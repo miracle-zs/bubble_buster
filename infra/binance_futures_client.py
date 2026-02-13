@@ -296,6 +296,30 @@ class BinanceFuturesClient:
             return [data]
         return data
 
+    def get_income_history(
+        self,
+        symbol: Optional[str] = None,
+        income_type: Optional[str] = None,
+        start_time: Optional[int] = None,
+        end_time: Optional[int] = None,
+        limit: int = 1000,
+    ) -> List[Dict[str, Any]]:
+        params: Dict[str, Any] = {"limit": max(1, min(1000, int(limit)))}
+        if symbol:
+            params["symbol"] = symbol
+        if income_type:
+            params["incomeType"] = income_type
+        if start_time is not None:
+            params["startTime"] = int(start_time)
+        if end_time is not None:
+            params["endTime"] = int(end_time)
+        data = self._request("GET", "/fapi/v1/income", params=params, signed=True)
+        if isinstance(data, list):
+            return data
+        if isinstance(data, dict):
+            return [data]
+        return []
+
     def set_margin_type(self, symbol: str, margin_type: str = "ISOLATED") -> Dict[str, Any]:
         try:
             return self._request(

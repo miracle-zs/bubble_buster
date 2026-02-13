@@ -128,6 +128,12 @@ def create_components(
         client=client,
         store=store,
         asset=runtime_cfg.get("wallet_snapshot_asset", fallback="USDT").strip() or "USDT",
+        sync_cashflows=runtime_cfg.getboolean("sync_cashflows", fallback=True),
+        cashflow_income_types=[
+            x.strip().upper()
+            for x in runtime_cfg.get("cashflow_income_types", fallback="TRANSFER,WELCOME_BONUS").split(",")
+            if x.strip()
+        ],
     )
 
     service_cfg = ServiceRuntimeConfig(

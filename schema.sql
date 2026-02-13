@@ -67,6 +67,23 @@ CREATE TABLE IF NOT EXISTS wallet_snapshots (
 
 CREATE INDEX IF NOT EXISTS idx_wallet_snapshots_captured_at ON wallet_snapshots(captured_at_utc);
 
+CREATE TABLE IF NOT EXISTS cashflow_events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    unique_key TEXT NOT NULL UNIQUE,
+    event_time_utc TEXT NOT NULL,
+    asset TEXT NOT NULL,
+    amount REAL NOT NULL,
+    income_type TEXT NOT NULL,
+    symbol TEXT,
+    tran_id TEXT,
+    info TEXT,
+    raw_json TEXT,
+    created_at_utc TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_cashflow_events_time ON cashflow_events(event_time_utc);
+CREATE INDEX IF NOT EXISTS idx_cashflow_events_asset_time ON cashflow_events(asset, event_time_utc);
+
 CREATE TABLE IF NOT EXISTS locks (
     lock_name TEXT PRIMARY KEY,
     holder TEXT,

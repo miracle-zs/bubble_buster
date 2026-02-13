@@ -2,6 +2,7 @@ import json
 import os
 import sqlite3
 import uuid
+import hashlib
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Set, Tuple
@@ -365,6 +366,85 @@ class StateStore:
                 """
             ).fetchone()
             return dict(row) if row is not None else None
+
+    def get_earliest_wallet_snapshot_time(self) -> Optional[str]:
+        with self._connect() as conn:
+            row = conn.execute(
+                """
+                SELECT captured_at_utc
+                FROM wallet_snapshots
+                ORDER BY captured_at_utc ASC, id ASC
+                LIMIT 1
+                """
+            ).fetchone()
+            return str(row["captured_at_utc"]) if row is not None else None
+
+    def add_cashflow_event(
+        self,
+        event_time_utc: str,
+        asset: str,
+        amount: float,
+        income_type: str,
+        symbol: Optional[str] = None,
+        tran_id: Optional[str] = None,
+        info: Optional[str] = None,
+        raw_json: Optional[Dict[str, Any]] = None,
+    ) -> bool:
+        normalized_asset = (asset or "").upper().strip()
+        normalized_type = (income_type or "").upper().strip()
+        normalized_symbol = (symbol or "").upper().strip() or None
+        normalized_tran_id = (str(tran_id).strip() if tran_id is not None else "") or None
+        normalized_info = (info or "").strip() or None
+        unique_source = "|".join(
+            [
+                event_time_utc,
+                normalized_asset,
+                f"{float(amount):.12f}",
+                normalized_type,
+                normalized_symbol or "",
+                normalized_tran_id or "",
+                normalized_info or "",
+            ]
+        )
+        unique_key = hashlib.sha1(unique_source.encode("utf-8")).hexdigest()
+        payload_json = json.dumps(raw_json, ensure_ascii=False) if raw_json is not None else None
+        with self._connect() as conn:
+            cursor = conn.execute(
+                """
+                INSERT OR IGNORE INTO cashflow_events (
+                    unique_key, event_time_utc, asset, amount, income_type,
+                    symbol, tran_id, info, raw_json, created_at_utc
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    unique_key,
+                    event_time_utc,
+                    normalized_asset,
+                    float(amount),
+                    normalized_type,
+                    normalized_symbol,
+                    normalized_tran_id,
+                    normalized_info,
+                    payload_json,
+                    utc_now_iso(),
+                ),
+            )
+            return int(cursor.rowcount or 0) > 0
+
+    def get_latest_cashflow_event_time(self, asset: str = "USDT") -> Optional[str]:
+        with self._connect() as conn:
+            row = conn.execute(
+                """
+                SELECT event_time_utc
+                FROM cashflow_events
+                WHERE asset = ?
+                ORDER BY event_time_utc DESC, id DESC
+                LIMIT 1
+                """,
+                ((asset or "USDT").upper(),),
+            ).fetchone()
+            return str(row["event_time_utc"]) if row is not None else None
 
 
 def _safe_float(value: Any) -> Optional[float]:

@@ -226,12 +226,93 @@ class DashboardDataProvider:
             return None
         return dict(row)
 
-    def _build_equity_curve(
+    def _apply_drawdown(self, curve: List[Dict[str, Any]]) -> Dict[str, float]:
+        peak_equity: Optional[float] = None
+        max_drawdown = 0.0
+        max_drawdown_pct = 0.0
+        for point in curve:
+            equity = self._safe_float(point.get("equity")) or 0.0
+            if peak_equity is None or equity > peak_equity:
+                peak_equity = equity
+            drawdown = max(0.0, (peak_equity or 0.0) - equity)
+            drawdown_pct = (drawdown / peak_equity * 100.0) if (peak_equity and peak_equity > 0) else 0.0
+            point["drawdown"] = round(drawdown, 8)
+            point["drawdown_pct"] = round(drawdown_pct, 6)
+            if drawdown > max_drawdown:
+                max_drawdown = drawdown
+            if drawdown_pct > max_drawdown_pct:
+                max_drawdown_pct = drawdown_pct
+        current_drawdown = float(curve[-1]["drawdown"]) if curve else 0.0
+        current_drawdown_pct = float(curve[-1]["drawdown_pct"]) if curve else 0.0
+        return {
+            "max_drawdown": round(max_drawdown, 8),
+            "max_drawdown_pct": round(max_drawdown_pct, 6),
+            "current_drawdown": round(current_drawdown, 8),
+            "current_drawdown_pct": round(current_drawdown_pct, 6),
+        }
+
+    def _build_balance_curve(
         self,
         conn: sqlite3.Connection,
         now_utc: datetime,
         wallet_balance_usdt: Optional[float],
     ) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
+        wallet_rows = self._query_rows(
+            conn,
+            """
+            SELECT id, captured_at_utc, balance_usdt
+            FROM wallet_snapshots
+            ORDER BY captured_at_utc ASC, id ASC
+            LIMIT 2000
+            """,
+        )
+
+        curve: List[Dict[str, Any]] = []
+        if wallet_rows:
+            base_balance = self._safe_float(wallet_rows[0].get("balance_usdt")) or 0.0
+            for row in wallet_rows:
+                balance = self._safe_float(row.get("balance_usdt"))
+                if balance is None:
+                    continue
+                curve.append(
+                    {
+                        "t": row.get("captured_at_utc"),
+                        "equity": round(balance, 8),
+                        "pnl": 0.0,
+                        "cum_pnl": round(balance - base_balance, 8),
+                    }
+                )
+        elif wallet_balance_usdt is not None:
+            curve = [
+                {
+                    "t": now_utc.replace(microsecond=0).isoformat(),
+                    "equity": round(wallet_balance_usdt, 8),
+                    "pnl": 0.0,
+                    "cum_pnl": 0.0,
+                }
+            ]
+
+        dd = self._apply_drawdown(curve)
+        total_realized_pnl = float(curve[-1]["cum_pnl"]) if curve else 0.0
+
+        stats = {
+            "wallet_balance_usdt": round(wallet_balance_usdt, 8) if wallet_balance_usdt is not None else None,
+            "total_realized_pnl": round(total_realized_pnl, 8),
+            "closed_trades_priced": 0,
+            "wins": 0,
+            "losses": 0,
+            "breakeven": 0,
+            "win_rate_pct": 0.0,
+            "max_drawdown": dd["max_drawdown"],
+            "max_drawdown_pct": dd["max_drawdown_pct"],
+            "current_drawdown": dd["current_drawdown"],
+            "current_drawdown_pct": dd["current_drawdown_pct"],
+            "unpriced_closed_positions": 0,
+            "equity_baseline": round((self._safe_float(curve[0].get("equity")) if curve else 0.0) or 0.0, 8),
+        }
+        return curve, stats
+
+    def _load_trade_outcome_stats(self, conn: sqlite3.Connection, now_utc: datetime) -> Dict[str, Any]:
         rows = self._query_rows(
             conn,
             """
@@ -261,8 +342,7 @@ class DashboardDataProvider:
             """,
         )
 
-        curve: List[Dict[str, Any]] = []
-        cumulative_pnl = 0.0
+        cumulative_trade_pnl = 0.0
         wins = 0
         losses = 0
         breakeven = 0
@@ -272,20 +352,17 @@ class DashboardDataProvider:
             side = str(row.get("side") or "").upper()
             if side and side != "SHORT":
                 continue
-
             qty = self._safe_float(row.get("qty")) or 0.0
             entry_price = self._safe_float(row.get("entry_price")) or 0.0
             if qty <= 0 or entry_price <= 0:
                 skipped_unpriced += 1
                 continue
-
             close_price = self._extract_close_price(row)
             if close_price is None or close_price <= 0:
                 skipped_unpriced += 1
                 continue
-
             pnl = (entry_price - close_price) * qty
-            cumulative_pnl += pnl
+            cumulative_trade_pnl += pnl
             if pnl > 0:
                 wins += 1
             elif pnl < 0:
@@ -293,84 +370,127 @@ class DashboardDataProvider:
             else:
                 breakeven += 1
 
-            close_time = (
-                row.get("closed_at_utc")
-                or row.get("close_event_time_utc")
-                or row.get("updated_at_utc")
-                or now_utc.replace(microsecond=0).isoformat()
-            )
-            curve.append(
-                {
-                    "t": close_time,
-                    "symbol": row.get("symbol"),
-                    "status": row.get("status"),
-                    "close_reason": row.get("close_reason"),
-                    "close_price": round(close_price, 10),
-                    "pnl": round(pnl, 8),
-                    "cum_pnl": round(cumulative_pnl, 8),
-                }
-            )
-
-        equity_offset = 0.0
-        if wallet_balance_usdt is not None:
-            equity_offset = wallet_balance_usdt - cumulative_pnl
-
-        if wallet_balance_usdt is not None and not curve:
-            now_iso = now_utc.replace(microsecond=0).isoformat()
-            curve = [
-                {
-                    "t": now_iso,
-                    "symbol": None,
-                    "status": "BALANCE_SNAPSHOT",
-                    "close_reason": None,
-                    "close_price": None,
-                    "pnl": 0.0,
-                    "cum_pnl": 0.0,
-                }
-            ]
-
-        peak_equity: Optional[float] = None
-        max_drawdown = 0.0
-        max_drawdown_pct = 0.0
-
-        for point in curve:
-            equity = equity_offset + (self._safe_float(point.get("cum_pnl")) or 0.0)
-            point["equity"] = round(equity, 8)
-            if peak_equity is None or equity > peak_equity:
-                peak_equity = equity
-
-            drawdown = max(0.0, (peak_equity or 0.0) - equity)
-            if peak_equity and peak_equity > 0:
-                drawdown_pct = (drawdown / peak_equity) * 100.0
-            else:
-                drawdown_pct = 0.0
-
-            point["drawdown"] = round(drawdown, 8)
-            point["drawdown_pct"] = round(drawdown_pct, 6)
-            if drawdown > max_drawdown:
-                max_drawdown = drawdown
-            if drawdown_pct > max_drawdown_pct:
-                max_drawdown_pct = drawdown_pct
-
         priced_closed_count = wins + losses + breakeven
         win_rate_pct = (wins / priced_closed_count * 100.0) if priced_closed_count > 0 else 0.0
-        current_drawdown = float(curve[-1]["drawdown"]) if curve else 0.0
-        current_drawdown_pct = float(curve[-1]["drawdown_pct"]) if curve else 0.0
-
-        stats = {
-            "wallet_balance_usdt": round(wallet_balance_usdt, 8) if wallet_balance_usdt is not None else None,
-            "total_realized_pnl": round(cumulative_pnl, 8),
+        return {
             "closed_trades_priced": priced_closed_count,
             "wins": wins,
             "losses": losses,
             "breakeven": breakeven,
             "win_rate_pct": round(win_rate_pct, 2),
-            "max_drawdown": round(max_drawdown, 8),
-            "max_drawdown_pct": round(max_drawdown_pct, 6),
-            "current_drawdown": round(current_drawdown, 8),
-            "current_drawdown_pct": round(current_drawdown_pct, 6),
             "unpriced_closed_positions": skipped_unpriced,
-            "equity_baseline": round(equity_offset, 8),
+            "trade_realized_pnl": round(cumulative_trade_pnl, 8),
+            "as_of_utc": now_utc.replace(microsecond=0).isoformat(),
+        }
+
+    def _build_strategy_equity_curve(
+        self,
+        conn: sqlite3.Connection,
+        now_utc: datetime,
+        wallet_balance_usdt: Optional[float],
+    ) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
+        wallet_rows = self._query_rows(
+            conn,
+            """
+            SELECT id, captured_at_utc, balance_usdt
+            FROM wallet_snapshots
+            ORDER BY captured_at_utc ASC, id ASC
+            LIMIT 2000
+            """,
+        )
+        cashflow_rows: List[Dict[str, Any]] = []
+        try:
+            cashflow_rows = self._query_rows(
+                conn,
+                """
+                SELECT id, event_time_utc, amount
+                FROM cashflow_events
+                WHERE asset = 'USDT'
+                ORDER BY event_time_utc ASC, id ASC
+                LIMIT 5000
+                """,
+            )
+        except sqlite3.Error:
+            cashflow_rows = []
+
+        curve: List[Dict[str, Any]] = []
+        cum_cashflow = 0.0
+        cf_idx = 0
+        prev_cum_pnl = 0.0
+        baseline_equity: Optional[float] = None
+
+        for row in wallet_rows:
+            t = str(row.get("captured_at_utc") or "")
+            balance = self._safe_float(row.get("balance_usdt"))
+            if balance is None:
+                continue
+            while cf_idx < len(cashflow_rows):
+                cf_t = str(cashflow_rows[cf_idx].get("event_time_utc") or "")
+                if cf_t and cf_t <= t:
+                    cum_cashflow += self._safe_float(cashflow_rows[cf_idx].get("amount")) or 0.0
+                    cf_idx += 1
+                    continue
+                break
+
+            strategy_equity = balance - cum_cashflow
+            if baseline_equity is None:
+                baseline_equity = strategy_equity
+            cum_pnl = strategy_equity - (baseline_equity or 0.0)
+            pnl = cum_pnl - prev_cum_pnl
+            prev_cum_pnl = cum_pnl
+
+            curve.append(
+                {
+                    "t": t,
+                    "equity": round(strategy_equity, 8),
+                    "pnl": round(pnl, 8),
+                    "cum_pnl": round(cum_pnl, 8),
+                    "cum_cashflow": round(cum_cashflow, 8),
+                }
+            )
+
+        if not curve and wallet_balance_usdt is not None:
+            curve = [
+                {
+                    "t": now_utc.replace(microsecond=0).isoformat(),
+                    "equity": round(wallet_balance_usdt, 8),
+                    "pnl": 0.0,
+                    "cum_pnl": 0.0,
+                    "cum_cashflow": 0.0,
+                }
+            ]
+            baseline_equity = wallet_balance_usdt
+
+        if not curve:
+            curve = [
+                {
+                    "t": now_utc.replace(microsecond=0).isoformat(),
+                    "equity": 0.0,
+                    "pnl": 0.0,
+                    "cum_pnl": 0.0,
+                    "cum_cashflow": 0.0,
+                }
+            ]
+            baseline_equity = 0.0
+
+        dd = self._apply_drawdown(curve)
+        trade_stats = self._load_trade_outcome_stats(conn, now_utc)
+        stats = {
+            "wallet_balance_usdt": round(wallet_balance_usdt, 8) if wallet_balance_usdt is not None else None,
+            "total_realized_pnl": round(float(curve[-1]["cum_pnl"]), 8),
+            "closed_trades_priced": trade_stats["closed_trades_priced"],
+            "wins": trade_stats["wins"],
+            "losses": trade_stats["losses"],
+            "breakeven": trade_stats["breakeven"],
+            "win_rate_pct": trade_stats["win_rate_pct"],
+            "max_drawdown": dd["max_drawdown"],
+            "max_drawdown_pct": dd["max_drawdown_pct"],
+            "current_drawdown": dd["current_drawdown"],
+            "current_drawdown_pct": dd["current_drawdown_pct"],
+            "unpriced_closed_positions": trade_stats["unpriced_closed_positions"],
+            "equity_baseline": round((baseline_equity or 0.0), 8),
+            "net_cashflow_usdt": round(cum_cashflow, 8),
+            "trade_realized_pnl": trade_stats["trade_realized_pnl"],
         }
         return curve, stats
 
@@ -392,13 +512,47 @@ class DashboardDataProvider:
                 "recent_errors": 0,
                 "last_run_status": None,
                 "wallet_balance_usdt": live_wallet["balance_usdt"],
+                "net_cashflow_usdt": 0.0,
             },
             "wallet": live_wallet,
             "latest_run": None,
             "runs": [],
             "open_positions": [],
             "events": [],
+            "cashflow_events": [],
+            "strategy_equity_curve": [],
+            "balance_curve": [],
             "equity_curve": [],
+            "drawdown_stats_strategy": {
+                "wallet_balance_usdt": None,
+                "total_realized_pnl": 0.0,
+                "closed_trades_priced": 0,
+                "wins": 0,
+                "losses": 0,
+                "breakeven": 0,
+                "win_rate_pct": 0.0,
+                "max_drawdown": 0.0,
+                "max_drawdown_pct": 0.0,
+                "current_drawdown": 0.0,
+                "current_drawdown_pct": 0.0,
+                "unpriced_closed_positions": 0,
+                "equity_baseline": 0.0,
+            },
+            "drawdown_stats_balance": {
+                "wallet_balance_usdt": live_wallet["balance_usdt"],
+                "total_realized_pnl": 0.0,
+                "closed_trades_priced": 0,
+                "wins": 0,
+                "losses": 0,
+                "breakeven": 0,
+                "win_rate_pct": 0.0,
+                "max_drawdown": 0.0,
+                "max_drawdown_pct": 0.0,
+                "current_drawdown": 0.0,
+                "current_drawdown_pct": 0.0,
+                "unpriced_closed_positions": 0,
+                "equity_baseline": live_wallet["balance_usdt"] if live_wallet["balance_usdt"] is not None else 0.0,
+            },
             "drawdown_stats": {
                 "wallet_balance_usdt": live_wallet["balance_usdt"],
                 "total_realized_pnl": 0.0,
@@ -511,14 +665,33 @@ class DashboardDataProvider:
                     LIMIT 120
                     """,
                 )
+                data["cashflow_events"] = self._query_rows(
+                    conn,
+                    """
+                    SELECT id, event_time_utc, asset, amount, income_type, symbol, tran_id, info
+                    FROM cashflow_events
+                    ORDER BY event_time_utc DESC, id DESC
+                    LIMIT 80
+                    """,
+                )
 
-                curve, stats = self._build_equity_curve(
+                strategy_curve, strategy_stats = self._build_strategy_equity_curve(
                     conn=conn,
                     now_utc=now_utc,
                     wallet_balance_usdt=self._safe_float(data["wallet"].get("balance_usdt")),
                 )
-                data["equity_curve"] = curve[-600:]
-                data["drawdown_stats"] = stats
+                balance_curve, balance_stats = self._build_balance_curve(
+                    conn=conn,
+                    now_utc=now_utc,
+                    wallet_balance_usdt=self._safe_float(data["wallet"].get("balance_usdt")),
+                )
+                data["strategy_equity_curve"] = strategy_curve[-600:]
+                data["balance_curve"] = balance_curve[-600:]
+                data["drawdown_stats_strategy"] = strategy_stats
+                data["drawdown_stats_balance"] = balance_stats
+                data["summary"]["net_cashflow_usdt"] = strategy_stats.get("net_cashflow_usdt", 0.0)
+                data["equity_curve"] = data["strategy_equity_curve"]
+                data["drawdown_stats"] = data["drawdown_stats_balance"]
         except sqlite3.Error as exc:
             data["summary"]["last_run_status"] = "DB_ERROR"
             data["db_error"] = str(exc)
@@ -853,6 +1026,49 @@ DASHBOARD_HTML = """<!doctype html>
       padding: 10px 12px 0;
     }
 
+    .chart-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+      margin-bottom: 8px;
+    }
+
+    .chart-title {
+      font-size: 0.86rem;
+      color: var(--muted);
+      letter-spacing: 0.02em;
+    }
+
+    .tab-row {
+      display: flex;
+      gap: 6px;
+      flex-wrap: wrap;
+    }
+
+    .tab-btn {
+      border: 1px solid rgba(80, 143, 175, 0.6);
+      background: rgba(10, 25, 35, 0.92);
+      color: var(--muted);
+      border-radius: 999px;
+      padding: 4px 10px;
+      font-size: 0.76rem;
+      cursor: pointer;
+      transition: all 140ms ease;
+    }
+
+    .tab-btn:hover {
+      color: var(--text);
+      border-color: rgba(126, 199, 235, 0.8);
+    }
+
+    .tab-btn.active {
+      color: #031018;
+      background: linear-gradient(180deg, #68d8ff, #43b6ea);
+      border-color: transparent;
+      font-weight: 700;
+    }
+
     .chart-canvas {
       width: 100%;
       height: 248px;
@@ -968,12 +1184,23 @@ DASHBOARD_HTML = """<!doctype html>
         <div class="k">Win Rate</div>
         <div class="v" id="winRate">--</div>
       </article>
+      <article class="card">
+        <div class="k">Net Cashflow (USDT)</div>
+        <div class="v" id="netCashflow">--</div>
+      </article>
     </section>
 
     <section class="grid">
       <section class="panel">
         <h2>Equity Curve (USDT)</h2>
         <div class="chart-wrap">
+          <div class="chart-head">
+            <div class="chart-title" id="curveTitle">策略权益曲线（不含出入金）</div>
+            <div class="tab-row">
+              <button class="tab-btn active" id="tabStrategy" type="button">策略权益</button>
+              <button class="tab-btn" id="tabBalance" type="button">账户余额</button>
+            </div>
+          </div>
           <div class="chart-canvas" id="equityChart"></div>
         </div>
       </section>
@@ -1026,6 +1253,20 @@ DASHBOARD_HTML = """<!doctype html>
       </section>
 
       <section class="panel">
+        <h2>Recent Cashflow Events</h2>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>ID</th><th>Type</th><th>Amount</th><th>Asset</th><th>Symbol</th><th>Time(UTC)</th>
+              </tr>
+            </thead>
+            <tbody id="cashflowBody"></tbody>
+          </table>
+        </div>
+      </section>
+
+      <section class="panel">
         <h2>Strategy Log Tail</h2>
         <pre class="log mono" id="logTail"></pre>
       </section>
@@ -1041,10 +1282,12 @@ DASHBOARD_HTML = """<!doctype html>
   if (window && window.location && typeof window.location.pathname === "string") {
     pathPrefix = window.location.pathname || "/";
   }
-  pathPrefix = pathPrefix.replace(/\/+$/, "");
+  pathPrefix = pathPrefix.replace(/\\/+$/, "");
   if (!pathPrefix) pathPrefix = "";
   var api = pathPrefix + "/api/dashboard";
   var equityChart = null;
+  var currentCurveTab = "strategy";
+  var latestData = null;
 
   var el = {
     meta: document.getElementById("meta"),
@@ -1058,11 +1301,16 @@ DASHBOARD_HTML = """<!doctype html>
     realizedPnl: document.getElementById("realizedPnl"),
     maxDrawdown: document.getElementById("maxDrawdown"),
     winRate: document.getElementById("winRate"),
+    netCashflow: document.getElementById("netCashflow"),
+    curveTitle: document.getElementById("curveTitle"),
+    tabStrategy: document.getElementById("tabStrategy"),
+    tabBalance: document.getElementById("tabBalance"),
     equityChart: document.getElementById("equityChart"),
     drawdownStats: document.getElementById("drawdownStats"),
     positionsBody: document.getElementById("positionsBody"),
     runsBody: document.getElementById("runsBody"),
     eventsBody: document.getElementById("eventsBody"),
+    cashflowBody: document.getElementById("cashflowBody"),
     logTail: document.getElementById("logTail")
   };
 
@@ -1268,7 +1516,8 @@ DASHBOARD_HTML = """<!doctype html>
         {
           name: "Equity",
           type: "line",
-          showSymbol: false,
+          showSymbol: points.length <= 1,
+          symbolSize: 6,
           smooth: 0.18,
           data: yData,
           lineStyle: { width: 2.4, color: lineColor },
@@ -1284,6 +1533,74 @@ DASHBOARD_HTML = """<!doctype html>
 
   }
 
+  function activeStats(data) {
+    if (!data) return {};
+    if (currentCurveTab === "balance") {
+      return data.drawdown_stats_balance || data.drawdown_stats || {};
+    }
+    return data.drawdown_stats_strategy || data.drawdown_stats || {};
+  }
+
+  function activeCurve(data) {
+    if (!data) return [];
+    if (currentCurveTab === "balance") {
+      return data.balance_curve || data.equity_curve || [];
+    }
+    return data.strategy_equity_curve || data.equity_curve || [];
+  }
+
+  function renderCurveTabState() {
+    if (el.tabStrategy) {
+      el.tabStrategy.classList.toggle("active", currentCurveTab === "strategy");
+    }
+    if (el.tabBalance) {
+      el.tabBalance.classList.toggle("active", currentCurveTab === "balance");
+    }
+    if (el.curveTitle) {
+      el.curveTitle.textContent = currentCurveTab === "strategy"
+        ? "策略权益曲线（不含出入金）"
+        : "账户余额曲线（含出入金）";
+    }
+  }
+
+  function rerenderFromLatest() {
+    if (!latestData) return;
+    var d = latestData;
+    var summary = d.summary || {};
+    var wallet = d.wallet || {};
+    var stats = activeStats(d);
+
+    var walletDisplay = stats.wallet_balance_usdt;
+    if (walletDisplay === null || walletDisplay === undefined) walletDisplay = wallet.balance_usdt;
+    setText(el.walletBalance, fmtNum(walletDisplay, 4));
+    setText(el.realizedPnl, fmtSigned(stats.total_realized_pnl, 4));
+    setText(el.maxDrawdown, fmtNum(stats.max_drawdown_pct, 2) + "%");
+    setText(el.winRate, fmtNum(stats.win_rate_pct, 2) + "%");
+    setText(el.netCashflow, fmtSigned(stats.net_cashflow_usdt, 4));
+    if (el.realizedPnl) {
+      var pnl = toNum(stats.total_realized_pnl);
+      el.realizedPnl.className = "v " + (pnl === null ? "" : (pnl > 0 ? "ok" : (pnl < 0 ? "bad" : "warn")));
+    }
+    if (el.maxDrawdown) {
+      var dd = toNum(stats.max_drawdown_pct);
+      el.maxDrawdown.className = "v " + (dd && dd > 0 ? "bad" : "");
+    }
+    if (el.winRate) {
+      var wr = toNum(stats.win_rate_pct);
+      el.winRate.className = "v " + (wr === null ? "" : (wr >= 50 ? "ok" : "warn"));
+    }
+    if (el.netCashflow) {
+      var cf = toNum(stats.net_cashflow_usdt);
+      el.netCashflow.className = "v " + (cf === null ? "" : (cf > 0 ? "warn" : (cf < 0 ? "bad" : "ok")));
+    }
+    renderCurveTabState();
+    renderEquityChart(activeCurve(d));
+    renderDrawdownStats(stats, wallet);
+    setText(el.openCount, txt(summary.open_positions));
+    setText(el.symbolCount, txt(summary.open_symbols));
+    setText(el.errorCount, txt(summary.recent_errors));
+  }
+
   function renderDrawdownStats(stats, wallet) {
     if (!el.drawdownStats) return;
     var s = stats || {};
@@ -1294,6 +1611,8 @@ DASHBOARD_HTML = """<!doctype html>
     var rows = [
       ["Wallet", walletBalance === null ? "--" : fmtNum(walletBalance, 4) + " USDT"],
       ["Realized PnL", fmtSigned(s.total_realized_pnl, 4) + " USDT"],
+      ["Net Cashflow", fmtSigned(s.net_cashflow_usdt, 4) + " USDT"],
+      ["Trade Realized", fmtSigned(s.trade_realized_pnl, 4) + " USDT"],
       ["Max Drawdown", fmtNum(s.max_drawdown, 4) + " (" + fmtNum(s.max_drawdown_pct, 2) + "%)"],
       ["Current Drawdown", fmtNum(s.current_drawdown, 4) + " (" + fmtNum(s.current_drawdown_pct, 2) + "%)"],
       ["Win Rate", fmtNum(s.win_rate_pct, 2) + "%"],
@@ -1318,9 +1637,10 @@ DASHBOARD_HTML = """<!doctype html>
 
       var cfgPath = txt(d.config_path);
       var dbPath = txt(d.db_path);
+      latestData = d;
       var summary = d.summary || {};
       var wallet = d.wallet || {};
-      var stats = d.drawdown_stats || {};
+      var stats = activeStats(d);
       var svc = d.service || {};
       var svcStatus = "DISABLED";
       if (svc.enabled) {
@@ -1354,30 +1674,10 @@ DASHBOARD_HTML = """<!doctype html>
       setText(el.symbolCount, txt(summary.open_symbols));
       setText(el.errorCount, txt(summary.recent_errors));
       setText(el.lastRunStatus, txt(summary.last_run_status));
-      var walletDisplay = stats.wallet_balance_usdt;
-      if (walletDisplay === null || walletDisplay === undefined) walletDisplay = wallet.balance_usdt;
-      setText(el.walletBalance, fmtNum(walletDisplay, 4));
-      setText(el.realizedPnl, fmtSigned(stats.total_realized_pnl, 4));
-      setText(el.maxDrawdown, fmtNum(stats.max_drawdown_pct, 2) + "%");
-      setText(el.winRate, fmtNum(stats.win_rate_pct, 2) + "%");
       if (el.lastRunStatus) {
         el.lastRunStatus.className = "v " + clsForStatus(summary.last_run_status);
       }
-      if (el.realizedPnl) {
-        var pnl = toNum(stats.total_realized_pnl);
-        el.realizedPnl.className = "v " + (pnl === null ? "" : (pnl > 0 ? "ok" : (pnl < 0 ? "bad" : "warn")));
-      }
-      if (el.maxDrawdown) {
-        var dd = toNum(stats.max_drawdown_pct);
-        el.maxDrawdown.className = "v " + (dd && dd > 0 ? "bad" : "");
-      }
-      if (el.winRate) {
-        var wr = toNum(stats.win_rate_pct);
-        el.winRate.className = "v " + (wr === null ? "" : (wr >= 50 ? "ok" : "warn"));
-      }
-
-      renderEquityChart(d.equity_curve || []);
-      renderDrawdownStats(stats, wallet);
+      rerenderFromLatest();
 
       renderRows(el.positionsBody, d.open_positions || [], function (p) {
         var errClass = p.last_error ? " bad" : "";
@@ -1419,6 +1719,21 @@ DASHBOARD_HTML = """<!doctype html>
         );
       }, 6);
 
+      renderRows(el.cashflowBody, d.cashflow_events || [], function (c) {
+        var amount = toNum(c.amount);
+        var amountClass = amount === null ? "" : (amount > 0 ? "ok" : (amount < 0 ? "bad" : "warn"));
+        return (
+          "<tr>" +
+          '<td class="mono">' + escapeHtml(c.id) + "</td>" +
+          "<td>" + escapeHtml(c.income_type) + "</td>" +
+          '<td class="' + amountClass + '">' + escapeHtml(fmtSigned(c.amount, 4)) + "</td>" +
+          "<td>" + escapeHtml(c.asset) + "</td>" +
+          "<td>" + escapeHtml(c.symbol) + "</td>" +
+          '<td class="mono">' + escapeHtml(fmtAxisTime(c.event_time_utc)) + "</td>" +
+          "</tr>"
+        );
+      }, 6);
+
       if (el.logTail) {
         var logLines = d.log_tail || [];
         if (Object.prototype.toString.call(logLines) !== "[object Array]") {
@@ -1430,6 +1745,18 @@ DASHBOARD_HTML = """<!doctype html>
   }
 
   refresh();
+  if (el.tabStrategy) {
+    el.tabStrategy.addEventListener("click", function () {
+      currentCurveTab = "strategy";
+      rerenderFromLatest();
+    });
+  }
+  if (el.tabBalance) {
+    el.tabBalance.addEventListener("click", function () {
+      currentCurveTab = "balance";
+      rerenderFromLatest();
+    });
+  }
   setInterval(refresh, Math.max(2000, REFRESH_SEC * 1000));
 })();
 </script>

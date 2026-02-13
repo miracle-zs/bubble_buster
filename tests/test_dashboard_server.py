@@ -86,6 +86,8 @@ class DashboardServerTest(unittest.TestCase):
         self.assertIn("equity_curve", snapshot)
         self.assertIn("drawdown_stats", snapshot)
         self.assertIn("wallet", snapshot)
+        self.assertIn("cashflow_events", snapshot)
+        self.assertIn("net_cashflow_usdt", snapshot["summary"])
 
     def test_snapshot_without_db_file(self) -> None:
         missing_db = str(Path(self.temp_dir.name) / "missing.db")
@@ -169,16 +171,20 @@ class DashboardServerTest(unittest.TestCase):
         self.assertEqual(first["wallet"]["live_source"], "API")
         self.assertEqual(second["wallet"]["live_source"], "CACHE")
 
-        stats = first["drawdown_stats"]
-        self.assertAlmostEqual(stats["total_realized_pnl"], 40.0)
-        self.assertAlmostEqual(stats["wallet_balance_usdt"], 120.0)
-        self.assertEqual(stats["closed_trades_priced"], 1)
-        self.assertAlmostEqual(stats["win_rate_pct"], 100.0)
+        strategy_stats = first["drawdown_stats_strategy"]
+        balance_stats = first["drawdown_stats_balance"]
+        self.assertAlmostEqual(strategy_stats["total_realized_pnl"], 0.0)
+        self.assertEqual(strategy_stats["closed_trades_priced"], 1)
+        self.assertAlmostEqual(strategy_stats["win_rate_pct"], 100.0)
+        self.assertAlmostEqual(strategy_stats["trade_realized_pnl"], 40.0)
+        self.assertAlmostEqual(strategy_stats["net_cashflow_usdt"], 0.0)
+        self.assertAlmostEqual(balance_stats["wallet_balance_usdt"], 120.0)
+        self.assertEqual(balance_stats["closed_trades_priced"], 0)
 
-        curve = first["equity_curve"]
+        curve = first["balance_curve"]
         self.assertEqual(len(curve), 1)
-        self.assertAlmostEqual(curve[0]["pnl"], 40.0)
-        self.assertAlmostEqual(curve[0]["cum_pnl"], 40.0)
+        self.assertAlmostEqual(curve[0]["pnl"], 0.0)
+        self.assertAlmostEqual(curve[0]["cum_pnl"], 0.0)
         self.assertAlmostEqual(curve[0]["equity"], 120.0)
 
         with sqlite3.connect(self.db_path) as conn:
@@ -208,6 +214,60 @@ class DashboardServerTest(unittest.TestCase):
         self.assertEqual(calls["n"], 1)
         self.assertEqual(first["wallet"]["source"], "ERROR")
         self.assertEqual(second["wallet"]["source"], "COOLDOWN")
+
+    def test_equity_curve_prefers_wallet_snapshots(self) -> None:
+        self.store.add_wallet_snapshot("2026-02-13T00:00:00+00:00", 100.0, source="API")
+        self.store.add_wallet_snapshot("2026-02-13T00:01:00+00:00", 95.0, source="API")
+        self.store.add_wallet_snapshot("2026-02-13T00:02:00+00:00", 110.0, source="API")
+
+        provider = DashboardDataProvider(
+            db_path=self.db_path,
+            log_file=self.log_file,
+            timezone_name="UTC",
+            entry_hour=7,
+            entry_minute=40,
+            balance_fetcher=lambda: 110.0,
+            balance_cache_ttl_sec=60,
+        )
+        snapshot = provider.snapshot(log_lines=0)
+        curve = snapshot["balance_curve"]
+        stats = snapshot["drawdown_stats_balance"]
+
+        self.assertEqual(len(curve), 4)  # 3 seeded + 1 live API snapshot persisted
+        self.assertAlmostEqual(curve[0]["equity"], 100.0)
+        self.assertAlmostEqual(curve[1]["equity"], 95.0)
+        self.assertAlmostEqual(curve[-1]["equity"], 110.0)
+        self.assertAlmostEqual(stats["max_drawdown"], 5.0)
+        self.assertAlmostEqual(stats["max_drawdown_pct"], 5.0)
+
+    def test_strategy_equity_ignores_cashflow(self) -> None:
+        self.store.add_wallet_snapshot("2026-02-13T00:00:00+00:00", 100.0, source="API")
+        self.store.add_wallet_snapshot("2026-02-13T00:01:00+00:00", 130.0, source="API")
+        self.store.add_wallet_snapshot("2026-02-13T00:02:00+00:00", 125.0, source="API")
+        self.store.add_cashflow_event(
+            event_time_utc="2026-02-13T00:00:30+00:00",
+            asset="USDT",
+            amount=30.0,
+            income_type="TRANSFER",
+            tran_id="t-1",
+        )
+
+        provider = DashboardDataProvider(
+            db_path=self.db_path,
+            log_file=self.log_file,
+            timezone_name="UTC",
+            entry_hour=7,
+            entry_minute=40,
+        )
+        snapshot = provider.snapshot(log_lines=0)
+        strategy_curve = snapshot["strategy_equity_curve"]
+        balance_curve = snapshot["balance_curve"]
+        strategy_stats = snapshot["drawdown_stats_strategy"]
+
+        self.assertEqual([round(x["equity"], 8) for x in balance_curve[:3]], [100.0, 130.0, 125.0])
+        self.assertEqual([round(x["equity"], 8) for x in strategy_curve[:3]], [100.0, 100.0, 95.0])
+        self.assertAlmostEqual(strategy_stats["net_cashflow_usdt"], 30.0)
+        self.assertAlmostEqual(strategy_stats["total_realized_pnl"], -5.0)
 
 
 if __name__ == "__main__":
