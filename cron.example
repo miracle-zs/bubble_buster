@@ -1,0 +1,5 @@
+# Optional fallback mode (cron-driven). Recommended mode is `python main.py service`.
+# Use Asia/Shanghai timezone for schedule semantics
+CRON_TZ=Asia/Shanghai
+40 7 * * * /usr/bin/python3 /Users/zhangshuai/PycharmProjects/bubble_buster/main.py entry --config /Users/zhangshuai/PycharmProjects/bubble_buster/config.ini
+* * * * * /usr/bin/python3 /Users/zhangshuai/PycharmProjects/bubble_buster/main.py manage --config /Users/zhangshuai/PycharmProjects/bubble_buster/config.ini

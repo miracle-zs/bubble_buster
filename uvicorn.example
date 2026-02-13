@@ -1,0 +1,5 @@
+# FastAPI dashboard (recommended)
+# Make sure BUBBLE_BUSTER_CONFIG points to your actual config file.
+# If `run_service_with_dashboard=true` in config, strategy service starts in FastAPI startup.
+BUBBLE_BUSTER_CONFIG=/Users/zhangshuai/PycharmProjects/bubble_buster/config.ini \
+uvicorn app.main:app --host 127.0.0.1 --port 8787 --reload

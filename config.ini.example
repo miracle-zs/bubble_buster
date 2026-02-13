@@ -1,0 +1,58 @@
+[binance]
+api_key = YOUR_BINANCE_API_KEY
+api_secret = YOUR_BINANCE_API_SECRET
+base_url = https://fapi.binance.com
+timeout_sec = 10
+retry_count = 3
+retry_delay_sec = 1
+recv_window = 5000
+http_pool_maxsize = 64
+
+[strategy]
+leverage = 2
+top_n = 10
+volume_threshold = 0
+tp_price_drop_pct = 20
+sl_liq_buffer_pct = 1
+max_hold_hours = 47.5
+trigger_price_type = CONTRACT_PRICE
+allocation_splits = 10
+entry_fee_buffer_pct = 1.0
+entry_shrink_retry_count = 3
+entry_shrink_step_pct = 10.0
+entry_rank_fetch_multiplier = 3
+ranker_max_workers = 24
+ranker_weight_limit_per_minute = 1000
+ranker_min_request_interval_ms = 20
+
+[runtime]
+timezone = Asia/Shanghai
+entry_hour = 7
+entry_minute = 40
+entry_misfire_grace_min = 120
+manager_interval_sec = 60
+manager_max_catch_up_runs = 3
+service_loop_sleep_sec = 1.0
+run_manage_on_startup = true
+wallet_snapshot_asset = USDT
+dashboard_host = 127.0.0.1
+dashboard_port = 8787
+dashboard_refresh_sec = 5
+run_service_with_dashboard = true
+lock_file = runtime.lock
+lock_wait_sec = 30
+db_path = state.db
+log_dir = logs
+log_level = INFO
+
+[notify]
+enabled = true
+serverchan_sendkey = YOUR_SERVERCHAN_SENDKEY
+http_proxy =
+https_proxy =
+
+[Settings]
+SERVERCHAN_SENDKEY = YOUR_SERVERCHAN_SENDKEY
+VOLUME_THRESHOLD = 0
+HTTP_PROXY =
+HTTPS_PROXY =

@@ -1,0 +1,6 @@
+config.ini
+state.db
+runtime.lock
+logs/
+__pycache__/
+*.pyc
