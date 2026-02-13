@@ -269,6 +269,33 @@ class DashboardServerTest(unittest.TestCase):
         self.assertAlmostEqual(strategy_stats["net_cashflow_usdt"], 30.0)
         self.assertAlmostEqual(strategy_stats["total_realized_pnl"], -5.0)
 
+    def test_strategy_equity_starts_equal_to_balance_when_prior_cashflow_exists(self) -> None:
+        self.store.add_cashflow_event(
+            event_time_utc="2026-02-12T23:59:00+00:00",
+            asset="USDT",
+            amount=50.0,
+            income_type="TRANSFER",
+            tran_id="t-prior",
+        )
+        self.store.add_wallet_snapshot("2026-02-13T00:00:00+00:00", 100.0, source="API")
+        self.store.add_wallet_snapshot("2026-02-13T00:01:00+00:00", 120.0, source="API")
+
+        provider = DashboardDataProvider(
+            db_path=self.db_path,
+            log_file=self.log_file,
+            timezone_name="UTC",
+            entry_hour=7,
+            entry_minute=40,
+        )
+        snapshot = provider.snapshot(log_lines=0)
+        strategy_curve = snapshot["strategy_equity_curve"]
+        balance_curve = snapshot["balance_curve"]
+        strategy_stats = snapshot["drawdown_stats_strategy"]
+
+        self.assertEqual(round(strategy_curve[0]["equity"], 8), round(balance_curve[0]["equity"], 8))
+        self.assertEqual(round(strategy_curve[1]["equity"], 8), round(balance_curve[1]["equity"], 8))
+        self.assertAlmostEqual(strategy_stats["net_cashflow_usdt"], 0.0)
+
 
 if __name__ == "__main__":
     unittest.main()

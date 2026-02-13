@@ -418,6 +418,7 @@ class DashboardDataProvider:
         cf_idx = 0
         prev_cum_pnl = 0.0
         baseline_equity: Optional[float] = None
+        cashflow_baseline: Optional[float] = None
 
         for row in wallet_rows:
             t = str(row.get("captured_at_utc") or "")
@@ -432,7 +433,12 @@ class DashboardDataProvider:
                     continue
                 break
 
-            strategy_equity = balance - cum_cashflow
+            if cashflow_baseline is None:
+                # Align strategy-equity start point to account-equity start point:
+                # only cashflow AFTER first wallet snapshot should shift strategy curve.
+                cashflow_baseline = cum_cashflow
+            effective_cashflow = cum_cashflow - (cashflow_baseline or 0.0)
+            strategy_equity = balance - effective_cashflow
             if baseline_equity is None:
                 baseline_equity = strategy_equity
             cum_pnl = strategy_equity - (baseline_equity or 0.0)
@@ -445,7 +451,7 @@ class DashboardDataProvider:
                     "equity": round(strategy_equity, 8),
                     "pnl": round(pnl, 8),
                     "cum_pnl": round(cum_pnl, 8),
-                    "cum_cashflow": round(cum_cashflow, 8),
+                    "cum_cashflow": round(effective_cashflow, 8),
                 }
             )
 
@@ -489,7 +495,7 @@ class DashboardDataProvider:
             "current_drawdown_pct": dd["current_drawdown_pct"],
             "unpriced_closed_positions": trade_stats["unpriced_closed_positions"],
             "equity_baseline": round((baseline_equity or 0.0), 8),
-            "net_cashflow_usdt": round(cum_cashflow, 8),
+            "net_cashflow_usdt": round(float(curve[-1].get("cum_cashflow") or 0.0), 8),
             "trade_realized_pnl": trade_stats["trade_realized_pnl"],
         }
         return curve, stats
