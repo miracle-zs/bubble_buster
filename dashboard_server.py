@@ -1169,7 +1169,7 @@ DASHBOARD_HTML = """<!doctype html>
         <div class="v" id="lastRunStatus">--</div>
       </article>
       <article class="card">
-        <div class="k">Wallet Balance (USDT)</div>
+        <div class="k">Account Equity (USDT)</div>
         <div class="v" id="walletBalance">--</div>
       </article>
       <article class="card">
@@ -1198,7 +1198,7 @@ DASHBOARD_HTML = """<!doctype html>
             <div class="chart-title" id="curveTitle">策略权益曲线（不含出入金）</div>
             <div class="tab-row">
               <button class="tab-btn active" id="tabStrategy" type="button">策略权益</button>
-              <button class="tab-btn" id="tabBalance" type="button">账户余额</button>
+              <button class="tab-btn" id="tabBalance" type="button">账户权益</button>
             </div>
           </div>
           <div class="chart-canvas" id="equityChart"></div>
@@ -1559,7 +1559,7 @@ DASHBOARD_HTML = """<!doctype html>
     if (el.curveTitle) {
       el.curveTitle.textContent = currentCurveTab === "strategy"
         ? "策略权益曲线（不含出入金）"
-        : "账户余额曲线（含出入金）";
+        : "账户权益曲线（含未实现盈亏/出入金）";
     }
   }
 
@@ -1609,7 +1609,7 @@ DASHBOARD_HTML = """<!doctype html>
     if (walletBalance === null) walletBalance = toNum(w.balance_usdt);
 
     var rows = [
-      ["Wallet", walletBalance === null ? "--" : fmtNum(walletBalance, 4) + " USDT"],
+      ["Account Equity", walletBalance === null ? "--" : fmtNum(walletBalance, 4) + " USDT"],
       ["Realized PnL", fmtSigned(s.total_realized_pnl, 4) + " USDT"],
       ["Net Cashflow", fmtSigned(s.net_cashflow_usdt, 4) + " USDT"],
       ["Trade Realized", fmtSigned(s.trade_realized_pnl, 4) + " USDT"],

@@ -21,20 +21,27 @@ class BalanceSamplerTest(unittest.TestCase):
         class ClientStub:
             def get_balance(self):
                 return [{"asset": "USDT", "balance": "88.1234"}]
+            def get_position_risk(self):
+                return [{"symbol": "BTCUSDT", "unRealizedProfit": "1.25"}]
 
         sampler = WalletSnapshotSampler(client=ClientStub(), store=self.store, asset="USDT")
         result = sampler.run_once()
 
         self.assertIn("snapshot_id", result)
-        self.assertAlmostEqual(float(result["balance"]), 88.1234)
+        self.assertAlmostEqual(float(result["wallet_balance"]), 88.1234)
+        self.assertAlmostEqual(float(result["unrealized_pnl"]), 1.25)
+        self.assertAlmostEqual(float(result["equity"]), 89.3734)
+        self.assertAlmostEqual(float(result["balance"]), 89.3734)
         latest = self.store.get_latest_wallet_snapshot()
         self.assertIsNotNone(latest)
-        self.assertAlmostEqual(float(latest["balance_usdt"]), 88.1234)
+        self.assertAlmostEqual(float(latest["balance_usdt"]), 89.3734)
 
     def test_run_once_raises_when_asset_missing(self) -> None:
         class ClientStub:
             def get_balance(self):
                 return [{"asset": "BTC", "balance": "1"}]
+            def get_position_risk(self):
+                return []
 
         sampler = WalletSnapshotSampler(client=ClientStub(), store=self.store, asset="USDT")
         with self.assertRaises(ValueError):

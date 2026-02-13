@@ -9,7 +9,7 @@ LOGGER = logging.getLogger(__name__)
 
 
 class WalletSnapshotSampler:
-    """Persist wallet balance snapshots on a fixed scheduler cadence."""
+    """Persist account equity snapshots on a fixed scheduler cadence."""
 
     def __init__(
         self,
@@ -29,10 +29,17 @@ class WalletSnapshotSampler:
     def run_once(self) -> Dict[str, object]:
         captured_at = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
         balances = self.client.get_balance()
-        balance_usdt = self._extract_balance(balances)
+        wallet_balance_usdt = self._extract_balance(balances)
+        unrealized_pnl_usdt = 0.0
+        try:
+            position_rows = self.client.get_position_risk()
+            unrealized_pnl_usdt = self._extract_unrealized_pnl(position_rows)
+        except Exception as exc:  # noqa: BLE001
+            LOGGER.warning("Failed to fetch position risk for equity snapshot, fallback wallet balance only: %s", exc)
+        equity_usdt = wallet_balance_usdt + unrealized_pnl_usdt
         snapshot_id = self.store.add_wallet_snapshot(
             captured_at_utc=captured_at,
-            balance_usdt=balance_usdt,
+            balance_usdt=equity_usdt,
             source="API",
             error=None,
         )
@@ -42,7 +49,10 @@ class WalletSnapshotSampler:
         return {
             "snapshot_id": snapshot_id,
             "asset": self.asset,
-            "balance": round(balance_usdt, 8),
+            "wallet_balance": round(wallet_balance_usdt, 8),
+            "unrealized_pnl": round(unrealized_pnl_usdt, 8),
+            "equity": round(equity_usdt, 8),
+            "balance": round(equity_usdt, 8),
             "captured_at_utc": captured_at,
             "cashflow_added": cashflow_added,
         }
@@ -58,6 +68,16 @@ class WalletSnapshotSampler:
                 raw = item.get("availableBalance")
             return float(raw or 0.0)
         raise ValueError(f"{self.asset} balance not found from /fapi/v2/balance")
+
+    def _extract_unrealized_pnl(self, positions: list) -> float:
+        total = 0.0
+        for row in positions or []:
+            # USD-M futures positionRisk is denominated in USDT for USDT contracts.
+            value = row.get("unRealizedProfit")
+            if value is None:
+                continue
+            total += float(value or 0.0)
+        return total
 
     def _sync_cashflows(self) -> int:
         if not self.cashflow_income_types:

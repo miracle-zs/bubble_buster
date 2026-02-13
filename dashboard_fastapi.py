@@ -121,6 +121,7 @@ def create_dashboard_context(config_path: str) -> DashboardRuntimeContext:
 
             def _fetch_wallet_balance_usdt() -> float:
                 balances = client.get_balance()
+                wallet_balance = None
                 for item in balances:
                     if str(item.get("asset", "")).upper() == "USDT":
                         raw = item.get("balance")
@@ -128,8 +129,21 @@ def create_dashboard_context(config_path: str) -> DashboardRuntimeContext:
                             raw = item.get("crossWalletBalance")
                         if raw is None:
                             raw = item.get("availableBalance")
-                        return float(raw or 0.0)
-                raise ValueError("USDT balance not found from /fapi/v2/balance")
+                        wallet_balance = float(raw or 0.0)
+                        break
+                if wallet_balance is None:
+                    raise ValueError("USDT balance not found from /fapi/v2/balance")
+                unrealized = 0.0
+                try:
+                    positions = client.get_position_risk()
+                    for row in positions:
+                        unrealized += float(row.get("unRealizedProfit") or 0.0)
+                except Exception as exc:  # noqa: BLE001
+                    logging.getLogger(__name__).warning(
+                        "Dashboard direct fetch failed to get position risk, fallback wallet balance only: %s",
+                        exc,
+                    )
+                return wallet_balance + unrealized
 
             balance_fetcher = _fetch_wallet_balance_usdt
 
