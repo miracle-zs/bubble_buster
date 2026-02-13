@@ -2,8 +2,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from balance_sampler import WalletSnapshotSampler
-from state_store import StateStore
+from core.balance_sampler import WalletSnapshotSampler
+from core.state_store import StateStore
 
 
 class BalanceSamplerTest(unittest.TestCase):

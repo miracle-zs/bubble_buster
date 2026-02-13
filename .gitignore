@@ -4,3 +4,24 @@ runtime.lock
 logs/
 __pycache__/
 *.pyc
+
+# OS / editor
+.DS_Store
+.idea/
+.vscode/
+
+# Python virtual env / tooling cache
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+htmlcov/
+
+# Misc runtime/temp
+*.swp
+*.swo
+*.tmp
+*.bak

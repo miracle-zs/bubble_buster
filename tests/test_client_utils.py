@@ -5,7 +5,7 @@ from unittest.mock import MagicMock
 if importlib.util.find_spec("requests") is None:
     raise unittest.SkipTest("requests is not installed")
 
-from binance_futures_client import (
+from infra.binance_futures_client import (
     BinanceAPIError,
     BinanceFuturesClient,
     SymbolRules,

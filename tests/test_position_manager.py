@@ -10,8 +10,8 @@ from unittest.mock import MagicMock
 if importlib.util.find_spec("requests") is None:
     raise unittest.SkipTest("requests is not installed")
 
-from position_manager import PositionManager
-from state_store import StateStore
+from core.position_manager import PositionManager
+from core.state_store import StateStore
 
 
 class PositionManagerTest(unittest.TestCase):

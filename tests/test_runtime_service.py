@@ -3,7 +3,7 @@ from datetime import datetime
 from threading import Event, Thread
 from zoneinfo import ZoneInfo
 
-from runtime_service import ServiceRuntimeConfig, StrategyRuntimeService
+from core.runtime_service import ServiceRuntimeConfig, StrategyRuntimeService
 
 
 class RuntimeServiceTest(unittest.TestCase):

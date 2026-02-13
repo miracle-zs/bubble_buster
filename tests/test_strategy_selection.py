@@ -4,7 +4,7 @@ import unittest
 if importlib.util.find_spec("requests") is None:
     raise unittest.SkipTest("requests is not installed")
 
-from strategy_top10_short import RankEntry, Top10ShortStrategy
+from core.strategy_top10_short import RankEntry, Top10ShortStrategy
 
 
 class StrategySelectionTest(unittest.TestCase):

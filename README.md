@@ -23,12 +23,19 @@
 ## 目录结构
 
 - `/Users/zhangshuai/PycharmProjects/bubble_buster/main.py`：CLI 入口（entry/manage/service/dashboard）
-- `/Users/zhangshuai/PycharmProjects/bubble_buster/strategy_top10_short.py`：建仓与出场挂单
-- `/Users/zhangshuai/PycharmProjects/bubble_buster/position_manager.py`：巡检、动态止损、超时平仓
-- `/Users/zhangshuai/PycharmProjects/bubble_buster/runtime_service.py`：常驻调度
 - `/Users/zhangshuai/PycharmProjects/bubble_buster/dashboard_fastapi.py`：Dashboard 服务
 - `/Users/zhangshuai/PycharmProjects/bubble_buster/dashboard_server.py`：Dashboard 数据与页面
-- `/Users/zhangshuai/PycharmProjects/bubble_buster/state_store.py`：SQLite 存储层
+- `/Users/zhangshuai/PycharmProjects/bubble_buster/core/`：核心策略与运行时逻辑
+  - `strategy_top10_short.py`：建仓与出场挂单
+  - `position_manager.py`：巡检、动态止损、超时平仓
+  - `runtime_service.py`：常驻调度
+  - `runtime_components.py`：组件装配
+  - `state_store.py`：SQLite 存储层
+  - `balance_sampler.py`：余额快照采集
+- `/Users/zhangshuai/PycharmProjects/bubble_buster/infra/`：基础设施适配
+  - `binance_futures_client.py`：交易所 API 客户端
+  - `binance_top10_monitor.py`：涨幅榜数据计算
+  - `notifier.py`：Server 酱通知
 - `/Users/zhangshuai/PycharmProjects/bubble_buster/schema.sql`：数据库表结构
 - `/Users/zhangshuai/PycharmProjects/bubble_buster/config.ini.example`：配置模板
 

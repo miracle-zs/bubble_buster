@@ -5,7 +5,7 @@ from unittest.mock import patch
 if importlib.util.find_spec("requests") is None:
     raise unittest.SkipTest("requests is not installed")
 
-from binance_top10_monitor import (
+from infra.binance_top10_monitor import (
     ApiWeightLimiter,
     build_top_gainers,
     calculate_daily_percentage_change,
@@ -19,7 +19,7 @@ class MonitorMathTest(unittest.TestCase):
         self.assertAlmostEqual(calculate_daily_percentage_change(90, 100), -10.0)
         self.assertEqual(calculate_daily_percentage_change(100, 0), 0.0)
 
-    @patch("binance_top10_monitor.get_klines_data")
+    @patch("infra.binance_top10_monitor.get_klines_data")
     def test_midnight_open_uses_single_kline_fast_path(self, mock_klines) -> None:
         midnight = 1700000000000
         mock_klines.return_value = [[midnight, "1.2345"]]
@@ -33,10 +33,10 @@ class MonitorMathTest(unittest.TestCase):
         self.assertEqual(kwargs.get("limit"), 1)
         self.assertIs(kwargs.get("rate_limiter"), limiter)
 
-    @patch("binance_top10_monitor.get_open_price_at_midnight")
-    @patch("binance_top10_monitor.get_utc_midnight_timestamp")
-    @patch("binance_top10_monitor.get_24hr_ticker_data")
-    @patch("binance_top10_monitor.get_exchange_info")
+    @patch("infra.binance_top10_monitor.get_open_price_at_midnight")
+    @patch("infra.binance_top10_monitor.get_utc_midnight_timestamp")
+    @patch("infra.binance_top10_monitor.get_24hr_ticker_data")
+    @patch("infra.binance_top10_monitor.get_exchange_info")
     def test_build_top_gainers_keeps_ranking_logic(
         self,
         mock_exchange_info,

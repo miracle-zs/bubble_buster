@@ -11,11 +11,11 @@ from typing import Optional
 from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse, JSONResponse
 
-from binance_futures_client import BinanceFuturesClient
+from core.runtime_components import build_proxies, create_components, resolve_path
+from core.runtime_service import StrategyRuntimeService
+from core.state_store import StateStore
 from dashboard_server import DashboardDataProvider, render_dashboard_html
-from runtime_components import build_proxies, create_components, resolve_path
-from runtime_service import StrategyRuntimeService
-from state_store import StateStore
+from infra.binance_futures_client import BinanceFuturesClient
 
 try:
     import fcntl

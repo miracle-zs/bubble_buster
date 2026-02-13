@@ -2,8 +2,8 @@ import logging
 from datetime import datetime, timezone
 from typing import Dict
 
-from binance_futures_client import BinanceFuturesClient
-from state_store import StateStore
+from core.state_store import StateStore
+from infra.binance_futures_client import BinanceFuturesClient
 
 LOGGER = logging.getLogger(__name__)
 

@@ -5,8 +5,8 @@ from unittest.mock import MagicMock
 if importlib.util.find_spec("requests") is None:
     raise unittest.SkipTest("requests is not installed")
 
-from binance_futures_client import BinanceAPIError
-from strategy_top10_short import Top10ShortStrategy
+from infra.binance_futures_client import BinanceAPIError
+from core.strategy_top10_short import Top10ShortStrategy
 
 
 class StrategyOrderRetryTest(unittest.TestCase):

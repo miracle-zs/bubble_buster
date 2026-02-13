@@ -3,13 +3,13 @@ import os
 from pathlib import Path
 from typing import Dict, Optional, Tuple
 
-from balance_sampler import WalletSnapshotSampler
-from binance_futures_client import BinanceFuturesClient
-from notifier import ServerChanNotifier
-from position_manager import PositionManager
-from runtime_service import ServiceRuntimeConfig
-from state_store import StateStore
-from strategy_top10_short import Top10ShortStrategy
+from core.balance_sampler import WalletSnapshotSampler
+from core.position_manager import PositionManager
+from core.runtime_service import ServiceRuntimeConfig
+from core.state_store import StateStore
+from core.strategy_top10_short import Top10ShortStrategy
+from infra.binance_futures_client import BinanceFuturesClient
+from infra.notifier import ServerChanNotifier
 
 
 def resolve_path(raw: str, base_dir: Optional[str] = None) -> str:
@@ -65,7 +65,7 @@ def create_components(
     )
 
     db_path = resolve_path(runtime_cfg.get("db_path", "state.db"), base_dir)
-    schema_path = str((Path(__file__).parent / "schema.sql").resolve())
+    schema_path = str((Path(__file__).resolve().parents[1] / "schema.sql").resolve())
 
     store = StateStore(db_path=db_path, schema_path=schema_path)
     store.init_schema()

@@ -2,7 +2,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from state_store import StateStore
+from core.state_store import StateStore
 
 
 class StateStoreTest(unittest.TestCase):

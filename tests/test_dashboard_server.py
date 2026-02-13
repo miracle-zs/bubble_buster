@@ -6,7 +6,7 @@ from typing import Dict
 from pathlib import Path
 
 from dashboard_server import DashboardDataProvider
-from state_store import StateStore
+from core.state_store import StateStore
 
 
 class DashboardServerTest(unittest.TestCase):
