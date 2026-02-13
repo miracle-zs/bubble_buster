@@ -1037,7 +1037,13 @@ DASHBOARD_HTML = """<!doctype html>
 (function () {
   var refreshNode = document.getElementById("refresh");
   var REFRESH_SEC = Number((refreshNode && refreshNode.textContent) || "5");
-  var api = "/api/dashboard";
+  var pathPrefix = "/";
+  if (window && window.location && typeof window.location.pathname === "string") {
+    pathPrefix = window.location.pathname || "/";
+  }
+  pathPrefix = pathPrefix.replace(/\/+$/, "");
+  if (!pathPrefix) pathPrefix = "";
+  var api = pathPrefix + "/api/dashboard";
   var equityChart = null;
 
   var el = {
