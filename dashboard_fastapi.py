@@ -149,8 +149,8 @@ def create_dashboard_context(config_path: str) -> DashboardRuntimeContext:
             if not run_with_dashboard:
                 balance_fetcher = _fetch_wallet_balance_usdt
 
-            def _fetch_close_price(symbol: str, order_id: int) -> Optional[float]:
-                trades = client.get_user_trades(symbol=symbol, order_id=order_id, limit=1000)
+            def _avg_price_from_order_trades(symbol: str, target_order_id: int) -> Optional[float]:
+                trades = client.get_user_trades(symbol=symbol, order_id=target_order_id, limit=1000)
                 if not trades:
                     return None
                 total_qty = 0.0
@@ -169,6 +169,39 @@ def create_dashboard_context(config_path: str) -> DashboardRuntimeContext:
                 if total_qty <= 0 or total_quote <= 0:
                     return None
                 return total_quote / total_qty
+
+            def _fetch_close_price(symbol: str, order_id: int) -> Optional[float]:
+                tried = set()
+
+                def _try(order_id_candidate: Optional[int]) -> Optional[float]:
+                    if order_id_candidate is None or order_id_candidate <= 0:
+                        return None
+                    if order_id_candidate in tried:
+                        return None
+                    tried.add(order_id_candidate)
+                    return _avg_price_from_order_trades(symbol=symbol, target_order_id=order_id_candidate)
+
+                direct = _try(int(order_id))
+                if direct is not None:
+                    return direct
+
+                # For algo conditional orders, /fapi/v1/algoOrder returns actualOrderId.
+                # We must resolve and then query /fapi/v1/userTrades by that real order id.
+                try:
+                    order_payload = client.get_order(symbol=symbol, order_id=int(order_id))
+                except Exception:  # noqa: BLE001
+                    return None
+
+                actual_order_id = order_payload.get("actualOrderId")
+                try:
+                    parsed_actual_order_id = int(actual_order_id) if actual_order_id is not None else None
+                except (TypeError, ValueError):
+                    parsed_actual_order_id = None
+
+                resolved = _try(parsed_actual_order_id)
+                if resolved is not None:
+                    return resolved
+                return None
 
             close_price_fetcher = _fetch_close_price
 

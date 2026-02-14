@@ -194,28 +194,43 @@ class DashboardDataProvider:
 
         if self.close_price_fetcher is not None:
             symbol = str(row.get("symbol") or "").upper().strip()
-            order_id_raw = row.get("close_order_id")
-            try:
-                order_id = int(order_id_raw) if order_id_raw is not None else None
-            except (TypeError, ValueError):
-                order_id = None
-            if symbol and order_id:
-                cache_key = (symbol, order_id)
-                if cache_key in self._close_price_cache:
-                    return self._close_price_cache[cache_key]
-                fetched_price: Optional[float] = None
+            candidate_order_ids: List[int] = []
+
+            for order_id_raw in (
+                row.get("close_order_id"),
+                row.get("tp_order_id"),
+                row.get("sl_order_id"),
+            ):
                 try:
-                    fetched_price = self.close_price_fetcher(symbol, order_id)
-                    if fetched_price is not None and fetched_price > 0:
-                        fetched_price = float(fetched_price)
-                    else:
+                    parsed_order_id = int(order_id_raw) if order_id_raw is not None else None
+                except (TypeError, ValueError):
+                    parsed_order_id = None
+                if parsed_order_id and parsed_order_id > 0 and parsed_order_id not in candidate_order_ids:
+                    candidate_order_ids.append(parsed_order_id)
+
+            if symbol and candidate_order_ids:
+                for order_id in candidate_order_ids:
+                    cache_key = (symbol, order_id)
+                    if cache_key in self._close_price_cache:
+                        cached = self._close_price_cache[cache_key]
+                        if cached is not None:
+                            return cached
+                        continue
+
+                    fetched_price: Optional[float] = None
+                    try:
+                        fetched_price = self.close_price_fetcher(symbol, order_id)
+                        if fetched_price is not None and fetched_price > 0:
+                            fetched_price = float(fetched_price)
+                        else:
+                            fetched_price = None
+                    except Exception as exc:  # noqa: BLE001
+                        LOGGER.debug("close_price_fetcher failed for %s order_id=%s: %s", symbol, order_id, exc)
                         fetched_price = None
-                except Exception as exc:  # noqa: BLE001
-                    LOGGER.debug("close_price_fetcher failed for %s order_id=%s: %s", symbol, order_id, exc)
-                    fetched_price = None
-                self._close_price_cache[cache_key] = fetched_price
-                if fetched_price is not None:
-                    return fetched_price
+
+                    self._close_price_cache[cache_key] = fetched_price
+                    if fetched_price is not None:
+                        return fetched_price
 
         return None
 
@@ -374,6 +389,7 @@ class DashboardDataProvider:
             SELECT
                 p.id, p.symbol, p.side, p.qty, p.entry_price,
                 p.tp_price, p.sl_price,
+                p.tp_order_id, p.sl_order_id,
                 p.status, p.close_reason,
                 p.closed_at_utc, p.updated_at_utc, p.close_order_id,
                 oe.event_time_utc AS close_event_time_utc,
@@ -445,6 +461,7 @@ class DashboardDataProvider:
             SELECT
                 p.id, p.symbol, p.side, p.qty, p.entry_price,
                 p.tp_price, p.sl_price,
+                p.tp_order_id, p.sl_order_id,
                 p.status, p.close_reason, p.close_order_id,
                 p.closed_at_utc, p.updated_at_utc,
                 oe.event_time_utc AS close_event_time_utc,

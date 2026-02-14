@@ -297,6 +297,58 @@ class DashboardServerTest(unittest.TestCase):
         self.assertEqual(round(strategy_curve[1]["equity"], 8), round(balance_curve[1]["equity"], 8))
         self.assertAlmostEqual(strategy_stats["net_cashflow_usdt"], 0.0)
 
+    def test_close_price_fetcher_falls_back_to_tp_sl_order_ids(self) -> None:
+        run_id, _ = self.store.create_run("2026-02-15")
+        now = datetime.now(timezone.utc).replace(microsecond=0)
+        position_id = self.store.insert_position(
+            run_id=run_id,
+            symbol="AZTECUSDT",
+            side="SHORT",
+            qty=10,
+            entry_price=1.0,
+            liq_price_open=2.0,
+            tp_price=0.8,
+            sl_price=1.2,
+            tp_order_id=7001,
+            sl_order_id=7002,
+            tp_client_order_id="tp-az",
+            sl_client_order_id="sl-az",
+            opened_at_utc=now.isoformat(),
+            expire_at_utc=now.isoformat(),
+            status="OPEN",
+        )
+        self.store.mark_position_closed(
+            position_id=position_id,
+            status="CLOSED_EXTERNAL",
+            close_reason="SHORT_POSITION_NOT_FOUND",
+            close_order_id=None,
+        )
+
+        calls = {"ids": []}
+
+        def _mock_close_price_fetcher(symbol: str, order_id: int) -> float | None:
+            calls["ids"].append(order_id)
+            if symbol == "AZTECUSDT" and order_id == 7001:
+                return 0.8
+            return None
+
+        provider = DashboardDataProvider(
+            db_path=self.db_path,
+            log_file=self.log_file,
+            timezone_name="UTC",
+            entry_hour=7,
+            entry_minute=40,
+            close_price_fetcher=_mock_close_price_fetcher,
+        )
+        snapshot = provider.snapshot(log_lines=0)
+        strategy_stats = snapshot["drawdown_stats_strategy"]
+        unpriced = snapshot["unpriced_closed_details"]
+
+        self.assertEqual(strategy_stats["closed_trades_priced"], 1)
+        self.assertAlmostEqual(strategy_stats["trade_realized_pnl"], 2.0)
+        self.assertEqual(unpriced, [])
+        self.assertIn(7001, calls["ids"])
+
 
 if __name__ == "__main__":
     unittest.main()
