@@ -957,27 +957,24 @@ DASHBOARD_HTML = """<!doctype html>
       box-shadow: inset 0 0 0 1px rgba(106, 182, 221, 0.08);
     }
 
-    .pill-btn {
+    .pill-value {
       margin-left: 6px;
+      display: inline-block;
+      min-width: 36px;
+      text-align: center;
+      border-radius: 999px;
+      padding: 2px 8px;
       border: 1px solid rgba(80, 143, 175, 0.7);
       background: rgba(7, 18, 27, 0.88);
       color: var(--muted);
-      border-radius: 999px;
-      padding: 2px 8px;
       font-size: 0.75rem;
-      cursor: pointer;
-      transition: all 140ms ease;
     }
 
-    .pill-btn:hover {
-      color: var(--text);
-      border-color: rgba(126, 199, 235, 0.9);
-    }
-
-    .pill-btn.ok {
+    .pill-value.ok {
       color: #031018;
       background: linear-gradient(180deg, #68d8ff, #43b6ea);
       border-color: transparent;
+      font-weight: 700;
     }
 
     #serviceState.ok { color: var(--ok); }
@@ -991,9 +988,16 @@ DASHBOARD_HTML = """<!doctype html>
 
     .cards {
       display: grid;
-      grid-template-columns: repeat(4, minmax(0, 1fr));
       gap: 12px;
-      margin-bottom: 14px;
+      margin-bottom: 10px;
+    }
+
+    .cards-runtime {
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+    }
+
+    .cards-performance {
+      grid-template-columns: repeat(5, minmax(0, 1fr));
     }
 
     .card {
@@ -1224,12 +1228,16 @@ DASHBOARD_HTML = """<!doctype html>
 
     @media (max-width: 1020px) {
       .cards { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      .cards-runtime { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      .cards-performance { grid-template-columns: repeat(3, minmax(0, 1fr)); }
       .grid { grid-template-columns: 1fr; }
       .header { padding: 12px; }
     }
 
     @media (max-width: 560px) {
-      .cards { grid-template-columns: 1fr; }
+      .cards,
+      .cards-runtime,
+      .cards-performance { grid-template-columns: 1fr; }
       .shell { padding: 14px 10px 20px; }
       .subtitle { font-size: 0.8rem; }
       .stats-wrap { grid-template-columns: 1fr; }
@@ -1256,13 +1264,11 @@ DASHBOARD_HTML = """<!doctype html>
         <div class="pill">Auto refresh: <span id="refresh">__REFRESH_SEC__</span>s</div>
         <div class="pill">Next entry: <span id="nextEntry">--</span></div>
         <div class="pill">Service: <span id="serviceState">--</span></div>
-        <div class="pill">Entry Catchup:
-          <button id="catchupToggle" class="pill-btn" type="button">--</button>
-        </div>
+        <div class="pill">Entry Catchup: <span id="catchupState" class="pill-value">--</span></div>
       </div>
     </section>
 
-    <section class="cards">
+    <section class="cards cards-runtime">
       <article class="card">
         <div class="k">Open Positions</div>
         <div class="v" id="openCount">0</div>
@@ -1279,12 +1285,15 @@ DASHBOARD_HTML = """<!doctype html>
         <div class="k">Last Run Status</div>
         <div class="v" id="lastRunStatus">--</div>
       </article>
+    </section>
+
+    <section class="cards cards-performance">
       <article class="card">
         <div class="k">Account Equity (USDT)</div>
         <div class="v" id="walletBalance">--</div>
       </article>
       <article class="card">
-        <div class="k">Realized PnL (USDT)</div>
+        <div class="k">Equity Change (USDT)</div>
         <div class="v" id="realizedPnl">--</div>
       </article>
       <article class="card">
@@ -1403,7 +1412,6 @@ DASHBOARD_HTML = """<!doctype html>
   pathPrefix = pathPrefix.replace(/\\/+$/, "");
   if (!pathPrefix) pathPrefix = "";
   var api = pathPrefix + "/api/dashboard";
-  var catchupApi = pathPrefix + "/api/runtime/settings/entry-catchup";
   var equityChart = null;
   var currentCurveTab = "strategy";
   var currentWindowHours = 24;
@@ -1414,7 +1422,7 @@ DASHBOARD_HTML = """<!doctype html>
     meta: document.getElementById("meta"),
     nextEntry: document.getElementById("nextEntry"),
     serviceState: document.getElementById("serviceState"),
-    catchupToggle: document.getElementById("catchupToggle"),
+    catchupState: document.getElementById("catchupState"),
     openCount: document.getElementById("openCount"),
     symbolCount: document.getElementById("symbolCount"),
     errorCount: document.getElementById("errorCount"),
@@ -1550,41 +1558,10 @@ DASHBOARD_HTML = """<!doctype html>
 
   function updateCatchupToggle(enabled, source) {
     currentCatchupEnabled = (enabled === true);
-    if (!el.catchupToggle) return;
-    el.catchupToggle.textContent = currentCatchupEnabled ? "ON" : "OFF";
-    el.catchupToggle.classList.toggle("ok", currentCatchupEnabled);
-    el.catchupToggle.title = "source: " + txt(source);
-  }
-
-  function toggleCatchup() {
-    if (!el.catchupToggle || currentCatchupEnabled === null) return;
-    var next = !currentCatchupEnabled;
-    el.catchupToggle.disabled = true;
-    var xhr = new XMLHttpRequest();
-    xhr.open(
-      "POST",
-      catchupApi + "?enabled=" + encodeURIComponent(String(next)) + "&persist=true&_=" + encodeURIComponent(String(new Date().getTime())),
-      true
-    );
-    xhr.onreadystatechange = function () {
-      if (xhr.readyState !== 4) return;
-      el.catchupToggle.disabled = false;
-      if (xhr.status < 200 || xhr.status >= 300) {
-        setText(el.meta, "update catchup failed: HTTP " + xhr.status);
-        return;
-      }
-      try {
-        var payload = JSON.parse(xhr.responseText || "{}");
-        updateCatchupToggle(payload.entry_catchup_enabled === true, payload.source || "RUNTIME");
-      } catch (err) {
-        setText(el.meta, "update catchup parse failed: " + err);
-      }
-    };
-    xhr.onerror = function () {
-      el.catchupToggle.disabled = false;
-      setText(el.meta, "update catchup failed: network error");
-    };
-    xhr.send();
+    if (!el.catchupState) return;
+    el.catchupState.textContent = currentCatchupEnabled ? "ON" : "OFF";
+    el.catchupState.classList.toggle("ok", currentCatchupEnabled);
+    el.catchupState.title = "source: " + txt(source);
   }
 
   function renderEquityChart(curve) {
@@ -1749,7 +1726,11 @@ DASHBOARD_HTML = """<!doctype html>
     setText(el.walletBalance, fmtNum(walletDisplay, 4));
     setText(el.realizedPnl, fmtSigned(stats.total_realized_pnl, 4));
     setText(el.maxDrawdown, fmtNum(stats.max_drawdown_pct, 2) + "%");
-    setText(el.winRate, fmtNum(stats.win_rate_pct, 2) + "%");
+    if (currentCurveTab === "balance") {
+      setText(el.winRate, "--");
+    } else {
+      setText(el.winRate, fmtNum(stats.win_rate_pct, 2) + "%");
+    }
     setText(el.netCashflow, fmtSigned(stats.net_cashflow_usdt, 4));
     if (el.realizedPnl) {
       var pnl = toNum(stats.total_realized_pnl);
@@ -1760,8 +1741,12 @@ DASHBOARD_HTML = """<!doctype html>
       el.maxDrawdown.className = "v " + (dd && dd > 0 ? "bad" : "");
     }
     if (el.winRate) {
-      var wr = toNum(stats.win_rate_pct);
-      el.winRate.className = "v " + (wr === null ? "" : (wr >= 50 ? "ok" : "warn"));
+      if (currentCurveTab === "balance") {
+        el.winRate.className = "v";
+      } else {
+        var wr = toNum(stats.win_rate_pct);
+        el.winRate.className = "v " + (wr === null ? "" : (wr >= 50 ? "ok" : "warn"));
+      }
     }
     if (el.netCashflow) {
       var cf = toNum(stats.net_cashflow_usdt);
@@ -1784,12 +1769,12 @@ DASHBOARD_HTML = """<!doctype html>
 
     var rows = [
       ["Account Equity", walletBalance === null ? "--" : fmtNum(walletBalance, 4) + " USDT"],
-      ["Realized PnL", fmtSigned(s.total_realized_pnl, 4) + " USDT"],
+      ["Equity Change", fmtSigned(s.total_realized_pnl, 4) + " USDT"],
       ["Net Cashflow", fmtSigned(s.net_cashflow_usdt, 4) + " USDT"],
       ["Trade Realized", fmtSigned(s.trade_realized_pnl, 4) + " USDT"],
       ["Max Drawdown", fmtNum(s.max_drawdown, 4) + " (" + fmtNum(s.max_drawdown_pct, 2) + "%)"],
       ["Current Drawdown", fmtNum(s.current_drawdown, 4) + " (" + fmtNum(s.current_drawdown_pct, 2) + "%)"],
-      ["Win Rate", fmtNum(s.win_rate_pct, 2) + "%"],
+      ["Win Rate", currentCurveTab === "balance" ? "--" : (fmtNum(s.win_rate_pct, 2) + "%")],
       ["Closed Trades", txt(s.closed_trades_priced)],
       ["Unpriced Closed", txt(s.unpriced_closed_positions)],
       ["Balance Source", txt(w.source)]
@@ -1809,8 +1794,6 @@ DASHBOARD_HTML = """<!doctype html>
         return;
       }
 
-      var cfgPath = txt(d.config_path);
-      var dbPath = txt(d.db_path);
       latestData = d;
       var summary = d.summary || {};
       var wallet = d.wallet || {};
@@ -1830,11 +1813,9 @@ DASHBOARD_HTML = """<!doctype html>
 
       setText(
         el.meta,
-        "Updated: " + fmtAxisTime(d.generated_at_utc) +
-          " | TZ: " + txt(d.timezone) +
-          " | Config: " + cfgPath +
-          " | DB: " + dbPath +
-          " | Balance: " + txt(wallet.source)
+        "Updated " + fmtAxisTime(d.generated_at_utc) +
+          " · TZ " + txt(d.timezone) +
+          " · Balance " + txt(wallet.source)
       );
       setText(el.nextEntry, fmtAxisTime(d.next_entry_local));
       setText(el.serviceState, svcStatus);
@@ -1933,11 +1914,6 @@ DASHBOARD_HTML = """<!doctype html>
     el.tabBalance.addEventListener("click", function () {
       currentCurveTab = "balance";
       rerenderFromLatest();
-    });
-  }
-  if (el.catchupToggle) {
-    el.catchupToggle.addEventListener("click", function () {
-      toggleCatchup();
     });
   }
   if (el.windowRow) {
