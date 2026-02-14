@@ -541,7 +541,7 @@ class DashboardDataProvider:
             try:
                 parsed_hours = float(window_hours)
                 if parsed_hours > 0:
-                    window_hours_value = min(parsed_hours, 24.0 * 90.0)
+                    window_hours_value = min(parsed_hours, 24.0 * 366.0)
             except (TypeError, ValueError):
                 window_hours_value = None
         window_start_utc = (
@@ -957,6 +957,29 @@ DASHBOARD_HTML = """<!doctype html>
       box-shadow: inset 0 0 0 1px rgba(106, 182, 221, 0.08);
     }
 
+    .pill-btn {
+      margin-left: 6px;
+      border: 1px solid rgba(80, 143, 175, 0.7);
+      background: rgba(7, 18, 27, 0.88);
+      color: var(--muted);
+      border-radius: 999px;
+      padding: 2px 8px;
+      font-size: 0.75rem;
+      cursor: pointer;
+      transition: all 140ms ease;
+    }
+
+    .pill-btn:hover {
+      color: var(--text);
+      border-color: rgba(126, 199, 235, 0.9);
+    }
+
+    .pill-btn.ok {
+      color: #031018;
+      background: linear-gradient(180deg, #68d8ff, #43b6ea);
+      border-color: transparent;
+    }
+
     #serviceState.ok { color: var(--ok); }
     #serviceState.warn { color: var(--warn); }
     #serviceState.bad { color: var(--bad); }
@@ -1233,6 +1256,9 @@ DASHBOARD_HTML = """<!doctype html>
         <div class="pill">Auto refresh: <span id="refresh">__REFRESH_SEC__</span>s</div>
         <div class="pill">Next entry: <span id="nextEntry">--</span></div>
         <div class="pill">Service: <span id="serviceState">--</span></div>
+        <div class="pill">Entry Catchup:
+          <button id="catchupToggle" class="pill-btn" type="button">--</button>
+        </div>
       </div>
     </section>
 
@@ -1288,9 +1314,10 @@ DASHBOARD_HTML = """<!doctype html>
           </div>
           <div class="window-row" id="windowRow">
             <button class="tab-btn" data-window-hours="1" type="button">1H</button>
-            <button class="tab-btn" data-window-hours="6" type="button">6H</button>
-            <button class="tab-btn active" data-window-hours="24" type="button">24H</button>
-            <button class="tab-btn" data-window-hours="168" type="button">7D</button>
+            <button class="tab-btn active" data-window-hours="24" type="button">1D</button>
+            <button class="tab-btn" data-window-hours="168" type="button">1W</button>
+            <button class="tab-btn" data-window-hours="720" type="button">1M</button>
+            <button class="tab-btn" data-window-hours="8760" type="button">1Y</button>
           </div>
           <div class="chart-canvas" id="equityChart"></div>
         </div>
@@ -1376,15 +1403,18 @@ DASHBOARD_HTML = """<!doctype html>
   pathPrefix = pathPrefix.replace(/\\/+$/, "");
   if (!pathPrefix) pathPrefix = "";
   var api = pathPrefix + "/api/dashboard";
+  var catchupApi = pathPrefix + "/api/runtime/settings/entry-catchup";
   var equityChart = null;
   var currentCurveTab = "strategy";
   var currentWindowHours = 24;
   var latestData = null;
+  var currentCatchupEnabled = null;
 
   var el = {
     meta: document.getElementById("meta"),
     nextEntry: document.getElementById("nextEntry"),
     serviceState: document.getElementById("serviceState"),
+    catchupToggle: document.getElementById("catchupToggle"),
     openCount: document.getElementById("openCount"),
     symbolCount: document.getElementById("symbolCount"),
     errorCount: document.getElementById("errorCount"),
@@ -1514,6 +1544,45 @@ DASHBOARD_HTML = """<!doctype html>
     };
     xhr.onerror = function () {
       callback(new Error("Network error"));
+    };
+    xhr.send();
+  }
+
+  function updateCatchupToggle(enabled, source) {
+    currentCatchupEnabled = (enabled === true);
+    if (!el.catchupToggle) return;
+    el.catchupToggle.textContent = currentCatchupEnabled ? "ON" : "OFF";
+    el.catchupToggle.classList.toggle("ok", currentCatchupEnabled);
+    el.catchupToggle.title = "source: " + txt(source);
+  }
+
+  function toggleCatchup() {
+    if (!el.catchupToggle || currentCatchupEnabled === null) return;
+    var next = !currentCatchupEnabled;
+    el.catchupToggle.disabled = true;
+    var xhr = new XMLHttpRequest();
+    xhr.open(
+      "POST",
+      catchupApi + "?enabled=" + encodeURIComponent(String(next)) + "&persist=true&_=" + encodeURIComponent(String(new Date().getTime())),
+      true
+    );
+    xhr.onreadystatechange = function () {
+      if (xhr.readyState !== 4) return;
+      el.catchupToggle.disabled = false;
+      if (xhr.status < 200 || xhr.status >= 300) {
+        setText(el.meta, "update catchup failed: HTTP " + xhr.status);
+        return;
+      }
+      try {
+        var payload = JSON.parse(xhr.responseText || "{}");
+        updateCatchupToggle(payload.entry_catchup_enabled === true, payload.source || "RUNTIME");
+      } catch (err) {
+        setText(el.meta, "update catchup parse failed: " + err);
+      }
+    };
+    xhr.onerror = function () {
+      el.catchupToggle.disabled = false;
+      setText(el.meta, "update catchup failed: network error");
     };
     xhr.send();
   }
@@ -1747,6 +1816,7 @@ DASHBOARD_HTML = """<!doctype html>
       var wallet = d.wallet || {};
       var stats = activeStats(d);
       var svc = d.service || {};
+      var runtime = d.runtime_settings || {};
       var svcStatus = "DISABLED";
       if (svc.enabled) {
         if (svc.running) {
@@ -1781,6 +1851,9 @@ DASHBOARD_HTML = """<!doctype html>
       setText(el.lastRunStatus, txt(summary.last_run_status));
       if (el.lastRunStatus) {
         el.lastRunStatus.className = "v " + clsForStatus(summary.last_run_status);
+      }
+      if (runtime && Object.prototype.hasOwnProperty.call(runtime, "entry_catchup_enabled")) {
+        updateCatchupToggle(runtime.entry_catchup_enabled === true, runtime.source || "RUNTIME");
       }
       rerenderFromLatest();
 
@@ -1860,6 +1933,11 @@ DASHBOARD_HTML = """<!doctype html>
     el.tabBalance.addEventListener("click", function () {
       currentCurveTab = "balance";
       rerenderFromLatest();
+    });
+  }
+  if (el.catchupToggle) {
+    el.catchupToggle.addEventListener("click", function () {
+      toggleCatchup();
     });
   }
   if (el.windowRow) {

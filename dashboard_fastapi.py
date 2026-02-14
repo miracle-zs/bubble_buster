@@ -3,7 +3,7 @@ import logging
 import os
 import threading
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from logging.handlers import TimedRotatingFileHandler
 from pathlib import Path
 from typing import Optional
@@ -187,6 +187,41 @@ def _build_service_state(enabled: bool = False) -> dict:
         "thread": None,
         "stop_event": None,
         "lock": None,
+        "service": None,
+    }
+
+
+def _read_entry_catchup_from_config(config_path: str) -> bool:
+    cfg = _load_config(config_path)
+    runtime_cfg = cfg["runtime"] if cfg.has_section("runtime") else {}
+    return str(runtime_cfg.get("entry_catchup_enabled", "true")).strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _persist_entry_catchup_to_config(config_path: str, enabled: bool) -> None:
+    cfg = _load_config(config_path)
+    if not cfg.has_section("runtime"):
+        cfg.add_section("runtime")
+    cfg["runtime"]["entry_catchup_enabled"] = "true" if enabled else "false"
+    with open(config_path, "w", encoding="utf-8") as f:
+        cfg.write(f)
+
+
+def _runtime_entry_catchup_state(app: FastAPI) -> dict:
+    config_path = str(getattr(app.state, "config_path", "") or _default_config_path())
+    service_state = getattr(app.state, "service_state", {}) or {}
+    service = service_state.get("service")
+    if service is not None and getattr(service, "cfg", None) is not None:
+        return {
+            "entry_catchup_enabled": bool(getattr(service.cfg, "entry_catchup_enabled", True)),
+            "source": "RUNTIME",
+            "mutable": True,
+            "config_path": config_path,
+        }
+    return {
+        "entry_catchup_enabled": _read_entry_catchup_from_config(config_path),
+        "source": "CONFIG",
+        "mutable": True,
+        "config_path": config_path,
     }
 
 
@@ -256,6 +291,7 @@ def _startup_background_service(app: FastAPI, config_path: str) -> None:
         service_state["thread"] = thread
         service_state["stop_event"] = stop_event
         service_state["lock"] = runtime_lock
+        service_state["service"] = service
     except Exception as exc:  # noqa: BLE001
         service_state["error"] = str(exc)
         lock_obj = service_state.get("lock")
@@ -282,6 +318,7 @@ def _shutdown_background_service(app: FastAPI) -> None:
         if lock_obj:
             lock_obj.release()
         service_state["running"] = False
+        service_state["service"] = None
 
 
 def create_app(config_path: Optional[str] = None) -> FastAPI:
@@ -290,6 +327,7 @@ def create_app(config_path: Optional[str] = None) -> FastAPI:
     @app.on_event("startup")
     def _startup() -> None:
         path = config_path or _default_config_path()
+        app.state.config_path = path
         app.state.ctx = create_dashboard_context(path)
         _ensure_strategy_log_handler(app.state.ctx.log_file)
         _startup_background_service(app, path)
@@ -307,7 +345,7 @@ def create_app(config_path: Optional[str] = None) -> FastAPI:
     def dashboard_data(
         request: Request,
         log_lines: int = Query(default=80, ge=0, le=300),
-        window_hours: Optional[float] = Query(default=24.0, gt=0.0, le=2160.0),
+        window_hours: Optional[float] = Query(default=24.0, gt=0.0, le=8784.0),
         curve_points: Optional[int] = Query(default=None, ge=100, le=5000),
     ):
         ctx: DashboardRuntimeContext = request.app.state.ctx
@@ -327,9 +365,41 @@ def create_app(config_path: Optional[str] = None) -> FastAPI:
                 "running": bool(service_state.get("running", False)) and bool(thread and thread.is_alive()),
                 "error": service_state.get("error"),
             }
+            payload["runtime_settings"] = _runtime_entry_catchup_state(request.app)
             return JSONResponse(payload)
         except Exception as exc:  # noqa: BLE001
             raise HTTPException(status_code=500, detail=f"dashboard snapshot failed: {exc}") from exc
+
+    @app.get("/api/runtime/settings")
+    def runtime_settings(request: Request):
+        try:
+            return _runtime_entry_catchup_state(request.app)
+        except Exception as exc:  # noqa: BLE001
+            raise HTTPException(status_code=500, detail=f"runtime settings read failed: {exc}") from exc
+
+    @app.post("/api/runtime/settings/entry-catchup")
+    def update_entry_catchup(
+        request: Request,
+        enabled: bool = Query(...),
+        persist: bool = Query(default=True),
+    ):
+        service_state = getattr(request.app.state, "service_state", {}) or {}
+        service = service_state.get("service")
+        applied_runtime = False
+        if service is not None and getattr(service, "cfg", None) is not None:
+            service.cfg = replace(service.cfg, entry_catchup_enabled=bool(enabled))
+            applied_runtime = True
+
+        config_path = str(getattr(request.app.state, "config_path", "") or _default_config_path())
+        persisted = False
+        if persist:
+            _persist_entry_catchup_to_config(config_path, bool(enabled))
+            persisted = True
+
+        state = _runtime_entry_catchup_state(request.app)
+        state["applied_runtime"] = applied_runtime
+        state["persisted"] = persisted
+        return state
 
     @app.get("/healthz")
     def healthz(request: Request):
