@@ -373,6 +373,12 @@ class DashboardDataProvider:
             "losses": 0,
             "breakeven": 0,
             "win_rate_pct": 0.0,
+            "gross_profit": 0.0,
+            "gross_loss_abs": 0.0,
+            "avg_win": 0.0,
+            "avg_loss_abs": 0.0,
+            "profit_factor": None,
+            "avg_win_loss_ratio": None,
             "max_drawdown": dd["max_drawdown"],
             "max_drawdown_pct": dd["max_drawdown_pct"],
             "current_drawdown": dd["current_drawdown"],
@@ -418,6 +424,8 @@ class DashboardDataProvider:
         losses = 0
         breakeven = 0
         skipped_unpriced = 0
+        gross_profit = 0.0
+        gross_loss_abs = 0.0
 
         for row in rows:
             side = str(row.get("side") or "").upper()
@@ -436,19 +444,31 @@ class DashboardDataProvider:
             cumulative_trade_pnl += pnl
             if pnl > 0:
                 wins += 1
+                gross_profit += pnl
             elif pnl < 0:
                 losses += 1
+                gross_loss_abs += abs(pnl)
             else:
                 breakeven += 1
 
         priced_closed_count = wins + losses + breakeven
         win_rate_pct = (wins / priced_closed_count * 100.0) if priced_closed_count > 0 else 0.0
+        avg_win = (gross_profit / wins) if wins > 0 else 0.0
+        avg_loss_abs = (gross_loss_abs / losses) if losses > 0 else 0.0
+        profit_factor = (gross_profit / gross_loss_abs) if gross_loss_abs > 0 else None
+        avg_win_loss_ratio = (avg_win / avg_loss_abs) if (avg_loss_abs > 0 and avg_win > 0) else None
         return {
             "closed_trades_priced": priced_closed_count,
             "wins": wins,
             "losses": losses,
             "breakeven": breakeven,
             "win_rate_pct": round(win_rate_pct, 2),
+            "gross_profit": round(gross_profit, 8),
+            "gross_loss_abs": round(gross_loss_abs, 8),
+            "avg_win": round(avg_win, 8),
+            "avg_loss_abs": round(avg_loss_abs, 8),
+            "profit_factor": round(profit_factor, 6) if profit_factor is not None else None,
+            "avg_win_loss_ratio": round(avg_win_loss_ratio, 6) if avg_win_loss_ratio is not None else None,
             "unpriced_closed_positions": skipped_unpriced,
             "trade_realized_pnl": round(cumulative_trade_pnl, 8),
             "as_of_utc": now_utc.replace(microsecond=0).isoformat(),
@@ -617,6 +637,12 @@ class DashboardDataProvider:
             "losses": trade_stats["losses"],
             "breakeven": trade_stats["breakeven"],
             "win_rate_pct": trade_stats["win_rate_pct"],
+            "gross_profit": trade_stats["gross_profit"],
+            "gross_loss_abs": trade_stats["gross_loss_abs"],
+            "avg_win": trade_stats["avg_win"],
+            "avg_loss_abs": trade_stats["avg_loss_abs"],
+            "profit_factor": trade_stats["profit_factor"],
+            "avg_win_loss_ratio": trade_stats["avg_win_loss_ratio"],
             "max_drawdown": dd["max_drawdown"],
             "max_drawdown_pct": dd["max_drawdown_pct"],
             "current_drawdown": dd["current_drawdown"],
@@ -687,6 +713,12 @@ class DashboardDataProvider:
                 "losses": 0,
                 "breakeven": 0,
                 "win_rate_pct": 0.0,
+                "gross_profit": 0.0,
+                "gross_loss_abs": 0.0,
+                "avg_win": 0.0,
+                "avg_loss_abs": 0.0,
+                "profit_factor": None,
+                "avg_win_loss_ratio": None,
                 "max_drawdown": 0.0,
                 "max_drawdown_pct": 0.0,
                 "current_drawdown": 0.0,
@@ -702,6 +734,12 @@ class DashboardDataProvider:
                 "losses": 0,
                 "breakeven": 0,
                 "win_rate_pct": 0.0,
+                "gross_profit": 0.0,
+                "gross_loss_abs": 0.0,
+                "avg_win": 0.0,
+                "avg_loss_abs": 0.0,
+                "profit_factor": None,
+                "avg_win_loss_ratio": None,
                 "max_drawdown": 0.0,
                 "max_drawdown_pct": 0.0,
                 "current_drawdown": 0.0,
@@ -717,6 +755,12 @@ class DashboardDataProvider:
                 "losses": 0,
                 "breakeven": 0,
                 "win_rate_pct": 0.0,
+                "gross_profit": 0.0,
+                "gross_loss_abs": 0.0,
+                "avg_win": 0.0,
+                "avg_loss_abs": 0.0,
+                "profit_factor": None,
+                "avg_win_loss_ratio": None,
                 "max_drawdown": 0.0,
                 "max_drawdown_pct": 0.0,
                 "current_drawdown": 0.0,
@@ -1891,6 +1935,16 @@ DASHBOARD_HTML = """<!doctype html>
       ["Equity Change", fmtSigned(s.total_realized_pnl, 4) + " USDT"],
       ["Net Cashflow", fmtSigned(s.net_cashflow_usdt, 4) + " USDT"],
       ["Trade Realized", fmtSigned(s.trade_realized_pnl, 4) + " USDT"],
+      ["Gross Profit", fmtSigned(s.gross_profit, 4) + " USDT"],
+      ["Gross Loss", (toNum(s.gross_loss_abs) === null ? "--" : ("-" + fmtNum(s.gross_loss_abs, 4) + " USDT"))],
+      ["Avg Win / Avg Loss", (currentCurveTab === "balance" || Number(s.closed_trades_priced || 0) <= 0)
+        ? "--"
+        : (fmtNum(s.avg_win, 4) + " / " + fmtNum(s.avg_loss_abs, 4))],
+      ["Profit Factor", (currentCurveTab === "balance" || Number(s.closed_trades_priced || 0) <= 0)
+        ? "--"
+        : (Number(s.losses || 0) <= 0
+          ? (Number(s.wins || 0) > 0 ? "∞" : "--")
+          : fmtNum(s.profit_factor, 3))],
       ["Max Drawdown", fmtNum(s.max_drawdown, 4) + " (" + fmtNum(s.max_drawdown_pct, 2) + "%)"],
       ["Current Drawdown", fmtNum(s.current_drawdown, 4) + " (" + fmtNum(s.current_drawdown_pct, 2) + "%)"],
       ["Win Rate", (currentCurveTab === "balance" || Number(s.closed_trades_priced || 0) <= 0) ? "--" : (fmtNum(s.win_rate_pct, 2) + "%")],

@@ -178,6 +178,11 @@ class DashboardServerTest(unittest.TestCase):
         self.assertEqual(strategy_stats["closed_trades_priced"], 1)
         self.assertAlmostEqual(strategy_stats["win_rate_pct"], 100.0)
         self.assertAlmostEqual(strategy_stats["trade_realized_pnl"], 40.0)
+        self.assertAlmostEqual(strategy_stats["gross_profit"], 40.0)
+        self.assertAlmostEqual(strategy_stats["gross_loss_abs"], 0.0)
+        self.assertAlmostEqual(strategy_stats["avg_win"], 40.0)
+        self.assertAlmostEqual(strategy_stats["avg_loss_abs"], 0.0)
+        self.assertIsNone(strategy_stats["profit_factor"])
         self.assertAlmostEqual(strategy_stats["net_cashflow_usdt"], 0.0)
         self.assertAlmostEqual(balance_stats["wallet_balance_usdt"], 120.0)
         self.assertEqual(balance_stats["closed_trades_priced"], 0)
@@ -348,6 +353,106 @@ class DashboardServerTest(unittest.TestCase):
         self.assertAlmostEqual(strategy_stats["trade_realized_pnl"], 2.0)
         self.assertEqual(unpriced, [])
         self.assertIn(7001, calls["ids"])
+
+    def test_trade_outcome_stats_include_profit_factor_and_avg_ratio(self) -> None:
+        run_id, _ = self.store.create_run("2026-02-16")
+        now = datetime.now(timezone.utc).replace(microsecond=0)
+
+        win_id = self.store.insert_position(
+            run_id=run_id,
+            symbol="WINUSDT",
+            side="SHORT",
+            qty=1.0,
+            entry_price=100.0,
+            liq_price_open=130.0,
+            tp_price=80.0,
+            sl_price=120.0,
+            tp_order_id=8101,
+            sl_order_id=8102,
+            tp_client_order_id="tp-win",
+            sl_client_order_id="sl-win",
+            opened_at_utc=now.isoformat(),
+            expire_at_utc=now.isoformat(),
+            status="OPEN",
+        )
+        self.store.add_order_event(
+            symbol="WINUSDT",
+            position_id=win_id,
+            event_time_utc=now.isoformat(),
+            order_payload={
+                "orderId": 8101,
+                "clientOrderId": "tp-win",
+                "type": "MARKET",
+                "side": "BUY",
+                "price": "90",
+                "origQty": "1",
+                "executedQty": "1",
+                "status": "FILLED",
+            },
+        )
+        self.store.mark_position_closed(
+            position_id=win_id,
+            status="CLOSED_TP",
+            close_reason="TAKE_PROFIT_FILLED",
+            close_order_id=8101,
+        )
+
+        loss_id = self.store.insert_position(
+            run_id=run_id,
+            symbol="LOSSUSDT",
+            side="SHORT",
+            qty=1.0,
+            entry_price=100.0,
+            liq_price_open=130.0,
+            tp_price=80.0,
+            sl_price=120.0,
+            tp_order_id=8201,
+            sl_order_id=8202,
+            tp_client_order_id="tp-loss",
+            sl_client_order_id="sl-loss",
+            opened_at_utc=now.isoformat(),
+            expire_at_utc=now.isoformat(),
+            status="OPEN",
+        )
+        self.store.add_order_event(
+            symbol="LOSSUSDT",
+            position_id=loss_id,
+            event_time_utc=now.isoformat(),
+            order_payload={
+                "orderId": 8202,
+                "clientOrderId": "sl-loss",
+                "type": "MARKET",
+                "side": "BUY",
+                "price": "110",
+                "origQty": "1",
+                "executedQty": "1",
+                "status": "FILLED",
+            },
+        )
+        self.store.mark_position_closed(
+            position_id=loss_id,
+            status="CLOSED_SL",
+            close_reason="STOP_LOSS_FILLED",
+            close_order_id=8202,
+        )
+
+        provider = DashboardDataProvider(
+            db_path=self.db_path,
+            log_file=self.log_file,
+            timezone_name="UTC",
+            entry_hour=7,
+            entry_minute=40,
+        )
+        snapshot = provider.snapshot(log_lines=0)
+        stats = snapshot["drawdown_stats_strategy"]
+
+        self.assertEqual(stats["closed_trades_priced"], 2)
+        self.assertAlmostEqual(stats["gross_profit"], 10.0)
+        self.assertAlmostEqual(stats["gross_loss_abs"], 10.0)
+        self.assertAlmostEqual(stats["avg_win"], 10.0)
+        self.assertAlmostEqual(stats["avg_loss_abs"], 10.0)
+        self.assertAlmostEqual(stats["profit_factor"], 1.0)
+        self.assertAlmostEqual(stats["avg_win_loss_ratio"], 1.0)
 
 
 if __name__ == "__main__":
