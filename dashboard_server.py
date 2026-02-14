@@ -410,6 +410,63 @@ class DashboardDataProvider:
             "as_of_utc": now_utc.replace(microsecond=0).isoformat(),
         }
 
+    def _list_unpriced_closed_positions(self, conn: sqlite3.Connection, limit: int = 80) -> List[Dict[str, Any]]:
+        rows = self._query_rows(
+            conn,
+            """
+            SELECT
+                p.id, p.symbol, p.side, p.qty, p.entry_price,
+                p.status, p.close_reason, p.close_order_id,
+                p.closed_at_utc, p.updated_at_utc,
+                oe.event_time_utc AS close_event_time_utc,
+                oe.price AS close_event_price,
+                oe.qty AS close_event_qty,
+                oe.raw_json AS close_raw_json
+            FROM positions p
+            LEFT JOIN order_events oe ON oe.id = (
+                SELECT oe2.id
+                FROM order_events oe2
+                WHERE oe2.position_id = p.id
+                  AND (
+                    (p.close_order_id IS NOT NULL AND oe2.order_id = p.close_order_id)
+                    OR (p.close_order_id IS NULL AND oe2.side = 'BUY' AND oe2.status = 'FILLED')
+                  )
+                ORDER BY oe2.id DESC
+                LIMIT 1
+            )
+            WHERE p.status != 'OPEN'
+            ORDER BY COALESCE(p.closed_at_utc, oe.event_time_utc, p.updated_at_utc) DESC, p.id DESC
+            LIMIT ?
+            """,
+            (max(1, int(limit)),),
+        )
+        items: List[Dict[str, Any]] = []
+        for row in rows:
+            side = str(row.get("side") or "").upper()
+            if side and side != "SHORT":
+                continue
+            qty = self._safe_float(row.get("qty")) or 0.0
+            entry_price = self._safe_float(row.get("entry_price")) or 0.0
+            if qty <= 0 or entry_price <= 0:
+                reason = "INVALID_POSITION_FIELDS"
+            else:
+                close_price = self._extract_close_price(row)
+                if close_price is not None and close_price > 0:
+                    continue
+                reason = "MISSING_FILL_PRICE"
+            items.append(
+                {
+                    "id": row.get("id"),
+                    "symbol": row.get("symbol"),
+                    "status": row.get("status"),
+                    "close_reason": row.get("close_reason"),
+                    "close_order_id": row.get("close_order_id"),
+                    "detected_reason": reason,
+                    "closed_at_utc": row.get("closed_at_utc") or row.get("close_event_time_utc") or row.get("updated_at_utc"),
+                }
+            )
+        return items
+
     def _build_strategy_equity_curve(
         self,
         conn: sqlite3.Connection,
@@ -572,6 +629,7 @@ class DashboardDataProvider:
             "open_positions": [],
             "events": [],
             "cashflow_events": [],
+            "unpriced_closed_details": [],
             "strategy_equity_curve": [],
             "balance_curve": [],
             "equity_curve": [],
@@ -726,6 +784,7 @@ class DashboardDataProvider:
                     LIMIT 80
                     """,
                 )
+                data["unpriced_closed_details"] = self._list_unpriced_closed_positions(conn, limit=120)
 
                 strategy_curve, strategy_stats = self._build_strategy_equity_curve(
                     conn=conn,
@@ -959,22 +1018,18 @@ DASHBOARD_HTML = """<!doctype html>
 
     .pill-value {
       margin-left: 6px;
-      display: inline-block;
-      min-width: 36px;
-      text-align: center;
-      border-radius: 999px;
-      padding: 2px 8px;
-      border: 1px solid rgba(80, 143, 175, 0.7);
-      background: rgba(7, 18, 27, 0.88);
+      display: inline;
       color: var(--muted);
-      font-size: 0.75rem;
+      font-size: 0.8rem;
+      font-weight: 700;
     }
 
     .pill-value.ok {
-      color: #031018;
-      background: linear-gradient(180deg, #68d8ff, #43b6ea);
-      border-color: transparent;
-      font-weight: 700;
+      color: var(--accent);
+    }
+
+    .pill-value.warn {
+      color: var(--warn);
     }
 
     #serviceState.ok { color: var(--ok); }
@@ -1264,7 +1319,6 @@ DASHBOARD_HTML = """<!doctype html>
         <div class="pill">Auto refresh: <span id="refresh">__REFRESH_SEC__</span>s</div>
         <div class="pill">Next entry: <span id="nextEntry">--</span></div>
         <div class="pill">Service: <span id="serviceState">--</span></div>
-        <div class="pill">Entry Catchup: <span id="catchupState" class="pill-value">--</span></div>
       </div>
     </section>
 
@@ -1394,6 +1448,20 @@ DASHBOARD_HTML = """<!doctype html>
       </section>
 
       <section class="panel">
+        <h2>Closed w/o Fill Price</h2>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>ID</th><th>Symbol</th><th>Status</th><th>Close Reason</th><th>Detect</th><th>Order ID</th><th>Closed(UTC)</th>
+              </tr>
+            </thead>
+            <tbody id="unpricedBody"></tbody>
+          </table>
+        </div>
+      </section>
+
+      <section class="panel">
         <h2>Strategy Log Tail</h2>
         <pre class="log mono" id="logTail"></pre>
       </section>
@@ -1416,13 +1484,11 @@ DASHBOARD_HTML = """<!doctype html>
   var currentCurveTab = "strategy";
   var currentWindowHours = 24;
   var latestData = null;
-  var currentCatchupEnabled = null;
 
   var el = {
     meta: document.getElementById("meta"),
     nextEntry: document.getElementById("nextEntry"),
     serviceState: document.getElementById("serviceState"),
-    catchupState: document.getElementById("catchupState"),
     openCount: document.getElementById("openCount"),
     symbolCount: document.getElementById("symbolCount"),
     errorCount: document.getElementById("errorCount"),
@@ -1442,6 +1508,7 @@ DASHBOARD_HTML = """<!doctype html>
     runsBody: document.getElementById("runsBody"),
     eventsBody: document.getElementById("eventsBody"),
     cashflowBody: document.getElementById("cashflowBody"),
+    unpricedBody: document.getElementById("unpricedBody"),
     logTail: document.getElementById("logTail")
   };
 
@@ -1507,6 +1574,19 @@ DASHBOARD_HTML = """<!doctype html>
     return mm + "-" + dd + " " + hh + ":" + mi;
   }
 
+  function fmtMetaTime(isoText) {
+    var raw = txt(isoText);
+    if (raw === "--") return raw;
+    var d = new Date(raw);
+    if (Number.isNaN(d.getTime())) return raw.slice(5, 19).replace("T", " ");
+    var mm = String(d.getMonth() + 1).padStart(2, "0");
+    var dd = String(d.getDate()).padStart(2, "0");
+    var hh = String(d.getHours()).padStart(2, "0");
+    var mi = String(d.getMinutes()).padStart(2, "0");
+    var ss = String(d.getSeconds()).padStart(2, "0");
+    return mm + "-" + dd + " " + hh + ":" + mi + ":" + ss;
+  }
+
   function fmtDateOnly(isoText) {
     var raw = txt(isoText);
     if (raw === "--") return raw;
@@ -1554,14 +1634,6 @@ DASHBOARD_HTML = """<!doctype html>
       callback(new Error("Network error"));
     };
     xhr.send();
-  }
-
-  function updateCatchupToggle(enabled, source) {
-    currentCatchupEnabled = (enabled === true);
-    if (!el.catchupState) return;
-    el.catchupState.textContent = currentCatchupEnabled ? "ON" : "OFF";
-    el.catchupState.classList.toggle("ok", currentCatchupEnabled);
-    el.catchupState.title = "source: " + txt(source);
   }
 
   function renderEquityChart(curve) {
@@ -1726,7 +1798,8 @@ DASHBOARD_HTML = """<!doctype html>
     setText(el.walletBalance, fmtNum(walletDisplay, 4));
     setText(el.realizedPnl, fmtSigned(stats.total_realized_pnl, 4));
     setText(el.maxDrawdown, fmtNum(stats.max_drawdown_pct, 2) + "%");
-    if (currentCurveTab === "balance") {
+    var pricedTrades = Number(stats.closed_trades_priced || 0);
+    if (currentCurveTab === "balance" || pricedTrades <= 0) {
       setText(el.winRate, "--");
     } else {
       setText(el.winRate, fmtNum(stats.win_rate_pct, 2) + "%");
@@ -1741,7 +1814,7 @@ DASHBOARD_HTML = """<!doctype html>
       el.maxDrawdown.className = "v " + (dd && dd > 0 ? "bad" : "");
     }
     if (el.winRate) {
-      if (currentCurveTab === "balance") {
+      if (currentCurveTab === "balance" || pricedTrades <= 0) {
         el.winRate.className = "v";
       } else {
         var wr = toNum(stats.win_rate_pct);
@@ -1774,9 +1847,9 @@ DASHBOARD_HTML = """<!doctype html>
       ["Trade Realized", fmtSigned(s.trade_realized_pnl, 4) + " USDT"],
       ["Max Drawdown", fmtNum(s.max_drawdown, 4) + " (" + fmtNum(s.max_drawdown_pct, 2) + "%)"],
       ["Current Drawdown", fmtNum(s.current_drawdown, 4) + " (" + fmtNum(s.current_drawdown_pct, 2) + "%)"],
-      ["Win Rate", currentCurveTab === "balance" ? "--" : (fmtNum(s.win_rate_pct, 2) + "%")],
-      ["Closed Trades", txt(s.closed_trades_priced)],
-      ["Unpriced Closed", txt(s.unpriced_closed_positions)],
+      ["Win Rate", (currentCurveTab === "balance" || Number(s.closed_trades_priced || 0) <= 0) ? "--" : (fmtNum(s.win_rate_pct, 2) + "%")],
+      ["Closed Trades (Priced)", txt(s.closed_trades_priced)],
+      ["Closed w/o Fill Price", txt(s.unpriced_closed_positions)],
       ["Balance Source", txt(w.source)]
     ];
 
@@ -1799,7 +1872,6 @@ DASHBOARD_HTML = """<!doctype html>
       var wallet = d.wallet || {};
       var stats = activeStats(d);
       var svc = d.service || {};
-      var runtime = d.runtime_settings || {};
       var svcStatus = "DISABLED";
       if (svc.enabled) {
         if (svc.running) {
@@ -1813,7 +1885,7 @@ DASHBOARD_HTML = """<!doctype html>
 
       setText(
         el.meta,
-        "Updated " + fmtAxisTime(d.generated_at_utc) +
+        "Updated " + fmtMetaTime(d.generated_at_utc) +
           " · TZ " + txt(d.timezone) +
           " · Balance " + txt(wallet.source)
       );
@@ -1832,9 +1904,6 @@ DASHBOARD_HTML = """<!doctype html>
       setText(el.lastRunStatus, txt(summary.last_run_status));
       if (el.lastRunStatus) {
         el.lastRunStatus.className = "v " + clsForStatus(summary.last_run_status);
-      }
-      if (runtime && Object.prototype.hasOwnProperty.call(runtime, "entry_catchup_enabled")) {
-        updateCatchupToggle(runtime.entry_catchup_enabled === true, runtime.source || "RUNTIME");
       }
       rerenderFromLatest();
 
@@ -1892,6 +1961,20 @@ DASHBOARD_HTML = """<!doctype html>
           "</tr>"
         );
       }, 6);
+
+      renderRows(el.unpricedBody, d.unpriced_closed_details || [], function (u) {
+        return (
+          "<tr>" +
+          '<td class="mono">' + escapeHtml(u.id) + "</td>" +
+          "<td>" + escapeHtml(u.symbol) + "</td>" +
+          '<td class="' + clsForStatus(u.status) + '">' + escapeHtml(u.status) + "</td>" +
+          "<td>" + escapeHtml(u.close_reason) + "</td>" +
+          "<td>" + escapeHtml(u.detected_reason) + "</td>" +
+          '<td class="mono">' + escapeHtml(u.close_order_id) + "</td>" +
+          '<td class="mono">' + escapeHtml(fmtAxisTime(u.closed_at_utc)) + "</td>" +
+          "</tr>"
+        );
+      }, 7);
 
       if (el.logTail) {
         var logLines = d.log_tail || [];

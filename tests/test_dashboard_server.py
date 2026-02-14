@@ -87,6 +87,7 @@ class DashboardServerTest(unittest.TestCase):
         self.assertIn("drawdown_stats", snapshot)
         self.assertIn("wallet", snapshot)
         self.assertIn("cashflow_events", snapshot)
+        self.assertIn("unpriced_closed_details", snapshot)
         self.assertIn("net_cashflow_usdt", snapshot["summary"])
 
     def test_snapshot_without_db_file(self) -> None:
