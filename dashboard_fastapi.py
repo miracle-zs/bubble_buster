@@ -90,6 +90,7 @@ def create_dashboard_context(config_path: str) -> DashboardRuntimeContext:
     entry_hour = int(runtime_cfg.get("entry_hour", 7))
     entry_minute = int(runtime_cfg.get("entry_minute", 40))
     refresh_sec = max(2, int(runtime_cfg.get("dashboard_refresh_sec", 5)))
+    curve_points = max(100, int(runtime_cfg.get("dashboard_curve_points", 600)))
     balance_refresh_sec = max(5, int(runtime_cfg.get("manager_interval_sec", 60)))
     run_with_dashboard = runtime_cfg.get("run_service_with_dashboard", "true").strip().lower() in {
         "1",
@@ -158,6 +159,7 @@ def create_dashboard_context(config_path: str) -> DashboardRuntimeContext:
         entry_minute=entry_minute,
         balance_fetcher=balance_fetcher,
         balance_cache_ttl_sec=balance_refresh_sec,
+        default_curve_points=curve_points,
     )
 
     return DashboardRuntimeContext(
@@ -305,10 +307,16 @@ def create_app(config_path: Optional[str] = None) -> FastAPI:
     def dashboard_data(
         request: Request,
         log_lines: int = Query(default=80, ge=0, le=300),
+        window_hours: Optional[float] = Query(default=24.0, gt=0.0, le=2160.0),
+        curve_points: Optional[int] = Query(default=None, ge=100, le=5000),
     ):
         ctx: DashboardRuntimeContext = request.app.state.ctx
         try:
-            payload = ctx.provider.snapshot(log_lines=log_lines)
+            payload = ctx.provider.snapshot(
+                log_lines=log_lines,
+                window_hours=window_hours,
+                curve_points=curve_points,
+            )
             payload["config_path"] = ctx.config_path
             payload["db_path"] = ctx.db_path
 

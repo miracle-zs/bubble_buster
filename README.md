@@ -115,6 +115,7 @@ python main.py manage --config config.ini --loop
   - `manager_interval_sec=60`
   - `run_service_with_dashboard=true`
   - `wallet_snapshot_asset=USDT`
+  - `dashboard_curve_points=1200`（图表最大点数）
 
 ## 数据库表
 

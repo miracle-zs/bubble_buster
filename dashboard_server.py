@@ -22,6 +22,7 @@ class DashboardServerConfig:
     entry_hour: int
     entry_minute: int
     refresh_sec: int
+    curve_points: int = 600
 
 
 class DashboardDataProvider:
@@ -34,6 +35,7 @@ class DashboardDataProvider:
         entry_minute: int,
         balance_fetcher: Optional[Callable[[], float]] = None,
         balance_cache_ttl_sec: int = 60,
+        default_curve_points: int = 600,
     ):
         self.db_path = db_path
         self.log_file = log_file
@@ -41,6 +43,7 @@ class DashboardDataProvider:
         self.entry_minute = entry_minute % 60
         self.balance_fetcher = balance_fetcher
         self.balance_cache_ttl_sec = max(5, int(balance_cache_ttl_sec))
+        self.default_curve_points = max(100, min(5000, int(default_curve_points)))
         self._balance_cache_value: Optional[float] = None
         self._balance_cache_at: Optional[datetime] = None
         self._balance_last_attempt_at: Optional[datetime] = None
@@ -251,20 +254,44 @@ class DashboardDataProvider:
             "current_drawdown_pct": round(current_drawdown_pct, 6),
         }
 
+    def _query_wallet_rows(
+        self,
+        conn: sqlite3.Connection,
+        window_start_utc: Optional[str],
+        max_points: int,
+    ) -> List[Dict[str, Any]]:
+        params: List[Any] = []
+        where_sql = ""
+        if window_start_utc:
+            where_sql = "WHERE captured_at_utc >= ?"
+            params.append(window_start_utc)
+        params.append(max(1, int(max_points)))
+        rows = self._query_rows(
+            conn,
+            f"""
+            SELECT id, captured_at_utc, balance_usdt
+            FROM wallet_snapshots
+            {where_sql}
+            ORDER BY captured_at_utc DESC, id DESC
+            LIMIT ?
+            """,
+            tuple(params),
+        )
+        rows.reverse()
+        return rows
+
     def _build_balance_curve(
         self,
         conn: sqlite3.Connection,
         now_utc: datetime,
         wallet_balance_usdt: Optional[float],
+        window_start_utc: Optional[str],
+        max_points: int,
     ) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
-        wallet_rows = self._query_rows(
-            conn,
-            """
-            SELECT id, captured_at_utc, balance_usdt
-            FROM wallet_snapshots
-            ORDER BY captured_at_utc ASC, id ASC
-            LIMIT 2000
-            """,
+        wallet_rows = self._query_wallet_rows(
+            conn=conn,
+            window_start_utc=window_start_utc,
+            max_points=max_points,
         )
 
         curve: List[Dict[str, Any]] = []
@@ -388,15 +415,13 @@ class DashboardDataProvider:
         conn: sqlite3.Connection,
         now_utc: datetime,
         wallet_balance_usdt: Optional[float],
+        window_start_utc: Optional[str],
+        max_points: int,
     ) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
-        wallet_rows = self._query_rows(
-            conn,
-            """
-            SELECT id, captured_at_utc, balance_usdt
-            FROM wallet_snapshots
-            ORDER BY captured_at_utc ASC, id ASC
-            LIMIT 2000
-            """,
+        wallet_rows = self._query_wallet_rows(
+            conn=conn,
+            window_start_utc=window_start_utc,
+            max_points=max_points,
         )
         cashflow_rows: List[Dict[str, Any]] = []
         try:
@@ -500,11 +525,30 @@ class DashboardDataProvider:
         }
         return curve, stats
 
-    def snapshot(self, log_lines: int = 80) -> Dict[str, Any]:
+    def snapshot(
+        self,
+        log_lines: int = 80,
+        window_hours: Optional[float] = None,
+        curve_points: Optional[int] = None,
+    ) -> Dict[str, Any]:
         now_utc = datetime.now(timezone.utc)
         now_local = now_utc.astimezone(self.local_tz)
         next_entry = self._next_entry_local(now_local)
         live_wallet = self._read_wallet_balance(now_utc)
+        points_limit = max(100, min(5000, int(curve_points if curve_points is not None else self.default_curve_points)))
+        window_hours_value: Optional[float] = None
+        if window_hours is not None:
+            try:
+                parsed_hours = float(window_hours)
+                if parsed_hours > 0:
+                    window_hours_value = min(parsed_hours, 24.0 * 90.0)
+            except (TypeError, ValueError):
+                window_hours_value = None
+        window_start_utc = (
+            (now_utc - timedelta(hours=window_hours_value)).replace(microsecond=0).isoformat()
+            if window_hours_value is not None
+            else None
+        )
 
         data: Dict[str, Any] = {
             "generated_at_utc": now_utc.replace(microsecond=0).isoformat(),
@@ -512,6 +556,8 @@ class DashboardDataProvider:
             "now_local": now_local.replace(microsecond=0).isoformat(),
             "next_entry_local": next_entry.replace(microsecond=0).isoformat(),
             "seconds_to_next_entry": int((next_entry - now_local).total_seconds()),
+            "curve_window_hours": window_hours_value,
+            "curve_points": points_limit,
             "summary": {
                 "open_positions": 0,
                 "open_symbols": 0,
@@ -685,14 +731,18 @@ class DashboardDataProvider:
                     conn=conn,
                     now_utc=now_utc,
                     wallet_balance_usdt=self._safe_float(data["wallet"].get("balance_usdt")),
+                    window_start_utc=window_start_utc,
+                    max_points=points_limit,
                 )
                 balance_curve, balance_stats = self._build_balance_curve(
                     conn=conn,
                     now_utc=now_utc,
                     wallet_balance_usdt=self._safe_float(data["wallet"].get("balance_usdt")),
+                    window_start_utc=window_start_utc,
+                    max_points=points_limit,
                 )
-                data["strategy_equity_curve"] = strategy_curve[-600:]
-                data["balance_curve"] = balance_curve[-600:]
+                data["strategy_equity_curve"] = strategy_curve[-points_limit:]
+                data["balance_curve"] = balance_curve[-points_limit:]
                 data["drawdown_stats_strategy"] = strategy_stats
                 data["drawdown_stats_balance"] = balance_stats
                 data["summary"]["net_cashflow_usdt"] = strategy_stats.get("net_cashflow_usdt", 0.0)
@@ -731,7 +781,27 @@ def _make_handler(provider: DashboardDataProvider, cfg: DashboardServerConfig):
             if path == "/api/dashboard":
                 params = parse_qs(parsed.query)
                 lines = max(0, int(params.get("log_lines", ["80"])[0]))
-                body = _json_bytes(provider.snapshot(log_lines=min(lines, 300)))
+                window_hours_raw = params.get("window_hours", [None])[0]
+                curve_points_raw = params.get("curve_points", [None])[0]
+                window_hours: Optional[float] = None
+                curve_points: Optional[int] = None
+                try:
+                    if window_hours_raw not in (None, ""):
+                        window_hours = float(window_hours_raw)
+                except ValueError:
+                    window_hours = None
+                try:
+                    if curve_points_raw not in (None, ""):
+                        curve_points = int(curve_points_raw)
+                except ValueError:
+                    curve_points = None
+                body = _json_bytes(
+                    provider.snapshot(
+                        log_lines=min(lines, 300),
+                        window_hours=window_hours,
+                        curve_points=curve_points,
+                    )
+                )
                 self.send_response(200)
                 self.send_header("Content-Type", "application/json; charset=utf-8")
                 self.send_header("Cache-Control", "no-store")
@@ -765,6 +835,7 @@ def run_dashboard_server(cfg: DashboardServerConfig) -> None:
         timezone_name=cfg.timezone_name,
         entry_hour=cfg.entry_hour,
         entry_minute=cfg.entry_minute,
+        default_curve_points=cfg.curve_points,
     )
     handler_cls = _make_handler(provider=provider, cfg=cfg)
 
@@ -1052,6 +1123,14 @@ DASHBOARD_HTML = """<!doctype html>
       flex-wrap: wrap;
     }
 
+    .window-row {
+      display: flex;
+      gap: 6px;
+      flex-wrap: wrap;
+      justify-content: flex-end;
+      margin-top: 6px;
+    }
+
     .tab-btn {
       border: 1px solid rgba(80, 143, 175, 0.6);
       background: rgba(10, 25, 35, 0.92);
@@ -1207,6 +1286,12 @@ DASHBOARD_HTML = """<!doctype html>
               <button class="tab-btn" id="tabBalance" type="button">账户权益</button>
             </div>
           </div>
+          <div class="window-row" id="windowRow">
+            <button class="tab-btn" data-window-hours="1" type="button">1H</button>
+            <button class="tab-btn" data-window-hours="6" type="button">6H</button>
+            <button class="tab-btn active" data-window-hours="24" type="button">24H</button>
+            <button class="tab-btn" data-window-hours="168" type="button">7D</button>
+          </div>
           <div class="chart-canvas" id="equityChart"></div>
         </div>
       </section>
@@ -1293,6 +1378,7 @@ DASHBOARD_HTML = """<!doctype html>
   var api = pathPrefix + "/api/dashboard";
   var equityChart = null;
   var currentCurveTab = "strategy";
+  var currentWindowHours = 24;
   var latestData = null;
 
   var el = {
@@ -1311,6 +1397,7 @@ DASHBOARD_HTML = """<!doctype html>
     curveTitle: document.getElementById("curveTitle"),
     tabStrategy: document.getElementById("tabStrategy"),
     tabBalance: document.getElementById("tabBalance"),
+    windowRow: document.getElementById("windowRow"),
     equityChart: document.getElementById("equityChart"),
     drawdownStats: document.getElementById("drawdownStats"),
     positionsBody: document.getElementById("positionsBody"),
@@ -1408,7 +1495,11 @@ DASHBOARD_HTML = """<!doctype html>
 
   function fetchDashboard(callback) {
     var xhr = new XMLHttpRequest();
-    xhr.open("GET", api + "?_=" + new Date().getTime(), true);
+    var q = [
+      "_=" + encodeURIComponent(String(new Date().getTime())),
+      "window_hours=" + encodeURIComponent(String(currentWindowHours))
+    ];
+    xhr.open("GET", api + "?" + q.join("&"), true);
     xhr.onreadystatechange = function () {
       if (xhr.readyState !== 4) return;
       if (xhr.status < 200 || xhr.status >= 300) {
@@ -1566,6 +1657,14 @@ DASHBOARD_HTML = """<!doctype html>
       el.curveTitle.textContent = currentCurveTab === "strategy"
         ? "策略权益曲线（不含出入金）"
         : "账户权益曲线（含未实现盈亏/出入金）";
+    }
+    if (el.windowRow) {
+      var buttons = el.windowRow.querySelectorAll("[data-window-hours]");
+      for (var i = 0; i < buttons.length; i += 1) {
+        var b = buttons[i];
+        var h = Number(b.getAttribute("data-window-hours"));
+        b.classList.toggle("active", h === currentWindowHours);
+      }
     }
   }
 
@@ -1761,6 +1860,19 @@ DASHBOARD_HTML = """<!doctype html>
     el.tabBalance.addEventListener("click", function () {
       currentCurveTab = "balance";
       rerenderFromLatest();
+    });
+  }
+  if (el.windowRow) {
+    el.windowRow.addEventListener("click", function (evt) {
+      var t = evt.target;
+      if (!t || !t.getAttribute) return;
+      var raw = t.getAttribute("data-window-hours");
+      if (!raw) return;
+      var parsed = Number(raw);
+      if (!Number.isFinite(parsed) || parsed <= 0) return;
+      currentWindowHours = parsed;
+      renderCurveTabState();
+      refresh();
     });
   }
   setInterval(refresh, Math.max(2000, REFRESH_SEC * 1000));

@@ -41,6 +41,7 @@ cashflow_income_types = TRANSFER,WELCOME_BONUS
 dashboard_host = 127.0.0.1
 dashboard_port = 8787
 dashboard_refresh_sec = 5
+dashboard_curve_points = 1200
 run_service_with_dashboard = true
 lock_file = runtime.lock
 lock_wait_sec = 30
