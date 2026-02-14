@@ -3,3 +3,6 @@
 CRON_TZ=Asia/Shanghai
 40 7 * * * /usr/bin/python3 /Users/zhangshuai/PycharmProjects/bubble_buster/main.py entry --config /Users/zhangshuai/PycharmProjects/bubble_buster/config.ini
 * * * * * /usr/bin/python3 /Users/zhangshuai/PycharmProjects/bubble_buster/main.py manage --config /Users/zhangshuai/PycharmProjects/bubble_buster/config.ini
+
+# Account-B-only risk cut (set config_b.ini with daily_loss_cut_scope=exchange)
+55 11 * * * /usr/bin/python3 /Users/zhangshuai/PycharmProjects/bubble_buster/main.py loss-cut --config /Users/zhangshuai/PycharmProjects/bubble_buster/config_b.ini

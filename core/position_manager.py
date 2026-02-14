@@ -1,6 +1,6 @@
 import logging
 from datetime import datetime, timezone
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 from uuid import uuid4
 
 from core.state_store import StateStore
@@ -15,6 +15,9 @@ LOGGER = logging.getLogger(__name__)
 
 
 class PositionManager:
+    DAILY_LOSS_CUT_SCOPE_TRACKED = "tracked"
+    DAILY_LOSS_CUT_SCOPE_EXCHANGE = "exchange"
+
     def __init__(
         self,
         client: BinanceFuturesClient,
@@ -22,14 +25,21 @@ class PositionManager:
         notifier: ServerChanNotifier,
         sl_liq_buffer_pct: float,
         trigger_price_type: str,
+        daily_loss_cut_scope: str = DAILY_LOSS_CUT_SCOPE_TRACKED,
     ):
         self.client = client
         self.store = store
         self.notifier = notifier
         self.sl_liq_buffer_pct = sl_liq_buffer_pct
         self.trigger_price_type = trigger_price_type
+        self.daily_loss_cut_scope = self._normalize_daily_loss_cut_scope(daily_loss_cut_scope)
 
     def run_daily_loss_cut(self) -> Dict[str, int]:
+        if self.daily_loss_cut_scope == self.DAILY_LOSS_CUT_SCOPE_EXCHANGE:
+            return self._run_daily_loss_cut_exchange_positions()
+        return self._run_daily_loss_cut_tracked_positions()
+
+    def _run_daily_loss_cut_tracked_positions(self) -> Dict[str, int]:
         positions = self.store.list_open_positions()
         summary = {
             "total": len(positions),
@@ -50,15 +60,21 @@ class PositionManager:
                     self.store.set_position_error(position_id, "position risk not found")
                     continue
 
-                position_amt = float(risk.get("positionAmt", "0") or 0)
+                position_amt = self._safe_float(risk.get("positionAmt"), default=0.0)
                 if position_amt >= 0:
                     continue
 
-                unrealized_pnl = float(risk.get("unRealizedProfit", "0") or 0)
+                unrealized_pnl = self._safe_float(risk.get("unRealizedProfit"), default=0.0)
                 if unrealized_pnl >= 0:
                     continue
 
-                close_info = self._close_daily_loss_cut(pos, abs(position_amt), unrealized_pnl)
+                close_info = self._close_daily_loss_cut(
+                    symbol=symbol,
+                    qty=abs(position_amt),
+                    side="BUY",
+                    position_id=position_id,
+                    cancel_pos=pos,
+                )
                 summary["closed_loss_cut"] += 1
                 details["closed_loss_cut"].append(
                     f"{symbol}(id={position_id}, upnl={unrealized_pnl:.6f}, qty={close_info['qty']}, "
@@ -70,6 +86,72 @@ class PositionManager:
                 LOGGER.exception("Daily loss-cut failed for position id=%s symbol=%s: %s", position_id, symbol, exc)
                 self.store.set_position_error(position_id, str(exc))
                 details["errors"].append(f"{symbol}(id={position_id}): {exc}")
+
+        if summary["closed_loss_cut"] > 0 or summary["errors"] > 0:
+            self.notifier.send(
+                "【Top10做空】11:55浮亏止损汇总",
+                self._build_daily_loss_cut_notification(summary, details),
+            )
+
+        return summary
+
+    def _run_daily_loss_cut_exchange_positions(self) -> Dict[str, int]:
+        summary = {
+            "total": 0,
+            "closed_loss_cut": 0,
+            "errors": 0,
+        }
+        details: Dict[str, List[str]] = {
+            "closed_loss_cut": [],
+            "errors": [],
+        }
+
+        try:
+            risks = self.client.get_position_risk()
+        except Exception as exc:  # noqa: BLE001
+            LOGGER.exception("Daily loss-cut failed to query exchange positions: %s", exc)
+            summary["errors"] += 1
+            details["errors"].append(f"fetch_position_risk_failed: {exc}")
+            self.notifier.send(
+                "【Top10做空】11:55浮亏止损汇总",
+                self._build_daily_loss_cut_notification(summary, details),
+            )
+            return summary
+
+        for risk in risks:
+            symbol = str(risk.get("symbol") or "").strip()
+            if not symbol:
+                continue
+
+            position_amt = self._safe_float(risk.get("positionAmt"), default=0.0)
+            if abs(position_amt) <= 1e-12:
+                continue
+
+            summary["total"] += 1
+            unrealized_pnl = self._safe_float(risk.get("unRealizedProfit"), default=0.0)
+            if unrealized_pnl >= 0:
+                continue
+
+            close_side = "BUY" if position_amt < 0 else "SELL"
+            try:
+                close_info = self._close_daily_loss_cut(
+                    symbol=symbol,
+                    qty=abs(position_amt),
+                    side=close_side,
+                    position_id=None,
+                    cancel_pos=None,
+                )
+                summary["closed_loss_cut"] += 1
+                details["closed_loss_cut"].append(
+                    f"{symbol}(upnl={unrealized_pnl:.6f}, qty={close_info['qty']}, side={close_side}, "
+                    f"close_order_id={close_info['close_order_id']})"
+                )
+            except Exception as exc:  # noqa: BLE001
+                summary["errors"] += 1
+                LOGGER.exception("Daily loss-cut failed for exchange position symbol=%s: %s", symbol, exc)
+                details["errors"].append(
+                    f"{symbol}(upnl={unrealized_pnl:.6f}, side={close_side}, qty={abs(position_amt)}): {exc}"
+                )
 
         if summary["closed_loss_cut"] > 0 or summary["errors"] > 0:
             self.notifier.send(
@@ -245,15 +327,20 @@ class PositionManager:
         )
         return {"qty": qty, "close_order_id": close_order.get("orderId")}
 
-    def _close_daily_loss_cut(self, pos: Dict[str, object], qty: float, unrealized_pnl: float) -> Dict[str, object]:
-        position_id = int(pos["id"])
-        symbol = str(pos["symbol"])
-
-        self._cancel_exit_orders(pos)
+    def _close_daily_loss_cut(
+        self,
+        symbol: str,
+        qty: float,
+        side: str,
+        position_id: Optional[int],
+        cancel_pos: Optional[Dict[str, object]] = None,
+    ) -> Dict[str, object]:
+        if cancel_pos is not None:
+            self._cancel_exit_orders(cancel_pos)
 
         close_order = self.client.create_order(
             symbol=symbol,
-            side="BUY",
+            side=side,
             type="MARKET",
             quantity=self.client.format_order_qty(symbol, qty),
             reduceOnly=True,
@@ -267,16 +354,16 @@ class PositionManager:
             event_time_utc=self._utc_now_iso(),
             order_payload=close_order,
         )
-        self.store.mark_position_closed(
-            position_id=position_id,
-            status="CLOSED_DAILY_LOSS_CUT",
-            close_reason="DAILY_FLOATING_LOSS_CHECK",
-            close_order_id=close_order.get("orderId"),
-        )
+        if position_id is not None:
+            self.store.mark_position_closed(
+                position_id=position_id,
+                status="CLOSED_DAILY_LOSS_CUT",
+                close_reason="DAILY_FLOATING_LOSS_CHECK",
+                close_order_id=close_order.get("orderId"),
+            )
         return {
             "qty": qty,
             "close_order_id": close_order.get("orderId"),
-            "unrealized_pnl": unrealized_pnl,
         }
 
     def _update_dynamic_stop(self, pos: Dict[str, object], risk: Dict[str, str]) -> Optional[Dict[str, object]]:
@@ -477,6 +564,15 @@ class PositionManager:
                 return row
         return None
 
+    @classmethod
+    def _normalize_daily_loss_cut_scope(cls, scope: str) -> str:
+        normalized = str(scope or "").strip().lower()
+        if normalized in {cls.DAILY_LOSS_CUT_SCOPE_TRACKED, cls.DAILY_LOSS_CUT_SCOPE_EXCHANGE}:
+            return normalized
+        if normalized:
+            LOGGER.warning("Invalid daily_loss_cut_scope=%s, fallback to %s", normalized, cls.DAILY_LOSS_CUT_SCOPE_TRACKED)
+        return cls.DAILY_LOSS_CUT_SCOPE_TRACKED
+
     @staticmethod
     def _is_expired(expire_at_utc: str) -> bool:
         expire_time = datetime.fromisoformat(expire_at_utc)
@@ -494,6 +590,15 @@ class PositionManager:
         if number <= 0:
             return None
         return number
+
+    @staticmethod
+    def _safe_float(value: Any, default: float = 0.0) -> float:
+        try:
+            if value is None:
+                return default
+            return float(value)
+        except (TypeError, ValueError):
+            return default
 
     @staticmethod
     def _new_client_id(tag: str, symbol: str) -> str:

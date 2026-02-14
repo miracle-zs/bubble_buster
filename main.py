@@ -45,6 +45,7 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Run continuously with runtime.manager_interval_sec",
     )
+    subparsers.add_parser("loss-cut", help="Run floating-loss cut once")
     subparsers.add_parser("service", help="Run built-in scheduler service (no cron)")
     dashboard_parser = subparsers.add_parser("dashboard", help="Run local web dashboard")
     dashboard_parser.add_argument("--host", default=None, help="Dashboard bind host override")
@@ -193,6 +194,11 @@ def main() -> int:
                     summary = manager.run_once()
                     LOGGER.info("manage summary: %s", summary)
                 return 0
+
+            if args.command == "loss-cut":
+                summary = manager.run_daily_loss_cut()
+                LOGGER.info("daily loss-cut summary: %s", summary)
+                return 0 if summary.get("errors", 0) == 0 else 1
 
             if args.command == "service":
                 service = StrategyRuntimeService(

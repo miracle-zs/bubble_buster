@@ -272,6 +272,71 @@ class PositionManagerTest(unittest.TestCase):
         self.assertEqual(title, "【Top10做空】11:55浮亏止损汇总")
         self.assertIn("| closed_loss_cut | 1 |", content)
 
+    def test_daily_loss_cut_exchange_scope_closes_losing_long_and_short(self) -> None:
+        client = MagicMock()
+        client.get_position_risk.return_value = [
+            {"symbol": "BTCUSDT", "positionAmt": "-0.02", "unRealizedProfit": "-1.2"},
+            {"symbol": "ETHUSDT", "positionAmt": "0.30", "unRealizedProfit": "-2.4"},
+            {"symbol": "BNBUSDT", "positionAmt": "0.10", "unRealizedProfit": "3.8"},
+            {"symbol": "XRPUSDT", "positionAmt": "0", "unRealizedProfit": "-0.2"},
+        ]
+        client.format_order_qty.side_effect = lambda _symbol, qty: str(qty)
+        client.create_order.side_effect = [
+            {
+                "orderId": 1001,
+                "clientOrderId": "dl-short",
+                "type": "MARKET",
+                "side": "BUY",
+                "origQty": "0.02",
+                "status": "FILLED",
+            },
+            {
+                "orderId": 1002,
+                "clientOrderId": "dl-long",
+                "type": "MARKET",
+                "side": "SELL",
+                "origQty": "0.30",
+                "status": "FILLED",
+            },
+        ]
+
+        notifier = MagicMock()
+        manager = PositionManager(
+            client=client,
+            store=self.store,
+            notifier=notifier,
+            sl_liq_buffer_pct=1.0,
+            trigger_price_type="CONTRACT_PRICE",
+            daily_loss_cut_scope="exchange",
+        )
+
+        summary = manager.run_daily_loss_cut()
+        self.assertEqual(summary["total"], 3)
+        self.assertEqual(summary["closed_loss_cut"], 2)
+        self.assertEqual(summary["errors"], 0)
+
+        self.assertEqual(client.create_order.call_count, 2)
+        first_order = client.create_order.call_args_list[0].kwargs
+        self.assertEqual(first_order["symbol"], "BTCUSDT")
+        self.assertEqual(first_order["side"], "BUY")
+        self.assertEqual(first_order["type"], "MARKET")
+        self.assertTrue(first_order["reduceOnly"])
+
+        second_order = client.create_order.call_args_list[1].kwargs
+        self.assertEqual(second_order["symbol"], "ETHUSDT")
+        self.assertEqual(second_order["side"], "SELL")
+        self.assertEqual(second_order["type"], "MARKET")
+        self.assertTrue(second_order["reduceOnly"])
+
+        with self.store._connect() as conn:  # pylint: disable=protected-access
+            row = conn.execute("SELECT COUNT(*) AS c FROM order_events").fetchone()
+            self.assertEqual(int(row["c"]), 2)
+
+        notifier.send.assert_called_once()
+        title, content = notifier.send.call_args.args
+        self.assertEqual(title, "【Top10做空】11:55浮亏止损汇总")
+        self.assertIn("| closed_loss_cut | 2 |", content)
+
     def _insert_open_position(
         self,
         symbol: str,

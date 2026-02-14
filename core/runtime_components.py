@@ -122,6 +122,7 @@ def create_components(
         notifier=notifier,
         sl_liq_buffer_pct=strategy_cfg.getfloat("sl_liq_buffer_pct", fallback=1.0),
         trigger_price_type=strategy_cfg.get("trigger_price_type", fallback="CONTRACT_PRICE").strip(),
+        daily_loss_cut_scope=runtime_cfg.get("daily_loss_cut_scope", fallback="tracked").strip(),
     )
 
     wallet_sampler = WalletSnapshotSampler(
