@@ -57,6 +57,7 @@ class StrategyRuntimeService:
         self._last_entry_local_date: Optional[date] = None
         self._last_entry_skipped_date: Optional[date] = None
         self._last_loss_cut_local_date: Optional[date] = None
+        self._last_loss_cut_skipped_date: Optional[date] = None
 
     def _entry_schedule_for_day(self, day: date) -> datetime:
         return datetime(
@@ -133,6 +134,17 @@ class StrategyRuntimeService:
             return
         target = self._loss_cut_schedule_for_day(today)
         if now_local < target:
+            return
+        window_end = target + timedelta(minutes=1)
+        if now_local >= window_end:
+            if self._last_loss_cut_skipped_date != today:
+                LOGGER.warning(
+                    "Daily loss-cut missed strict window, skip for today: now=%s target=%s window=1min",
+                    now_local.isoformat(timespec="seconds"),
+                    target.isoformat(timespec="seconds"),
+                )
+                self._last_loss_cut_skipped_date = today
+            self._last_loss_cut_local_date = today
             return
 
         self._last_loss_cut_local_date = today

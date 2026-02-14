@@ -192,6 +192,25 @@ class RuntimeServiceTest(unittest.TestCase):
         service.run_cycle(now_local=due, now_monotonic=3.0)
         self.assertEqual(manager.daily_loss_calls, 1)
 
+    def test_daily_loss_cut_skips_if_strict_window_missed(self):
+        service, _, manager, _ = self._create_service(
+            run_manage_on_startup=False,
+            manager_interval_sec=3600,
+            daily_loss_cut_enabled=True,
+            daily_loss_cut_hour=11,
+            daily_loss_cut_minute=55,
+            entry_hour=23,
+            entry_minute=59,
+        )
+
+        missed = datetime(2026, 2, 13, 22, 25, tzinfo=ZoneInfo("UTC"))
+        service.run_cycle(now_local=missed, now_monotonic=1.0)
+        self.assertEqual(manager.daily_loss_calls, 0)
+
+        # Same day remains skipped.
+        service.run_cycle(now_local=missed, now_monotonic=2.0)
+        self.assertEqual(manager.daily_loss_calls, 0)
+
 
 if __name__ == "__main__":
     unittest.main()
