@@ -100,9 +100,10 @@ def create_dashboard_context(config_path: str) -> DashboardRuntimeContext:
     }
 
     balance_fetcher = None
+    close_price_fetcher = None
     # If runtime service is enabled, wallet snapshots are persisted in background.
     # In that mode dashboard reads DB snapshots and skips direct balance polling.
-    if (not run_with_dashboard) and cfg.has_section("binance"):
+    if cfg.has_section("binance"):
         binance_cfg = cfg["binance"]
         api_key = binance_cfg.get("api_key", "").strip()
         api_secret = binance_cfg.get("api_secret", "").strip()
@@ -145,8 +146,31 @@ def create_dashboard_context(config_path: str) -> DashboardRuntimeContext:
                         exc,
                     )
                 return wallet_balance + unrealized
+            if not run_with_dashboard:
+                balance_fetcher = _fetch_wallet_balance_usdt
 
-            balance_fetcher = _fetch_wallet_balance_usdt
+            def _fetch_close_price(symbol: str, order_id: int) -> Optional[float]:
+                trades = client.get_user_trades(symbol=symbol, order_id=order_id, limit=1000)
+                if not trades:
+                    return None
+                total_qty = 0.0
+                total_quote = 0.0
+                for tr in trades:
+                    qty = float(tr.get("qty") or tr.get("executedQty") or 0.0)
+                    price = float(tr.get("price") or 0.0)
+                    quote = float(tr.get("quoteQty") or 0.0)
+                    if qty <= 0:
+                        continue
+                    if quote > 0:
+                        total_quote += quote
+                    elif price > 0:
+                        total_quote += price * qty
+                    total_qty += qty
+                if total_qty <= 0 or total_quote <= 0:
+                    return None
+                return total_quote / total_qty
+
+            close_price_fetcher = _fetch_close_price
 
     schema_path = str((Path(__file__).parent / "schema.sql").resolve())
     StateStore(db_path=db_path, schema_path=schema_path).init_schema()
@@ -158,6 +182,7 @@ def create_dashboard_context(config_path: str) -> DashboardRuntimeContext:
         entry_hour=entry_hour,
         entry_minute=entry_minute,
         balance_fetcher=balance_fetcher,
+        close_price_fetcher=close_price_fetcher,
         balance_cache_ttl_sec=balance_refresh_sec,
         default_curve_points=curve_points,
     )

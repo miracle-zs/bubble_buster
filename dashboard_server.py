@@ -34,6 +34,7 @@ class DashboardDataProvider:
         entry_hour: int,
         entry_minute: int,
         balance_fetcher: Optional[Callable[[], float]] = None,
+        close_price_fetcher: Optional[Callable[[str, int], Optional[float]]] = None,
         balance_cache_ttl_sec: int = 60,
         default_curve_points: int = 600,
     ):
@@ -42,8 +43,10 @@ class DashboardDataProvider:
         self.entry_hour = entry_hour % 24
         self.entry_minute = entry_minute % 60
         self.balance_fetcher = balance_fetcher
+        self.close_price_fetcher = close_price_fetcher
         self.balance_cache_ttl_sec = max(5, int(balance_cache_ttl_sec))
         self.default_curve_points = max(100, min(5000, int(default_curve_points)))
+        self._close_price_cache: Dict[Tuple[str, int], Optional[float]] = {}
         self._balance_cache_value: Optional[float] = None
         self._balance_cache_at: Optional[datetime] = None
         self._balance_last_attempt_at: Optional[datetime] = None
@@ -188,6 +191,31 @@ class DashboardDataProvider:
             sl_price = self._safe_float(row.get("sl_price"))
             if sl_price and sl_price > 0:
                 return sl_price
+
+        if self.close_price_fetcher is not None:
+            symbol = str(row.get("symbol") or "").upper().strip()
+            order_id_raw = row.get("close_order_id")
+            try:
+                order_id = int(order_id_raw) if order_id_raw is not None else None
+            except (TypeError, ValueError):
+                order_id = None
+            if symbol and order_id:
+                cache_key = (symbol, order_id)
+                if cache_key in self._close_price_cache:
+                    return self._close_price_cache[cache_key]
+                fetched_price: Optional[float] = None
+                try:
+                    fetched_price = self.close_price_fetcher(symbol, order_id)
+                    if fetched_price is not None and fetched_price > 0:
+                        fetched_price = float(fetched_price)
+                    else:
+                        fetched_price = None
+                except Exception as exc:  # noqa: BLE001
+                    LOGGER.debug("close_price_fetcher failed for %s order_id=%s: %s", symbol, order_id, exc)
+                    fetched_price = None
+                self._close_price_cache[cache_key] = fetched_price
+                if fetched_price is not None:
+                    return fetched_price
 
         return None
 
@@ -416,6 +444,7 @@ class DashboardDataProvider:
             """
             SELECT
                 p.id, p.symbol, p.side, p.qty, p.entry_price,
+                p.tp_price, p.sl_price,
                 p.status, p.close_reason, p.close_order_id,
                 p.closed_at_utc, p.updated_at_utc,
                 oe.event_time_utc AS close_event_time_utc,
