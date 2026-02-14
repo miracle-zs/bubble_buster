@@ -213,6 +213,65 @@ class PositionManagerTest(unittest.TestCase):
         row = self._get_position(position_id)
         self.assertIsNone(row["last_error"])
 
+    def test_daily_loss_cut_closes_only_losing_positions(self) -> None:
+        losing_id = self._insert_open_position(
+            symbol="BTCUSDT",
+            qty=0.02,
+            tp_order_id=101,
+            sl_order_id=202,
+            tp_price=40000.0,
+            sl_price=59000.0,
+            expire_in_hours=24,
+        )
+        winning_id = self._insert_open_position(
+            symbol="ETHUSDT",
+            qty=0.03,
+            tp_order_id=301,
+            sl_order_id=302,
+            tp_price=3000.0,
+            sl_price=4200.0,
+            expire_in_hours=24,
+        )
+
+        client = MagicMock()
+        client.get_position_risk.side_effect = [
+            [{"symbol": "BTCUSDT", "positionAmt": "-0.02", "unRealizedProfit": "-1.2"}],
+            [{"symbol": "ETHUSDT", "positionAmt": "-0.03", "unRealizedProfit": "2.8"}],
+        ]
+        client.create_order.return_value = {
+            "orderId": 888,
+            "clientOrderId": "dl-close",
+            "type": "MARKET",
+            "side": "BUY",
+            "origQty": "0.02",
+            "status": "FILLED",
+        }
+
+        notifier = MagicMock()
+        manager = PositionManager(
+            client=client,
+            store=self.store,
+            notifier=notifier,
+            sl_liq_buffer_pct=1.0,
+            trigger_price_type="CONTRACT_PRICE",
+        )
+
+        summary = manager.run_daily_loss_cut()
+        self.assertEqual(summary["closed_loss_cut"], 1)
+        self.assertEqual(summary["errors"], 0)
+
+        losing_row = self._get_position(losing_id)
+        self.assertEqual(losing_row["status"], "CLOSED_DAILY_LOSS_CUT")
+        self.assertEqual(losing_row["close_reason"], "DAILY_FLOATING_LOSS_CHECK")
+
+        winning_row = self._get_position(winning_id)
+        self.assertEqual(winning_row["status"], "OPEN")
+
+        notifier.send.assert_called_once()
+        title, content = notifier.send.call_args.args
+        self.assertEqual(title, "【Top10做空】11:55浮亏止损汇总")
+        self.assertIn("| closed_loss_cut | 1 |", content)
+
     def _insert_open_position(
         self,
         symbol: str,

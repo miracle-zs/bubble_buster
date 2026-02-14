@@ -112,6 +112,9 @@ python main.py manage --config config.ini --loop
   - `entry_hour=7`
   - `entry_minute=40`
   - `entry_catchup_enabled=true`（是否允许错过后补开）
+  - `daily_loss_cut_enabled=true`（是否启用每日浮亏砍仓）
+  - `daily_loss_cut_hour=11`
+  - `daily_loss_cut_minute=55`
   - `manager_interval_sec=60`
   - `run_service_with_dashboard=true`
   - `wallet_snapshot_asset=USDT`

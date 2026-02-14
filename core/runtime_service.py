@@ -17,6 +17,9 @@ class ServiceRuntimeConfig:
     entry_minute: int
     entry_misfire_grace_min: int
     entry_catchup_enabled: bool
+    daily_loss_cut_enabled: bool
+    daily_loss_cut_hour: int
+    daily_loss_cut_minute: int
     manager_interval_sec: int
     manager_max_catch_up_runs: int
     loop_sleep_sec: float
@@ -53,6 +56,7 @@ class StrategyRuntimeService:
         )
         self._last_entry_local_date: Optional[date] = None
         self._last_entry_skipped_date: Optional[date] = None
+        self._last_loss_cut_local_date: Optional[date] = None
 
     def _entry_schedule_for_day(self, day: date) -> datetime:
         return datetime(
@@ -109,6 +113,35 @@ class StrategyRuntimeService:
         self._last_entry_local_date = now_local.date()
         LOGGER.info("service entry result: %s", result)
 
+    def _loss_cut_schedule_for_day(self, day: date) -> datetime:
+        return datetime(
+            year=day.year,
+            month=day.month,
+            day=day.day,
+            hour=self.cfg.daily_loss_cut_hour % 24,
+            minute=self.cfg.daily_loss_cut_minute % 60,
+            second=0,
+            microsecond=0,
+            tzinfo=self.timezone,
+        )
+
+    def _run_daily_loss_cut_if_due(self, now_local: datetime) -> None:
+        if not self.cfg.daily_loss_cut_enabled:
+            return
+        today = now_local.date()
+        if self._last_loss_cut_local_date == today:
+            return
+        target = self._loss_cut_schedule_for_day(today)
+        if now_local < target:
+            return
+
+        self._last_loss_cut_local_date = today
+        if not hasattr(self.manager, "run_daily_loss_cut"):
+            LOGGER.warning("manager has no run_daily_loss_cut method, skip daily loss cut")
+            return
+        result = self.manager.run_daily_loss_cut()
+        LOGGER.info("service daily loss-cut result: %s", result)
+
     def _run_manage_if_due(self, now_monotonic: float) -> None:
         if now_monotonic < self._next_manage_monotonic:
             return
@@ -143,6 +176,7 @@ class StrategyRuntimeService:
         local_dt = now_local or datetime.now(self.timezone)
         mono = now_monotonic if now_monotonic is not None else time.monotonic()
         self._run_entry_if_due(local_dt)
+        self._run_daily_loss_cut_if_due(local_dt)
         self._run_manage_if_due(mono)
 
     def run_forever(self, stop_event: Optional[threading.Event] = None) -> None:

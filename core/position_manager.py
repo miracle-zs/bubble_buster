@@ -29,6 +29,56 @@ class PositionManager:
         self.sl_liq_buffer_pct = sl_liq_buffer_pct
         self.trigger_price_type = trigger_price_type
 
+    def run_daily_loss_cut(self) -> Dict[str, int]:
+        positions = self.store.list_open_positions()
+        summary = {
+            "total": len(positions),
+            "closed_loss_cut": 0,
+            "errors": 0,
+        }
+        details: Dict[str, List[str]] = {
+            "closed_loss_cut": [],
+            "errors": [],
+        }
+
+        for pos in positions:
+            position_id = int(pos["id"])
+            symbol = str(pos["symbol"])
+            try:
+                risk = self._get_symbol_position_risk(symbol)
+                if risk is None:
+                    self.store.set_position_error(position_id, "position risk not found")
+                    continue
+
+                position_amt = float(risk.get("positionAmt", "0") or 0)
+                if position_amt >= 0:
+                    continue
+
+                unrealized_pnl = float(risk.get("unRealizedProfit", "0") or 0)
+                if unrealized_pnl >= 0:
+                    continue
+
+                close_info = self._close_daily_loss_cut(pos, abs(position_amt), unrealized_pnl)
+                summary["closed_loss_cut"] += 1
+                details["closed_loss_cut"].append(
+                    f"{symbol}(id={position_id}, upnl={unrealized_pnl:.6f}, qty={close_info['qty']}, "
+                    f"close_order_id={close_info['close_order_id']})"
+                )
+                self.store.clear_position_error(position_id)
+            except Exception as exc:  # noqa: BLE001
+                summary["errors"] += 1
+                LOGGER.exception("Daily loss-cut failed for position id=%s symbol=%s: %s", position_id, symbol, exc)
+                self.store.set_position_error(position_id, str(exc))
+                details["errors"].append(f"{symbol}(id={position_id}): {exc}")
+
+        if summary["closed_loss_cut"] > 0 or summary["errors"] > 0:
+            self.notifier.send(
+                "【Top10做空】11:55浮亏止损汇总",
+                self._build_daily_loss_cut_notification(summary, details),
+            )
+
+        return summary
+
     def run_once(self) -> Dict[str, int]:
         positions = self.store.list_open_positions()
         summary = {
@@ -195,6 +245,40 @@ class PositionManager:
         )
         return {"qty": qty, "close_order_id": close_order.get("orderId")}
 
+    def _close_daily_loss_cut(self, pos: Dict[str, object], qty: float, unrealized_pnl: float) -> Dict[str, object]:
+        position_id = int(pos["id"])
+        symbol = str(pos["symbol"])
+
+        self._cancel_exit_orders(pos)
+
+        close_order = self.client.create_order(
+            symbol=symbol,
+            side="BUY",
+            type="MARKET",
+            quantity=self.client.format_order_qty(symbol, qty),
+            reduceOnly=True,
+            newClientOrderId=self._new_client_id("dl", symbol),
+            newOrderRespType="RESULT",
+        )
+
+        self.store.add_order_event(
+            symbol=symbol,
+            position_id=position_id,
+            event_time_utc=self._utc_now_iso(),
+            order_payload=close_order,
+        )
+        self.store.mark_position_closed(
+            position_id=position_id,
+            status="CLOSED_DAILY_LOSS_CUT",
+            close_reason="DAILY_FLOATING_LOSS_CHECK",
+            close_order_id=close_order.get("orderId"),
+        )
+        return {
+            "qty": qty,
+            "close_order_id": close_order.get("orderId"),
+            "unrealized_pnl": unrealized_pnl,
+        }
+
     def _update_dynamic_stop(self, pos: Dict[str, object], risk: Dict[str, str]) -> Optional[Dict[str, object]]:
         position_id = int(pos["id"])
         symbol = str(pos["symbol"])
@@ -353,6 +437,34 @@ class PositionManager:
         ]:
             values = [item for item in details.get(key, []) if item]
             block = format_markdown_list_section(title, values, max_items=15)
+            if block:
+                lines.extend(["", block])
+
+        return "\n".join(lines)
+
+    @staticmethod
+    def _build_daily_loss_cut_notification(summary: Dict[str, int], details: Dict[str, List[str]]) -> str:
+        rows = [
+            ("open_positions", summary["total"]),
+            ("closed_loss_cut", summary["closed_loss_cut"]),
+            ("errors", summary["errors"]),
+        ]
+        lines = [
+            "### Top10 做空 11:55 浮亏止损汇总",
+            "",
+            f"- 巡检时间(UTC): `{datetime.now(timezone.utc).replace(microsecond=0).isoformat()}`",
+            "",
+            "### 摘要",
+            "",
+            format_markdown_kv_table(rows),
+        ]
+
+        for key, title in [
+            ("closed_loss_cut", "浮亏平仓明细"),
+            ("errors", "错误明细"),
+        ]:
+            values = [item for item in details.get(key, []) if item]
+            block = format_markdown_list_section(title, values, max_items=20)
             if block:
                 lines.extend(["", block])
 

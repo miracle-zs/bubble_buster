@@ -14,6 +14,9 @@ class RuntimeServiceTest(unittest.TestCase):
             entry_minute=overrides.get("entry_minute", 40),
             entry_misfire_grace_min=overrides.get("entry_misfire_grace_min", 120),
             entry_catchup_enabled=overrides.get("entry_catchup_enabled", True),
+            daily_loss_cut_enabled=overrides.get("daily_loss_cut_enabled", True),
+            daily_loss_cut_hour=overrides.get("daily_loss_cut_hour", 11),
+            daily_loss_cut_minute=overrides.get("daily_loss_cut_minute", 55),
             manager_interval_sec=overrides.get("manager_interval_sec", 60),
             manager_max_catch_up_runs=overrides.get("manager_max_catch_up_runs", 3),
             loop_sleep_sec=overrides.get("loop_sleep_sec", 1.0),
@@ -31,10 +34,15 @@ class RuntimeServiceTest(unittest.TestCase):
         class ManagerStub:
             def __init__(self):
                 self.calls = 0
+                self.daily_loss_calls = 0
 
             def run_once(self):
                 self.calls += 1
                 return {"total": 0}
+
+            def run_daily_loss_cut(self):
+                self.daily_loss_calls += 1
+                return {"total": 0, "closed_loss_cut": 0, "errors": 0}
 
         class WalletSamplerStub:
             def __init__(self):
@@ -163,6 +171,26 @@ class RuntimeServiceTest(unittest.TestCase):
 
         self.assertEqual(manager.calls, 4)
         self.assertEqual(sampler.calls, 4)  # type: ignore[union-attr]
+
+    def test_daily_loss_cut_runs_once_per_day_after_schedule(self):
+        service, _, manager, _ = self._create_service(
+            run_manage_on_startup=False,
+            manager_interval_sec=3600,
+            daily_loss_cut_enabled=True,
+            daily_loss_cut_hour=11,
+            daily_loss_cut_minute=55,
+            entry_hour=23,
+            entry_minute=59,
+        )
+
+        before = datetime(2026, 2, 13, 11, 54, tzinfo=ZoneInfo("UTC"))
+        due = datetime(2026, 2, 13, 11, 55, tzinfo=ZoneInfo("UTC"))
+        service.run_cycle(now_local=before, now_monotonic=1.0)
+        self.assertEqual(manager.daily_loss_calls, 0)
+        service.run_cycle(now_local=due, now_monotonic=2.0)
+        self.assertEqual(manager.daily_loss_calls, 1)
+        service.run_cycle(now_local=due, now_monotonic=3.0)
+        self.assertEqual(manager.daily_loss_calls, 1)
 
 
 if __name__ == "__main__":
