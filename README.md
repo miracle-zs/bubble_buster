@@ -111,6 +111,7 @@ python main.py manage --config config.ini --loop
   - `timezone=Asia/Shanghai`
   - `entry_hour=7`
   - `entry_minute=40`
+  - `entry_catchup_enabled=true`（是否允许错过后补开）
   - `manager_interval_sec=60`
   - `run_service_with_dashboard=true`
   - `wallet_snapshot_asset=USDT`

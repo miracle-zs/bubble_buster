@@ -30,6 +30,7 @@ timezone = Asia/Shanghai
 entry_hour = 7
 entry_minute = 40
 entry_misfire_grace_min = 120
+entry_catchup_enabled = true
 manager_interval_sec = 60
 manager_max_catch_up_runs = 3
 service_loop_sleep_sec = 1.0

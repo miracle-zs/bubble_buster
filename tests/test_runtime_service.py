@@ -13,6 +13,7 @@ class RuntimeServiceTest(unittest.TestCase):
             entry_hour=overrides.get("entry_hour", 7),
             entry_minute=overrides.get("entry_minute", 40),
             entry_misfire_grace_min=overrides.get("entry_misfire_grace_min", 120),
+            entry_catchup_enabled=overrides.get("entry_catchup_enabled", True),
             manager_interval_sec=overrides.get("manager_interval_sec", 60),
             manager_max_catch_up_runs=overrides.get("manager_max_catch_up_runs", 3),
             loop_sleep_sec=overrides.get("loop_sleep_sec", 1.0),
@@ -81,6 +82,22 @@ class RuntimeServiceTest(unittest.TestCase):
 
         # Same day should stay skipped.
         service.run_cycle(now_local=now_local, now_monotonic=160.0)
+        self.assertEqual(strategy.calls, 0)
+
+    def test_entry_skips_when_catchup_disabled(self):
+        service, strategy, _, _ = self._create_service(
+            entry_hour=7,
+            entry_minute=40,
+            entry_misfire_grace_min=120,
+            entry_catchup_enabled=False,
+        )
+
+        missed_local = datetime(2026, 2, 13, 7, 45, tzinfo=ZoneInfo("UTC"))
+        service.run_cycle(now_local=missed_local, now_monotonic=100.0)
+        self.assertEqual(strategy.calls, 0)
+
+        # Same day should remain skipped even if called again.
+        service.run_cycle(now_local=missed_local, now_monotonic=110.0)
         self.assertEqual(strategy.calls, 0)
 
     def test_manage_interval_and_catch_up_limit(self):

@@ -16,6 +16,7 @@ class ServiceRuntimeConfig:
     entry_hour: int
     entry_minute: int
     entry_misfire_grace_min: int
+    entry_catchup_enabled: bool
     manager_interval_sec: int
     manager_max_catch_up_runs: int
     loop_sleep_sec: float
@@ -72,6 +73,17 @@ class StrategyRuntimeService:
 
         target = self._entry_schedule_for_day(today)
         if now_local < target:
+            return False
+
+        if not self.cfg.entry_catchup_enabled and now_local > target:
+            if self._last_entry_skipped_date != today:
+                LOGGER.warning(
+                    "Entry missed scheduled time and catch-up disabled, skip for today: now=%s target=%s",
+                    now_local.isoformat(timespec="seconds"),
+                    target.isoformat(timespec="seconds"),
+                )
+                self._last_entry_skipped_date = today
+            self._last_entry_local_date = today
             return False
 
         grace = timedelta(minutes=max(0, self.cfg.entry_misfire_grace_min))
@@ -136,12 +148,13 @@ class StrategyRuntimeService:
     def run_forever(self, stop_event: Optional[threading.Event] = None) -> None:
         stopper = stop_event or threading.Event()
         LOGGER.info(
-            "runtime service started: tz=%s entry=%02d:%02d manage_interval=%ss grace=%smin",
+            "runtime service started: tz=%s entry=%02d:%02d manage_interval=%ss grace=%smin catchup=%s",
             self.timezone.key,
             self.cfg.entry_hour,
             self.cfg.entry_minute,
             self.cfg.manager_interval_sec,
             self.cfg.entry_misfire_grace_min,
+            "on" if self.cfg.entry_catchup_enabled else "off",
         )
         while not stopper.is_set():
             try:

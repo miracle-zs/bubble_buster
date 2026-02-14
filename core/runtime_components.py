@@ -141,6 +141,7 @@ def create_components(
         entry_hour=runtime_cfg.getint("entry_hour", fallback=7),
         entry_minute=runtime_cfg.getint("entry_minute", fallback=40),
         entry_misfire_grace_min=runtime_cfg.getint("entry_misfire_grace_min", fallback=120),
+        entry_catchup_enabled=runtime_cfg.getboolean("entry_catchup_enabled", fallback=True),
         manager_interval_sec=max(1, runtime_cfg.getint("manager_interval_sec", fallback=60)),
         manager_max_catch_up_runs=max(1, runtime_cfg.getint("manager_max_catch_up_runs", fallback=3)),
         loop_sleep_sec=max(0.2, runtime_cfg.getfloat("service_loop_sleep_sec", fallback=1.0)),
