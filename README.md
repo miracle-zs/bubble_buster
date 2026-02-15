@@ -35,7 +35,7 @@
 - `infra/binance_futures_client.py`
   - 交易 API 封装（签名、重试、规则归一化、条件单 fallback）。
 - `core/state_store.py` + `schema.sql`
-  - 状态持久化（runs/positions/order_events/wallet_snapshots/cashflow_events/locks）。
+  - 状态持久化（runs/positions/order_events/fills/wallet_snapshots/cashflow_events/rebalance_cycles/rebalance_actions/locks）。
 
 ### 当前实现特点（重要）
 
@@ -215,8 +215,11 @@ CRON_TZ=Asia/Shanghai
 - `runs`：每日入场运行记录（含状态/消息）。
 - `positions`：仓位生命周期。
 - `order_events`：订单事件流水。
+- `fills`：从订单回报抽取的成交快照（成交量/均价/手续费/已实现PnL）。
 - `wallet_snapshots`：权益快照。
 - `cashflow_events`：现金流流水（去重）。
+- `rebalance_cycles`：每次再平衡周期汇总（目标/执行结果/跳过原因）。
+- `rebalance_actions`：再平衡逐仓动作明细（偏离度/调整量/结果）。
 - `locks`：预留锁表。
 
 ---
@@ -230,7 +233,20 @@ conda run -n base python -m unittest discover -s tests -p 'test_*.py'
 
 ---
 
-## 9) 常见问题
+## 9) 寻优 SQL 模板
+
+- 模板文件：`optimization_sql_templates.sql`
+- 用途：针对 `rebalance_cycles / rebalance_actions / fills` 做效果评估、模式对比与训练样本导出。
+- 运行示例：
+
+```bash
+cd /root/bubble_buster
+sqlite3 state.db < optimization_sql_templates.sql
+```
+
+---
+
+## 10) 常见问题
 
 - `Lock busy timeout ...`
   - 两个进程共用了同一个 `lock_file`。给不同实例配置不同 lock 文件。
@@ -243,7 +259,7 @@ conda run -n base python -m unittest discover -s tests -p 'test_*.py'
 
 ---
 
-## 10) systemd 模板（账户 A）
+## 11) systemd 模板（账户 A）
 
 适用场景：账户 A 需要常驻跑整套策略（`service` 模式）。
 
@@ -330,7 +346,7 @@ sudo journalctl -u bubble_buster_dashboard -f
 
 ---
 
-## 11) 目录
+## 12) 目录
 
 ```text
 bubble_buster/

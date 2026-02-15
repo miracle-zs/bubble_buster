@@ -42,6 +42,12 @@ class RebalancePlan:
     qty: float
     ref_price: float
     est_notional: float
+    current_notional: float
+    target_notional: float
+    deviation_notional: float
+    deadband_notional: float
+    max_adjust_notional: float
+    requested_adjust_notional: float
 
 
 class Top10ShortStrategy:
@@ -206,6 +212,7 @@ class Top10ShortStrategy:
                             target_count=max(1, len(open_symbols)),
                             reduce_only=False,
                             reason_tag="post",
+                            run_id=run_id,
                         )
                     except Exception as exc:  # noqa: BLE001
                         LOGGER.exception("Post-entry rebalance failed when no new candidates: %s", exc)
@@ -246,6 +253,7 @@ class Top10ShortStrategy:
                             target_count=expected_total_positions,
                             reduce_only=True,
                             reason_tag="pre",
+                            run_id=run_id,
                         )
                     except Exception as exc:  # noqa: BLE001
                         LOGGER.exception("Pre-entry rebalance failed: %s", exc)
@@ -414,6 +422,7 @@ class Top10ShortStrategy:
                             target_count=len(open_positions_after_entry),
                             reduce_only=False,
                             reason_tag="post",
+                            run_id=run_id,
                         )
                     except Exception as exc:  # noqa: BLE001
                         LOGGER.exception("Post-entry rebalance failed: %s", exc)
@@ -665,25 +674,53 @@ class Top10ShortStrategy:
         target_count: int,
         reduce_only: bool,
         reason_tag: str,
+        run_id: Optional[str] = None,
     ) -> Dict[str, object]:
         summary: Dict[str, object] = {
             "target_count": max(0, int(target_count)),
+            "open_positions": 0,
             "planned": 0,
             "adjusted": 0,
             "errors": 0,
             "reduced_notional": 0.0,
             "added_notional": 0.0,
             "target_notional_per_position": 0.0,
+            "target_gross_notional": 0.0,
             "equity_usdt": 0.0,
             "mode": self.rebalance_mode,
             "virtual_slots": 0,
         }
-        if target_count <= 0:
+        skip_reason: Optional[str] = None
+        cycle_id: Optional[int] = None
+        try:
+            cycle_id = self.store.create_rebalance_cycle(
+                run_id=run_id,
+                reason_tag=reason_tag,
+                mode=self.rebalance_mode,
+                reduce_only=reduce_only,
+                target_count=target_count,
+            )
+        except Exception as exc:  # noqa: BLE001
+            LOGGER.exception("Failed to create rebalance cycle row: %s", exc)
+        summary["cycle_id"] = cycle_id
+
+        def _finalize_and_return(reason: Optional[str]) -> Dict[str, object]:
+            try:
+                if cycle_id is not None:
+                    self.store.finalize_rebalance_cycle(cycle_id=cycle_id, summary=summary, skip_reason=reason)
+            except Exception as exc:  # noqa: BLE001
+                LOGGER.exception("Failed to finalize rebalance cycle row: %s", exc)
             return summary
 
+        if target_count <= 0:
+            skip_reason = "INVALID_TARGET_COUNT"
+            return _finalize_and_return(skip_reason)
+
         positions = self.store.list_open_positions()
+        summary["open_positions"] = len(positions)
         if not positions:
-            return summary
+            skip_reason = "NO_OPEN_POSITIONS"
+            return _finalize_and_return(skip_reason)
 
         risk_rows = self.client.get_position_risk()
         risk_map: Dict[str, Dict[str, Any]] = {
@@ -693,11 +730,13 @@ class Top10ShortStrategy:
         }
         equity_usdt = self._compute_account_equity_usdt(risk_rows=risk_rows)
         if equity_usdt <= 0:
-            return summary
+            skip_reason = "NON_POSITIVE_EQUITY"
+            return _finalize_and_return(skip_reason)
 
         target_gross_notional = equity_usdt * float(self.leverage) * self.rebalance_utilization
         if target_gross_notional <= 0:
-            return summary
+            skip_reason = "NON_POSITIVE_TARGET_GROSS_NOTIONAL"
+            return _finalize_and_return(skip_reason)
         target_notional_per_position = target_gross_notional / float(target_count)
         target_notional_by_position, virtual_slots = self._build_target_notional_map(
             positions=positions,
@@ -706,20 +745,58 @@ class Top10ShortStrategy:
         )
         summary["equity_usdt"] = round(equity_usdt, 6)
         summary["target_notional_per_position"] = round(target_notional_per_position, 6)
+        summary["target_gross_notional"] = round(target_gross_notional, 6)
         summary["virtual_slots"] = virtual_slots
 
         reduce_plans: List[RebalancePlan] = []
         increase_plans: List[RebalancePlan] = []
+        action_id_by_position: Dict[int, int] = {}
         for pos in positions:
             if len(reduce_plans) + len(increase_plans) >= self.rebalance_max_adjust_orders:
                 break
             position_id = int(pos["id"])
-            plan = self._build_rebalance_plan(
+            plan, evaluation = self._build_rebalance_plan(
                 pos=pos,
                 risk_map=risk_map,
                 target_notional=target_notional_by_position.get(position_id, target_notional_per_position),
                 reduce_only=reduce_only,
             )
+            if cycle_id is not None:
+                try:
+                    action_id = self.store.add_rebalance_action(
+                        cycle_id=cycle_id,
+                        run_id=run_id,
+                        position_id=position_id,
+                        symbol=str(pos.get("symbol") or ""),
+                        action_side=str(evaluation.get("side") or "") or None,
+                        reduce_only=reduce_only,
+                        ref_price=self._safe_float(evaluation.get("ref_price"), default=0.0) or None,
+                        current_notional_usdt=self._safe_float(evaluation.get("current_notional"), default=0.0),
+                        target_notional_usdt=self._safe_float(evaluation.get("target_notional"), default=0.0),
+                        deviation_notional_usdt=self._safe_float(evaluation.get("deviation_notional"), default=0.0),
+                        deadband_notional_usdt=self._safe_float(evaluation.get("deadband_notional"), default=0.0),
+                        max_adjust_notional_usdt=self._safe_float(
+                            evaluation.get("max_adjust_notional"),
+                            default=0.0,
+                        ),
+                        requested_adjust_notional_usdt=self._safe_float(
+                            evaluation.get("requested_adjust_notional"),
+                            default=0.0,
+                        ),
+                        qty=self._safe_float(evaluation.get("qty"), default=0.0),
+                        est_notional_usdt=self._safe_float(evaluation.get("est_notional"), default=0.0),
+                        status="PLANNED" if plan is not None else "SKIPPED",
+                        skip_reason=None if plan is not None else str(evaluation.get("reason") or "SKIPPED"),
+                    )
+                    if plan is not None:
+                        action_id_by_position[position_id] = action_id
+                except Exception as exc:  # noqa: BLE001
+                    LOGGER.exception(
+                        "Failed to write rebalance action row for position_id=%s symbol=%s: %s",
+                        position_id,
+                        pos.get("symbol"),
+                        exc,
+                    )
             if plan is None:
                 continue
             if plan.side == "BUY":
@@ -729,7 +806,8 @@ class Top10ShortStrategy:
 
         summary["planned"] = len(reduce_plans) + len(increase_plans)
         if not summary["planned"]:
-            return summary
+            skip_reason = "NO_ADJUSTMENT_PLAN"
+            return _finalize_and_return(skip_reason)
 
         touched_position_ids: Set[int] = set()
         reduced_notional = 0.0
@@ -756,6 +834,14 @@ class Top10ShortStrategy:
                     event_time_utc=self._utc_now_iso(),
                     order_payload=order,
                 )
+                action_id = action_id_by_position.get(plan.position_id)
+                if action_id is not None:
+                    self.store.update_rebalance_action_result(
+                        action_id=action_id,
+                        status="ADJUSTED",
+                        order_id=self._safe_int(order.get("orderId")),
+                        client_order_id=str(order.get("clientOrderId") or "") or None,
+                    )
                 if plan.side == "BUY":
                     reduced_notional += plan.est_notional
                 else:
@@ -769,6 +855,19 @@ class Top10ShortStrategy:
                 summary["adjusted"] = int(summary["adjusted"]) + 1
             except Exception as exc:  # noqa: BLE001
                 summary["errors"] = int(summary["errors"]) + 1
+                action_id = action_id_by_position.get(plan.position_id)
+                if action_id is not None:
+                    try:
+                        self.store.update_rebalance_action_result(
+                            action_id=action_id,
+                            status="ERROR",
+                            error=str(exc),
+                        )
+                    except Exception:  # noqa: BLE001
+                        LOGGER.exception(
+                            "Failed to update rebalance action error row for position_id=%s",
+                            plan.position_id,
+                        )
                 self.store.set_position_error(plan.position_id, f"rebalance: {exc}")
                 LOGGER.exception(
                     "Rebalance order failed for symbol=%s position_id=%s side=%s: %s",
@@ -783,7 +882,7 @@ class Top10ShortStrategy:
 
         if touched_position_ids:
             self._refresh_exit_orders_for_positions(touched_position_ids)
-        return summary
+        return _finalize_and_return(skip_reason)
 
     def _build_rebalance_plan(
         self,
@@ -791,16 +890,34 @@ class Top10ShortStrategy:
         risk_map: Dict[str, Dict[str, Any]],
         target_notional: float,
         reduce_only: bool,
-    ) -> Optional[RebalancePlan]:
+    ) -> tuple[Optional[RebalancePlan], Dict[str, object]]:
         position_id = int(pos["id"])
         symbol = str(pos["symbol"])
+        evaluation: Dict[str, object] = {
+            "position_id": position_id,
+            "symbol": symbol,
+            "status": "SKIPPED",
+            "reason": "UNKNOWN",
+            "side": None,
+            "ref_price": None,
+            "current_notional": 0.0,
+            "target_notional": float(target_notional),
+            "deviation_notional": 0.0,
+            "deadband_notional": 0.0,
+            "max_adjust_notional": 0.0,
+            "requested_adjust_notional": 0.0,
+            "qty": 0.0,
+            "est_notional": 0.0,
+        }
         risk = risk_map.get(symbol)
         if not risk:
-            return None
+            evaluation["reason"] = "MISSING_POSITION_RISK"
+            return None, evaluation
 
         position_amt = self._safe_float(risk.get("positionAmt"), default=0.0)
         if position_amt >= 0:
-            return None
+            evaluation["reason"] = "NON_SHORT_POSITION"
+            return None, evaluation
 
         mark_price = (
             self._safe_positive_float(risk.get("markPrice"))
@@ -808,43 +925,71 @@ class Top10ShortStrategy:
             or self._safe_positive_float(pos.get("entry_price"))
         )
         if not mark_price:
-            return None
+            evaluation["reason"] = "MISSING_MARK_PRICE"
+            return None, evaluation
 
         current_notional = abs(position_amt) * mark_price
+        evaluation["ref_price"] = mark_price
+        evaluation["current_notional"] = current_notional
         if current_notional <= 0:
-            return None
+            evaluation["reason"] = "NON_POSITIVE_CURRENT_NOTIONAL"
+            return None, evaluation
 
         deviation_notional = target_notional - current_notional
         deadband = max(target_notional, 0.0) * self.rebalance_deadband_pct
+        evaluation["deviation_notional"] = deviation_notional
+        evaluation["deadband_notional"] = deadband
         if abs(deviation_notional) <= deadband:
-            return None
+            evaluation["reason"] = "WITHIN_DEADBAND"
+            return None, evaluation
         if reduce_only and deviation_notional > 0:
-            return None
+            evaluation["reason"] = "REDUCE_ONLY_BLOCKED_INCREASE"
+            return None, evaluation
 
         max_adjust_notional = current_notional * self.rebalance_max_single_adjust_pct
         adjust_notional = min(abs(deviation_notional), max_adjust_notional)
+        evaluation["max_adjust_notional"] = max_adjust_notional
+        evaluation["requested_adjust_notional"] = adjust_notional
         if adjust_notional < self.rebalance_min_adjust_notional_usdt:
-            return None
+            evaluation["reason"] = "BELOW_MIN_ADJUST_NOTIONAL"
+            return None, evaluation
 
         qty = self.client.normalize_order_qty(symbol, adjust_notional, mark_price)
+        evaluation["qty"] = qty
         if qty <= 0:
-            return None
+            evaluation["reason"] = "QTY_NORMALIZED_ZERO"
+            return None, evaluation
 
         side = "BUY" if deviation_notional < 0 else "SELL"
+        evaluation["side"] = side
         if reduce_only and side != "BUY":
-            return None
+            evaluation["reason"] = "REDUCE_ONLY_BLOCKED_INCREASE"
+            return None, evaluation
 
         est_notional = qty * mark_price
+        evaluation["est_notional"] = est_notional
         if est_notional < self.rebalance_min_adjust_notional_usdt:
-            return None
+            evaluation["reason"] = "EST_NOTIONAL_BELOW_MIN"
+            return None, evaluation
 
-        return RebalancePlan(
-            position_id=position_id,
-            symbol=symbol,
-            side=side,
-            qty=qty,
-            ref_price=mark_price,
-            est_notional=est_notional,
+        evaluation["status"] = "PLANNED"
+        evaluation["reason"] = "PLANNED"
+        return (
+            RebalancePlan(
+                position_id=position_id,
+                symbol=symbol,
+                side=side,
+                qty=qty,
+                ref_price=mark_price,
+                est_notional=est_notional,
+                current_notional=current_notional,
+                target_notional=target_notional,
+                deviation_notional=deviation_notional,
+                deadband_notional=deadband,
+                max_adjust_notional=max_adjust_notional,
+                requested_adjust_notional=adjust_notional,
+            ),
+            evaluation,
         )
 
     def _sync_position_after_adjustment(self, position_id: int, symbol: str, fallback_price: float) -> bool:
@@ -1291,6 +1436,15 @@ class Top10ShortStrategy:
             return float(value)
         except (TypeError, ValueError):
             return default
+
+    @staticmethod
+    def _safe_int(value: object) -> Optional[int]:
+        try:
+            if value is None:
+                return None
+            return int(value)
+        except (TypeError, ValueError):
+            return None
 
     @staticmethod
     def _new_client_id(tag: str, symbol: str) -> str:
