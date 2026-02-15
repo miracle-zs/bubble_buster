@@ -132,7 +132,11 @@ class PositionManager:
             if unrealized_pnl >= 0:
                 continue
 
-            close_side = "BUY" if position_amt < 0 else "SELL"
+            position_side = str(risk.get("positionSide") or "BOTH").strip().upper() or "BOTH"
+            close_side, use_reduce_only = self._resolve_close_side_for_exchange_position(
+                position_amt=position_amt,
+                position_side=position_side,
+            )
             try:
                 close_info = self._close_daily_loss_cut(
                     symbol=symbol,
@@ -140,17 +144,21 @@ class PositionManager:
                     side=close_side,
                     position_id=None,
                     cancel_pos=None,
+                    position_side=position_side if position_side in {"LONG", "SHORT"} else None,
+                    use_reduce_only=use_reduce_only,
                 )
                 summary["closed_loss_cut"] += 1
                 details["closed_loss_cut"].append(
                     f"{symbol}(upnl={unrealized_pnl:.6f}, qty={close_info['qty']}, side={close_side}, "
+                    f"position_side={position_side}, reduce_only={use_reduce_only}, "
                     f"close_order_id={close_info['close_order_id']})"
                 )
             except Exception as exc:  # noqa: BLE001
                 summary["errors"] += 1
                 LOGGER.exception("Daily loss-cut failed for exchange position symbol=%s: %s", symbol, exc)
                 details["errors"].append(
-                    f"{symbol}(upnl={unrealized_pnl:.6f}, side={close_side}, qty={abs(position_amt)}): {exc}"
+                    f"{symbol}(upnl={unrealized_pnl:.6f}, side={close_side}, position_side={position_side}, "
+                    f"qty={abs(position_amt)}): {exc}"
                 )
 
         if summary["closed_loss_cut"] > 0 or summary["errors"] > 0:
@@ -334,18 +342,27 @@ class PositionManager:
         side: str,
         position_id: Optional[int],
         cancel_pos: Optional[Dict[str, object]] = None,
+        position_side: Optional[str] = None,
+        use_reduce_only: bool = True,
     ) -> Dict[str, object]:
         if cancel_pos is not None:
             self._cancel_exit_orders(cancel_pos)
 
+        create_order_params: Dict[str, object] = {
+            "symbol": symbol,
+            "side": side,
+            "type": "MARKET",
+            "quantity": self.client.format_order_qty(symbol, qty),
+            "newClientOrderId": self._new_client_id("dl", symbol),
+            "newOrderRespType": "RESULT",
+        }
+        if use_reduce_only:
+            create_order_params["reduceOnly"] = True
+        if position_side in {"LONG", "SHORT"}:
+            create_order_params["positionSide"] = position_side
+
         close_order = self.client.create_order(
-            symbol=symbol,
-            side=side,
-            type="MARKET",
-            quantity=self.client.format_order_qty(symbol, qty),
-            reduceOnly=True,
-            newClientOrderId=self._new_client_id("dl", symbol),
-            newOrderRespType="RESULT",
+            **create_order_params,
         )
 
         self.store.add_order_event(
@@ -365,6 +382,21 @@ class PositionManager:
             "qty": qty,
             "close_order_id": close_order.get("orderId"),
         }
+
+    @staticmethod
+    def _resolve_close_side_for_exchange_position(
+        position_amt: float,
+        position_side: str,
+    ) -> tuple[str, bool]:
+        normalized_side = str(position_side or "").strip().upper()
+        if normalized_side == "LONG":
+            # Hedge mode LONG leg closes by SELL and must not send reduceOnly.
+            return "SELL", False
+        if normalized_side == "SHORT":
+            # Hedge mode SHORT leg closes by BUY and must not send reduceOnly.
+            return "BUY", False
+        # One-way mode (BOTH).
+        return ("BUY" if position_amt < 0 else "SELL"), True
 
     def _update_dynamic_stop(self, pos: Dict[str, object], risk: Dict[str, str]) -> Optional[Dict[str, object]]:
         position_id = int(pos["id"])

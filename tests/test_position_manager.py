@@ -337,6 +337,75 @@ class PositionManagerTest(unittest.TestCase):
         self.assertEqual(title, "【Top10做空】11:55浮亏止损汇总")
         self.assertIn("| closed_loss_cut | 2 |", content)
 
+    def test_daily_loss_cut_exchange_scope_hedge_mode_uses_position_side(self) -> None:
+        client = MagicMock()
+        client.get_position_risk.return_value = [
+            {
+                "symbol": "BTCUSDT",
+                "positionAmt": "0.02",
+                "positionSide": "LONG",
+                "unRealizedProfit": "-1.0",
+            },
+            {
+                "symbol": "ETHUSDT",
+                "positionAmt": "-0.30",
+                "positionSide": "SHORT",
+                "unRealizedProfit": "-2.0",
+            },
+        ]
+        client.format_order_qty.side_effect = lambda _symbol, qty: str(qty)
+        client.create_order.side_effect = [
+            {
+                "orderId": 2001,
+                "clientOrderId": "dl-long",
+                "type": "MARKET",
+                "side": "SELL",
+                "origQty": "0.02",
+                "status": "FILLED",
+            },
+            {
+                "orderId": 2002,
+                "clientOrderId": "dl-short",
+                "type": "MARKET",
+                "side": "BUY",
+                "origQty": "0.30",
+                "status": "FILLED",
+            },
+        ]
+
+        notifier = MagicMock()
+        manager = PositionManager(
+            client=client,
+            store=self.store,
+            notifier=notifier,
+            sl_liq_buffer_pct=1.0,
+            trigger_price_type="CONTRACT_PRICE",
+            daily_loss_cut_scope="exchange",
+        )
+
+        summary = manager.run_daily_loss_cut()
+        self.assertEqual(summary["total"], 2)
+        self.assertEqual(summary["closed_loss_cut"], 2)
+        self.assertEqual(summary["errors"], 0)
+
+        self.assertEqual(client.create_order.call_count, 2)
+        first_order = client.create_order.call_args_list[0].kwargs
+        self.assertEqual(first_order["symbol"], "BTCUSDT")
+        self.assertEqual(first_order["side"], "SELL")
+        self.assertEqual(first_order["positionSide"], "LONG")
+        self.assertNotIn("reduceOnly", first_order)
+
+        second_order = client.create_order.call_args_list[1].kwargs
+        self.assertEqual(second_order["symbol"], "ETHUSDT")
+        self.assertEqual(second_order["side"], "BUY")
+        self.assertEqual(second_order["positionSide"], "SHORT")
+        self.assertNotIn("reduceOnly", second_order)
+
+        notifier.send.assert_called_once()
+        title, content = notifier.send.call_args.args
+        self.assertEqual(title, "【Top10做空】11:55浮亏止损汇总")
+        self.assertIn("| closed_loss_cut | 2 |", content)
+
     def _insert_open_position(
         self,
         symbol: str,
