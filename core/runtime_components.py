@@ -114,6 +114,25 @@ def create_components(
             0,
             strategy_cfg.getint("ranker_min_request_interval_ms", fallback=20),
         ),
+        rebalance_enabled=strategy_cfg.getboolean("rebalance_enabled", fallback=False),
+        rebalance_pre_entry_reduce=strategy_cfg.getboolean("rebalance_pre_entry_reduce", fallback=True),
+        rebalance_after_entry=strategy_cfg.getboolean("rebalance_after_entry", fallback=True),
+        rebalance_utilization=strategy_cfg.getfloat("rebalance_utilization", fallback=0.9),
+        rebalance_deadband_pct=strategy_cfg.getfloat("rebalance_deadband_pct", fallback=0.10),
+        rebalance_min_adjust_notional_usdt=strategy_cfg.getfloat(
+            "rebalance_min_adjust_notional_usdt",
+            fallback=20.0,
+        ),
+        rebalance_max_single_adjust_pct=strategy_cfg.getfloat(
+            "rebalance_max_single_adjust_pct",
+            fallback=0.40,
+        ),
+        rebalance_max_adjust_orders=strategy_cfg.getint("rebalance_max_adjust_orders", fallback=30),
+        rebalance_mode=strategy_cfg.get("rebalance_mode", fallback="equal_risk").strip(),
+        rebalance_age_decay_half_life_hours=strategy_cfg.getfloat(
+            "rebalance_age_decay_half_life_hours",
+            fallback=36.0,
+        ),
     )
 
     manager = PositionManager(

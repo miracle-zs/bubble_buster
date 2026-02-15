@@ -1,8 +1,9 @@
 import logging
+import math
 import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
 from uuid import uuid4
 
 from core.state_store import StateStore
@@ -33,8 +34,20 @@ class PlannedOrder:
     qty: float
 
 
+@dataclass(frozen=True)
+class RebalancePlan:
+    position_id: int
+    symbol: str
+    side: str
+    qty: float
+    ref_price: float
+    est_notional: float
+
+
 class Top10ShortStrategy:
     INSUFFICIENT_MARGIN_ERROR_CODES = {-2019, -2027, -2028}
+    REBALANCE_MODE_EQUAL_RISK = "equal_risk"
+    REBALANCE_MODE_AGE_DECAY = "age_decay"
 
     def __init__(
         self,
@@ -56,6 +69,16 @@ class Top10ShortStrategy:
         ranker_max_workers: int,
         ranker_weight_limit_per_minute: int,
         ranker_min_request_interval_ms: int,
+        rebalance_enabled: bool = False,
+        rebalance_pre_entry_reduce: bool = True,
+        rebalance_after_entry: bool = True,
+        rebalance_utilization: float = 0.9,
+        rebalance_deadband_pct: float = 0.10,
+        rebalance_min_adjust_notional_usdt: float = 20.0,
+        rebalance_max_single_adjust_pct: float = 0.40,
+        rebalance_max_adjust_orders: int = 30,
+        rebalance_mode: str = REBALANCE_MODE_EQUAL_RISK,
+        rebalance_age_decay_half_life_hours: float = 36.0,
     ):
         self.client = client
         self.store = store
@@ -75,6 +98,16 @@ class Top10ShortStrategy:
         self.ranker_max_workers = max(1, int(ranker_max_workers))
         self.ranker_weight_limit_per_minute = max(100, int(ranker_weight_limit_per_minute))
         self.ranker_min_request_interval_ms = max(0, int(ranker_min_request_interval_ms))
+        self.rebalance_enabled = bool(rebalance_enabled)
+        self.rebalance_pre_entry_reduce = bool(rebalance_pre_entry_reduce)
+        self.rebalance_after_entry = bool(rebalance_after_entry)
+        self.rebalance_utilization = min(0.99, max(0.1, float(rebalance_utilization)))
+        self.rebalance_deadband_pct = min(0.5, max(0.0, float(rebalance_deadband_pct)))
+        self.rebalance_min_adjust_notional_usdt = max(1.0, float(rebalance_min_adjust_notional_usdt))
+        self.rebalance_max_single_adjust_pct = min(0.95, max(0.05, float(rebalance_max_single_adjust_pct)))
+        self.rebalance_max_adjust_orders = max(1, int(rebalance_max_adjust_orders))
+        self.rebalance_mode = self._normalize_rebalance_mode(rebalance_mode)
+        self.rebalance_age_decay_half_life_hours = max(1.0, float(rebalance_age_decay_half_life_hours))
 
     def run_entry(self, trade_day_utc: Optional[str] = None) -> Dict[str, object]:
         trade_day = (trade_day_utc or "").strip() or datetime.now(timezone.utc).date().isoformat()
@@ -101,6 +134,8 @@ class Top10ShortStrategy:
         exit_setup_failure_details: List[str] = []
         risk_off_details: List[str] = []
         shrink_retry_details: List[str] = []
+        pre_rebalance_summary: Optional[Dict[str, object]] = None
+        post_rebalance_summary: Optional[Dict[str, object]] = None
 
         try:
             open_symbols = self.store.list_open_symbols()
@@ -165,6 +200,15 @@ class Top10ShortStrategy:
                 )
 
             if not candidates:
+                if self.rebalance_enabled and self.rebalance_after_entry:
+                    try:
+                        post_rebalance_summary = self._rebalance_to_target(
+                            target_count=max(1, len(open_symbols)),
+                            reduce_only=False,
+                            reason_tag="post",
+                        )
+                    except Exception as exc:  # noqa: BLE001
+                        LOGGER.exception("Post-entry rebalance failed when no new candidates: %s", exc)
                 self.store.finalize_run(run_id, "SUCCESS", "All symbols already have open strategy positions")
                 self.notifier.send(
                     "【Top10做空】本次未开仓",
@@ -176,6 +220,10 @@ class Top10ShortStrategy:
                         extra_rows=[
                             ("跳过币种数", len(skipped_symbols)),
                             ("跳过币种", self._join_symbols(skipped_symbols)),
+                            (
+                                "再平衡(后校准)",
+                                self._format_rebalance_summary(post_rebalance_summary),
+                            ),
                         ],
                     ),
                 )
@@ -186,7 +234,21 @@ class Top10ShortStrategy:
                     "failed": 0,
                     "entry_failed": 0,
                     "exit_setup_failed": 0,
+                    "rebalance_pre": pre_rebalance_summary,
+                    "rebalance_post": post_rebalance_summary,
                 }
+
+            if self.rebalance_enabled and self.rebalance_pre_entry_reduce:
+                expected_total_positions = len(open_symbols) + len(candidates)
+                if expected_total_positions > 0:
+                    try:
+                        pre_rebalance_summary = self._rebalance_to_target(
+                            target_count=expected_total_positions,
+                            reduce_only=True,
+                            reason_tag="pre",
+                        )
+                    except Exception as exc:  # noqa: BLE001
+                        LOGGER.exception("Pre-entry rebalance failed: %s", exc)
 
             available_balance = self.client.get_available_balance("USDT")
             if available_balance <= 0:
@@ -344,12 +406,26 @@ class Top10ShortStrategy:
                         )
                     )
 
+            if self.rebalance_enabled and self.rebalance_after_entry:
+                open_positions_after_entry = self.store.list_open_positions()
+                if open_positions_after_entry:
+                    try:
+                        post_rebalance_summary = self._rebalance_to_target(
+                            target_count=len(open_positions_after_entry),
+                            reduce_only=False,
+                            reason_tag="post",
+                        )
+                    except Exception as exc:  # noqa: BLE001
+                        LOGGER.exception("Post-entry rebalance failed: %s", exc)
+
             failed_count = entry_failed_count + exit_setup_failed_count
             summary = (
                 f"run_id={run_id}, opened={opened_count}, failed={failed_count}, "
                 f"entry_failed={entry_failed_count}, exit_setup_failed={exit_setup_failed_count}, "
                 f"skipped_existing={len(skipped_symbols)}, failed_notional={failed_notional:.4f}, "
-                f"fee_buffer_pct={self.entry_fee_buffer_pct:.2f}, shrink_retry_success={len(shrink_retry_details)}"
+                f"fee_buffer_pct={self.entry_fee_buffer_pct:.2f}, shrink_retry_success={len(shrink_retry_details)}, "
+                f"rebalance_pre={self._format_rebalance_summary(pre_rebalance_summary)}, "
+                f"rebalance_post={self._format_rebalance_summary(post_rebalance_summary)}"
             )
             run_status = "SUCCESS" if opened_count > 0 or failed_count == 0 else "FAILED"
             self.store.finalize_run(run_id, run_status, summary)
@@ -384,6 +460,8 @@ class Top10ShortStrategy:
                 "entry_failed": entry_failed_count,
                 "exit_setup_failed": exit_setup_failed_count,
                 "skipped": len(skipped_symbols),
+                "rebalance_pre": pre_rebalance_summary,
+                "rebalance_post": post_rebalance_summary,
             }
 
         except Exception as exc:  # noqa: BLE001
@@ -581,6 +659,344 @@ class Top10ShortStrategy:
             "qty": qty,
             "close_order_id": close_order.get("orderId"),
         }
+
+    def _rebalance_to_target(
+        self,
+        target_count: int,
+        reduce_only: bool,
+        reason_tag: str,
+    ) -> Dict[str, object]:
+        summary: Dict[str, object] = {
+            "target_count": max(0, int(target_count)),
+            "planned": 0,
+            "adjusted": 0,
+            "errors": 0,
+            "reduced_notional": 0.0,
+            "added_notional": 0.0,
+            "target_notional_per_position": 0.0,
+            "equity_usdt": 0.0,
+            "mode": self.rebalance_mode,
+            "virtual_slots": 0,
+        }
+        if target_count <= 0:
+            return summary
+
+        positions = self.store.list_open_positions()
+        if not positions:
+            return summary
+
+        risk_rows = self.client.get_position_risk()
+        risk_map: Dict[str, Dict[str, Any]] = {
+            str(row.get("symbol") or "").strip(): row
+            for row in risk_rows
+            if str(row.get("symbol") or "").strip()
+        }
+        equity_usdt = self._compute_account_equity_usdt(risk_rows=risk_rows)
+        if equity_usdt <= 0:
+            return summary
+
+        target_gross_notional = equity_usdt * float(self.leverage) * self.rebalance_utilization
+        if target_gross_notional <= 0:
+            return summary
+        target_notional_per_position = target_gross_notional / float(target_count)
+        target_notional_by_position, virtual_slots = self._build_target_notional_map(
+            positions=positions,
+            target_count=target_count,
+            target_gross_notional=target_gross_notional,
+        )
+        summary["equity_usdt"] = round(equity_usdt, 6)
+        summary["target_notional_per_position"] = round(target_notional_per_position, 6)
+        summary["virtual_slots"] = virtual_slots
+
+        reduce_plans: List[RebalancePlan] = []
+        increase_plans: List[RebalancePlan] = []
+        for pos in positions:
+            if len(reduce_plans) + len(increase_plans) >= self.rebalance_max_adjust_orders:
+                break
+            position_id = int(pos["id"])
+            plan = self._build_rebalance_plan(
+                pos=pos,
+                risk_map=risk_map,
+                target_notional=target_notional_by_position.get(position_id, target_notional_per_position),
+                reduce_only=reduce_only,
+            )
+            if plan is None:
+                continue
+            if plan.side == "BUY":
+                reduce_plans.append(plan)
+            else:
+                increase_plans.append(plan)
+
+        summary["planned"] = len(reduce_plans) + len(increase_plans)
+        if not summary["planned"]:
+            return summary
+
+        touched_position_ids: Set[int] = set()
+        reduced_notional = 0.0
+        added_notional = 0.0
+
+        for plan in reduce_plans + increase_plans:
+            try:
+                if plan.side == "SELL":
+                    self.client.ensure_isolated_and_leverage(plan.symbol, self.leverage)
+                order_params: Dict[str, object] = {
+                    "symbol": plan.symbol,
+                    "side": plan.side,
+                    "type": "MARKET",
+                    "quantity": self.client.format_order_qty(plan.symbol, plan.qty),
+                    "newClientOrderId": self._new_client_id(f"rb{reason_tag}", plan.symbol),
+                    "newOrderRespType": "RESULT",
+                }
+                if plan.side == "BUY":
+                    order_params["reduceOnly"] = True
+                order = self.client.create_order(**order_params)
+                self.store.add_order_event(
+                    symbol=plan.symbol,
+                    position_id=plan.position_id,
+                    event_time_utc=self._utc_now_iso(),
+                    order_payload=order,
+                )
+                if plan.side == "BUY":
+                    reduced_notional += plan.est_notional
+                else:
+                    added_notional += plan.est_notional
+                if self._sync_position_after_adjustment(
+                    position_id=plan.position_id,
+                    symbol=plan.symbol,
+                    fallback_price=plan.ref_price,
+                ):
+                    touched_position_ids.add(plan.position_id)
+                summary["adjusted"] = int(summary["adjusted"]) + 1
+            except Exception as exc:  # noqa: BLE001
+                summary["errors"] = int(summary["errors"]) + 1
+                self.store.set_position_error(plan.position_id, f"rebalance: {exc}")
+                LOGGER.exception(
+                    "Rebalance order failed for symbol=%s position_id=%s side=%s: %s",
+                    plan.symbol,
+                    plan.position_id,
+                    plan.side,
+                    exc,
+                )
+
+        summary["reduced_notional"] = round(reduced_notional, 6)
+        summary["added_notional"] = round(added_notional, 6)
+
+        if touched_position_ids:
+            self._refresh_exit_orders_for_positions(touched_position_ids)
+        return summary
+
+    def _build_rebalance_plan(
+        self,
+        pos: Dict[str, object],
+        risk_map: Dict[str, Dict[str, Any]],
+        target_notional: float,
+        reduce_only: bool,
+    ) -> Optional[RebalancePlan]:
+        position_id = int(pos["id"])
+        symbol = str(pos["symbol"])
+        risk = risk_map.get(symbol)
+        if not risk:
+            return None
+
+        position_amt = self._safe_float(risk.get("positionAmt"), default=0.0)
+        if position_amt >= 0:
+            return None
+
+        mark_price = (
+            self._safe_positive_float(risk.get("markPrice"))
+            or self._safe_positive_float(risk.get("entryPrice"))
+            or self._safe_positive_float(pos.get("entry_price"))
+        )
+        if not mark_price:
+            return None
+
+        current_notional = abs(position_amt) * mark_price
+        if current_notional <= 0:
+            return None
+
+        deviation_notional = target_notional - current_notional
+        deadband = max(target_notional, 0.0) * self.rebalance_deadband_pct
+        if abs(deviation_notional) <= deadband:
+            return None
+        if reduce_only and deviation_notional > 0:
+            return None
+
+        max_adjust_notional = current_notional * self.rebalance_max_single_adjust_pct
+        adjust_notional = min(abs(deviation_notional), max_adjust_notional)
+        if adjust_notional < self.rebalance_min_adjust_notional_usdt:
+            return None
+
+        qty = self.client.normalize_order_qty(symbol, adjust_notional, mark_price)
+        if qty <= 0:
+            return None
+
+        side = "BUY" if deviation_notional < 0 else "SELL"
+        if reduce_only and side != "BUY":
+            return None
+
+        est_notional = qty * mark_price
+        if est_notional < self.rebalance_min_adjust_notional_usdt:
+            return None
+
+        return RebalancePlan(
+            position_id=position_id,
+            symbol=symbol,
+            side=side,
+            qty=qty,
+            ref_price=mark_price,
+            est_notional=est_notional,
+        )
+
+    def _sync_position_after_adjustment(self, position_id: int, symbol: str, fallback_price: float) -> bool:
+        position_risk = self._load_short_position(symbol)
+        if not position_risk:
+            self.store.set_position_error(position_id, "rebalance sync: short position not found")
+            return False
+
+        qty_now = abs(float(position_risk.get("positionAmt", "0") or 0))
+        if qty_now <= 0:
+            self.store.set_position_error(position_id, "rebalance sync: short position qty is zero")
+            return False
+
+        entry_price_now = self._safe_positive_float(position_risk.get("entryPrice")) or fallback_price
+        self.store.set_position_qty(position_id, qty_now, entry_price_now)
+        self.store.clear_position_error(position_id)
+        return True
+
+    def _build_target_notional_map(
+        self,
+        positions: List[Dict[str, object]],
+        target_count: int,
+        target_gross_notional: float,
+    ) -> tuple[Dict[int, float], int]:
+        if not positions or target_count <= 0 or target_gross_notional <= 0:
+            return {}, 0
+
+        target_per_position = target_gross_notional / float(target_count)
+        if self.rebalance_mode == self.REBALANCE_MODE_EQUAL_RISK:
+            return {int(pos["id"]): target_per_position for pos in positions}, max(0, target_count - len(positions))
+
+        now_utc = self._utc_now_datetime()
+        weighted_rows: List[Tuple[int, float]] = []
+        for pos in positions:
+            position_id = int(pos["id"])
+            age_hours = self._position_age_hours(pos=pos, now_utc=now_utc)
+            weight = self._age_decay_weight(age_hours=age_hours)
+            weighted_rows.append((position_id, weight))
+
+        virtual_slots = max(0, target_count - len(weighted_rows))
+        total_weight = sum(weight for _, weight in weighted_rows) + float(virtual_slots)
+        if total_weight <= 1e-12:
+            return {int(pos["id"]): target_per_position for pos in positions}, virtual_slots
+
+        target_map: Dict[int, float] = {}
+        for position_id, weight in weighted_rows:
+            target_map[position_id] = target_gross_notional * (weight / total_weight)
+        return target_map, virtual_slots
+
+    def _age_decay_weight(self, age_hours: float) -> float:
+        if age_hours <= 0:
+            return 1.0
+        half_life = max(1.0, self.rebalance_age_decay_half_life_hours)
+        decay = math.exp(-math.log(2.0) * (age_hours / half_life))
+        return max(1e-4, decay)
+
+    @classmethod
+    def _position_age_hours(cls, pos: Dict[str, object], now_utc: datetime) -> float:
+        opened_at = str(pos.get("opened_at_utc") or "").strip()
+        if not opened_at:
+            return 0.0
+        try:
+            opened_dt = cls._parse_iso_utc(opened_at)
+        except Exception:  # noqa: BLE001
+            return 0.0
+        delta_sec = (now_utc - opened_dt).total_seconds()
+        if delta_sec <= 0:
+            return 0.0
+        return delta_sec / 3600.0
+
+    @staticmethod
+    def _parse_iso_utc(text: str) -> datetime:
+        parsed = datetime.fromisoformat(text)
+        if parsed.tzinfo is None:
+            return parsed.replace(tzinfo=timezone.utc)
+        return parsed.astimezone(timezone.utc)
+
+    def _refresh_exit_orders_for_positions(self, position_ids: Set[int]) -> None:
+        open_positions = self.store.list_open_positions()
+        open_by_id = {int(row["id"]): row for row in open_positions}
+        for position_id in sorted(position_ids):
+            pos = open_by_id.get(position_id)
+            if not pos:
+                continue
+            symbol = str(pos["symbol"])
+            try:
+                self._cancel_order_if_exists(symbol, pos.get("tp_order_id"), pos.get("tp_client_order_id"))
+                self._cancel_order_if_exists(symbol, pos.get("sl_order_id"), pos.get("sl_client_order_id"))
+                self._place_exit_orders(position_id=position_id, symbol=symbol)
+                self.store.clear_position_error(position_id)
+            except Exception as exc:  # noqa: BLE001
+                self.store.set_position_error(position_id, f"rebalance_exit_refresh: {exc}")
+                LOGGER.exception(
+                    "Refresh exit orders failed for rebalance position_id=%s symbol=%s: %s",
+                    position_id,
+                    symbol,
+                    exc,
+                )
+
+    def _compute_account_equity_usdt(self, risk_rows: Optional[List[Dict[str, Any]]] = None) -> float:
+        balances = self.client.get_balance()
+        wallet_balance = 0.0
+        for item in balances:
+            if str(item.get("asset", "")).upper() != "USDT":
+                continue
+            raw = item.get("balance")
+            if raw is None:
+                raw = item.get("crossWalletBalance")
+            if raw is None:
+                raw = item.get("availableBalance")
+            wallet_balance = self._safe_float(raw, default=0.0)
+            break
+
+        rows = risk_rows if risk_rows is not None else self.client.get_position_risk()
+        unrealized_pnl = 0.0
+        for row in rows:
+            unrealized_pnl += self._safe_float(row.get("unRealizedProfit"), default=0.0)
+        return wallet_balance + unrealized_pnl
+
+    def _cancel_order_if_exists(self, symbol: str, order_id: object, client_order_id: object) -> None:
+        if not order_id and not client_order_id:
+            return
+        try:
+            parsed_order_id = int(order_id) if order_id else None
+            parsed_client_order_id = str(client_order_id) if client_order_id else None
+            self.client.cancel_order(
+                symbol=symbol,
+                order_id=parsed_order_id,
+                orig_client_order_id=parsed_client_order_id,
+            )
+        except BinanceAPIError as exc:
+            LOGGER.debug("cancel_order ignored for rebalance %s/%s/%s: %s", symbol, order_id, client_order_id, exc)
+
+    @staticmethod
+    def _format_rebalance_summary(summary: Optional[Dict[str, object]]) -> str:
+        if not summary:
+            return "-"
+        return (
+            f"mode={summary.get('mode', '-')}, "
+            f"planned={int(summary.get('planned', 0))}, "
+            f"adjusted={int(summary.get('adjusted', 0))}, "
+            f"errors={int(summary.get('errors', 0))}"
+        )
+
+    @classmethod
+    def _normalize_rebalance_mode(cls, raw_mode: str) -> str:
+        normalized = str(raw_mode or "").strip().lower()
+        if normalized in {cls.REBALANCE_MODE_EQUAL_RISK, cls.REBALANCE_MODE_AGE_DECAY}:
+            return normalized
+        if normalized:
+            LOGGER.warning("Invalid rebalance_mode=%s, fallback to %s", normalized, cls.REBALANCE_MODE_EQUAL_RISK)
+        return cls.REBALANCE_MODE_EQUAL_RISK
 
     def _build_entry_notification(
         self,
@@ -856,7 +1272,7 @@ class Top10ShortStrategy:
             )
 
     @staticmethod
-    def _safe_positive_float(value: Optional[str]) -> Optional[float]:
+    def _safe_positive_float(value: object) -> Optional[float]:
         if value is None:
             return None
         try:
@@ -866,6 +1282,15 @@ class Top10ShortStrategy:
             return number
         except (TypeError, ValueError):
             return None
+
+    @staticmethod
+    def _safe_float(value: object, default: float = 0.0) -> float:
+        try:
+            if value is None:
+                return default
+            return float(value)
+        except (TypeError, ValueError):
+            return default
 
     @staticmethod
     def _new_client_id(tag: str, symbol: str) -> str:
