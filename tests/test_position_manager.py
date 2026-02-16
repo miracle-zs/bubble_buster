@@ -26,6 +26,11 @@ class PositionManagerTest(unittest.TestCase):
     def tearDown(self) -> None:
         self.temp_dir.cleanup()
 
+    def test_new_client_id_handles_non_ascii_symbol(self) -> None:
+        client_id = PositionManager._new_client_id("dl", "币安人生USDT")
+        self.assertLessEqual(len(client_id), 36)
+        self.assertRegex(client_id, r"^[.A-Z:/a-z0-9_-]{1,36}$")
+
     def test_dynamic_stop_loss_update(self) -> None:
         position_id = self._insert_open_position(
             symbol="BTCUSDT",

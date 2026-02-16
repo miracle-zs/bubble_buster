@@ -1,4 +1,5 @@
 import logging
+import hashlib
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 from uuid import uuid4
@@ -633,8 +634,21 @@ class PositionManager:
             return default
 
     @staticmethod
+    def _sanitize_client_id_part(value: str, fallback: str, max_len: int) -> str:
+        allowed = set("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-")
+        cleaned = "".join(ch for ch in str(value) if ch in allowed)
+        if not cleaned:
+            cleaned = fallback
+        return cleaned[: max(1, int(max_len))]
+
+    @staticmethod
     def _new_client_id(tag: str, symbol: str) -> str:
-        return f"t10s-{tag}-{symbol}-{uuid4().hex[:8]}"[:36]
+        tag_part = PositionManager._sanitize_client_id_part(tag, fallback="x", max_len=8).lower()
+        symbol_part = PositionManager._sanitize_client_id_part(symbol, fallback="sym", max_len=6).upper()
+        symbol_hash = hashlib.sha1(str(symbol).encode("utf-8")).hexdigest()[:6]
+        nonce = uuid4().hex[:8]
+        # Binance Futures requires newClientOrderId to match ^[.A-Z:/a-z0-9_-]{1,36}$.
+        return f"t10s-{tag_part}-{symbol_part}-{symbol_hash}-{nonce}"
 
     @staticmethod
     def _utc_now_iso() -> str:

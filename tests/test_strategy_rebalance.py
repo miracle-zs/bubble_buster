@@ -59,6 +59,11 @@ class StrategyRebalanceTest(unittest.TestCase):
 
         return _create_order
 
+    def test_new_client_id_handles_non_ascii_symbol(self) -> None:
+        client_id = Top10ShortStrategy._new_client_id("ent", "币安人生USDT")
+        self.assertLessEqual(len(client_id), 36)
+        self.assertRegex(client_id, r"^[.A-Z:/a-z0-9_-]{1,36}$")
+
     def test_rebalance_reduce_only_sells_nothing_and_reduces_old_positions(self) -> None:
         client = MagicMock()
         client.get_balance.return_value = [{"asset": "USDT", "balance": "100"}]
