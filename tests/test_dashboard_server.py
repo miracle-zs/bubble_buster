@@ -1,7 +1,7 @@
 import tempfile
 import unittest
 import sqlite3
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Dict
 from pathlib import Path
 
@@ -301,6 +301,31 @@ class DashboardServerTest(unittest.TestCase):
         self.assertEqual(round(strategy_curve[0]["equity"], 8), round(balance_curve[0]["equity"], 8))
         self.assertEqual(round(strategy_curve[1]["equity"], 8), round(balance_curve[1]["equity"], 8))
         self.assertAlmostEqual(strategy_stats["net_cashflow_usdt"], 0.0)
+
+    def test_curve_window_uses_resample_instead_of_tail_limit(self) -> None:
+        base = datetime.now(timezone.utc).replace(second=0, microsecond=0) - timedelta(minutes=179)
+        for i in range(180):
+            ts = (base + timedelta(minutes=i)).isoformat()
+            equity = 1000.0 + (35.0 if i % 2 == 0 else -22.0) + i * 0.1
+            self.store.add_wallet_snapshot(ts, equity, source="API")
+
+        provider = DashboardDataProvider(
+            db_path=self.db_path,
+            log_file=self.log_file,
+            timezone_name="UTC",
+            entry_hour=7,
+            entry_minute=40,
+        )
+        snapshot = provider.snapshot(log_lines=0, window_hours=12, curve_points=100)
+        balance_curve = snapshot["balance_curve"]
+        strategy_curve = snapshot["strategy_equity_curve"]
+
+        self.assertLessEqual(len(balance_curve), 100)
+        self.assertLessEqual(len(strategy_curve), 100)
+        self.assertEqual(balance_curve[0]["t"], base.isoformat())
+        self.assertEqual(balance_curve[-1]["t"], (base + timedelta(minutes=179)).isoformat())
+        self.assertEqual(strategy_curve[0]["t"], base.isoformat())
+        self.assertEqual(strategy_curve[-1]["t"], (base + timedelta(minutes=179)).isoformat())
 
     def test_close_price_fetcher_falls_back_to_tp_sl_order_ids(self) -> None:
         run_id, _ = self.store.create_run("2026-02-15")

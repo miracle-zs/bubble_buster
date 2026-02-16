@@ -297,31 +297,86 @@ class DashboardDataProvider:
             "current_drawdown_pct": round(current_drawdown_pct, 6),
         }
 
+    def _resample_curve(
+        self,
+        curve: List[Dict[str, Any]],
+        max_points: int,
+    ) -> List[Dict[str, Any]]:
+        target = max(2, int(max_points))
+        total_points = len(curve)
+        if total_points <= target:
+            return [dict(point) for point in curve]
+        if target == 2:
+            return [dict(curve[0]), dict(curve[-1])]
+
+        interior_count = total_points - 2
+        # Bucket by time and keep first/min/max/last in each bucket to preserve shape.
+        bucket_count = max(1, target // 4)
+        selected: List[int] = [0]
+        for bucket in range(bucket_count):
+            start = 1 + int(bucket * interior_count / bucket_count)
+            end = 1 + int((bucket + 1) * interior_count / bucket_count)
+            if end <= start:
+                continue
+            indices = list(range(start, end))
+            min_idx = min(indices, key=lambda idx: self._safe_float(curve[idx].get("equity")) or 0.0)
+            max_idx = max(indices, key=lambda idx: self._safe_float(curve[idx].get("equity")) or 0.0)
+            selected.extend(sorted({indices[0], min_idx, max_idx, indices[-1]}))
+        selected.append(total_points - 1)
+        selected = sorted(set(selected))
+        if len(selected) <= target:
+            return [dict(curve[idx]) for idx in selected]
+
+        interior = selected[1:-1]
+        keep_interior = max(0, target - 2)
+        sampled_interior: List[int] = []
+        if keep_interior > 0 and interior:
+            if keep_interior >= len(interior):
+                sampled_interior = interior
+            elif keep_interior == 1:
+                sampled_interior = [interior[len(interior) // 2]]
+            else:
+                step = (len(interior) - 1) / float(keep_interior - 1)
+                used = set()
+                for i in range(keep_interior):
+                    pick = interior[int(round(i * step))]
+                    if pick in used:
+                        continue
+                    sampled_interior.append(pick)
+                    used.add(pick)
+                if len(sampled_interior) < keep_interior:
+                    for pick in interior:
+                        if pick in used:
+                            continue
+                        sampled_interior.append(pick)
+                        used.add(pick)
+                        if len(sampled_interior) >= keep_interior:
+                            break
+                sampled_interior = sorted(sampled_interior[:keep_interior])
+
+        final_indices = [0] + sampled_interior + [total_points - 1]
+        return [dict(curve[idx]) for idx in final_indices]
+
     def _query_wallet_rows(
         self,
         conn: sqlite3.Connection,
         window_start_utc: Optional[str],
-        max_points: int,
     ) -> List[Dict[str, Any]]:
         params: List[Any] = []
         where_sql = ""
         if window_start_utc:
             where_sql = "WHERE captured_at_utc >= ?"
             params.append(window_start_utc)
-        params.append(max(1, int(max_points)))
-        rows = self._query_rows(
+        return self._query_rows(
             conn,
             f"""
             SELECT id, captured_at_utc, balance_usdt
             FROM wallet_snapshots
             {where_sql}
-            ORDER BY captured_at_utc DESC, id DESC
-            LIMIT ?
+            ORDER BY captured_at_utc ASC, id ASC
             """,
             tuple(params),
         )
-        rows.reverse()
-        return rows
 
     def _build_balance_curve(
         self,
@@ -334,7 +389,6 @@ class DashboardDataProvider:
         wallet_rows = self._query_wallet_rows(
             conn=conn,
             window_start_utc=window_start_utc,
-            max_points=max_points,
         )
 
         curve: List[Dict[str, Any]] = []
@@ -362,6 +416,7 @@ class DashboardDataProvider:
                 }
             ]
 
+        curve = self._resample_curve(curve, max_points)
         dd = self._apply_drawdown(curve)
         total_realized_pnl = float(curve[-1]["cum_pnl"]) if curve else 0.0
 
@@ -544,7 +599,6 @@ class DashboardDataProvider:
         wallet_rows = self._query_wallet_rows(
             conn=conn,
             window_start_utc=window_start_utc,
-            max_points=max_points,
         )
         cashflow_rows: List[Dict[str, Any]] = []
         try:
@@ -627,6 +681,7 @@ class DashboardDataProvider:
             ]
             baseline_equity = 0.0
 
+        curve = self._resample_curve(curve, max_points)
         dd = self._apply_drawdown(curve)
         trade_stats = self._load_trade_outcome_stats(conn, now_utc)
         stats = {
@@ -1701,11 +1756,21 @@ DASHBOARD_HTML = """<!doctype html>
     target.innerHTML = html;
   }
 
+  function curvePointsForWindow(hours) {
+    var h = Number(hours);
+    if (!Number.isFinite(h) || h <= 0) return 600;
+    // Wallet snapshots are typically per-minute; request more points for longer windows.
+    var estimatedPoints = Math.ceil(h * 60);
+    return Math.max(600, Math.min(5000, estimatedPoints));
+  }
+
   function fetchDashboard(callback) {
     var xhr = new XMLHttpRequest();
+    var curvePoints = curvePointsForWindow(currentWindowHours);
     var q = [
       "_=" + encodeURIComponent(String(new Date().getTime())),
-      "window_hours=" + encodeURIComponent(String(currentWindowHours))
+      "window_hours=" + encodeURIComponent(String(currentWindowHours)),
+      "curve_points=" + encodeURIComponent(String(curvePoints))
     ];
     xhr.open("GET", api + "?" + q.join("&"), true);
     xhr.onreadystatechange = function () {
