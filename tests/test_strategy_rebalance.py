@@ -1,11 +1,12 @@
 import importlib.util
 import unittest
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 if importlib.util.find_spec("requests") is None:
     raise unittest.SkipTest("requests is not installed")
 
 from core.strategy_top10_short import Top10ShortStrategy
+from infra.binance_futures_client import BinanceAPIError
 
 
 class StrategyRebalanceTest(unittest.TestCase):
@@ -103,8 +104,24 @@ class StrategyRebalanceTest(unittest.TestCase):
         client = MagicMock()
         client.get_balance.return_value = [{"asset": "USDT", "balance": "100"}]
         client.get_position_risk.return_value = [
-            {"symbol": "AUSDT", "positionAmt": "-10", "markPrice": "10", "entryPrice": "10", "unRealizedProfit": "0"},
-            {"symbol": "BUSDT", "positionAmt": "-2", "markPrice": "10", "entryPrice": "10", "unRealizedProfit": "0"},
+            {
+                "symbol": "AUSDT",
+                "positionAmt": "-10",
+                "markPrice": "10",
+                "entryPrice": "10",
+                "unRealizedProfit": "0",
+                "marginType": "isolated",
+                "leverage": "2",
+            },
+            {
+                "symbol": "BUSDT",
+                "positionAmt": "-2",
+                "markPrice": "10",
+                "entryPrice": "10",
+                "unRealizedProfit": "0",
+                "marginType": "isolated",
+                "leverage": "2",
+            },
         ]
         client.normalize_order_qty.side_effect = lambda _s, notional, price: notional / price
         client.format_order_qty.side_effect = lambda _s, qty: str(qty)
@@ -134,7 +151,60 @@ class StrategyRebalanceTest(unittest.TestCase):
         self.assertEqual(client.create_order.call_args_list[1].kwargs["side"], "SELL")
         self.assertTrue(client.create_order.call_args_list[0].kwargs["reduceOnly"])
         self.assertNotIn("reduceOnly", client.create_order.call_args_list[1].kwargs)
-        client.ensure_isolated_and_leverage.assert_called_once_with("BUSDT", 2)
+        client.ensure_isolated_and_leverage.assert_not_called()
+
+    def test_rebalance_sell_continues_when_ensure_hits_open_orders_error(self) -> None:
+        client = MagicMock()
+        client.get_balance.return_value = [{"asset": "USDT", "balance": "100"}]
+        client.get_position_risk.return_value = [
+            {
+                "symbol": "AUSDT",
+                "positionAmt": "-10",
+                "markPrice": "10",
+                "entryPrice": "10",
+                "unRealizedProfit": "0",
+                "marginType": "isolated",
+                "leverage": "2",
+            },
+            {
+                "symbol": "BUSDT",
+                "positionAmt": "-2",
+                "markPrice": "10",
+                "entryPrice": "10",
+                "unRealizedProfit": "0",
+                "marginType": "cross",
+                "leverage": "1",
+            },
+        ]
+        client.normalize_order_qty.side_effect = lambda _s, notional, price: notional / price
+        client.format_order_qty.side_effect = lambda _s, qty: str(qty)
+        client.create_order.side_effect = self._mock_order_factory()
+        client.ensure_isolated_and_leverage.side_effect = BinanceAPIError(
+            code=-4067,
+            message="Position side cannot be changed if there exists open orders.",
+        )
+
+        store = MagicMock()
+        store.list_open_positions.return_value = [
+            {"id": 1, "symbol": "AUSDT", "entry_price": 10.0, "tp_order_id": None, "sl_order_id": None},
+            {"id": 2, "symbol": "BUSDT", "entry_price": 10.0, "tp_order_id": None, "sl_order_id": None},
+        ]
+
+        strategy = self._build_strategy(client, store)
+        strategy._load_short_position = MagicMock(
+            side_effect=[
+                {"symbol": "AUSDT", "positionAmt": "-9", "entryPrice": "10"},
+                {"symbol": "BUSDT", "positionAmt": "-3.9", "entryPrice": "10"},
+            ]
+        )
+        strategy._refresh_exit_orders_for_positions = MagicMock()
+
+        summary = strategy._rebalance_to_target(target_count=2, reduce_only=False, reason_tag="post")
+
+        self.assertEqual(int(summary["errors"]), 0)
+        self.assertEqual(int(summary["adjusted"]), 2)
+        self.assertEqual(client.create_order.call_count, 2)
+        self.assertEqual(client.create_order.call_args_list[1].kwargs["side"], "SELL")
 
     def test_rebalance_skips_when_within_deadband(self) -> None:
         client = MagicMock()
@@ -239,6 +309,76 @@ class StrategyRebalanceTest(unittest.TestCase):
         self.assertEqual(int(summary["planned"]), 0)
         self.assertEqual(int(summary["adjusted"]), 0)
         client.create_order.assert_not_called()
+
+    @patch("core.strategy_top10_short.build_top_gainers")
+    def test_entry_uses_equity_target_notional_when_rebalance_enabled(self, mock_top_gainers) -> None:
+        mock_top_gainers.return_value = [
+            {
+                "symbol": "NEWUSDT",
+                "change": "11.5",
+                "current_price": "10",
+                "volume": "12345",
+            }
+        ]
+
+        client = MagicMock()
+        client.session = MagicMock()
+        client.base_url = "https://fapi.binance.com"
+        client.get_available_balance.return_value = 500.0
+        client.get_balance.return_value = [{"asset": "USDT", "balance": "920"}]
+        client.get_position_risk.return_value = [
+            {
+                "symbol": "OLDUSDT",
+                "positionAmt": "-1",
+                "markPrice": "80",
+                "entryPrice": "80",
+                "unRealizedProfit": "0",
+            }
+        ]
+        client.normalize_order_qty.return_value = 1.0
+
+        store = MagicMock()
+        store.create_run.return_value = ("run-1", True)
+        store.list_open_symbols.return_value = {"OLDUSDT"}
+        store.insert_position.return_value = 1001
+        store.list_open_positions.return_value = [{"id": 1001, "symbol": "NEWUSDT"}]
+
+        strategy = self._build_strategy(client, store, rebalance_utilization=0.9)
+        strategy.top_n = 1
+        strategy._load_short_position = MagicMock(
+            return_value={
+                "symbol": "NEWUSDT",
+                "entryPrice": "10",
+                "liquidationPrice": "12",
+                "positionAmt": "-1",
+            }
+        )
+        strategy._place_market_short_with_shrink_retry = MagicMock(
+            return_value=(
+                {
+                    "orderId": 2001,
+                    "clientOrderId": "ent-new-1",
+                    "status": "FILLED",
+                    "origQty": "1",
+                    "side": "SELL",
+                    "type": "MARKET",
+                    "symbol": "NEWUSDT",
+                },
+                0,
+            )
+        )
+        strategy._place_exit_orders = MagicMock()
+        strategy._rebalance_to_target = MagicMock(return_value={"planned": 0, "adjusted": 0, "errors": 0, "mode": "equal_risk"})
+
+        result = strategy.run_entry(trade_day_utc="2026-02-16-test-entry-notional")
+
+        self.assertEqual(result["status"], "SUCCESS")
+        target_notional_used = float(strategy._place_market_short_with_shrink_retry.call_args.kwargs["target_notional"])
+        expected_total_positions = 2.0  # 1 old + 1 new
+        expected_target_notional = 920.0 * 2.0 * 0.9 / expected_total_positions
+        self.assertAlmostEqual(target_notional_used, expected_target_notional, places=6)
+        old_available_formula_notional = 500.0 * 0.99 / 10.0 * 2.0
+        self.assertGreater(target_notional_used, old_available_formula_notional)
 
 
 if __name__ == "__main__":

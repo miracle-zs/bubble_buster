@@ -195,6 +195,7 @@ class Top10ShortStrategy:
                 open_symbols=open_symbols,
                 target_count=self.top_n,
             )
+            expected_total_positions = len(open_symbols) + len(candidates)
 
             if len(candidates) < self.top_n:
                 LOGGER.warning(
@@ -246,7 +247,6 @@ class Top10ShortStrategy:
                 }
 
             if self.rebalance_enabled and self.rebalance_pre_entry_reduce:
-                expected_total_positions = len(open_symbols) + len(candidates)
                 if expected_total_positions > 0:
                     try:
                         pre_rebalance_summary = self._rebalance_to_target(
@@ -305,6 +305,26 @@ class Top10ShortStrategy:
 
             base_margin = effective_balance / float(self.allocation_splits)
             target_notional = base_margin * float(self.leverage)
+            entry_target_mode = "available_balance"
+            if self.rebalance_enabled and self.rebalance_after_entry and expected_total_positions > 0:
+                try:
+                    risk_rows_for_entry_sizing = self.client.get_position_risk()
+                    equity_for_entry_sizing = self._compute_account_equity_usdt(
+                        risk_rows=risk_rows_for_entry_sizing
+                    )
+                    if equity_for_entry_sizing > 0:
+                        rebalance_target_notional = (
+                            equity_for_entry_sizing
+                            * float(self.leverage)
+                            * self.rebalance_utilization
+                            / float(expected_total_positions)
+                        )
+                        if rebalance_target_notional > 0:
+                            target_notional = rebalance_target_notional
+                            base_margin = target_notional / float(self.leverage)
+                            entry_target_mode = "equity_rebalance"
+                except Exception as exc:  # noqa: BLE001
+                    LOGGER.exception("Failed to compute entry target notional from equity rebalance target: %s", exc)
 
             successful_positions: List[Dict[str, object]] = []
             failed_notional = 0.0
@@ -433,6 +453,7 @@ class Top10ShortStrategy:
                 f"entry_failed={entry_failed_count}, exit_setup_failed={exit_setup_failed_count}, "
                 f"skipped_existing={len(skipped_symbols)}, failed_notional={failed_notional:.4f}, "
                 f"fee_buffer_pct={self.entry_fee_buffer_pct:.2f}, shrink_retry_success={len(shrink_retry_details)}, "
+                f"entry_target_mode={entry_target_mode}, entry_target_notional={target_notional:.4f}, "
                 f"rebalance_pre={self._format_rebalance_summary(pre_rebalance_summary)}, "
                 f"rebalance_post={self._format_rebalance_summary(post_rebalance_summary)}"
             )
@@ -816,7 +837,7 @@ class Top10ShortStrategy:
         for plan in reduce_plans + increase_plans:
             try:
                 if plan.side == "SELL":
-                    self.client.ensure_isolated_and_leverage(plan.symbol, self.leverage)
+                    self._ensure_sell_mode_for_rebalance(symbol=plan.symbol, risk=risk_map.get(plan.symbol))
                 order_params: Dict[str, object] = {
                     "symbol": plan.symbol,
                     "side": plan.side,
@@ -1108,6 +1129,28 @@ class Top10ShortStrategy:
         for row in rows:
             unrealized_pnl += self._safe_float(row.get("unRealizedProfit"), default=0.0)
         return wallet_balance + unrealized_pnl
+
+    def _ensure_sell_mode_for_rebalance(self, symbol: str, risk: Optional[Dict[str, Any]]) -> None:
+        current_margin_type = str((risk or {}).get("marginType") or "").strip().upper()
+        current_leverage = self._safe_int((risk or {}).get("leverage"))
+        if current_margin_type == "ISOLATED" and current_leverage == self.leverage:
+            return
+
+        try:
+            self.client.ensure_isolated_and_leverage(symbol, self.leverage)
+        except BinanceAPIError as exc:
+            code = self._safe_int(getattr(exc, "code", None))
+            if code == -4067:
+                LOGGER.warning(
+                    "Rebalance SELL continue without ensure for %s due to -4067 (open orders exist): "
+                    "marginType=%s leverage=%s target_leverage=%s",
+                    symbol,
+                    current_margin_type or "-",
+                    current_leverage if current_leverage is not None else "-",
+                    self.leverage,
+                )
+                return
+            raise
 
     def _cancel_order_if_exists(self, symbol: str, order_id: object, client_order_id: object) -> None:
         if not order_id and not client_order_id:
