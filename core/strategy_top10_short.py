@@ -877,6 +877,14 @@ class Top10ShortStrategy:
                 summary["adjusted"] = int(summary["adjusted"]) + 1
             except Exception as exc:  # noqa: BLE001
                 summary["errors"] = int(summary["errors"]) + 1
+                if isinstance(exc, BinanceAPIError) and self._is_insufficient_margin_error(exc):
+                    self._log_margin_shortfall_context(
+                        stage=f"rebalance_{reason_tag}",
+                        symbol=plan.symbol,
+                        side=plan.side,
+                        requested_notional_usdt=plan.est_notional,
+                        error=exc,
+                    )
                 action_id = action_id_by_position.get(plan.position_id)
                 if action_id is not None:
                     try:
@@ -1369,6 +1377,13 @@ class Top10ShortStrategy:
                 if not self._is_insufficient_margin_error(exc):
                     raise
                 if attempt >= self.entry_shrink_retry_count:
+                    self._log_margin_shortfall_context(
+                        stage="entry",
+                        symbol=symbol,
+                        side="SELL",
+                        requested_notional_usdt=notional,
+                        error=exc,
+                    )
                     raise
 
                 shrink_factor = 1.0 - (self.entry_shrink_step_pct / 100.0)
@@ -1404,6 +1419,46 @@ class Top10ShortStrategy:
             return True
         msg = str(exc.message or "").lower()
         return "insufficient" in msg and "margin" in msg
+
+    def _log_margin_shortfall_context(
+        self,
+        stage: str,
+        symbol: str,
+        side: str,
+        requested_notional_usdt: float,
+        error: Exception,
+    ) -> None:
+        requested_notional = max(0.0, float(requested_notional_usdt))
+        is_short_add = str(side or "").upper() == "SELL"
+        required_margin = (
+            requested_notional / float(self.leverage)
+            if is_short_add and self.leverage > 0
+            else 0.0
+        )
+        available_balance: Optional[float] = None
+        available_balance_err: Optional[str] = None
+        try:
+            available_balance = float(self.client.get_available_balance("USDT"))
+        except Exception as fetch_exc:  # noqa: BLE001
+            available_balance_err = str(fetch_exc)
+        shortfall = (
+            max(0.0, required_margin - available_balance)
+            if available_balance is not None
+            else None
+        )
+        LOGGER.warning(
+            "Margin shortfall detail: stage=%s symbol=%s side=%s requested_notional=%.6f required_initial_margin=%.6f "
+            "available_balance=%s shortfall=%s error=%s%s",
+            stage,
+            symbol,
+            str(side or "").upper() or "-",
+            requested_notional,
+            required_margin,
+            f"{available_balance:.6f}" if available_balance is not None else "n/a",
+            f"{shortfall:.6f}" if shortfall is not None else "n/a",
+            str(error),
+            f" balance_fetch_error={available_balance_err}" if available_balance_err else "",
+        )
 
     def _load_short_position(self, symbol: str) -> Optional[Dict[str, str]]:
         # Retry a few times for eventual consistency after market order execution.

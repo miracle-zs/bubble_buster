@@ -1,6 +1,6 @@
 import importlib.util
 import unittest
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 if importlib.util.find_spec("requests") is None:
     raise unittest.SkipTest("requests is not installed")
@@ -75,6 +75,39 @@ class StrategyOrderRetryTest(unittest.TestCase):
     def test_margin_error_detected_by_message_when_code_missing(self) -> None:
         err = BinanceAPIError("NETWORK", "margin is insufficient")
         self.assertTrue(Top10ShortStrategy._is_insufficient_margin_error(err))
+
+    def test_logs_margin_shortfall_when_entry_retries_exhausted(self) -> None:
+        client = MagicMock()
+        client.normalize_order_qty.side_effect = [10.0, 9.0, 8.1, 7.29]
+        client.format_order_qty.side_effect = lambda _symbol, qty: str(qty)
+        client.create_order.side_effect = [
+            BinanceAPIError(-2019, "Margin is insufficient."),
+            BinanceAPIError(-2019, "Margin is insufficient."),
+            BinanceAPIError(-2019, "Margin is insufficient."),
+            BinanceAPIError(-2019, "Margin is insufficient."),
+        ]
+        client.get_available_balance.return_value = 5.0
+
+        strategy = self._build_strategy(client)
+        with patch("core.strategy_top10_short.LOGGER") as logger:
+            with self.assertRaises(BinanceAPIError):
+                strategy._place_market_short_with_shrink_retry(
+                    symbol="ABCUSDT",
+                    target_notional=100.0,
+                    reference_price=10.0,
+                    client_id_tag="ent",
+                )
+
+            margin_calls = [
+                call
+                for call in logger.warning.call_args_list
+                if call.args and "Margin shortfall detail:" in str(call.args[0])
+            ]
+            self.assertEqual(len(margin_calls), 1)
+            args = margin_calls[0].args
+            self.assertEqual(args[1], "entry")
+            self.assertEqual(args[2], "ABCUSDT")
+            self.assertEqual(args[3], "SELL")
 
 
 if __name__ == "__main__":
