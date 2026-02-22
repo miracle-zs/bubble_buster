@@ -33,6 +33,27 @@ class MonitorMathTest(unittest.TestCase):
         self.assertEqual(kwargs.get("limit"), 1)
         self.assertIs(kwargs.get("rate_limiter"), limiter)
 
+    @patch("infra.binance_top10_monitor.get_klines_data")
+    def test_midnight_open_uses_first_available_kline_after_utc_start(self, mock_klines) -> None:
+        midnight = 1700000000000
+        first_after_midnight = midnight + (30 * 60 * 1000)
+        mock_klines.return_value = [[first_after_midnight, "2.5000"]]
+        limiter = ApiWeightLimiter(max_weight_per_minute=1000, min_request_interval_ms=0)
+
+        price = get_open_price_at_midnight("OPNUSDT", midnight, rate_limiter=limiter)
+
+        self.assertAlmostEqual(price or 0.0, 2.5)
+        self.assertEqual(mock_klines.call_count, 1)
+
+    @patch("infra.binance_top10_monitor.get_klines_data")
+    def test_midnight_open_returns_none_when_no_kline_available(self, mock_klines) -> None:
+        midnight = 1700000000000
+        mock_klines.return_value = []
+
+        price = get_open_price_at_midnight("BTCUSDT", midnight)
+
+        self.assertIsNone(price)
+
     @patch("infra.binance_top10_monitor.get_open_price_at_midnight")
     @patch("infra.binance_top10_monitor.get_utc_midnight_timestamp")
     @patch("infra.binance_top10_monitor.get_24hr_ticker_data")

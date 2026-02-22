@@ -253,8 +253,7 @@ def get_open_price_at_midnight(
     base_url: str = BINANCE_API_BASE,
     rate_limiter: Optional[ApiWeightLimiter] = None,
 ) -> Optional[float]:
-    """Fetches the 1h kline open price at UTC midnight for a symbol."""
-    # Fast path: for an exact 1h candle boundary, one kline is sufficient.
+    """Fetches the first available 1h kline open price after UTC midnight."""
     klines = get_klines_data(
         symbol,
         '1h',
@@ -265,16 +264,16 @@ def get_open_price_at_midnight(
         rate_limiter=rate_limiter,
     )
 
-    if klines and klines[0][0] == midnight_utc_timestamp:
+    if klines:
         return float(klines[0][1])
 
-    logging.warning("Exact midnight kline not found for %s. Expanding search window.", symbol)
-    start_time_wider = midnight_utc_timestamp - (60 * 60 * 1000)
-    end_time_wider = midnight_utc_timestamp + (60 * 60 * 1000)
+    logging.warning("No immediate UTC-start kline for %s. Expanding forward search window.", symbol)
+    # Fallback: search forward two hours and use the first available 1h kline.
+    end_time_wider = midnight_utc_timestamp + (2 * 60 * 60 * 1000)
     klines_wider = get_klines_data(
         symbol,
         '1h',
-        start_time_wider,
+        midnight_utc_timestamp,
         end_time_wider,
         session=session,
         base_url=base_url,
@@ -282,15 +281,10 @@ def get_open_price_at_midnight(
     )
 
     if not klines_wider:
-        logging.warning("Could not fetch 1-hour klines for %s around UTC midnight.", symbol)
+        logging.warning("Could not fetch 1-hour klines for %s after UTC midnight.", symbol)
         return None
 
-    for kline in klines_wider:
-        if kline[0] == midnight_utc_timestamp:
-            return float(kline[1])
-
-    logging.warning("No 1-hour kline found exactly at UTC midnight for %s.", symbol)
-    return None
+    return float(klines_wider[0][1])
 
 
 def calculate_daily_percentage_change(current_price: float, midnight_open_price: Optional[float]) -> float:
