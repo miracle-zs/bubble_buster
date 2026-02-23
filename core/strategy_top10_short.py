@@ -562,7 +562,7 @@ class Top10ShortStrategy:
         if not cycle_min_time or cycle_min_equity <= 0:
             return {"status": "SKIPPED", "reason": "INVALID_MIN_SNAPSHOT"}
 
-        cycle_key = cycle_min_time
+        cycle_key = start_time_utc
         threshold_equity = cycle_min_equity * (1.0 + self.equity_recovery_trigger_pct)
         state_cycle_key = str(state.get("cycle_key") or "").strip()
         state_triggered = bool(state.get("triggered", False))
@@ -680,7 +680,7 @@ class Top10ShortStrategy:
             self._refresh_exit_orders_for_positions(touched_position_ids)
 
         event_id = self.store.add_equity_recovery_event(
-            cycle_key=cycle_key,
+            cycle_key=current_time_utc,
             cycle_min_captured_at_utc=cycle_min_time,
             cycle_min_equity_usdt=cycle_min_equity,
             current_captured_at_utc=current_time_utc,
@@ -708,7 +708,7 @@ class Top10ShortStrategy:
         )
         return {
             "status": "TRIGGERED",
-            "cycle_key": cycle_key,
+            "cycle_key": current_time_utc,
             "event_id": event_id,
             "open_positions": len(open_positions),
             "adjusted": adjusted,

@@ -69,7 +69,11 @@ class StrategyEquityRecoveryTest(unittest.TestCase):
         }
         store.get_lock_state.side_effect = [
             None,
-            {"cycle_key": "2026-02-23T01:00:00+00:00", "triggered": True},
+            {
+                "cycle_key": "2026-02-23T07:40:00+00:00",
+                "triggered": True,
+                "window_start_utc": "2026-02-23T07:40:00+00:00",
+            },
         ]
         store.list_open_positions.return_value = [
             {"id": 1, "symbol": "AUSDT", "entry_price": 10.0},
@@ -91,6 +95,7 @@ class StrategyEquityRecoveryTest(unittest.TestCase):
 
         self.assertEqual(first["status"], "TRIGGERED")
         self.assertEqual(first["adjusted"], 2)
+        self.assertEqual(first["cycle_key"], "2026-02-23T07:40:00+00:00")
         self.assertEqual(client.create_order.call_count, 2)
         self.assertEqual(second["status"], "SKIPPED")
         self.assertEqual(second["reason"], "ALREADY_TRIGGERED_IN_CYCLE")

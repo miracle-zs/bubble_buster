@@ -182,6 +182,10 @@ CRON_TZ=Asia/Shanghai
 - `tp_price_drop_pct`：止盈触发跌幅（做空方向）。
 - `sl_liq_buffer_pct`：止损参考清算价缓冲。
 - `max_hold_hours`：超时平仓阈值。
+- `equity_recovery_take_profit_enabled`：是否启用“24h 低点反弹后组合止盈减仓”。
+- `equity_recovery_lookback_hours`：反弹判定窗口（小时）。
+- `equity_recovery_trigger_pct`：触发阈值，当前权益 >= 窗口最低权益 * (1 + 阈值) 时触发。
+- `equity_recovery_reduce_ratio`：触发后组合减仓比例（按每个持仓当前仓位比例减仓）。
 
 ### `[runtime]`
 
@@ -220,7 +224,10 @@ CRON_TZ=Asia/Shanghai
 - `cashflow_events`：现金流流水（去重）。
 - `rebalance_cycles`：每次再平衡周期汇总（目标/执行结果/跳过原因）。
 - `rebalance_actions`：再平衡逐仓动作明细（偏离度/调整量/结果）。
-- `locks`：预留锁表。
+- `equity_recovery_events`：组合止盈触发事件（窗口最低点、触发权益、减仓结果与明细）。
+- `locks`：运行时状态表；组合止盈使用其中的 `equity_recovery_take_profit_v1` 锁记录周期状态。
+`cycle_key` 语义：触发后定义为“触发时刻（新的窗口起点）”。
+`window_start_utc` 语义：下一轮 24h 窗口起点锚点（与 rolling 24h 取更晚者）。
 
 ---
 
