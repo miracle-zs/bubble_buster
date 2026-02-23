@@ -201,6 +201,7 @@ def main() -> int:
                 return 0 if summary.get("errors", 0) == 0 else 1
 
             if args.command == "service":
+                LOGGER.info("service mode starting: max_account_workers=%s", service_cfg.max_account_workers)
                 service = StrategyRuntimeService(
                     strategy=strategy,
                     manager=manager,

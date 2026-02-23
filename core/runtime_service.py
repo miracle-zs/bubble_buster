@@ -1,9 +1,10 @@
 import logging
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
-from typing import Optional
+from typing import Dict, Optional
 from zoneinfo import ZoneInfo
 
 
@@ -24,6 +25,7 @@ class ServiceRuntimeConfig:
     manager_max_catch_up_runs: int
     loop_sleep_sec: float
     run_manage_on_startup: bool
+    max_account_workers: int = 1
 
 
 class StrategyRuntimeService:
@@ -36,11 +38,26 @@ class StrategyRuntimeService:
         cfg: ServiceRuntimeConfig,
         balance_sampler=None,
         now_monotonic: Optional[float] = None,
+        account_runtimes: Optional[Dict[str, Dict[str, object]]] = None,
+        max_account_workers: Optional[int] = None,
     ):
         self.strategy = strategy
         self.manager = manager
         self.balance_sampler = balance_sampler
         self.cfg = cfg
+        self.max_account_workers = max(
+            1,
+            max_account_workers
+            if max_account_workers is not None
+            else getattr(cfg, "max_account_workers", 1),
+        )
+        self.account_runtimes = account_runtimes or {
+            "default": {
+                "strategy": strategy,
+                "manager": manager,
+                "balance_sampler": balance_sampler,
+            }
+        }
 
         try:
             self.timezone = ZoneInfo(cfg.timezone_name)
@@ -160,22 +177,9 @@ class StrategyRuntimeService:
 
         run_count = 0
         while now_monotonic >= self._next_manage_monotonic and run_count < max(1, self.cfg.manager_max_catch_up_runs):
-            summary = self.manager.run_once()
+            summary = self.run_manage_tick()
             run_count += 1
             LOGGER.info("service manage summary: %s", summary)
-            if self.balance_sampler is not None:
-                try:
-                    wallet_summary = self.balance_sampler.run_once()
-                    LOGGER.info("service wallet snapshot: %s", wallet_summary)
-                except Exception as exc:  # noqa: BLE001
-                    LOGGER.warning("service wallet snapshot failed: %s", exc)
-            if hasattr(self.strategy, "run_equity_recovery_take_profit"):
-                try:
-                    result = self.strategy.run_equity_recovery_take_profit()
-                    if isinstance(result, dict) and result.get("status") in {"TRIGGERED", "PARTIAL"}:
-                        LOGGER.info("service equity recovery take-profit result: %s", result)
-                except Exception as exc:  # noqa: BLE001
-                    LOGGER.warning("service equity recovery take-profit failed: %s", exc)
             self._next_manage_monotonic += self.cfg.manager_interval_sec
 
         if now_monotonic >= self._next_manage_monotonic:
@@ -186,6 +190,49 @@ class StrategyRuntimeService:
                 run_count,
                 self.cfg.manager_interval_sec,
             )
+
+    def _run_manage_for_account(self, account_id: str) -> Dict[str, object]:
+        ctx = self.account_runtimes[account_id]
+        manager = ctx["manager"]
+        strategy = ctx.get("strategy")
+        balance_sampler = ctx.get("balance_sampler")
+
+        summary = manager.run_once()  # type: ignore[attr-defined]
+        if balance_sampler is not None:
+            try:
+                wallet_summary = balance_sampler.run_once()  # type: ignore[attr-defined]
+                LOGGER.info("service wallet snapshot account=%s: %s", account_id, wallet_summary)
+            except Exception as exc:  # noqa: BLE001
+                LOGGER.warning("service wallet snapshot failed account=%s: %s", account_id, exc)
+
+        if strategy is not None and hasattr(strategy, "run_equity_recovery_take_profit"):
+            try:
+                result = strategy.run_equity_recovery_take_profit()  # type: ignore[attr-defined]
+                if isinstance(result, dict) and result.get("status") in {"TRIGGERED", "PARTIAL"}:
+                    LOGGER.info("service equity recovery take-profit account=%s result: %s", account_id, result)
+            except Exception as exc:  # noqa: BLE001
+                LOGGER.warning("service equity recovery take-profit failed account=%s: %s", account_id, exc)
+
+        return {"account_id": account_id, "summary": summary}
+
+    def run_manage_tick(self) -> Dict[str, Dict[str, object]]:
+        account_ids = list(self.account_runtimes.keys())
+        if len(account_ids) == 1:
+            only = account_ids[0]
+            result = self._run_manage_for_account(only)
+            return {only: result}
+
+        outputs: Dict[str, Dict[str, object]] = {}
+        with ThreadPoolExecutor(max_workers=min(self.max_account_workers, len(account_ids))) as ex:
+            futures = {ex.submit(self._run_manage_for_account, aid): aid for aid in account_ids}
+            for future in as_completed(futures):
+                aid = futures[future]
+                try:
+                    outputs[aid] = future.result()
+                except Exception as exc:  # noqa: BLE001
+                    LOGGER.exception("service manage failed account=%s: %s", aid, exc)
+                    outputs[aid] = {"account_id": aid, "error": str(exc)}
+        return outputs
 
     def run_cycle(
         self,

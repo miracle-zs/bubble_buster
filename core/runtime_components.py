@@ -185,6 +185,7 @@ def create_components(
         manager_max_catch_up_runs=max(1, runtime_cfg.getint("manager_max_catch_up_runs", fallback=3)),
         loop_sleep_sec=max(0.2, runtime_cfg.getfloat("service_loop_sleep_sec", fallback=1.0)),
         run_manage_on_startup=runtime_cfg.getboolean("run_manage_on_startup", fallback=True),
+        max_account_workers=max(1, runtime_cfg.getint("max_account_workers", fallback=1)),
     )
 
     return strategy, manager, wallet_sampler, runtime_cfg, service_cfg
