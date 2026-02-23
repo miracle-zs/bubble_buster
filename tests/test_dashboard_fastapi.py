@@ -8,6 +8,7 @@ if importlib.util.find_spec("fastapi") is None or importlib.util.find_spec("http
 
 from fastapi.testclient import TestClient
 
+from core.state_store import StateStore
 from dashboard_fastapi import create_app, create_dashboard_context
 
 
@@ -62,6 +63,67 @@ log_dir = logs
             self.assertIn("equity_curve", payload)
             self.assertIn("drawdown_stats", payload)
             self.assertIn("wallet", payload)
+
+    def test_accounts_summary_and_account_snapshot_api(self) -> None:
+        app = create_app(config_path=str(self.config_path))
+        with TestClient(app) as client:
+            db_path = str(self.root / "data" / "state.db")
+            schema_path = str(Path(__file__).resolve().parents[1] / "schema.sql")
+            store = StateStore(db_path=db_path, schema_path=schema_path)
+            store.init_schema()
+
+            now = "2026-02-13T00:00:00+00:00"
+            run1, _ = store.create_run("2026-02-13", account_id="acc01")
+            run2, _ = store.create_run("2026-02-13", account_id="acc02")
+            store.insert_position(
+                run_id=run1,
+                symbol="AUSDT",
+                side="SHORT",
+                qty=1.0,
+                entry_price=100.0,
+                liq_price_open=150.0,
+                tp_price=90.0,
+                sl_price=120.0,
+                tp_order_id=None,
+                sl_order_id=None,
+                tp_client_order_id=None,
+                sl_client_order_id=None,
+                opened_at_utc=now,
+                expire_at_utc=now,
+                status="OPEN",
+            )
+            store.insert_position(
+                run_id=run2,
+                symbol="BUSDT",
+                side="SHORT",
+                qty=1.0,
+                entry_price=100.0,
+                liq_price_open=150.0,
+                tp_price=90.0,
+                sl_price=120.0,
+                tp_order_id=None,
+                sl_order_id=None,
+                tp_client_order_id=None,
+                sl_client_order_id=None,
+                opened_at_utc=now,
+                expire_at_utc=now,
+                status="OPEN",
+            )
+            store.scoped("acc01").add_wallet_snapshot(now, 111.0, source="API")
+            store.scoped("acc02").add_wallet_snapshot(now, 222.0, source="API")
+
+            summary = client.get("/api/accounts/summary")
+            self.assertEqual(summary.status_code, 200)
+            ids = [row["account_id"] for row in summary.json()["accounts"]]
+            self.assertIn("acc01", ids)
+            self.assertIn("acc02", ids)
+
+            snap = client.get("/api/account/acc01/snapshot")
+            self.assertEqual(snap.status_code, 200)
+            payload = snap.json()
+            self.assertEqual(payload["account_id"], "acc01")
+            symbols = {row["symbol"] for row in payload["open_positions"]}
+            self.assertEqual(symbols, {"AUSDT"})
 
 
 if __name__ == "__main__":

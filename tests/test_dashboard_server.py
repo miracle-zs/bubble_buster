@@ -119,6 +119,112 @@ class DashboardServerTest(unittest.TestCase):
         with self.assertRaises(sqlite3.ProgrammingError):
             conn.execute("SELECT 1").fetchone()  # type: ignore[union-attr]
 
+    def test_accounts_summary_returns_grouped_metrics(self) -> None:
+        run1, _ = self.store.create_run("2026-02-13", account_id="acc01")
+        run2, _ = self.store.create_run("2026-02-13", account_id="acc02")
+        now = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+        self.store.insert_position(
+            run_id=run1,
+            symbol="AUSDT",
+            side="SHORT",
+            qty=1.0,
+            entry_price=100.0,
+            liq_price_open=150.0,
+            tp_price=90.0,
+            sl_price=120.0,
+            tp_order_id=None,
+            sl_order_id=None,
+            tp_client_order_id=None,
+            sl_client_order_id=None,
+            opened_at_utc=now,
+            expire_at_utc=now,
+            status="OPEN",
+        )
+        self.store.insert_position(
+            run_id=run2,
+            symbol="BUSDT",
+            side="SHORT",
+            qty=2.0,
+            entry_price=200.0,
+            liq_price_open=250.0,
+            tp_price=180.0,
+            sl_price=220.0,
+            tp_order_id=None,
+            sl_order_id=None,
+            tp_client_order_id=None,
+            sl_client_order_id=None,
+            opened_at_utc=now,
+            expire_at_utc=now,
+            status="OPEN",
+        )
+        self.store.scoped("acc01").add_wallet_snapshot(now, 1000.0, source="API")
+        self.store.scoped("acc02").add_wallet_snapshot(now, 2000.0, source="API")
+
+        provider = DashboardDataProvider(
+            db_path=self.db_path,
+            log_file=self.log_file,
+            timezone_name="UTC",
+            entry_hour=7,
+            entry_minute=40,
+        )
+        payload = provider.accounts_summary()
+        account_ids = [row["account_id"] for row in payload["accounts"]]
+        self.assertIn("acc01", account_ids)
+        self.assertIn("acc02", account_ids)
+
+    def test_account_snapshot_filters_by_account_id(self) -> None:
+        now = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+        run1, _ = self.store.create_run("2026-02-13", account_id="acc01")
+        run2, _ = self.store.create_run("2026-02-13", account_id="acc02")
+        self.store.insert_position(
+            run_id=run1,
+            symbol="ACC01USDT",
+            side="SHORT",
+            qty=1.0,
+            entry_price=100.0,
+            liq_price_open=150.0,
+            tp_price=90.0,
+            sl_price=120.0,
+            tp_order_id=None,
+            sl_order_id=None,
+            tp_client_order_id=None,
+            sl_client_order_id=None,
+            opened_at_utc=now,
+            expire_at_utc=now,
+            status="OPEN",
+        )
+        self.store.insert_position(
+            run_id=run2,
+            symbol="ACC02USDT",
+            side="SHORT",
+            qty=1.0,
+            entry_price=100.0,
+            liq_price_open=150.0,
+            tp_price=90.0,
+            sl_price=120.0,
+            tp_order_id=None,
+            sl_order_id=None,
+            tp_client_order_id=None,
+            sl_client_order_id=None,
+            opened_at_utc=now,
+            expire_at_utc=now,
+            status="OPEN",
+        )
+        self.store.scoped("acc01").add_wallet_snapshot(now, 111.0, source="API")
+        self.store.scoped("acc02").add_wallet_snapshot(now, 222.0, source="API")
+
+        provider = DashboardDataProvider(
+            db_path=self.db_path,
+            log_file=self.log_file,
+            timezone_name="UTC",
+            entry_hour=7,
+            entry_minute=40,
+        )
+        payload = provider.snapshot(log_lines=0, account_id="acc01")
+        symbols = {row["symbol"] for row in payload["open_positions"]}
+        self.assertEqual(symbols, {"ACC01USDT"})
+        self.assertEqual(payload["account_id"], "acc01")
+
     def test_equity_curve_and_wallet_cache(self) -> None:
         run_id, _ = self.store.create_run("2026-02-14")
         now = datetime.now(timezone.utc).replace(microsecond=0)
