@@ -174,7 +174,10 @@ def main() -> int:
 
     try:
         with file_lock(lock_file, wait_sec=lock_wait_sec):
-            strategy, manager, wallet_sampler, runtime_cfg, service_cfg = create_components(cfg, base_dir=base_dir)
+            strategy, manager, wallet_sampler, runtime_cfg, service_cfg, account_runtimes = create_components(
+                cfg,
+                base_dir=base_dir,
+            )
 
             if args.command == "entry":
                 warn_if_outside_entry_window(runtime_cfg)
@@ -213,6 +216,7 @@ def main() -> int:
                     manager=manager,
                     cfg=service_cfg,
                     balance_sampler=wallet_sampler,
+                    account_runtimes=account_runtimes,
                 )
                 service.run_forever()
                 return 0

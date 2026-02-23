@@ -329,12 +329,16 @@ def _startup_background_service(app: FastAPI, config_path: str) -> None:
         runtime_lock = RuntimeFileLock(lock_file=lock_file, wait_sec=lock_wait_sec)
         runtime_lock.acquire()
 
-        strategy, manager, wallet_sampler, _runtime_cfg, service_cfg = create_components(cfg, base_dir=base_dir)
+        strategy, manager, wallet_sampler, _runtime_cfg, service_cfg, account_runtimes = create_components(
+            cfg,
+            base_dir=base_dir,
+        )
         service = StrategyRuntimeService(
             strategy=strategy,
             manager=manager,
             cfg=service_cfg,
             balance_sampler=wallet_sampler,
+            account_runtimes=account_runtimes,
         )
         stop_event = threading.Event()
         thread = threading.Thread(
