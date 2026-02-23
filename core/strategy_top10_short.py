@@ -91,6 +91,7 @@ class Top10ShortStrategy:
         equity_recovery_lookback_hours: float = 24.0,
         equity_recovery_trigger_pct: float = 0.10,
         equity_recovery_reduce_ratio: float = 0.50,
+        account_id: str = "default",
     ):
         self.client = client
         self.store = store
@@ -124,11 +125,12 @@ class Top10ShortStrategy:
         self.equity_recovery_lookback_hours = max(1.0, float(equity_recovery_lookback_hours))
         self.equity_recovery_trigger_pct = min(1.0, max(0.001, float(equity_recovery_trigger_pct)))
         self.equity_recovery_reduce_ratio = min(0.95, max(0.05, float(equity_recovery_reduce_ratio)))
+        self.account_id = (account_id or "").strip() or "default"
 
     def run_entry(self, trade_day_utc: Optional[str] = None) -> Dict[str, object]:
         trade_day = (trade_day_utc or "").strip() or datetime.now(timezone.utc).date().isoformat()
         trade_day_utc = trade_day
-        run_id, created = self.store.create_run(trade_day_utc)
+        run_id, created = self.store.create_run(trade_day_utc, account_id=self.account_id)
         if not created:
             LOGGER.info("Entry skipped: run already exists for trade_day_utc=%s", trade_day_utc)
             return {

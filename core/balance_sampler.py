@@ -18,10 +18,12 @@ class WalletSnapshotSampler:
         asset: str = "USDT",
         sync_cashflows: bool = False,
         cashflow_income_types: Optional[List[str]] = None,
+        account_id: str = "default",
     ):
         self.client = client
         self.store = store
         self.asset = asset.upper().strip() or "USDT"
+        self.account_id = (account_id or "").strip() or "default"
         self.sync_cashflows = bool(sync_cashflows)
         income_types = cashflow_income_types or ["TRANSFER", "WELCOME_BONUS"]
         self.cashflow_income_types = [str(x).upper().strip() for x in income_types if str(x).strip()]

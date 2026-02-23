@@ -69,6 +69,9 @@ def create_components(
 
     store = StateStore(db_path=db_path, schema_path=schema_path)
     store.init_schema()
+    default_account_id = runtime_cfg.get("default_account_id", fallback="default").strip() or "default"
+    store.migrate_to_multi_account(default_account_id=default_account_id)
+    scoped_store = store.scoped(default_account_id)
 
     notifier = ServerChanNotifier(
         enabled=notify_cfg.getboolean("enabled", fallback=True),
@@ -79,7 +82,7 @@ def create_components(
 
     strategy = Top10ShortStrategy(
         client=client,
-        store=store,
+        store=scoped_store,
         notifier=notifier,
         leverage=strategy_cfg.getint("leverage", fallback=2),
         top_n=strategy_cfg.getint("top_n", fallback=10),
@@ -149,20 +152,22 @@ def create_components(
             "equity_recovery_reduce_ratio",
             fallback=0.50,
         ),
+        account_id=default_account_id,
     )
 
     manager = PositionManager(
         client=client,
-        store=store,
+        store=scoped_store,
         notifier=notifier,
         sl_liq_buffer_pct=strategy_cfg.getfloat("sl_liq_buffer_pct", fallback=1.0),
         trigger_price_type=strategy_cfg.get("trigger_price_type", fallback="CONTRACT_PRICE").strip(),
         daily_loss_cut_scope=runtime_cfg.get("daily_loss_cut_scope", fallback="tracked").strip(),
+        account_id=default_account_id,
     )
 
     wallet_sampler = WalletSnapshotSampler(
         client=client,
-        store=store,
+        store=scoped_store,
         asset=runtime_cfg.get("wallet_snapshot_asset", fallback="USDT").strip() or "USDT",
         sync_cashflows=runtime_cfg.getboolean("sync_cashflows", fallback=True),
         cashflow_income_types=[
@@ -170,6 +175,7 @@ def create_components(
             for x in runtime_cfg.get("cashflow_income_types", fallback="TRANSFER,WELCOME_BONUS").split(",")
             if x.strip()
         ],
+        account_id=default_account_id,
     )
 
     service_cfg = ServiceRuntimeConfig(
@@ -186,6 +192,9 @@ def create_components(
         loop_sleep_sec=max(0.2, runtime_cfg.getfloat("service_loop_sleep_sec", fallback=1.0)),
         run_manage_on_startup=runtime_cfg.getboolean("run_manage_on_startup", fallback=True),
         max_account_workers=max(1, runtime_cfg.getint("max_account_workers", fallback=1)),
+        account_failure_threshold=max(1, runtime_cfg.getint("account_failure_threshold", fallback=3)),
+        account_cooldown_cycles=max(1, runtime_cfg.getint("account_cooldown_cycles", fallback=2)),
+        account_task_timeout_sec=max(0.1, runtime_cfg.getfloat("account_task_timeout_sec", fallback=30.0)),
     )
 
     return strategy, manager, wallet_sampler, runtime_cfg, service_cfg
