@@ -25,3 +25,7 @@ htmlcov/
 *.swo
 *.tmp
 *.bak
+
+.worktrees/
+
+.worktrees/
