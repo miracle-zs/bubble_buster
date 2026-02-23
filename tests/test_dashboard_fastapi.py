@@ -134,6 +134,7 @@ log_dir = logs
             self.assertEqual(snap.status_code, 200)
             payload = snap.json()
             self.assertEqual(payload["account_id"], "acc01")
+            self.assertIn("service", payload)
             symbols = {row["symbol"] for row in payload["open_positions"]}
             self.assertEqual(symbols, {"AUSDT"})
 

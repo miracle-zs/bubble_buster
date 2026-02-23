@@ -476,6 +476,13 @@ def create_app(config_path: Optional[str] = None) -> FastAPI:
             payload["config_path"] = ctx.config_path
             payload["db_path"] = ctx.db_path
             payload["account_id"] = account_id
+            service_state = getattr(request.app.state, "service_state", {}) or {}
+            thread = service_state.get("thread")
+            payload["service"] = {
+                "enabled": bool(service_state.get("enabled", False)),
+                "running": bool(service_state.get("running", False)) and bool(thread and thread.is_alive()),
+                "error": service_state.get("error"),
+            }
             return JSONResponse(payload)
         except Exception as exc:  # noqa: BLE001
             raise HTTPException(status_code=500, detail=f"account snapshot failed: {exc}") from exc
