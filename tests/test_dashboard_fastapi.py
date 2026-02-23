@@ -47,6 +47,18 @@ log_dir = logs
     def test_app_health_and_dashboard_api(self) -> None:
         app = create_app(config_path=str(self.config_path))
         with TestClient(app) as client:
+            overview = client.get("/")
+            self.assertEqual(overview.status_code, 200)
+            self.assertIn("账户总览", overview.text)
+
+            compact = client.get("/account/acc01/")
+            self.assertEqual(compact.status_code, 200)
+            self.assertIn("acc01", compact.text)
+
+            advanced = client.get("/account/acc01/?view=advanced")
+            self.assertEqual(advanced.status_code, 200)
+            self.assertIn("api/account/acc01/snapshot", advanced.text)
+
             health = client.get("/healthz")
             self.assertEqual(health.status_code, 200)
             h = health.json()

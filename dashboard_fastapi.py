@@ -14,7 +14,12 @@ from fastapi.responses import HTMLResponse, JSONResponse
 from core.runtime_components import build_proxies, create_components, resolve_path
 from core.runtime_service import StrategyRuntimeService
 from core.state_store import StateStore
-from dashboard_server import DashboardDataProvider, render_dashboard_html
+from dashboard_server import (
+    DashboardDataProvider,
+    render_account_compact_html,
+    render_account_dashboard_html,
+    render_accounts_overview_html,
+)
 from infra.binance_futures_client import BinanceFuturesClient
 
 try:
@@ -399,9 +404,21 @@ def create_app(config_path: Optional[str] = None) -> FastAPI:
         _shutdown_background_service(app)
 
     @app.get("/", response_class=HTMLResponse)
-    def dashboard_page(request: Request):
+    def overview_page(request: Request):
         ctx: DashboardRuntimeContext = request.app.state.ctx
-        return HTMLResponse(render_dashboard_html(ctx.refresh_sec))
+        return HTMLResponse(render_accounts_overview_html(ctx.refresh_sec))
+
+    @app.get("/account/{account_id}/", response_class=HTMLResponse)
+    def account_detail_page(
+        request: Request,
+        account_id: str,
+        view: str = Query(default="compact"),
+    ):
+        ctx: DashboardRuntimeContext = request.app.state.ctx
+        normalized_view = (view or "compact").strip().lower()
+        if normalized_view == "advanced":
+            return HTMLResponse(render_account_dashboard_html(ctx.refresh_sec, account_id=account_id))
+        return HTMLResponse(render_account_compact_html(ctx.refresh_sec, account_id=account_id))
 
     @app.get("/api/dashboard")
     def dashboard_data(
