@@ -27,6 +27,7 @@ class PositionManager:
         sl_liq_buffer_pct: float,
         trigger_price_type: str,
         daily_loss_cut_scope: str = DAILY_LOSS_CUT_SCOPE_TRACKED,
+        account_id: str = "default",
     ):
         self.client = client
         self.store = store
@@ -34,6 +35,7 @@ class PositionManager:
         self.sl_liq_buffer_pct = sl_liq_buffer_pct
         self.trigger_price_type = trigger_price_type
         self.daily_loss_cut_scope = self._normalize_daily_loss_cut_scope(daily_loss_cut_scope)
+        self.account_id = (account_id or "").strip() or "default"
 
     def run_daily_loss_cut(self) -> Dict[str, int]:
         if self.daily_loss_cut_scope == self.DAILY_LOSS_CUT_SCOPE_EXCHANGE:

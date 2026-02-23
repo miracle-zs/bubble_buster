@@ -1,8 +1,11 @@
-# Optional fallback mode (cron-driven). Recommended mode is `python main.py service`.
-# Use Asia/Shanghai timezone for schedule semantics
+# Preferred mode: run one long-lived service process.
+#   /usr/bin/python3 /Users/zhangshuai/PycharmProjects/bubble_buster/main.py --config /Users/zhangshuai/PycharmProjects/bubble_buster/config.ini service
+#
+# Keep cron only as fallback or for explicit one-shot tasks.
 CRON_TZ=Asia/Shanghai
-40 7 * * * /usr/bin/python3 /Users/zhangshuai/PycharmProjects/bubble_buster/main.py entry --config /Users/zhangshuai/PycharmProjects/bubble_buster/config.ini
-* * * * * /usr/bin/python3 /Users/zhangshuai/PycharmProjects/bubble_buster/main.py manage --config /Users/zhangshuai/PycharmProjects/bubble_buster/config.ini
 
-# Account-B-only risk cut (set config_b.ini with daily_loss_cut_scope=exchange)
-55 11 * * * /usr/bin/python3 /Users/zhangshuai/PycharmProjects/bubble_buster/main.py loss-cut --config /Users/zhangshuai/PycharmProjects/bubble_buster/config_b.ini
+# Fallback: one-shot daily loss-cut (optional)
+55 11 * * * /usr/bin/python3 /Users/zhangshuai/PycharmProjects/bubble_buster/main.py --config /Users/zhangshuai/PycharmProjects/bubble_buster/config.ini loss-cut
+
+# Optional dashboard process (if not managed by systemd/supervisor)
+# */5 * * * * /usr/bin/python3 /Users/zhangshuai/PycharmProjects/bubble_buster/main.py --config /Users/zhangshuai/PycharmProjects/bubble_buster/config.ini dashboard --host 127.0.0.1 --port 8787

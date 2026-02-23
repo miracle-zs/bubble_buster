@@ -236,3 +236,134 @@ class RuntimeServiceTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def test_parse_accounts_with_modes_and_overrides() -> None:
+    from core.account_config import parse_account_settings
+
+    cfg_text = """
+[accounts]
+enabled = acc01,55
+mode.acc01 = full
+mode.55 = loss_cut_only
+[binance]
+api_key = k
+api_secret = s
+[account.55.binance]
+api_key = k55
+api_secret = s55
+"""
+    settings = parse_account_settings(cfg_text)
+    assert settings["acc01"].mode == "full"
+    assert settings["55"].mode == "loss_cut_only"
+    assert settings["55"].binance["api_key"] == "k55"
+
+
+def test_service_dispatches_manage_concurrently_per_account() -> None:
+    class ManagerStub:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def run_once(self):
+            self.calls += 1
+            return {"total": 1}
+
+    class StrategyStub:
+        def run_entry(self):
+            return {"status": "SKIPPED"}
+
+    m1 = ManagerStub()
+    m2 = ManagerStub()
+    s1 = StrategyStub()
+    s2 = StrategyStub()
+
+    cfg = ServiceRuntimeConfig(
+        timezone_name="UTC",
+        entry_hour=23,
+        entry_minute=59,
+        entry_misfire_grace_min=120,
+        entry_catchup_enabled=True,
+        daily_loss_cut_enabled=False,
+        daily_loss_cut_hour=11,
+        daily_loss_cut_minute=55,
+        manager_interval_sec=60,
+        manager_max_catch_up_runs=1,
+        loop_sleep_sec=1.0,
+        run_manage_on_startup=True,
+    )
+
+    service = StrategyRuntimeService(
+        strategy=s1,
+        manager=m1,
+        cfg=cfg,
+        now_monotonic=0.0,
+        account_runtimes={
+            "acc01": {"strategy": s1, "manager": m1, "balance_sampler": None},
+            "acc02": {"strategy": s2, "manager": m2, "balance_sampler": None},
+        },
+        max_account_workers=2,
+    )
+
+    now_local = datetime(2026, 2, 13, 1, 0, tzinfo=ZoneInfo("UTC"))
+    service.run_cycle(now_local=now_local, now_monotonic=10.0)
+
+    assert m1.calls == 1
+    assert m2.calls == 1
+
+
+def test_account_breaker_trips_after_consecutive_failures() -> None:
+    class FlakyManager:
+        def __init__(self, should_fail: bool) -> None:
+            self.should_fail = should_fail
+            self.calls = 0
+
+        def run_once(self):
+            self.calls += 1
+            if self.should_fail:
+                raise RuntimeError("boom")
+            return {"total": 1}
+
+    class StrategyStub:
+        def run_entry(self):
+            return {"status": "SKIPPED"}
+
+    bad = FlakyManager(True)
+    good = FlakyManager(False)
+    cfg = ServiceRuntimeConfig(
+        timezone_name="UTC",
+        entry_hour=23,
+        entry_minute=59,
+        entry_misfire_grace_min=120,
+        entry_catchup_enabled=True,
+        daily_loss_cut_enabled=False,
+        daily_loss_cut_hour=11,
+        daily_loss_cut_minute=55,
+        manager_interval_sec=1,
+        manager_max_catch_up_runs=1,
+        loop_sleep_sec=0.1,
+        run_manage_on_startup=True,
+        account_failure_threshold=2,
+        account_cooldown_cycles=2,
+        account_task_timeout_sec=1.0,
+    )
+    service = StrategyRuntimeService(
+        strategy=StrategyStub(),
+        manager=bad,
+        cfg=cfg,
+        now_monotonic=0.0,
+        account_runtimes={
+            "acc-bad": {"strategy": StrategyStub(), "manager": bad, "balance_sampler": None},
+            "acc-good": {"strategy": StrategyStub(), "manager": good, "balance_sampler": None},
+        },
+        max_account_workers=2,
+    )
+    now_local = datetime(2026, 2, 13, 1, 0, tzinfo=ZoneInfo("UTC"))
+
+    service.run_cycle(now_local=now_local, now_monotonic=0.0)
+    service.run_cycle(now_local=now_local, now_monotonic=1.0)
+    # Breaker tripped here for acc-bad; next two cycles should skip it.
+    service.run_cycle(now_local=now_local, now_monotonic=2.0)
+    service.run_cycle(now_local=now_local, now_monotonic=3.0)
+
+    assert bad.calls == 2
+    assert good.calls == 4

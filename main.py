@@ -201,6 +201,13 @@ def main() -> int:
                 return 0 if summary.get("errors", 0) == 0 else 1
 
             if args.command == "service":
+                LOGGER.info(
+                    "service mode starting: max_account_workers=%s failure_threshold=%s cooldown_cycles=%s timeout_sec=%.1f",
+                    service_cfg.max_account_workers,
+                    service_cfg.account_failure_threshold,
+                    service_cfg.account_cooldown_cycles,
+                    service_cfg.account_task_timeout_sec,
+                )
                 service = StrategyRuntimeService(
                     strategy=strategy,
                     manager=manager,

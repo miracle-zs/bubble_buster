@@ -12,6 +12,7 @@ from typing import Any, Dict, List, Optional, Set, Tuple
 @dataclass(frozen=True)
 class RunState:
     run_id: str
+    account_id: str
     trade_day_utc: str
     started_at_utc: str
     completed_at_utc: Optional[str]
@@ -45,10 +46,18 @@ def utc_now_iso() -> str:
 
 
 class StateStore:
-    def __init__(self, db_path: str, schema_path: Optional[str] = None):
+    def __init__(self, db_path: str, schema_path: Optional[str] = None, account_id: str = "default"):
         self.db_path = db_path
         self.schema_path = schema_path
+        self.account_id = (account_id or "").strip() or "default"
         os.makedirs(os.path.dirname(os.path.abspath(db_path)), exist_ok=True)
+
+    def scoped(self, account_id: str) -> "StateStore":
+        return StateStore(
+            db_path=self.db_path,
+            schema_path=self.schema_path,
+            account_id=account_id,
+        )
 
     def _connect(self) -> sqlite3.Connection:
         conn = sqlite3.connect(self.db_path)
@@ -79,7 +88,7 @@ class StateStore:
             else:
                 raise ValueError("schema_path is required for StateStore.init_schema")
 
-    def create_run(self, trade_day_utc: str) -> Tuple[str, bool]:
+    def create_run(self, trade_day_utc: str, account_id: str = "default") -> Tuple[str, bool]:
         """Creates a run for a UTC trade day.
 
         Returns (run_id, created). If created is False, run_id is the existing run.
@@ -90,16 +99,16 @@ class StateStore:
             try:
                 conn.execute(
                     """
-                    INSERT INTO runs (run_id, trade_day_utc, started_at_utc, status, message)
-                    VALUES (?, ?, ?, ?, ?)
+                    INSERT INTO runs (run_id, account_id, trade_day_utc, started_at_utc, status, message)
+                    VALUES (?, ?, ?, ?, ?, ?)
                     """,
-                    (run_id, trade_day_utc, started_at, "RUNNING", None),
+                    (run_id, account_id, trade_day_utc, started_at, "RUNNING", None),
                 )
                 return run_id, True
             except sqlite3.IntegrityError:
                 row = conn.execute(
-                    "SELECT run_id FROM runs WHERE trade_day_utc = ?",
-                    (trade_day_utc,),
+                    "SELECT run_id FROM runs WHERE account_id = ? AND trade_day_utc = ?",
+                    (account_id, trade_day_utc),
                 ).fetchone()
                 return str(row["run_id"]), False
 
@@ -121,12 +130,89 @@ class StateStore:
                 return None
             return RunState(
                 run_id=row["run_id"],
+                account_id=row["account_id"] if "account_id" in row.keys() else "default",
                 trade_day_utc=row["trade_day_utc"],
                 started_at_utc=row["started_at_utc"],
                 completed_at_utc=row["completed_at_utc"],
                 status=row["status"],
                 reason=row["message"],
             )
+
+    def migrate_to_multi_account(self, default_account_id: str) -> None:
+        default_account_id = (default_account_id or "").strip()
+        if not default_account_id:
+            raise ValueError("default_account_id is required")
+
+        with self._connect_ctx() as conn:
+            row = conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name='runs'"
+            ).fetchone()
+            if row is None:
+                return
+
+            columns = conn.execute("PRAGMA table_info(runs)").fetchall()
+            has_account_id = any(str(col["name"]) == "account_id" for col in columns)
+            if not has_account_id:
+                conn.execute("ALTER TABLE runs RENAME TO runs_legacy")
+                conn.execute(
+                    """
+                    CREATE TABLE runs (
+                        run_id TEXT PRIMARY KEY,
+                        account_id TEXT NOT NULL,
+                        trade_day_utc TEXT NOT NULL,
+                        started_at_utc TEXT NOT NULL,
+                        completed_at_utc TEXT,
+                        status TEXT NOT NULL,
+                        message TEXT,
+                        UNIQUE(account_id, trade_day_utc)
+                    )
+                    """
+                )
+                conn.execute(
+                    """
+                    INSERT INTO runs (run_id, account_id, trade_day_utc, started_at_utc, completed_at_utc, status, message)
+                    SELECT run_id, ?, trade_day_utc, started_at_utc, completed_at_utc, status, message
+                    FROM runs_legacy
+                    """,
+                    (default_account_id,),
+                )
+                conn.execute("DROP TABLE runs_legacy")
+
+            self._ensure_account_id_column(
+                conn=conn,
+                table_name="wallet_snapshots",
+                default_account_id=default_account_id,
+            )
+            self._ensure_account_id_column(
+                conn=conn,
+                table_name="cashflow_events",
+                default_account_id=default_account_id,
+            )
+            self._ensure_account_id_column(
+                conn=conn,
+                table_name="equity_recovery_events",
+                default_account_id=default_account_id,
+            )
+
+    def _ensure_account_id_column(
+        self,
+        conn: sqlite3.Connection,
+        table_name: str,
+        default_account_id: str,
+    ) -> None:
+        row = conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name=?",
+            (table_name,),
+        ).fetchone()
+        if row is None:
+            return
+        cols = conn.execute(f"PRAGMA table_info({table_name})").fetchall()
+        if any(str(col["name"]) == "account_id" for col in cols):
+            return
+        escaped = default_account_id.replace("'", "''")
+        conn.execute(
+            f"ALTER TABLE {table_name} ADD COLUMN account_id TEXT NOT NULL DEFAULT '{escaped}'"
+        )
 
     def insert_position(
         self,
@@ -189,12 +275,30 @@ class StateStore:
 
     def list_open_positions(self) -> List[Dict[str, Any]]:
         with self._connect_ctx() as conn:
-            rows = conn.execute("SELECT * FROM positions WHERE status = 'OPEN'").fetchall()
+            rows = conn.execute(
+                """
+                SELECT p.*
+                FROM positions p
+                INNER JOIN runs r ON r.run_id = p.run_id
+                WHERE p.status = 'OPEN'
+                  AND r.account_id = ?
+                """,
+                (self.account_id,),
+            ).fetchall()
             return [dict(row) for row in rows]
 
     def list_open_symbols(self) -> Set[str]:
         with self._connect_ctx() as conn:
-            rows = conn.execute("SELECT DISTINCT symbol FROM positions WHERE status = 'OPEN'").fetchall()
+            rows = conn.execute(
+                """
+                SELECT DISTINCT p.symbol
+                FROM positions p
+                INNER JOIN runs r ON r.run_id = p.run_id
+                WHERE p.status = 'OPEN'
+                  AND r.account_id = ?
+                """,
+                (self.account_id,),
+            ).fetchall()
             return {str(row["symbol"]) for row in rows}
 
     def update_position_orders(
@@ -528,11 +632,12 @@ class StateStore:
             cursor = conn.execute(
                 """
                 INSERT INTO wallet_snapshots (
-                    captured_at_utc, balance_usdt, source, error, created_at_utc
+                    account_id, captured_at_utc, balance_usdt, source, error, created_at_utc
                 )
-                VALUES (?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?)
                 """,
                 (
+                    self.account_id,
                     captured_at_utc,
                     float(balance_usdt),
                     source[:24],
@@ -546,11 +651,13 @@ class StateStore:
         with self._connect_ctx() as conn:
             row = conn.execute(
                 """
-                SELECT id, captured_at_utc, balance_usdt, source, error, created_at_utc
+                SELECT id, account_id, captured_at_utc, balance_usdt, source, error, created_at_utc
                 FROM wallet_snapshots
+                WHERE account_id = ?
                 ORDER BY id DESC
                 LIMIT 1
-                """
+                """,
+                (self.account_id,),
             ).fetchone()
             return dict(row) if row is not None else None
 
@@ -566,29 +673,29 @@ class StateStore:
             if end_captured_at_utc:
                 row = conn.execute(
                     """
-                    SELECT id, captured_at_utc, balance_usdt, source, error, created_at_utc
+                    SELECT id, account_id, captured_at_utc, balance_usdt, source, error, created_at_utc
                     FROM wallet_snapshots
-                    WHERE captured_at_utc >= ? AND captured_at_utc <= ?
+                    WHERE account_id = ? AND captured_at_utc >= ? AND captured_at_utc <= ?
                     ORDER BY balance_usdt ASC, captured_at_utc ASC, id ASC
                     LIMIT 1
                     """,
-                    (start, end_captured_at_utc.strip()),
+                    (self.account_id, start, end_captured_at_utc.strip()),
                 ).fetchone()
             else:
                 row = conn.execute(
                     """
-                    SELECT id, captured_at_utc, balance_usdt, source, error, created_at_utc
+                    SELECT id, account_id, captured_at_utc, balance_usdt, source, error, created_at_utc
                     FROM wallet_snapshots
-                    WHERE captured_at_utc >= ?
+                    WHERE account_id = ? AND captured_at_utc >= ?
                     ORDER BY balance_usdt ASC, captured_at_utc ASC, id ASC
                     LIMIT 1
                     """,
-                    (start,),
+                    (self.account_id, start),
                 ).fetchone()
             return dict(row) if row is not None else None
 
     def get_lock_state(self, lock_name: str) -> Optional[Dict[str, Any]]:
-        name = (lock_name or "").strip()
+        name = self._scoped_lock_name(lock_name)
         if not name:
             return None
         with self._connect_ctx() as conn:
@@ -613,7 +720,7 @@ class StateStore:
             return loaded if isinstance(loaded, dict) else None
 
     def set_lock_state(self, lock_name: str, state: Dict[str, Any]) -> None:
-        name = (lock_name or "").strip()
+        name = self._scoped_lock_name(lock_name)
         if not name:
             return
         payload = json.dumps(state or {}, ensure_ascii=False)
@@ -649,15 +756,16 @@ class StateStore:
             cursor = conn.execute(
                 """
                 INSERT INTO equity_recovery_events (
-                    cycle_key, cycle_min_captured_at_utc, cycle_min_equity_usdt,
+                    account_id, cycle_key, cycle_min_captured_at_utc, cycle_min_equity_usdt,
                     current_captured_at_utc, current_equity_usdt,
                     trigger_pct, threshold_equity_usdt, reduce_ratio,
                     open_positions, adjusted_positions, reduced_notional_usdt, error_count,
                     details_json, created_at_utc
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
+                    self.account_id,
                     (cycle_key or "").strip()[:64],
                     (cycle_min_captured_at_utc or "").strip(),
                     float(cycle_min_equity_usdt),
@@ -682,9 +790,11 @@ class StateStore:
                 """
                 SELECT captured_at_utc
                 FROM wallet_snapshots
+                WHERE account_id = ?
                 ORDER BY captured_at_utc ASC, id ASC
                 LIMIT 1
-                """
+                """,
+                (self.account_id,),
             ).fetchone()
             return str(row["captured_at_utc"]) if row is not None else None
 
@@ -706,6 +816,7 @@ class StateStore:
         normalized_info = (info or "").strip() or None
         unique_source = "|".join(
             [
+                self.account_id,
                 event_time_utc,
                 normalized_asset,
                 f"{float(amount):.12f}",
@@ -721,12 +832,13 @@ class StateStore:
             cursor = conn.execute(
                 """
                 INSERT OR IGNORE INTO cashflow_events (
-                    unique_key, event_time_utc, asset, amount, income_type,
+                    account_id, unique_key, event_time_utc, asset, amount, income_type,
                     symbol, tran_id, info, raw_json, created_at_utc
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
+                    self.account_id,
                     unique_key,
                     event_time_utc,
                     normalized_asset,
@@ -747,13 +859,19 @@ class StateStore:
                 """
                 SELECT event_time_utc
                 FROM cashflow_events
-                WHERE asset = ?
+                WHERE account_id = ? AND asset = ?
                 ORDER BY event_time_utc DESC, id DESC
                 LIMIT 1
                 """,
-                ((asset or "USDT").upper(),),
+                (self.account_id, (asset or "USDT").upper()),
             ).fetchone()
             return str(row["event_time_utc"]) if row is not None else None
+
+    def _scoped_lock_name(self, lock_name: str) -> str:
+        raw = (lock_name or "").strip()
+        if not raw:
+            return ""
+        return f"{self.account_id}:{raw}"
 
     def _insert_fill_from_order_event(
         self,

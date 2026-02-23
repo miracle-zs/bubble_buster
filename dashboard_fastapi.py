@@ -428,6 +428,37 @@ def create_app(config_path: Optional[str] = None) -> FastAPI:
         except Exception as exc:  # noqa: BLE001
             raise HTTPException(status_code=500, detail=f"dashboard snapshot failed: {exc}") from exc
 
+    @app.get("/api/accounts/summary")
+    def accounts_summary(request: Request):
+        ctx: DashboardRuntimeContext = request.app.state.ctx
+        try:
+            return JSONResponse(ctx.provider.accounts_summary())
+        except Exception as exc:  # noqa: BLE001
+            raise HTTPException(status_code=500, detail=f"accounts summary failed: {exc}") from exc
+
+    @app.get("/api/account/{account_id}/snapshot")
+    def account_snapshot(
+        request: Request,
+        account_id: str,
+        log_lines: int = Query(default=80, ge=0, le=300),
+        window_hours: Optional[float] = Query(default=24.0, gt=0.0, le=8784.0),
+        curve_points: Optional[int] = Query(default=None, ge=100, le=5000),
+    ):
+        ctx: DashboardRuntimeContext = request.app.state.ctx
+        try:
+            payload = ctx.provider.snapshot(
+                log_lines=log_lines,
+                window_hours=window_hours,
+                curve_points=curve_points,
+                account_id=account_id,
+            )
+            payload["config_path"] = ctx.config_path
+            payload["db_path"] = ctx.db_path
+            payload["account_id"] = account_id
+            return JSONResponse(payload)
+        except Exception as exc:  # noqa: BLE001
+            raise HTTPException(status_code=500, detail=f"account snapshot failed: {exc}") from exc
+
     @app.get("/api/runtime/settings")
     def runtime_settings(request: Request):
         try:

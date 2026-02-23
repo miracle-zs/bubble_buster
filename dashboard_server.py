@@ -252,15 +252,17 @@ class DashboardDataProvider:
         conn: sqlite3.Connection,
         captured_at_utc: str,
         balance_usdt: float,
+        account_id: str = "default",
         source: str = "API",
         error: Optional[str] = None,
     ) -> None:
         conn.execute(
             """
-            INSERT INTO wallet_snapshots (captured_at_utc, balance_usdt, source, error, created_at_utc)
-            VALUES (?, ?, ?, ?, ?)
+            INSERT INTO wallet_snapshots (account_id, captured_at_utc, balance_usdt, source, error, created_at_utc)
+            VALUES (?, ?, ?, ?, ?, ?)
             """,
             (
+                account_id,
                 captured_at_utc,
                 float(balance_usdt),
                 source[:24],
@@ -269,16 +271,32 @@ class DashboardDataProvider:
             ),
         )
 
-    def _get_latest_wallet_snapshot(self, conn: sqlite3.Connection) -> Optional[Dict[str, Any]]:
+    def _get_latest_wallet_snapshot(
+        self,
+        conn: sqlite3.Connection,
+        account_id: Optional[str] = None,
+    ) -> Optional[Dict[str, Any]]:
         try:
-            row = conn.execute(
-                """
-                SELECT id, captured_at_utc, balance_usdt, source, error, created_at_utc
-                FROM wallet_snapshots
-                ORDER BY id DESC
-                LIMIT 1
-                """
-            ).fetchone()
+            if account_id:
+                row = conn.execute(
+                    """
+                    SELECT id, account_id, captured_at_utc, balance_usdt, source, error, created_at_utc
+                    FROM wallet_snapshots
+                    WHERE account_id = ?
+                    ORDER BY id DESC
+                    LIMIT 1
+                    """,
+                    (account_id,),
+                ).fetchone()
+            else:
+                row = conn.execute(
+                    """
+                    SELECT id, account_id, captured_at_utc, balance_usdt, source, error, created_at_utc
+                    FROM wallet_snapshots
+                    ORDER BY id DESC
+                    LIMIT 1
+                    """
+                ).fetchone()
         except sqlite3.Error:
             return None
         if row is None:
@@ -374,11 +392,15 @@ class DashboardDataProvider:
         self,
         conn: sqlite3.Connection,
         window_start_utc: Optional[str],
+        account_id: Optional[str] = None,
     ) -> List[Dict[str, Any]]:
         params: List[Any] = []
-        where_sql = ""
+        where_sql = "WHERE 1=1"
+        if account_id:
+            where_sql += " AND account_id = ?"
+            params.append(account_id)
         if window_start_utc:
-            where_sql = "WHERE captured_at_utc >= ?"
+            where_sql += " AND captured_at_utc >= ?"
             params.append(window_start_utc)
         return self._query_rows(
             conn,
@@ -398,10 +420,12 @@ class DashboardDataProvider:
         wallet_balance_usdt: Optional[float],
         window_start_utc: Optional[str],
         max_points: int,
+        account_id: Optional[str] = None,
     ) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
         wallet_rows = self._query_wallet_rows(
             conn=conn,
             window_start_utc=window_start_utc,
+            account_id=account_id,
         )
 
         curve: List[Dict[str, Any]] = []
@@ -456,10 +480,20 @@ class DashboardDataProvider:
         }
         return curve, stats
 
-    def _load_trade_outcome_stats(self, conn: sqlite3.Connection, now_utc: datetime) -> Dict[str, Any]:
+    def _load_trade_outcome_stats(
+        self,
+        conn: sqlite3.Connection,
+        now_utc: datetime,
+        account_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        params: List[Any] = []
+        where_sql = "WHERE p.status != 'OPEN'"
+        if account_id:
+            where_sql += " AND r.account_id = ?"
+            params.append(account_id)
         rows = self._query_rows(
             conn,
-            """
+            f"""
             SELECT
                 p.id, p.symbol, p.side, p.qty, p.entry_price,
                 p.tp_price, p.sl_price,
@@ -471,6 +505,7 @@ class DashboardDataProvider:
                 oe.qty AS close_event_qty,
                 oe.raw_json AS close_raw_json
             FROM positions p
+            LEFT JOIN runs r ON r.run_id = p.run_id
             LEFT JOIN order_events oe ON oe.id = (
                 SELECT oe2.id
                 FROM order_events oe2
@@ -482,9 +517,10 @@ class DashboardDataProvider:
                 ORDER BY oe2.id DESC
                 LIMIT 1
             )
-            WHERE p.status != 'OPEN'
+            {where_sql}
             ORDER BY COALESCE(p.closed_at_utc, oe.event_time_utc, p.updated_at_utc) ASC, p.id ASC
             """,
+            tuple(params),
         )
 
         cumulative_trade_pnl = 0.0
@@ -542,10 +578,21 @@ class DashboardDataProvider:
             "as_of_utc": now_utc.replace(microsecond=0).isoformat(),
         }
 
-    def _list_unpriced_closed_positions(self, conn: sqlite3.Connection, limit: int = 80) -> List[Dict[str, Any]]:
+    def _list_unpriced_closed_positions(
+        self,
+        conn: sqlite3.Connection,
+        limit: int = 80,
+        account_id: Optional[str] = None,
+    ) -> List[Dict[str, Any]]:
+        params: List[Any] = []
+        where_sql = "WHERE p.status != 'OPEN'"
+        if account_id:
+            where_sql += " AND r.account_id = ?"
+            params.append(account_id)
+        params.append(max(1, int(limit)))
         rows = self._query_rows(
             conn,
-            """
+            f"""
             SELECT
                 p.id, p.symbol, p.side, p.qty, p.entry_price,
                 p.tp_price, p.sl_price,
@@ -557,6 +604,7 @@ class DashboardDataProvider:
                 oe.qty AS close_event_qty,
                 oe.raw_json AS close_raw_json
             FROM positions p
+            LEFT JOIN runs r ON r.run_id = p.run_id
             LEFT JOIN order_events oe ON oe.id = (
                 SELECT oe2.id
                 FROM order_events oe2
@@ -568,11 +616,11 @@ class DashboardDataProvider:
                 ORDER BY oe2.id DESC
                 LIMIT 1
             )
-            WHERE p.status != 'OPEN'
+            {where_sql}
             ORDER BY COALESCE(p.closed_at_utc, oe.event_time_utc, p.updated_at_utc) DESC, p.id DESC
             LIMIT ?
             """,
-            (max(1, int(limit)),),
+            tuple(params),
         )
         items: List[Dict[str, Any]] = []
         for row in rows:
@@ -608,22 +656,30 @@ class DashboardDataProvider:
         wallet_balance_usdt: Optional[float],
         window_start_utc: Optional[str],
         max_points: int,
+        account_id: Optional[str] = None,
     ) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
         wallet_rows = self._query_wallet_rows(
             conn=conn,
             window_start_utc=window_start_utc,
+            account_id=account_id,
         )
         cashflow_rows: List[Dict[str, Any]] = []
+        params: List[Any] = []
+        where_sql = "WHERE asset = 'USDT'"
+        if account_id:
+            where_sql += " AND account_id = ?"
+            params.append(account_id)
         try:
             cashflow_rows = self._query_rows(
                 conn,
-                """
+                f"""
                 SELECT id, event_time_utc, amount
                 FROM cashflow_events
-                WHERE asset = 'USDT'
+                {where_sql}
                 ORDER BY event_time_utc ASC, id ASC
                 LIMIT 5000
                 """,
+                tuple(params),
             )
         except sqlite3.Error:
             cashflow_rows = []
@@ -696,7 +752,7 @@ class DashboardDataProvider:
 
         curve = self._resample_curve(curve, max_points)
         dd = self._apply_drawdown(curve)
-        trade_stats = self._load_trade_outcome_stats(conn, now_utc)
+        trade_stats = self._load_trade_outcome_stats(conn, now_utc, account_id=account_id)
         stats = {
             "wallet_balance_usdt": round(wallet_balance_usdt, 8) if wallet_balance_usdt is not None else None,
             "total_realized_pnl": round(float(curve[-1]["cum_pnl"]), 8),
@@ -727,11 +783,17 @@ class DashboardDataProvider:
         log_lines: int = 80,
         window_hours: Optional[float] = None,
         curve_points: Optional[int] = None,
+        account_id: Optional[str] = None,
     ) -> Dict[str, Any]:
         now_utc = datetime.now(timezone.utc)
         now_local = now_utc.astimezone(self.local_tz)
         next_entry = self._next_entry_local(now_local)
-        live_wallet = self._read_wallet_balance(now_utc)
+        scoped_account = (account_id or "").strip() or None
+        live_wallet = (
+            self._read_wallet_balance(now_utc)
+            if scoped_account is None
+            else {"balance_usdt": None, "as_of_utc": None, "source": "ACCOUNT_SCOPED", "error": None}
+        )
         points_limit = max(100, min(5000, int(curve_points if curve_points is not None else self.default_curve_points)))
         window_hours_value: Optional[float] = None
         if window_hours is not None:
@@ -749,6 +811,7 @@ class DashboardDataProvider:
 
         data: Dict[str, Any] = {
             "generated_at_utc": now_utc.replace(microsecond=0).isoformat(),
+            "account_id": scoped_account,
             "timezone": str(getattr(self.local_tz, "key", self.local_tz)),
             "now_local": now_local.replace(microsecond=0).isoformat(),
             "next_entry_local": next_entry.replace(microsecond=0).isoformat(),
@@ -850,13 +913,14 @@ class DashboardDataProvider:
                             conn=conn,
                             captured_at_utc=str(live_wallet.get("as_of_utc") or now_utc.replace(microsecond=0).isoformat()),
                             balance_usdt=float(live_wallet["balance_usdt"]),
+                            account_id="default",
                             source="API",
                             error=None,
                         )
                     except sqlite3.Error as exc:
                         LOGGER.warning("Failed to persist wallet snapshot: %s", exc)
 
-                latest_wallet_row = self._get_latest_wallet_snapshot(conn)
+                latest_wallet_row = self._get_latest_wallet_snapshot(conn, account_id=scoped_account)
                 if latest_wallet_row is not None:
                     data["wallet"] = {
                         "balance_usdt": round(float(latest_wallet_row["balance_usdt"]), 8),
@@ -870,12 +934,23 @@ class DashboardDataProvider:
                     data["wallet"] = live_wallet
 
                 latest_run = conn.execute(
-                    """
-                    SELECT run_id, trade_day_utc, started_at_utc, completed_at_utc, status, message
-                    FROM runs
-                    ORDER BY started_at_utc DESC
-                    LIMIT 1
-                    """
+                    (
+                        """
+                        SELECT run_id, account_id, trade_day_utc, started_at_utc, completed_at_utc, status, message
+                        FROM runs
+                        WHERE account_id = ?
+                        ORDER BY started_at_utc DESC
+                        LIMIT 1
+                        """
+                        if scoped_account
+                        else """
+                        SELECT run_id, account_id, trade_day_utc, started_at_utc, completed_at_utc, status, message
+                        FROM runs
+                        ORDER BY started_at_utc DESC
+                        LIMIT 1
+                        """
+                    ),
+                    ((scoped_account,) if scoped_account else ()),
                 ).fetchone()
                 if latest_run is not None:
                     data["latest_run"] = dict(latest_run)
@@ -883,35 +958,52 @@ class DashboardDataProvider:
 
                 data["runs"] = self._query_rows(
                     conn,
-                    """
-                    SELECT run_id, trade_day_utc, started_at_utc, completed_at_utc, status, message
-                    FROM runs
-                    ORDER BY started_at_utc DESC
-                    LIMIT 30
-                    """,
+                    (
+                        """
+                        SELECT run_id, account_id, trade_day_utc, started_at_utc, completed_at_utc, status, message
+                        FROM runs
+                        WHERE account_id = ?
+                        ORDER BY started_at_utc DESC
+                        LIMIT 30
+                        """
+                        if scoped_account
+                        else """
+                        SELECT run_id, account_id, trade_day_utc, started_at_utc, completed_at_utc, status, message
+                        FROM runs
+                        ORDER BY started_at_utc DESC
+                        LIMIT 30
+                        """
+                    ),
+                    ((scoped_account,) if scoped_account else ()),
                 )
 
                 data["open_positions"] = self._query_rows(
                     conn,
                     """
-                    SELECT id, run_id, symbol, side, qty, entry_price,
-                           liq_price_latest, tp_price, sl_price,
-                           opened_at_utc, expire_at_utc, status, last_error
-                    FROM positions
-                    WHERE status = 'OPEN'
-                    ORDER BY opened_at_utc DESC
+                    SELECT p.id, p.run_id, p.symbol, p.side, p.qty, p.entry_price,
+                           p.liq_price_latest, p.tp_price, p.sl_price,
+                           p.opened_at_utc, p.expire_at_utc, p.status, p.last_error
+                    FROM positions p
+                    LEFT JOIN runs r ON r.run_id = p.run_id
+                    WHERE p.status = 'OPEN'
+                      AND (? IS NULL OR r.account_id = ?)
+                    ORDER BY p.opened_at_utc DESC
                     LIMIT 100
                     """,
+                    (scoped_account, scoped_account),
                 )
 
                 summary_row = conn.execute(
                     """
                     SELECT
-                        SUM(CASE WHEN status = 'OPEN' THEN 1 ELSE 0 END) AS open_positions,
-                        COUNT(DISTINCT CASE WHEN status = 'OPEN' THEN symbol END) AS open_symbols,
-                        SUM(CASE WHEN status = 'OPEN' AND last_error IS NOT NULL AND TRIM(last_error) != '' THEN 1 ELSE 0 END) AS recent_errors
-                    FROM positions
-                    """
+                        SUM(CASE WHEN p.status = 'OPEN' THEN 1 ELSE 0 END) AS open_positions,
+                        COUNT(DISTINCT CASE WHEN p.status = 'OPEN' THEN p.symbol END) AS open_symbols,
+                        SUM(CASE WHEN p.status = 'OPEN' AND p.last_error IS NOT NULL AND TRIM(p.last_error) != '' THEN 1 ELSE 0 END) AS recent_errors
+                    FROM positions p
+                    LEFT JOIN runs r ON r.run_id = p.run_id
+                    WHERE (? IS NULL OR r.account_id = ?)
+                    """,
+                    (scoped_account, scoped_account),
                 ).fetchone()
                 if summary_row is not None:
                     data["summary"]["open_positions"] = int(summary_row["open_positions"] or 0)
@@ -929,20 +1021,29 @@ class DashboardDataProvider:
                         p.close_reason AS position_close_reason
                     FROM order_events oe
                     LEFT JOIN positions p ON p.id = oe.position_id
+                    LEFT JOIN runs r ON r.run_id = p.run_id
+                    WHERE (? IS NULL OR r.account_id = ?)
                     ORDER BY oe.id DESC
                     LIMIT 120
                     """,
+                    (scoped_account, scoped_account),
                 )
                 data["cashflow_events"] = self._query_rows(
                     conn,
                     """
                     SELECT id, event_time_utc, asset, amount, income_type, symbol, tran_id, info
                     FROM cashflow_events
+                    WHERE (? IS NULL OR account_id = ?)
                     ORDER BY event_time_utc DESC, id DESC
                     LIMIT 80
                     """,
+                    (scoped_account, scoped_account),
                 )
-                data["unpriced_closed_details"] = self._list_unpriced_closed_positions(conn, limit=120)
+                data["unpriced_closed_details"] = self._list_unpriced_closed_positions(
+                    conn,
+                    limit=120,
+                    account_id=scoped_account,
+                )
 
                 strategy_curve, strategy_stats = self._build_strategy_equity_curve(
                     conn=conn,
@@ -950,6 +1051,7 @@ class DashboardDataProvider:
                     wallet_balance_usdt=self._safe_float(data["wallet"].get("balance_usdt")),
                     window_start_utc=window_start_utc,
                     max_points=points_limit,
+                    account_id=scoped_account,
                 )
                 balance_curve, balance_stats = self._build_balance_curve(
                     conn=conn,
@@ -957,6 +1059,7 @@ class DashboardDataProvider:
                     wallet_balance_usdt=self._safe_float(data["wallet"].get("balance_usdt")),
                     window_start_utc=window_start_utc,
                     max_points=points_limit,
+                    account_id=scoped_account,
                 )
                 data["strategy_equity_curve"] = strategy_curve[-points_limit:]
                 data["balance_curve"] = balance_curve[-points_limit:]
@@ -970,6 +1073,67 @@ class DashboardDataProvider:
             data["db_error"] = str(exc)
 
         return data
+
+    def accounts_summary(self) -> Dict[str, Any]:
+        now_utc = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+        payload = {"generated_at_utc": now_utc, "accounts": []}
+        if not os.path.exists(self.db_path):
+            return payload
+
+        try:
+            with self._connect_ctx() as conn:
+                rows = self._query_rows(
+                    conn,
+                    """
+                    WITH accounts AS (
+                        SELECT DISTINCT account_id FROM runs
+                        UNION
+                        SELECT DISTINCT account_id FROM wallet_snapshots
+                        UNION
+                        SELECT DISTINCT account_id FROM cashflow_events
+                    ),
+                    latest_runs AS (
+                        SELECT r.account_id, r.status, r.started_at_utc
+                        FROM runs r
+                        INNER JOIN (
+                            SELECT account_id, MAX(started_at_utc) AS max_started
+                            FROM runs
+                            GROUP BY account_id
+                        ) x ON x.account_id = r.account_id AND x.max_started = r.started_at_utc
+                    ),
+                    open_pos AS (
+                        SELECT r.account_id, COUNT(*) AS open_positions
+                        FROM positions p
+                        INNER JOIN runs r ON r.run_id = p.run_id
+                        WHERE p.status = 'OPEN'
+                        GROUP BY r.account_id
+                    ),
+                    latest_wallet AS (
+                        SELECT ws.account_id, ws.balance_usdt
+                        FROM wallet_snapshots ws
+                        INNER JOIN (
+                            SELECT account_id, MAX(id) AS max_id
+                            FROM wallet_snapshots
+                            GROUP BY account_id
+                        ) x ON x.account_id = ws.account_id AND x.max_id = ws.id
+                    )
+                    SELECT
+                        a.account_id,
+                        COALESCE(op.open_positions, 0) AS open_positions,
+                        lr.status AS last_run_status,
+                        lw.balance_usdt AS wallet_balance_usdt
+                    FROM accounts a
+                    LEFT JOIN open_pos op ON op.account_id = a.account_id
+                    LEFT JOIN latest_runs lr ON lr.account_id = a.account_id
+                    LEFT JOIN latest_wallet lw ON lw.account_id = a.account_id
+                    ORDER BY a.account_id ASC
+                    """
+                )
+                payload["accounts"] = rows
+                return payload
+        except sqlite3.Error as exc:
+            payload["db_error"] = str(exc)
+            return payload
 
 
 def render_dashboard_html(refresh_sec: int) -> str:
@@ -1017,6 +1181,50 @@ def _make_handler(provider: DashboardDataProvider, cfg: DashboardServerConfig):
                         log_lines=min(lines, 300),
                         window_hours=window_hours,
                         curve_points=curve_points,
+                    )
+                )
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json; charset=utf-8")
+                self.send_header("Cache-Control", "no-store")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+                return
+
+            if path == "/api/accounts/summary":
+                body = _json_bytes(provider.accounts_summary())
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json; charset=utf-8")
+                self.send_header("Cache-Control", "no-store")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+                return
+
+            if path.startswith("/api/account/") and path.endswith("/snapshot"):
+                account_id = path[len("/api/account/") : -len("/snapshot")].strip().strip("/")
+                params = parse_qs(parsed.query)
+                lines = max(0, int(params.get("log_lines", ["80"])[0]))
+                window_hours_raw = params.get("window_hours", [None])[0]
+                curve_points_raw = params.get("curve_points", [None])[0]
+                window_hours: Optional[float] = None
+                curve_points: Optional[int] = None
+                try:
+                    if window_hours_raw not in (None, ""):
+                        window_hours = float(window_hours_raw)
+                except ValueError:
+                    window_hours = None
+                try:
+                    if curve_points_raw not in (None, ""):
+                        curve_points = int(curve_points_raw)
+                except ValueError:
+                    curve_points = None
+                body = _json_bytes(
+                    provider.snapshot(
+                        log_lines=min(lines, 300),
+                        window_hours=window_hours,
+                        curve_points=curve_points,
+                        account_id=account_id or None,
                     )
                 )
                 self.send_response(200)

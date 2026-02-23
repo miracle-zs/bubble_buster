@@ -1,10 +1,12 @@
 CREATE TABLE IF NOT EXISTS runs (
     run_id TEXT PRIMARY KEY,
-    trade_day_utc TEXT NOT NULL UNIQUE,
+    account_id TEXT NOT NULL DEFAULT 'default',
+    trade_day_utc TEXT NOT NULL,
     started_at_utc TEXT NOT NULL,
     completed_at_utc TEXT,
     status TEXT NOT NULL,
-    message TEXT
+    message TEXT,
+    UNIQUE(account_id, trade_day_utc)
 );
 
 CREATE TABLE IF NOT EXISTS positions (
@@ -58,6 +60,7 @@ CREATE INDEX IF NOT EXISTS idx_order_events_symbol ON order_events(symbol);
 
 CREATE TABLE IF NOT EXISTS wallet_snapshots (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
+    account_id TEXT NOT NULL DEFAULT 'default',
     captured_at_utc TEXT NOT NULL,
     balance_usdt REAL NOT NULL,
     source TEXT NOT NULL DEFAULT 'API',
@@ -66,9 +69,11 @@ CREATE TABLE IF NOT EXISTS wallet_snapshots (
 );
 
 CREATE INDEX IF NOT EXISTS idx_wallet_snapshots_captured_at ON wallet_snapshots(captured_at_utc);
+CREATE INDEX IF NOT EXISTS idx_wallet_snapshots_account_captured_at ON wallet_snapshots(account_id, captured_at_utc);
 
 CREATE TABLE IF NOT EXISTS cashflow_events (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
+    account_id TEXT NOT NULL DEFAULT 'default',
     unique_key TEXT NOT NULL UNIQUE,
     event_time_utc TEXT NOT NULL,
     asset TEXT NOT NULL,
@@ -83,6 +88,7 @@ CREATE TABLE IF NOT EXISTS cashflow_events (
 
 CREATE INDEX IF NOT EXISTS idx_cashflow_events_time ON cashflow_events(event_time_utc);
 CREATE INDEX IF NOT EXISTS idx_cashflow_events_asset_time ON cashflow_events(asset, event_time_utc);
+CREATE INDEX IF NOT EXISTS idx_cashflow_events_account_asset_time ON cashflow_events(account_id, asset, event_time_utc);
 
 CREATE TABLE IF NOT EXISTS rebalance_cycles (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -181,6 +187,7 @@ CREATE TABLE IF NOT EXISTS locks (
 
 CREATE TABLE IF NOT EXISTS equity_recovery_events (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
+    account_id TEXT NOT NULL DEFAULT 'default',
     cycle_key TEXT NOT NULL,
     cycle_min_captured_at_utc TEXT NOT NULL,
     cycle_min_equity_usdt REAL NOT NULL,
@@ -199,3 +206,4 @@ CREATE TABLE IF NOT EXISTS equity_recovery_events (
 
 CREATE INDEX IF NOT EXISTS idx_equity_recovery_cycle ON equity_recovery_events(cycle_key);
 CREATE INDEX IF NOT EXISTS idx_equity_recovery_created ON equity_recovery_events(created_at_utc);
+CREATE INDEX IF NOT EXISTS idx_equity_recovery_account_created ON equity_recovery_events(account_id, created_at_utc);

@@ -94,7 +94,7 @@ cp config.ini.example config.ini
 
 ```bash
 cd /root/bubble_buster
-python3 main.py service --config /root/bubble_buster/config.ini
+python3 main.py --config /root/bubble_buster/config.ini service
 ```
 
 会自动执行：
@@ -108,7 +108,7 @@ python3 main.py service --config /root/bubble_buster/config.ini
 方式 1（推荐）：
 ```bash
 cd /root/bubble_buster
-python3 main.py dashboard --config /root/bubble_buster/config.ini --host 0.0.0.0 --port 8787
+python3 main.py --config /root/bubble_buster/config.ini dashboard --host 0.0.0.0 --port 8787
 ```
 
 方式 2（等价）：
@@ -124,16 +124,16 @@ uvicorn app.main:app --host 0.0.0.0 --port 8787
 cd /root/bubble_buster
 
 # 单次入场
-python3 main.py entry --config /root/bubble_buster/config.ini
+python3 main.py --config /root/bubble_buster/config.ini entry
 
 # 单次巡检
-python3 main.py manage --config /root/bubble_buster/config.ini
+python3 main.py --config /root/bubble_buster/config.ini manage
 
 # 巡检循环
-python3 main.py manage --config /root/bubble_buster/config.ini --loop
+python3 main.py --config /root/bubble_buster/config.ini manage --loop
 
 # 单次浮亏砍仓
-python3 main.py loss-cut --config /root/bubble_buster/config.ini
+python3 main.py --config /root/bubble_buster/config.ini loss-cut
 ```
 
 ---
@@ -162,7 +162,7 @@ python3 main.py loss-cut --config /root/bubble_buster/config.ini
 
 ```cron
 CRON_TZ=Asia/Shanghai
-55 11 * * * /usr/bin/python3 /root/bubble_buster/main.py loss-cut --config /root/bubble_buster/config_b.ini
+55 11 * * * /usr/bin/python3 /root/bubble_buster/main.py --config /root/bubble_buster/config_b.ini loss-cut
 ```
 
 说明：
@@ -198,10 +198,28 @@ CRON_TZ=Asia/Shanghai
   - `tracked`：只看策略跟踪仓位；
   - `exchange`：看账户全仓位（账户 B 建议）。
 - `manager_interval_sec` / `manager_max_catch_up_runs`：巡检周期与补跑上限。
+- `default_account_id`：默认账户 ID（单账户兼容场景使用）。
+- `max_account_workers`：单进程内并发账户任务 worker 数。
+- `account_failure_threshold`：账户连续失败阈值（触发断路器）。
+- `account_cooldown_cycles`：断路后冷却周期数。
+- `account_task_timeout_sec`：单账户任务超时时间。
 - `run_service_with_dashboard`：
   - `true`：Dashboard 启动时同时拉起后台服务；
   - `false`：Dashboard 只做展示（适合你已有 systemd 服务时）。
 - `db_path` / `log_dir` / `lock_file`：实例隔离关键参数。
+
+### `[accounts]`（单进程多账户）
+
+- `enabled`：启用账户列表（逗号分隔），示例 `enabled = acc01,acc02,55`
+- `mode.<account_id>`：账户模式，支持 `full` / `loss_cut_only`
+- 账户覆盖节：
+  - `[account.<id>.binance]`
+  - `[account.<id>.strategy]`
+  - `[account.<id>.runtime]`
+  - `[account.<id>.notify]`
+- Dashboard 新接口：
+  - `GET /api/accounts/summary`
+  - `GET /api/account/{account_id}/snapshot`
 
 ### `[notify]`
 
@@ -235,7 +253,7 @@ CRON_TZ=Asia/Shanghai
 
 ```bash
 cd /root/bubble_buster
-conda run -n base python -m unittest discover -s tests -p 'test_*.py'
+conda run -n base python -m pytest -q
 ```
 
 ---
@@ -283,7 +301,7 @@ Type=simple
 User=root
 WorkingDirectory=/root/bubble_buster
 Environment=PYTHONUNBUFFERED=1
-ExecStart=/usr/bin/python3 /root/bubble_buster/main.py service --config /root/bubble_buster/config.ini
+ExecStart=/usr/bin/python3 /root/bubble_buster/main.py --config /root/bubble_buster/config.ini service
 Restart=always
 RestartSec=5
 TimeoutStopSec=30
