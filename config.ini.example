@@ -24,7 +24,7 @@ entry_rank_fetch_multiplier = 3
 ranker_max_workers = 24
 ranker_weight_limit_per_minute = 1000
 ranker_min_request_interval_ms = 20
-rebalance_enabled = false
+rebalance_enabled = true
 rebalance_pre_entry_reduce = true
 rebalance_after_entry = true
 rebalance_utilization = 0.97
@@ -34,6 +34,10 @@ rebalance_max_single_adjust_pct = 0.80
 rebalance_max_adjust_orders = 30
 rebalance_mode = equal_risk
 rebalance_age_decay_half_life_hours = 36.0
+equity_recovery_take_profit_enabled = false
+equity_recovery_lookback_hours = 24.0
+equity_recovery_trigger_pct = 0.09
+equity_recovery_reduce_ratio = 0.50
 
 [runtime]
 timezone = Asia/Shanghai

@@ -68,6 +68,23 @@ class StateStoreTest(unittest.TestCase):
         self.assertAlmostEqual(float(latest["balance_usdt"]), 123.456)
         self.assertEqual(latest["source"], "API")
 
+    def test_lock_state_roundtrip(self) -> None:
+        self.assertIsNone(self.store.get_lock_state("equity_recovery_tp"))
+
+        self.store.set_lock_state(
+            "equity_recovery_tp",
+            {
+                "cycle_key": "2026-02-23T01:00:00+00:00",
+                "triggered": True,
+                "triggered_at_utc": "2026-02-23T07:40:00+00:00",
+            },
+        )
+        loaded = self.store.get_lock_state("equity_recovery_tp")
+        self.assertIsNotNone(loaded)
+        assert loaded is not None
+        self.assertEqual(loaded["cycle_key"], "2026-02-23T01:00:00+00:00")
+        self.assertTrue(loaded["triggered"])
+
     def test_rebalance_cycle_and_action_roundtrip(self) -> None:
         run_id, _ = self.store.create_run("2026-02-13")
         cycle_id = self.store.create_rebalance_cycle(

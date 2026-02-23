@@ -55,6 +55,7 @@ class Top10ShortStrategy:
     INSUFFICIENT_MARGIN_ERROR_CODES = {-2019, -2027, -2028}
     REBALANCE_MODE_EQUAL_RISK = "equal_risk"
     REBALANCE_MODE_AGE_DECAY = "age_decay"
+    EQUITY_RECOVERY_LOCK_NAME = "equity_recovery_take_profit_v1"
 
     def __init__(
         self,
@@ -86,6 +87,10 @@ class Top10ShortStrategy:
         rebalance_max_adjust_orders: int = 30,
         rebalance_mode: str = REBALANCE_MODE_EQUAL_RISK,
         rebalance_age_decay_half_life_hours: float = 36.0,
+        equity_recovery_take_profit_enabled: bool = False,
+        equity_recovery_lookback_hours: float = 24.0,
+        equity_recovery_trigger_pct: float = 0.10,
+        equity_recovery_reduce_ratio: float = 0.50,
     ):
         self.client = client
         self.store = store
@@ -115,6 +120,10 @@ class Top10ShortStrategy:
         self.rebalance_max_adjust_orders = max(1, int(rebalance_max_adjust_orders))
         self.rebalance_mode = self._normalize_rebalance_mode(rebalance_mode)
         self.rebalance_age_decay_half_life_hours = max(1.0, float(rebalance_age_decay_half_life_hours))
+        self.equity_recovery_take_profit_enabled = bool(equity_recovery_take_profit_enabled)
+        self.equity_recovery_lookback_hours = max(1.0, float(equity_recovery_lookback_hours))
+        self.equity_recovery_trigger_pct = min(1.0, max(0.001, float(equity_recovery_trigger_pct)))
+        self.equity_recovery_reduce_ratio = min(0.95, max(0.05, float(equity_recovery_reduce_ratio)))
 
     def run_entry(self, trade_day_utc: Optional[str] = None) -> Dict[str, object]:
         trade_day = (trade_day_utc or "").strip() or datetime.now(timezone.utc).date().isoformat()
@@ -516,6 +525,188 @@ class Top10ShortStrategy:
                 "entry_failed": entry_failed_count,
                 "exit_setup_failed": exit_setup_failed_count,
             }
+
+    def run_equity_recovery_take_profit(self) -> Dict[str, object]:
+        if not self.equity_recovery_take_profit_enabled:
+            return {"status": "DISABLED"}
+
+        latest = self.store.get_latest_wallet_snapshot()
+        if not latest:
+            return {"status": "SKIPPED", "reason": "NO_WALLET_SNAPSHOT"}
+        current_time_utc = str(latest.get("captured_at_utc") or "").strip()
+        current_equity = self._safe_float(latest.get("balance_usdt"), default=0.0)
+        if not current_time_utc or current_equity <= 0:
+            return {"status": "SKIPPED", "reason": "INVALID_CURRENT_SNAPSHOT"}
+
+        start_time_utc = (
+            self._parse_iso_utc(current_time_utc) - timedelta(hours=self.equity_recovery_lookback_hours)
+        ).replace(microsecond=0).isoformat()
+        min_snapshot = self.store.get_wallet_snapshot_min_since(
+            start_captured_at_utc=start_time_utc,
+            end_captured_at_utc=current_time_utc,
+        )
+        if not min_snapshot:
+            return {"status": "SKIPPED", "reason": "NO_MIN_SNAPSHOT"}
+
+        cycle_min_time = str(min_snapshot.get("captured_at_utc") or "").strip()
+        cycle_min_equity = self._safe_float(min_snapshot.get("balance_usdt"), default=0.0)
+        if not cycle_min_time or cycle_min_equity <= 0:
+            return {"status": "SKIPPED", "reason": "INVALID_MIN_SNAPSHOT"}
+
+        cycle_key = cycle_min_time
+        threshold_equity = cycle_min_equity * (1.0 + self.equity_recovery_trigger_pct)
+        state = self.store.get_lock_state(self.EQUITY_RECOVERY_LOCK_NAME) or {}
+        state_cycle_key = str(state.get("cycle_key") or "").strip()
+        state_triggered = bool(state.get("triggered", False))
+
+        if state_cycle_key != cycle_key:
+            state_triggered = False
+
+        if state_triggered:
+            return {"status": "SKIPPED", "reason": "ALREADY_TRIGGERED_IN_CYCLE", "cycle_key": cycle_key}
+
+        if current_equity < threshold_equity:
+            self.store.set_lock_state(
+                self.EQUITY_RECOVERY_LOCK_NAME,
+                {
+                    "cycle_key": cycle_key,
+                    "cycle_min_equity": cycle_min_equity,
+                    "triggered": False,
+                    "updated_at_utc": self._utc_now_iso(),
+                },
+            )
+            return {
+                "status": "SKIPPED",
+                "reason": "THRESHOLD_NOT_REACHED",
+                "cycle_key": cycle_key,
+                "current_equity": round(current_equity, 6),
+                "threshold_equity": round(threshold_equity, 6),
+            }
+
+        open_positions = self.store.list_open_positions()
+        if not open_positions:
+            return {"status": "SKIPPED", "reason": "NO_OPEN_POSITIONS", "cycle_key": cycle_key}
+
+        adjusted = 0
+        errors = 0
+        reduced_notional = 0.0
+        touched_position_ids: Set[int] = set()
+        detail_rows: List[Dict[str, object]] = []
+        for pos in open_positions:
+            position_id = int(pos["id"])
+            symbol = str(pos["symbol"])
+            try:
+                risk = self._load_short_position(symbol)
+                if not risk:
+                    detail_rows.append({"symbol": symbol, "position_id": position_id, "status": "SKIPPED_NO_RISK"})
+                    continue
+                position_amt = abs(self._safe_float(risk.get("positionAmt"), default=0.0))
+                mark_price = (
+                    self._safe_positive_float(risk.get("markPrice"))
+                    or self._safe_positive_float(risk.get("entryPrice"))
+                    or self._safe_positive_float(pos.get("entry_price"))
+                )
+                if position_amt <= 0 or not mark_price:
+                    detail_rows.append({"symbol": symbol, "position_id": position_id, "status": "SKIPPED_INVALID_QTY"})
+                    continue
+
+                reduce_target_qty = position_amt * self.equity_recovery_reduce_ratio
+                reduce_notional = reduce_target_qty * mark_price
+                reduce_qty = self.client.normalize_order_qty(symbol, reduce_notional, mark_price)
+                if reduce_qty <= 0:
+                    detail_rows.append({"symbol": symbol, "position_id": position_id, "status": "SKIPPED_QTY_ZERO"})
+                    continue
+
+                order = self.client.create_order(
+                    symbol=symbol,
+                    side="BUY",
+                    type="MARKET",
+                    quantity=self.client.format_order_qty(symbol, reduce_qty),
+                    reduceOnly=True,
+                    newClientOrderId=self._new_client_id("ptp", symbol),
+                    newOrderRespType="RESULT",
+                )
+                self.store.add_order_event(
+                    symbol=symbol,
+                    position_id=position_id,
+                    event_time_utc=self._utc_now_iso(),
+                    order_payload=order,
+                )
+                reduced_notional += reduce_qty * mark_price
+                adjusted += 1
+                if self._sync_position_after_adjustment(
+                    position_id=position_id,
+                    symbol=symbol,
+                    fallback_price=mark_price,
+                ):
+                    touched_position_ids.add(position_id)
+                detail_rows.append(
+                    {
+                        "symbol": symbol,
+                        "position_id": position_id,
+                        "status": "ADJUSTED",
+                        "reduce_qty": reduce_qty,
+                        "mark_price": mark_price,
+                    }
+                )
+            except Exception as exc:  # noqa: BLE001
+                errors += 1
+                self.store.set_position_error(position_id, f"equity_recovery_tp: {exc}")
+                LOGGER.exception(
+                    "Equity recovery take-profit failed for symbol=%s position_id=%s: %s",
+                    symbol,
+                    position_id,
+                    exc,
+                )
+                detail_rows.append(
+                    {
+                        "symbol": symbol,
+                        "position_id": position_id,
+                        "status": "ERROR",
+                        "error": str(exc),
+                    }
+                )
+
+        if touched_position_ids:
+            self._refresh_exit_orders_for_positions(touched_position_ids)
+
+        event_id = self.store.add_equity_recovery_event(
+            cycle_key=cycle_key,
+            cycle_min_captured_at_utc=cycle_min_time,
+            cycle_min_equity_usdt=cycle_min_equity,
+            current_captured_at_utc=current_time_utc,
+            current_equity_usdt=current_equity,
+            trigger_pct=self.equity_recovery_trigger_pct,
+            threshold_equity_usdt=threshold_equity,
+            reduce_ratio=self.equity_recovery_reduce_ratio,
+            open_positions=len(open_positions),
+            adjusted_positions=adjusted,
+            reduced_notional_usdt=reduced_notional,
+            error_count=errors,
+            details={"positions": detail_rows},
+        )
+        self.store.set_lock_state(
+            self.EQUITY_RECOVERY_LOCK_NAME,
+            {
+                "cycle_key": cycle_key,
+                "cycle_min_equity": cycle_min_equity,
+                "triggered": True,
+                "triggered_at_utc": self._utc_now_iso(),
+                "event_id": event_id,
+                "updated_at_utc": self._utc_now_iso(),
+            },
+        )
+        return {
+            "status": "TRIGGERED",
+            "cycle_key": cycle_key,
+            "event_id": event_id,
+            "open_positions": len(open_positions),
+            "adjusted": adjusted,
+            "errors": errors,
+            "current_equity": round(current_equity, 6),
+            "threshold_equity": round(threshold_equity, 6),
+            "reduced_notional": round(reduced_notional, 6),
+        }
 
     def _redistribute_failed_notional(
         self,

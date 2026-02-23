@@ -169,6 +169,13 @@ class StrategyRuntimeService:
                     LOGGER.info("service wallet snapshot: %s", wallet_summary)
                 except Exception as exc:  # noqa: BLE001
                     LOGGER.warning("service wallet snapshot failed: %s", exc)
+            if hasattr(self.strategy, "run_equity_recovery_take_profit"):
+                try:
+                    result = self.strategy.run_equity_recovery_take_profit()
+                    if isinstance(result, dict) and result.get("status") == "TRIGGERED":
+                        LOGGER.info("service equity recovery take-profit result: %s", result)
+                except Exception as exc:  # noqa: BLE001
+                    LOGGER.warning("service equity recovery take-profit failed: %s", exc)
             self._next_manage_monotonic += self.cfg.manager_interval_sec
 
         if now_monotonic >= self._next_manage_monotonic:

@@ -178,3 +178,24 @@ CREATE TABLE IF NOT EXISTS locks (
     holder TEXT,
     updated_at_utc TEXT NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS equity_recovery_events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    cycle_key TEXT NOT NULL,
+    cycle_min_captured_at_utc TEXT NOT NULL,
+    cycle_min_equity_usdt REAL NOT NULL,
+    current_captured_at_utc TEXT NOT NULL,
+    current_equity_usdt REAL NOT NULL,
+    trigger_pct REAL NOT NULL,
+    threshold_equity_usdt REAL NOT NULL,
+    reduce_ratio REAL NOT NULL,
+    open_positions INTEGER NOT NULL DEFAULT 0,
+    adjusted_positions INTEGER NOT NULL DEFAULT 0,
+    reduced_notional_usdt REAL NOT NULL DEFAULT 0,
+    error_count INTEGER NOT NULL DEFAULT 0,
+    details_json TEXT,
+    created_at_utc TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_equity_recovery_cycle ON equity_recovery_events(cycle_key);
+CREATE INDEX IF NOT EXISTS idx_equity_recovery_created ON equity_recovery_events(created_at_utc);

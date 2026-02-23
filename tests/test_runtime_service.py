@@ -26,10 +26,15 @@ class RuntimeServiceTest(unittest.TestCase):
         class StrategyStub:
             def __init__(self):
                 self.calls = 0
+                self.equity_recovery_calls = 0
 
             def run_entry(self):
                 self.calls += 1
                 return {"status": "SUCCESS"}
+
+            def run_equity_recovery_take_profit(self):
+                self.equity_recovery_calls += 1
+                return {"status": "SKIPPED", "reason": "THRESHOLD_NOT_REACHED"}
 
         class ManagerStub:
             def __init__(self):
@@ -171,6 +176,23 @@ class RuntimeServiceTest(unittest.TestCase):
 
         self.assertEqual(manager.calls, 4)
         self.assertEqual(sampler.calls, 4)  # type: ignore[union-attr]
+
+    def test_equity_recovery_hook_runs_with_manage_cycle(self):
+        service, strategy, manager, _ = self._create_service(
+            run_manage_on_startup=True,
+            manager_interval_sec=60,
+            manager_max_catch_up_runs=2,
+            entry_hour=23,
+            entry_minute=59,
+        )
+        now_local = datetime(2026, 2, 13, 1, 0, tzinfo=ZoneInfo("UTC"))
+
+        service.run_cycle(now_local=now_local, now_monotonic=10.0)
+        service.run_cycle(now_local=now_local, now_monotonic=70.0)
+        service.run_cycle(now_local=now_local, now_monotonic=400.0)
+
+        self.assertEqual(manager.calls, 4)
+        self.assertEqual(strategy.equity_recovery_calls, 4)
 
     def test_daily_loss_cut_runs_once_per_day_after_schedule(self):
         service, _, manager, _ = self._create_service(

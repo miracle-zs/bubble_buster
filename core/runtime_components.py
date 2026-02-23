@@ -133,6 +133,22 @@ def create_components(
             "rebalance_age_decay_half_life_hours",
             fallback=36.0,
         ),
+        equity_recovery_take_profit_enabled=strategy_cfg.getboolean(
+            "equity_recovery_take_profit_enabled",
+            fallback=False,
+        ),
+        equity_recovery_lookback_hours=strategy_cfg.getfloat(
+            "equity_recovery_lookback_hours",
+            fallback=24.0,
+        ),
+        equity_recovery_trigger_pct=strategy_cfg.getfloat(
+            "equity_recovery_trigger_pct",
+            fallback=0.10,
+        ),
+        equity_recovery_reduce_ratio=strategy_cfg.getfloat(
+            "equity_recovery_reduce_ratio",
+            fallback=0.50,
+        ),
     )
 
     manager = PositionManager(

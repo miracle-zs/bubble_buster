@@ -541,6 +541,128 @@ class StateStore:
             ).fetchone()
             return dict(row) if row is not None else None
 
+    def get_wallet_snapshot_min_since(
+        self,
+        start_captured_at_utc: str,
+        end_captured_at_utc: Optional[str] = None,
+    ) -> Optional[Dict[str, Any]]:
+        start = (start_captured_at_utc or "").strip()
+        if not start:
+            return None
+        with self._connect() as conn:
+            if end_captured_at_utc:
+                row = conn.execute(
+                    """
+                    SELECT id, captured_at_utc, balance_usdt, source, error, created_at_utc
+                    FROM wallet_snapshots
+                    WHERE captured_at_utc >= ? AND captured_at_utc <= ?
+                    ORDER BY balance_usdt ASC, captured_at_utc ASC, id ASC
+                    LIMIT 1
+                    """,
+                    (start, end_captured_at_utc.strip()),
+                ).fetchone()
+            else:
+                row = conn.execute(
+                    """
+                    SELECT id, captured_at_utc, balance_usdt, source, error, created_at_utc
+                    FROM wallet_snapshots
+                    WHERE captured_at_utc >= ?
+                    ORDER BY balance_usdt ASC, captured_at_utc ASC, id ASC
+                    LIMIT 1
+                    """,
+                    (start,),
+                ).fetchone()
+            return dict(row) if row is not None else None
+
+    def get_lock_state(self, lock_name: str) -> Optional[Dict[str, Any]]:
+        name = (lock_name or "").strip()
+        if not name:
+            return None
+        with self._connect() as conn:
+            row = conn.execute(
+                """
+                SELECT holder
+                FROM locks
+                WHERE lock_name = ?
+                LIMIT 1
+                """,
+                (name,),
+            ).fetchone()
+            if row is None:
+                return None
+            holder = row["holder"]
+            if holder is None:
+                return None
+            try:
+                loaded = json.loads(str(holder))
+            except (TypeError, ValueError):
+                return None
+            return loaded if isinstance(loaded, dict) else None
+
+    def set_lock_state(self, lock_name: str, state: Dict[str, Any]) -> None:
+        name = (lock_name or "").strip()
+        if not name:
+            return
+        payload = json.dumps(state or {}, ensure_ascii=False)
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO locks (lock_name, holder, updated_at_utc)
+                VALUES (?, ?, ?)
+                ON CONFLICT(lock_name) DO UPDATE SET
+                    holder = excluded.holder,
+                    updated_at_utc = excluded.updated_at_utc
+                """,
+                (name, payload, utc_now_iso()),
+            )
+
+    def add_equity_recovery_event(
+        self,
+        cycle_key: str,
+        cycle_min_captured_at_utc: str,
+        cycle_min_equity_usdt: float,
+        current_captured_at_utc: str,
+        current_equity_usdt: float,
+        trigger_pct: float,
+        threshold_equity_usdt: float,
+        reduce_ratio: float,
+        open_positions: int,
+        adjusted_positions: int,
+        reduced_notional_usdt: float,
+        error_count: int,
+        details: Optional[Dict[str, Any]] = None,
+    ) -> int:
+        with self._connect() as conn:
+            cursor = conn.execute(
+                """
+                INSERT INTO equity_recovery_events (
+                    cycle_key, cycle_min_captured_at_utc, cycle_min_equity_usdt,
+                    current_captured_at_utc, current_equity_usdt,
+                    trigger_pct, threshold_equity_usdt, reduce_ratio,
+                    open_positions, adjusted_positions, reduced_notional_usdt, error_count,
+                    details_json, created_at_utc
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    (cycle_key or "").strip()[:64],
+                    (cycle_min_captured_at_utc or "").strip(),
+                    float(cycle_min_equity_usdt),
+                    (current_captured_at_utc or "").strip(),
+                    float(current_equity_usdt),
+                    float(trigger_pct),
+                    float(threshold_equity_usdt),
+                    float(reduce_ratio),
+                    int(open_positions),
+                    int(adjusted_positions),
+                    float(reduced_notional_usdt),
+                    int(error_count),
+                    json.dumps(details, ensure_ascii=False) if details is not None else None,
+                    utc_now_iso(),
+                ),
+            )
+            return int(cursor.lastrowid)
+
     def get_earliest_wallet_snapshot_time(self) -> Optional[str]:
         with self._connect() as conn:
             row = conn.execute(
