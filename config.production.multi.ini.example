@@ -1,0 +1,105 @@
+[binance]
+api_key =
+api_secret =
+base_url = https://fapi.binance.com
+timeout_sec = 10
+retry_count = 3
+retry_delay_sec = 1
+recv_window = 5000
+http_pool_maxsize = 64
+
+[strategy]
+leverage = 2
+top_n = 10
+volume_threshold = 0
+tp_price_drop_pct = 20
+sl_liq_buffer_pct = 1
+max_hold_hours = 47.5
+trigger_price_type = CONTRACT_PRICE
+allocation_splits = 10
+entry_fee_buffer_pct = 1.0
+entry_shrink_retry_count = 3
+entry_shrink_step_pct = 10.0
+entry_rank_fetch_multiplier = 3
+ranker_max_workers = 24
+ranker_weight_limit_per_minute = 1000
+ranker_min_request_interval_ms = 20
+rebalance_enabled = true
+rebalance_pre_entry_reduce = true
+rebalance_after_entry = true
+rebalance_utilization = 0.97
+rebalance_deadband_pct = 0.03
+rebalance_min_adjust_notional_usdt = 1.0
+rebalance_max_single_adjust_pct = 0.80
+rebalance_max_adjust_orders = 30
+rebalance_mode = equal_risk
+rebalance_age_decay_half_life_hours = 36.0
+equity_recovery_take_profit_enabled = false
+equity_recovery_lookback_hours = 24.0
+equity_recovery_trigger_pct = 0.09
+equity_recovery_reduce_ratio = 0.50
+
+[runtime]
+timezone = Asia/Shanghai
+entry_hour = 7
+entry_minute = 40
+entry_misfire_grace_min = 20
+entry_catchup_enabled = true
+daily_loss_cut_enabled = true
+daily_loss_cut_hour = 11
+daily_loss_cut_minute = 55
+daily_loss_cut_scope = exchange
+manager_interval_sec = 60
+manager_max_catch_up_runs = 3
+service_loop_sleep_sec = 1.0
+run_manage_on_startup = true
+default_account_id = acc01
+max_account_workers = 3
+account_failure_threshold = 3
+account_cooldown_cycles = 2
+account_task_timeout_sec = 30
+wallet_snapshot_asset = USDT
+sync_cashflows = true
+cashflow_income_types = TRANSFER,WELCOME_BONUS
+dashboard_host = 127.0.0.1
+dashboard_port = 8787
+dashboard_refresh_sec = 5
+dashboard_curve_points = 1200
+run_service_with_dashboard = false
+lock_file = runtime.lock
+lock_wait_sec = 30
+db_path = state.db
+log_dir = logs
+log_level = INFO
+
+[accounts]
+enabled = acc01,acc02,55
+mode.acc01 = full
+mode.acc02 = full
+mode.55 = loss_cut_only
+
+[account.acc01.binance]
+api_key = REPLACE_WITH_ACC01_API_KEY
+api_secret = REPLACE_WITH_ACC01_API_SECRET
+
+[account.acc02.binance]
+api_key = REPLACE_WITH_ACC02_API_KEY
+api_secret = REPLACE_WITH_ACC02_API_SECRET
+
+[account.55.binance]
+api_key = REPLACE_WITH_ACC55_API_KEY
+api_secret = REPLACE_WITH_ACC55_API_SECRET
+
+[account.acc02.strategy]
+top_n = 12
+rebalance_utilization = 0.92
+
+[account.55.runtime]
+daily_loss_cut_enabled = true
+daily_loss_cut_scope = exchange
+
+[notify]
+enabled = true
+serverchan_sendkey =
+http_proxy =
+https_proxy =
