@@ -1,7 +1,21 @@
 # Multi-Account Single-Process Concurrency Design
 
 Date: 2026-02-23
-Status: Approved
+Status: Implemented (2026-02-23)
+
+## Implementation Notes
+
+- Added account config parser and validation (`core/account_config.py`) for `enabled` + `mode.<account_id>` + per-account binance overrides.
+- Runtime service now supports account runtime contexts with concurrent manage dispatch (`max_account_workers`).
+- Added per-account resilience controls:
+  - `account_failure_threshold`
+  - `account_cooldown_cycles`
+  - `account_task_timeout_sec`
+- `StateStore` supports account-scoped access via `store.scoped(account_id)` and scoped queries for runs/positions/wallet/cashflow/equity-recovery/locks.
+- Dashboard added:
+  - `GET /api/accounts/summary`
+  - `GET /api/account/{account_id}/snapshot`
+  with account-filtered snapshot query path.
 
 ## 1. Context
 
