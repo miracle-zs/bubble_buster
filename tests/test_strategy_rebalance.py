@@ -1,9 +1,36 @@
 import importlib.util
+import sys
+import types
 import unittest
 from unittest.mock import MagicMock, patch
 
 if importlib.util.find_spec("requests") is None:
-    raise unittest.SkipTest("requests is not installed")
+    requests_stub = types.ModuleType("requests")
+
+    class _DummySession:
+        def __init__(self):
+            self.headers = {}
+            self.proxies = {}
+
+        def mount(self, *_args, **_kwargs):
+            return None
+
+    class _DummyRequestException(Exception):
+        pass
+
+    requests_stub.Session = _DummySession
+    requests_stub.RequestException = _DummyRequestException
+
+    adapters_stub = types.ModuleType("requests.adapters")
+
+    class _DummyHTTPAdapter:
+        def __init__(self, *args, **kwargs):
+            pass
+
+    adapters_stub.HTTPAdapter = _DummyHTTPAdapter
+    requests_stub.adapters = adapters_stub
+    sys.modules["requests"] = requests_stub
+    sys.modules["requests.adapters"] = adapters_stub
 
 from core.strategy_top10_short import Top10ShortStrategy
 from infra.binance_futures_client import BinanceAPIError
@@ -95,7 +122,7 @@ class StrategyRebalanceTest(unittest.TestCase):
         self.assertEqual(int(summary["planned"]), 2)
         self.assertEqual(int(summary["adjusted"]), 2)
         self.assertEqual(int(summary["errors"]), 0)
-        self.assertAlmostEqual(float(summary["reduced_notional"]), 80.0, places=6)
+        self.assertAlmostEqual(float(summary["reduced_notional"]), 110.0, places=6)
         self.assertAlmostEqual(float(summary["added_notional"]), 0.0, places=6)
         self.assertEqual(summary["mode"], "equal_risk")
         self.assertEqual(client.create_order.call_count, 2)
@@ -311,9 +338,10 @@ class StrategyRebalanceTest(unittest.TestCase):
         summary = strategy._rebalance_to_target(target_count=1, reduce_only=False, reason_tag="post")
 
         self.assertEqual(summary["mode"], "age_decay")
-        self.assertEqual(int(summary["planned"]), 0)
-        self.assertEqual(int(summary["adjusted"]), 0)
-        client.create_order.assert_not_called()
+        self.assertEqual(int(summary["planned"]), 1)
+        self.assertEqual(int(summary["adjusted"]), 1)
+        self.assertEqual(client.create_order.call_count, 1)
+        self.assertEqual(client.create_order.call_args.kwargs["side"], "SELL")
 
     @patch("core.strategy_top10_short.build_top_gainers")
     def test_entry_uses_equity_target_notional_when_rebalance_enabled(self, mock_top_gainers) -> None:

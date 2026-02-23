@@ -3,6 +3,7 @@ import os
 import sqlite3
 import uuid
 import hashlib
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Set, Tuple
@@ -54,13 +55,25 @@ class StateStore:
         conn.row_factory = sqlite3.Row
         return conn
 
+    @contextmanager
+    def _connect_ctx(self):
+        conn = self._connect()
+        try:
+            yield conn
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
+
     def init_schema(self) -> None:
         if self.schema_path:
             with open(self.schema_path, "r", encoding="utf-8") as f:
                 schema_sql = f.read()
         else:
             schema_sql = ""
-        with self._connect() as conn:
+        with self._connect_ctx() as conn:
             if schema_sql:
                 conn.executescript(schema_sql)
             else:
@@ -73,7 +86,7 @@ class StateStore:
         """
         run_id = str(uuid.uuid4())
         started_at = utc_now_iso()
-        with self._connect() as conn:
+        with self._connect_ctx() as conn:
             try:
                 conn.execute(
                     """
@@ -91,7 +104,7 @@ class StateStore:
                 return str(row["run_id"]), False
 
     def finalize_run(self, run_id: str, status: str, message: Optional[str] = None) -> None:
-        with self._connect() as conn:
+        with self._connect_ctx() as conn:
             conn.execute(
                 """
                 UPDATE runs
@@ -102,7 +115,7 @@ class StateStore:
             )
 
     def get_run(self, run_id: str) -> Optional[RunState]:
-        with self._connect() as conn:
+        with self._connect_ctx() as conn:
             row = conn.execute("SELECT * FROM runs WHERE run_id = ?", (run_id,)).fetchone()
             if row is None:
                 return None
@@ -135,7 +148,7 @@ class StateStore:
         last_error: Optional[str] = None,
     ) -> int:
         now_iso = utc_now_iso()
-        with self._connect() as conn:
+        with self._connect_ctx() as conn:
             cursor = conn.execute(
                 """
                 INSERT INTO positions (
@@ -175,12 +188,12 @@ class StateStore:
             return int(cursor.lastrowid)
 
     def list_open_positions(self) -> List[Dict[str, Any]]:
-        with self._connect() as conn:
+        with self._connect_ctx() as conn:
             rows = conn.execute("SELECT * FROM positions WHERE status = 'OPEN'").fetchall()
             return [dict(row) for row in rows]
 
     def list_open_symbols(self) -> Set[str]:
-        with self._connect() as conn:
+        with self._connect_ctx() as conn:
             rows = conn.execute("SELECT DISTINCT symbol FROM positions WHERE status = 'OPEN'").fetchall()
             return {str(row["symbol"]) for row in rows}
 
@@ -195,7 +208,7 @@ class StateStore:
         sl_price: Optional[float],
         liq_price_latest: Optional[float] = None,
     ) -> None:
-        with self._connect() as conn:
+        with self._connect_ctx() as conn:
             conn.execute(
                 """
                 UPDATE positions
@@ -230,7 +243,7 @@ class StateStore:
         sl_price: float,
         liq_price_latest: Optional[float],
     ) -> None:
-        with self._connect() as conn:
+        with self._connect_ctx() as conn:
             conn.execute(
                 """
                 UPDATE positions
@@ -245,7 +258,7 @@ class StateStore:
             )
 
     def set_position_qty(self, position_id: int, qty: float, entry_price: float) -> None:
-        with self._connect() as conn:
+        with self._connect_ctx() as conn:
             conn.execute(
                 """
                 UPDATE positions
@@ -262,7 +275,7 @@ class StateStore:
         close_reason: Optional[str],
         close_order_id: Optional[int] = None,
     ) -> None:
-        with self._connect() as conn:
+        with self._connect_ctx() as conn:
             conn.execute(
                 """
                 UPDATE positions
@@ -277,7 +290,7 @@ class StateStore:
             )
 
     def set_position_error(self, position_id: int, error_message: str) -> None:
-        with self._connect() as conn:
+        with self._connect_ctx() as conn:
             conn.execute(
                 """
                 UPDATE positions
@@ -288,7 +301,7 @@ class StateStore:
             )
 
     def clear_position_error(self, position_id: int) -> None:
-        with self._connect() as conn:
+        with self._connect_ctx() as conn:
             conn.execute(
                 """
                 UPDATE positions
@@ -305,7 +318,7 @@ class StateStore:
         order_payload: Dict[str, Any],
         position_id: Optional[int] = None,
     ) -> int:
-        with self._connect() as conn:
+        with self._connect_ctx() as conn:
             cursor = conn.execute(
                 """
                 INSERT INTO order_events (
@@ -349,7 +362,7 @@ class StateStore:
         target_count: int,
     ) -> int:
         now_iso = utc_now_iso()
-        with self._connect() as conn:
+        with self._connect_ctx() as conn:
             cursor = conn.execute(
                 """
                 INSERT INTO rebalance_cycles (
@@ -376,7 +389,7 @@ class StateStore:
         summary: Dict[str, Any],
         skip_reason: Optional[str] = None,
     ) -> None:
-        with self._connect() as conn:
+        with self._connect_ctx() as conn:
             conn.execute(
                 """
                 UPDATE rebalance_cycles
@@ -433,7 +446,7 @@ class StateStore:
         error: Optional[str] = None,
     ) -> int:
         now_iso = utc_now_iso()
-        with self._connect() as conn:
+        with self._connect_ctx() as conn:
             cursor = conn.execute(
                 """
                 INSERT INTO rebalance_actions (
@@ -483,7 +496,7 @@ class StateStore:
         client_order_id: Optional[str] = None,
         error: Optional[str] = None,
     ) -> None:
-        with self._connect() as conn:
+        with self._connect_ctx() as conn:
             conn.execute(
                 """
                 UPDATE rebalance_actions
@@ -511,7 +524,7 @@ class StateStore:
         source: str = "API",
         error: Optional[str] = None,
     ) -> int:
-        with self._connect() as conn:
+        with self._connect_ctx() as conn:
             cursor = conn.execute(
                 """
                 INSERT INTO wallet_snapshots (
@@ -530,7 +543,7 @@ class StateStore:
             return int(cursor.lastrowid)
 
     def get_latest_wallet_snapshot(self) -> Optional[Dict[str, Any]]:
-        with self._connect() as conn:
+        with self._connect_ctx() as conn:
             row = conn.execute(
                 """
                 SELECT id, captured_at_utc, balance_usdt, source, error, created_at_utc
@@ -549,7 +562,7 @@ class StateStore:
         start = (start_captured_at_utc or "").strip()
         if not start:
             return None
-        with self._connect() as conn:
+        with self._connect_ctx() as conn:
             if end_captured_at_utc:
                 row = conn.execute(
                     """
@@ -578,7 +591,7 @@ class StateStore:
         name = (lock_name or "").strip()
         if not name:
             return None
-        with self._connect() as conn:
+        with self._connect_ctx() as conn:
             row = conn.execute(
                 """
                 SELECT holder
@@ -604,7 +617,7 @@ class StateStore:
         if not name:
             return
         payload = json.dumps(state or {}, ensure_ascii=False)
-        with self._connect() as conn:
+        with self._connect_ctx() as conn:
             conn.execute(
                 """
                 INSERT INTO locks (lock_name, holder, updated_at_utc)
@@ -632,7 +645,7 @@ class StateStore:
         error_count: int,
         details: Optional[Dict[str, Any]] = None,
     ) -> int:
-        with self._connect() as conn:
+        with self._connect_ctx() as conn:
             cursor = conn.execute(
                 """
                 INSERT INTO equity_recovery_events (
@@ -664,7 +677,7 @@ class StateStore:
             return int(cursor.lastrowid)
 
     def get_earliest_wallet_snapshot_time(self) -> Optional[str]:
-        with self._connect() as conn:
+        with self._connect_ctx() as conn:
             row = conn.execute(
                 """
                 SELECT captured_at_utc
@@ -704,7 +717,7 @@ class StateStore:
         )
         unique_key = hashlib.sha1(unique_source.encode("utf-8")).hexdigest()
         payload_json = json.dumps(raw_json, ensure_ascii=False) if raw_json is not None else None
-        with self._connect() as conn:
+        with self._connect_ctx() as conn:
             cursor = conn.execute(
                 """
                 INSERT OR IGNORE INTO cashflow_events (
@@ -729,7 +742,7 @@ class StateStore:
             return int(cursor.rowcount or 0) > 0
 
     def get_latest_cashflow_event_time(self, asset: str = "USDT") -> Optional[str]:
-        with self._connect() as conn:
+        with self._connect_ctx() as conn:
             row = conn.execute(
                 """
                 SELECT event_time_utc

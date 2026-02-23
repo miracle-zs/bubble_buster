@@ -573,7 +573,9 @@ class Top10ShortStrategy:
         if state_triggered:
             return {"status": "SKIPPED", "reason": "ALREADY_TRIGGERED_IN_CYCLE", "cycle_key": cycle_key}
 
-        if current_equity < threshold_equity:
+        # Avoid floating-point edge misses (e.g. 900 * 1.1 -> 990.0000000000001).
+        threshold_eps = max(1e-9, abs(threshold_equity) * 1e-12)
+        if current_equity + threshold_eps < threshold_equity:
             self.store.set_lock_state(
                 self.EQUITY_RECOVERY_LOCK_NAME,
                 {
@@ -594,18 +596,41 @@ class Top10ShortStrategy:
 
         open_positions = self.store.list_open_positions()
         if not open_positions:
-            return {"status": "SKIPPED", "reason": "NO_OPEN_POSITIONS", "cycle_key": cycle_key}
+            # Threshold reached with no positions: start a new anchored window from now.
+            self.store.set_lock_state(
+                self.EQUITY_RECOVERY_LOCK_NAME,
+                {
+                    "cycle_key": current_time_utc,
+                    "cycle_min_equity": cycle_min_equity,
+                    "triggered": False,
+                    "window_start_utc": current_time_utc,
+                    "updated_at_utc": self._utc_now_iso(),
+                },
+            )
+            return {"status": "SKIPPED", "reason": "NO_OPEN_POSITIONS", "cycle_key": current_time_utc}
 
         adjusted = 0
         errors = 0
         reduced_notional = 0.0
-        touched_position_ids: Set[int] = set()
+        sync_candidates: Dict[int, Tuple[str, float]] = {}
         detail_rows: List[Dict[str, object]] = []
+        risk_rows: List[Dict[str, Any]] = []
+        try:
+            risk_rows = self.client.get_position_risk()
+        except Exception as exc:  # noqa: BLE001
+            LOGGER.warning("Failed to fetch position risk in equity recovery stage, fallback per-symbol query: %s", exc)
+        risk_map: Dict[str, Dict[str, Any]] = {
+            str(row.get("symbol") or "").strip(): row
+            for row in risk_rows
+            if str(row.get("symbol") or "").strip()
+        }
         for pos in open_positions:
             position_id = int(pos["id"])
             symbol = str(pos["symbol"])
             try:
-                risk = self._load_short_position(symbol)
+                risk = risk_map.get(symbol)
+                if not risk:
+                    risk = self._load_short_position(symbol)
                 if not risk:
                     detail_rows.append({"symbol": symbol, "position_id": position_id, "status": "SKIPPED_NO_RISK"})
                     continue
@@ -643,12 +668,7 @@ class Top10ShortStrategy:
                 )
                 reduced_notional += reduce_qty * mark_price
                 adjusted += 1
-                if self._sync_position_after_adjustment(
-                    position_id=position_id,
-                    symbol=symbol,
-                    fallback_price=mark_price,
-                ):
-                    touched_position_ids.add(position_id)
+                sync_candidates[position_id] = (symbol, mark_price)
                 detail_rows.append(
                     {
                         "symbol": symbol,
@@ -676,8 +696,9 @@ class Top10ShortStrategy:
                     }
                 )
 
-        if touched_position_ids:
-            self._refresh_exit_orders_for_positions(touched_position_ids)
+        synced_position_ids = self._sync_positions_after_adjustment_bulk(sync_candidates)
+        if synced_position_ids:
+            self._refresh_exit_orders_for_positions(synced_position_ids)
 
         event_id = self.store.add_equity_recovery_event(
             cycle_key=current_time_utc,
@@ -694,21 +715,23 @@ class Top10ShortStrategy:
             error_count=errors,
             details={"positions": detail_rows},
         )
+        lock_triggered = errors == 0
+        next_window_start = current_time_utc if lock_triggered else start_time_utc
         self.store.set_lock_state(
             self.EQUITY_RECOVERY_LOCK_NAME,
             {
-                "cycle_key": current_time_utc,
+                "cycle_key": next_window_start,
                 "cycle_min_equity": cycle_min_equity,
-                "triggered": True,
-                "window_start_utc": current_time_utc,
+                "triggered": lock_triggered,
+                "window_start_utc": next_window_start,
                 "triggered_at_utc": self._utc_now_iso(),
                 "event_id": event_id,
                 "updated_at_utc": self._utc_now_iso(),
             },
         )
         return {
-            "status": "TRIGGERED",
-            "cycle_key": current_time_utc,
+            "status": "TRIGGERED" if lock_triggered else "PARTIAL",
+            "cycle_key": next_window_start,
             "event_id": event_id,
             "open_positions": len(open_positions),
             "adjusted": adjusted,
@@ -717,6 +740,51 @@ class Top10ShortStrategy:
             "threshold_equity": round(threshold_equity, 6),
             "reduced_notional": round(reduced_notional, 6),
         }
+
+    def _sync_positions_after_adjustment_bulk(
+        self,
+        position_rows: Dict[int, Tuple[str, float]],
+    ) -> Set[int]:
+        if not position_rows:
+            return set()
+        try:
+            risk_rows = self.client.get_position_risk()
+            risk_map: Dict[str, Dict[str, Any]] = {
+                str(row.get("symbol") or "").strip(): row
+                for row in risk_rows
+                if str(row.get("symbol") or "").strip()
+            }
+        except Exception as exc:  # noqa: BLE001
+            LOGGER.warning("Bulk sync position risk failed, fallback per-position sync: %s", exc)
+            synced: Set[int] = set()
+            for position_id, (symbol, fallback_price) in position_rows.items():
+                if self._sync_position_after_adjustment(
+                    position_id=position_id,
+                    symbol=symbol,
+                    fallback_price=fallback_price,
+                ):
+                    synced.add(position_id)
+            return synced
+
+        synced: Set[int] = set()
+        for position_id, (symbol, fallback_price) in position_rows.items():
+            risk = risk_map.get(symbol)
+            if not risk:
+                self.store.set_position_error(position_id, "equity_recovery sync: short position not found")
+                continue
+            position_amt = self._safe_float(risk.get("positionAmt"), default=0.0)
+            if position_amt >= 0:
+                self.store.set_position_error(position_id, "equity_recovery sync: short position qty is zero")
+                continue
+            qty_now = abs(position_amt)
+            if qty_now <= 0:
+                self.store.set_position_error(position_id, "equity_recovery sync: short position qty is zero")
+                continue
+            entry_price_now = self._safe_positive_float(risk.get("entryPrice")) or fallback_price
+            self.store.set_position_qty(position_id, qty_now, entry_price_now)
+            self.store.clear_position_error(position_id)
+            synced.add(position_id)
+        return synced
 
     def _redistribute_failed_notional(
         self,

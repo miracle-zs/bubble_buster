@@ -172,7 +172,7 @@ class StrategyRuntimeService:
             if hasattr(self.strategy, "run_equity_recovery_take_profit"):
                 try:
                     result = self.strategy.run_equity_recovery_take_profit()
-                    if isinstance(result, dict) and result.get("status") == "TRIGGERED":
+                    if isinstance(result, dict) and result.get("status") in {"TRIGGERED", "PARTIAL"}:
                         LOGGER.info("service equity recovery take-profit result: %s", result)
                 except Exception as exc:  # noqa: BLE001
                     LOGGER.warning("service equity recovery take-profit failed: %s", exc)

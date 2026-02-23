@@ -1,9 +1,36 @@
 import importlib.util
+import sys
+import types
 import unittest
 from unittest.mock import MagicMock, patch
 
 if importlib.util.find_spec("requests") is None:
-    raise unittest.SkipTest("requests is not installed")
+    requests_stub = types.ModuleType("requests")
+
+    class _DummySession:
+        def __init__(self):
+            self.headers = {}
+            self.proxies = {}
+
+        def mount(self, *_args, **_kwargs):
+            return None
+
+    class _DummyRequestException(Exception):
+        pass
+
+    requests_stub.Session = _DummySession
+    requests_stub.RequestException = _DummyRequestException
+
+    adapters_stub = types.ModuleType("requests.adapters")
+
+    class _DummyHTTPAdapter:
+        def __init__(self, *args, **kwargs):
+            pass
+
+    adapters_stub.HTTPAdapter = _DummyHTTPAdapter
+    requests_stub.adapters = adapters_stub
+    sys.modules["requests"] = requests_stub
+    sys.modules["requests.adapters"] = adapters_stub
 
 from infra.binance_futures_client import BinanceAPIError
 from core.strategy_top10_short import Top10ShortStrategy
