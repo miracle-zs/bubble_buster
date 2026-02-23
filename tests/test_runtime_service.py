@@ -1,6 +1,7 @@
 import unittest
 from datetime import datetime
 from threading import Event, Thread
+import time
 from zoneinfo import ZoneInfo
 
 from core.runtime_service import ServiceRuntimeConfig, StrategyRuntimeService
@@ -367,3 +368,154 @@ def test_account_breaker_trips_after_consecutive_failures() -> None:
 
     assert bad.calls == 2
     assert good.calls == 4
+
+
+def test_entry_dispatches_to_full_accounts_only() -> None:
+    class StrategyStub:
+        def __init__(self) -> None:
+            self.entry_calls = 0
+
+        def run_entry(self):
+            self.entry_calls += 1
+            return {"status": "SUCCESS"}
+
+    class ManagerStub:
+        def run_once(self):
+            return {"total": 0}
+
+        def run_daily_loss_cut(self):
+            return {"total": 0, "closed_loss_cut": 0, "errors": 0}
+
+    s1 = StrategyStub()
+    s2 = StrategyStub()
+    s3 = StrategyStub()
+    m = ManagerStub()
+
+    cfg = ServiceRuntimeConfig(
+        timezone_name="UTC",
+        entry_hour=11,
+        entry_minute=0,
+        entry_misfire_grace_min=120,
+        entry_catchup_enabled=True,
+        daily_loss_cut_enabled=False,
+        daily_loss_cut_hour=23,
+        daily_loss_cut_minute=59,
+        manager_interval_sec=3600,
+        manager_max_catch_up_runs=1,
+        loop_sleep_sec=1.0,
+        run_manage_on_startup=False,
+    )
+    service = StrategyRuntimeService(
+        strategy=s1,
+        manager=m,
+        cfg=cfg,
+        now_monotonic=0.0,
+        account_runtimes={
+            "acc01": {"mode": "full", "strategy": s1, "manager": m, "balance_sampler": None},
+            "acc02": {"mode": "full", "strategy": s2, "manager": m, "balance_sampler": None},
+            "acc03": {"mode": "loss_cut_only", "strategy": s3, "manager": m, "balance_sampler": None},
+        },
+        max_account_workers=2,
+    )
+    now_local = datetime(2026, 2, 13, 11, 0, tzinfo=ZoneInfo("UTC"))
+    service.run_cycle(now_local=now_local, now_monotonic=10.0)
+    assert s1.entry_calls == 1
+    assert s2.entry_calls == 1
+    assert s3.entry_calls == 0
+
+
+def test_daily_loss_cut_runs_for_full_and_loss_cut_only() -> None:
+    class StrategyStub:
+        def run_entry(self):
+            return {"status": "SKIPPED"}
+
+    class ManagerStub:
+        def __init__(self) -> None:
+            self.daily_calls = 0
+
+        def run_once(self):
+            return {"total": 0}
+
+        def run_daily_loss_cut(self):
+            self.daily_calls += 1
+            return {"total": 0, "closed_loss_cut": 0, "errors": 0}
+
+    m1 = ManagerStub()
+    m2 = ManagerStub()
+    s = StrategyStub()
+
+    cfg = ServiceRuntimeConfig(
+        timezone_name="UTC",
+        entry_hour=23,
+        entry_minute=59,
+        entry_misfire_grace_min=120,
+        entry_catchup_enabled=True,
+        daily_loss_cut_enabled=True,
+        daily_loss_cut_hour=11,
+        daily_loss_cut_minute=55,
+        manager_interval_sec=3600,
+        manager_max_catch_up_runs=1,
+        loop_sleep_sec=1.0,
+        run_manage_on_startup=False,
+    )
+    service = StrategyRuntimeService(
+        strategy=s,
+        manager=m1,
+        cfg=cfg,
+        now_monotonic=0.0,
+        account_runtimes={
+            "acc01": {"mode": "full", "strategy": s, "manager": m1, "balance_sampler": None},
+            "acc55": {"mode": "loss_cut_only", "strategy": s, "manager": m2, "balance_sampler": None},
+        },
+        max_account_workers=2,
+    )
+    now_local = datetime(2026, 2, 13, 11, 55, tzinfo=ZoneInfo("UTC"))
+    service.run_cycle(now_local=now_local, now_monotonic=10.0)
+    assert m1.daily_calls == 1
+    assert m2.daily_calls == 1
+
+
+def test_manage_timeout_marks_account_timeout() -> None:
+    class SlowManager:
+        def run_once(self):
+            time.sleep(0.2)
+            return {"total": 1}
+
+    class FastManager:
+        def run_once(self):
+            return {"total": 1}
+
+    class StrategyStub:
+        def run_entry(self):
+            return {"status": "SKIPPED"}
+
+    cfg = ServiceRuntimeConfig(
+        timezone_name="UTC",
+        entry_hour=23,
+        entry_minute=59,
+        entry_misfire_grace_min=120,
+        entry_catchup_enabled=True,
+        daily_loss_cut_enabled=False,
+        daily_loss_cut_hour=11,
+        daily_loss_cut_minute=55,
+        manager_interval_sec=1,
+        manager_max_catch_up_runs=1,
+        loop_sleep_sec=1.0,
+        run_manage_on_startup=True,
+        account_task_timeout_sec=0.05,
+    )
+    service = StrategyRuntimeService(
+        strategy=StrategyStub(),
+        manager=FastManager(),
+        cfg=cfg,
+        now_monotonic=0.0,
+        account_runtimes={
+            "slow": {"mode": "full", "strategy": StrategyStub(), "manager": SlowManager(), "balance_sampler": None},
+            "fast": {"mode": "full", "strategy": StrategyStub(), "manager": FastManager(), "balance_sampler": None},
+        },
+        max_account_workers=2,
+    )
+    now_local = datetime(2026, 2, 13, 1, 0, tzinfo=ZoneInfo("UTC"))
+    service.run_cycle(now_local=now_local, now_monotonic=0.0)
+    summary = service.run_manage_tick()
+    assert summary["slow"]["error"] == "TIMEOUT"

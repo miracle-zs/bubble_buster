@@ -72,6 +72,21 @@ db_path = state.db
 log_dir = logs
 log_level = INFO
 
+[accounts]
+enabled = default
+mode.default = full
+
+; Example:
+; enabled = acc01,55
+; mode.acc01 = full
+; mode.55 = loss_cut_only
+; [account.acc01.binance]
+; api_key = ACCOUNT_01_KEY
+; api_secret = ACCOUNT_01_SECRET
+; [account.55.binance]
+; api_key = ACCOUNT_55_KEY
+; api_secret = ACCOUNT_55_SECRET
+
 [notify]
 enabled = true
 serverchan_sendkey = YOUR_SERVERCHAN_SENDKEY
