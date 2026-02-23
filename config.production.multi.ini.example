@@ -73,9 +73,11 @@ log_dir = logs
 log_level = INFO
 
 [accounts]
-enabled = acc01,acc02,55
+enabled = acc01,acc02,acc03,acc04,55
 mode.acc01 = full
 mode.acc02 = full
+mode.acc03 = full
+mode.acc04 = full
 mode.55 = loss_cut_only
 
 [account.acc01.binance]
@@ -86,13 +88,39 @@ api_secret = REPLACE_WITH_ACC01_API_SECRET
 api_key = REPLACE_WITH_ACC02_API_KEY
 api_secret = REPLACE_WITH_ACC02_API_SECRET
 
+[account.acc03.binance]
+api_key = REPLACE_WITH_ACC03_API_KEY
+api_secret = REPLACE_WITH_ACC03_API_SECRET
+
+[account.acc04.binance]
+api_key = REPLACE_WITH_ACC04_API_KEY
+api_secret = REPLACE_WITH_ACC04_API_SECRET
+
 [account.55.binance]
 api_key = REPLACE_WITH_ACC55_API_KEY
 api_secret = REPLACE_WITH_ACC55_API_SECRET
 
+
+[account.acc01.strategy]
+equity_recovery_take_profit_enabled = false
+equity_recovery_trigger_pct = 0.08
+equity_recovery_reduce_ratio = 0.50
+
 [account.acc02.strategy]
-top_n = 12
-rebalance_utilization = 0.92
+equity_recovery_take_profit_enabled = true
+equity_recovery_trigger_pct = 0.09
+equity_recovery_reduce_ratio = 1.0
+
+
+[account.acc03.strategy]
+equity_recovery_take_profit_enabled = true
+equity_recovery_trigger_pct = 0.08
+equity_recovery_reduce_ratio = 1.0
+
+[account.acc04.strategy]
+equity_recovery_take_profit_enabled = true
+equity_recovery_trigger_pct = 0.09
+equity_recovery_reduce_ratio = 0.50
 
 [account.55.runtime]
 daily_loss_cut_enabled = true
