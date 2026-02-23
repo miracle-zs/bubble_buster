@@ -1,5 +1,6 @@
 import configparser
 import io
+import logging
 import os
 from pathlib import Path
 from typing import Dict, Optional, Tuple
@@ -12,6 +13,8 @@ from core.state_store import StateStore
 from core.strategy_top10_short import Top10ShortStrategy
 from infra.binance_futures_client import BinanceFuturesClient
 from infra.notifier import ServerChanNotifier
+
+LOGGER = logging.getLogger(__name__)
 
 
 class MergedSection:
@@ -217,17 +220,23 @@ def create_components(
     if cfg.has_section("accounts"):
         parsed_accounts = parse_account_settings(_serialize_config(cfg))
         for account_id, settings in parsed_accounts.items():
-            account_runtimes[account_id] = _build_single_account_components(
-                account_id=account_id,
-                mode=settings.mode,
-                binance_cfg=_merged_section(cfg, account_id, "binance"),
-                strategy_cfg=_merged_section(cfg, account_id, "strategy"),
-                runtime_cfg=_merged_section(cfg, account_id, "runtime"),
-                notify_cfg=_merged_section(cfg, account_id, "notify"),
-                root_store=root_store,
-            )
+            try:
+                account_runtimes[account_id] = _build_single_account_components(
+                    account_id=account_id,
+                    mode=settings.mode,
+                    binance_cfg=_merged_section(cfg, account_id, "binance"),
+                    strategy_cfg=_merged_section(cfg, account_id, "strategy"),
+                    runtime_cfg=_merged_section(cfg, account_id, "runtime"),
+                    notify_cfg=_merged_section(cfg, account_id, "notify"),
+                    root_store=root_store,
+                )
+            except Exception as exc:  # noqa: BLE001
+                LOGGER.error("Skip account due to invalid config account=%s error=%s", account_id, exc)
 
     if not account_runtimes:
+        if cfg.has_section("accounts"):
+            raise RuntimeError("No valid account runtime can be created from [accounts] configuration")
+
         account_id = default_account_id
         account_runtimes[account_id] = _build_single_account_components(
             account_id=account_id,
