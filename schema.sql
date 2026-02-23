@@ -1,10 +1,12 @@
 CREATE TABLE IF NOT EXISTS runs (
     run_id TEXT PRIMARY KEY,
-    trade_day_utc TEXT NOT NULL UNIQUE,
+    account_id TEXT NOT NULL DEFAULT 'default',
+    trade_day_utc TEXT NOT NULL,
     started_at_utc TEXT NOT NULL,
     completed_at_utc TEXT,
     status TEXT NOT NULL,
-    message TEXT
+    message TEXT,
+    UNIQUE(account_id, trade_day_utc)
 );
 
 CREATE TABLE IF NOT EXISTS positions (

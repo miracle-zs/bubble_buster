@@ -12,6 +12,7 @@ from typing import Any, Dict, List, Optional, Set, Tuple
 @dataclass(frozen=True)
 class RunState:
     run_id: str
+    account_id: str
     trade_day_utc: str
     started_at_utc: str
     completed_at_utc: Optional[str]
@@ -79,7 +80,7 @@ class StateStore:
             else:
                 raise ValueError("schema_path is required for StateStore.init_schema")
 
-    def create_run(self, trade_day_utc: str) -> Tuple[str, bool]:
+    def create_run(self, trade_day_utc: str, account_id: str = "default") -> Tuple[str, bool]:
         """Creates a run for a UTC trade day.
 
         Returns (run_id, created). If created is False, run_id is the existing run.
@@ -90,16 +91,16 @@ class StateStore:
             try:
                 conn.execute(
                     """
-                    INSERT INTO runs (run_id, trade_day_utc, started_at_utc, status, message)
-                    VALUES (?, ?, ?, ?, ?)
+                    INSERT INTO runs (run_id, account_id, trade_day_utc, started_at_utc, status, message)
+                    VALUES (?, ?, ?, ?, ?, ?)
                     """,
-                    (run_id, trade_day_utc, started_at, "RUNNING", None),
+                    (run_id, account_id, trade_day_utc, started_at, "RUNNING", None),
                 )
                 return run_id, True
             except sqlite3.IntegrityError:
                 row = conn.execute(
-                    "SELECT run_id FROM runs WHERE trade_day_utc = ?",
-                    (trade_day_utc,),
+                    "SELECT run_id FROM runs WHERE account_id = ? AND trade_day_utc = ?",
+                    (account_id, trade_day_utc),
                 ).fetchone()
                 return str(row["run_id"]), False
 
@@ -121,12 +122,55 @@ class StateStore:
                 return None
             return RunState(
                 run_id=row["run_id"],
+                account_id=row["account_id"] if "account_id" in row.keys() else "default",
                 trade_day_utc=row["trade_day_utc"],
                 started_at_utc=row["started_at_utc"],
                 completed_at_utc=row["completed_at_utc"],
                 status=row["status"],
                 reason=row["message"],
             )
+
+    def migrate_to_multi_account(self, default_account_id: str) -> None:
+        default_account_id = (default_account_id or "").strip()
+        if not default_account_id:
+            raise ValueError("default_account_id is required")
+
+        with self._connect_ctx() as conn:
+            row = conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name='runs'"
+            ).fetchone()
+            if row is None:
+                return
+
+            columns = conn.execute("PRAGMA table_info(runs)").fetchall()
+            has_account_id = any(str(col["name"]) == "account_id" for col in columns)
+            if has_account_id:
+                return
+
+            conn.execute("ALTER TABLE runs RENAME TO runs_legacy")
+            conn.execute(
+                """
+                CREATE TABLE runs (
+                    run_id TEXT PRIMARY KEY,
+                    account_id TEXT NOT NULL,
+                    trade_day_utc TEXT NOT NULL,
+                    started_at_utc TEXT NOT NULL,
+                    completed_at_utc TEXT,
+                    status TEXT NOT NULL,
+                    message TEXT,
+                    UNIQUE(account_id, trade_day_utc)
+                )
+                """
+            )
+            conn.execute(
+                """
+                INSERT INTO runs (run_id, account_id, trade_day_utc, started_at_utc, completed_at_utc, status, message)
+                SELECT run_id, ?, trade_day_utc, started_at_utc, completed_at_utc, status, message
+                FROM runs_legacy
+                """,
+                (default_account_id,),
+            )
+            conn.execute("DROP TABLE runs_legacy")
 
     def insert_position(
         self,
