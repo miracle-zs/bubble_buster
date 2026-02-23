@@ -2,6 +2,7 @@ import json
 import logging
 import os
 import sqlite3
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -61,6 +62,18 @@ class DashboardDataProvider:
         conn = sqlite3.connect(self.db_path)
         conn.row_factory = sqlite3.Row
         return conn
+
+    @contextmanager
+    def _connect_ctx(self):
+        conn = self._connect()
+        try:
+            yield conn
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
 
     def _next_entry_local(self, now_local: datetime) -> datetime:
         target = now_local.replace(
@@ -830,7 +843,7 @@ class DashboardDataProvider:
             return data
 
         try:
-            with self._connect() as conn:
+            with self._connect_ctx() as conn:
                 if live_wallet.get("source") == "API" and self._safe_float(live_wallet.get("balance_usdt")) is not None:
                     try:
                         self._insert_wallet_snapshot(

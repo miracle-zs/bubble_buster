@@ -95,6 +95,48 @@ class StrategyEquityRecoveryTest(unittest.TestCase):
         self.assertEqual(second["status"], "SKIPPED")
         self.assertEqual(second["reason"], "ALREADY_TRIGGERED_IN_CYCLE")
 
+    def test_equity_recovery_resets_window_start_at_trigger_time(self) -> None:
+        client = MagicMock()
+        client.normalize_order_qty.side_effect = lambda _s, notional, price: notional / price
+        client.format_order_qty.side_effect = lambda _s, qty: str(qty)
+        client.create_order.side_effect = self._mock_order_factory()
+
+        store = MagicMock()
+        store.get_latest_wallet_snapshot.side_effect = [
+            {"captured_at_utc": "2026-02-23T07:40:00+00:00", "balance_usdt": 990.0},
+            {"captured_at_utc": "2026-02-23T07:41:00+00:00", "balance_usdt": 992.0},
+        ]
+        store.get_wallet_snapshot_min_since.side_effect = [
+            {"captured_at_utc": "2026-02-23T01:00:00+00:00", "balance_usdt": 900.0},
+            {"captured_at_utc": "2026-02-23T07:40:00+00:00", "balance_usdt": 990.0},
+        ]
+        store.get_lock_state.side_effect = [
+            None,
+            {
+                "cycle_key": "2026-02-23T07:40:00+00:00",
+                "triggered": True,
+                "window_start_utc": "2026-02-23T07:40:00+00:00",
+            },
+        ]
+        store.list_open_positions.return_value = [{"id": 1, "symbol": "AUSDT", "entry_price": 10.0}]
+
+        strategy = self._build_strategy(client, store)
+        strategy._load_short_position = MagicMock(
+            return_value={"symbol": "AUSDT", "positionAmt": "-10", "markPrice": "10", "entryPrice": "10"}
+        )
+        strategy._sync_position_after_adjustment = MagicMock(return_value=True)
+        strategy._refresh_exit_orders_for_positions = MagicMock()
+
+        first = strategy.run_equity_recovery_take_profit()
+        second = strategy.run_equity_recovery_take_profit()
+
+        self.assertEqual(first["status"], "TRIGGERED")
+        self.assertEqual(second["status"], "SKIPPED")
+        first_call = store.get_wallet_snapshot_min_since.call_args_list[0].kwargs
+        second_call = store.get_wallet_snapshot_min_since.call_args_list[1].kwargs
+        self.assertNotEqual(first_call["start_captured_at_utc"], "2026-02-23T07:40:00+00:00")
+        self.assertEqual(second_call["start_captured_at_utc"], "2026-02-23T07:40:00+00:00")
+
 
 if __name__ == "__main__":
     unittest.main()

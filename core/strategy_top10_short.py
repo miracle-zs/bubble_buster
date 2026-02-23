@@ -538,9 +538,18 @@ class Top10ShortStrategy:
         if not current_time_utc or current_equity <= 0:
             return {"status": "SKIPPED", "reason": "INVALID_CURRENT_SNAPSHOT"}
 
-        start_time_utc = (
-            self._parse_iso_utc(current_time_utc) - timedelta(hours=self.equity_recovery_lookback_hours)
-        ).replace(microsecond=0).isoformat()
+        state = self.store.get_lock_state(self.EQUITY_RECOVERY_LOCK_NAME) or {}
+        current_dt = self._parse_iso_utc(current_time_utc)
+        rolling_start_dt = current_dt - timedelta(hours=self.equity_recovery_lookback_hours)
+        anchored_start_utc = str(state.get("window_start_utc") or "").strip()
+        if anchored_start_utc:
+            try:
+                anchored_start_dt = self._parse_iso_utc(anchored_start_utc)
+                if anchored_start_dt > rolling_start_dt:
+                    rolling_start_dt = anchored_start_dt
+            except Exception:  # noqa: BLE001
+                pass
+        start_time_utc = rolling_start_dt.replace(microsecond=0).isoformat()
         min_snapshot = self.store.get_wallet_snapshot_min_since(
             start_captured_at_utc=start_time_utc,
             end_captured_at_utc=current_time_utc,
@@ -555,7 +564,6 @@ class Top10ShortStrategy:
 
         cycle_key = cycle_min_time
         threshold_equity = cycle_min_equity * (1.0 + self.equity_recovery_trigger_pct)
-        state = self.store.get_lock_state(self.EQUITY_RECOVERY_LOCK_NAME) or {}
         state_cycle_key = str(state.get("cycle_key") or "").strip()
         state_triggered = bool(state.get("triggered", False))
 
@@ -572,6 +580,7 @@ class Top10ShortStrategy:
                     "cycle_key": cycle_key,
                     "cycle_min_equity": cycle_min_equity,
                     "triggered": False,
+                    "window_start_utc": start_time_utc,
                     "updated_at_utc": self._utc_now_iso(),
                 },
             )
@@ -688,9 +697,10 @@ class Top10ShortStrategy:
         self.store.set_lock_state(
             self.EQUITY_RECOVERY_LOCK_NAME,
             {
-                "cycle_key": cycle_key,
+                "cycle_key": current_time_utc,
                 "cycle_min_equity": cycle_min_equity,
                 "triggered": True,
+                "window_start_utc": current_time_utc,
                 "triggered_at_utc": self._utc_now_iso(),
                 "event_id": event_id,
                 "updated_at_utc": self._utc_now_iso(),

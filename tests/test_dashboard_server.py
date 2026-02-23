@@ -103,6 +103,22 @@ class DashboardServerTest(unittest.TestCase):
         self.assertEqual(snapshot["summary"]["open_positions"], 0)
         self.assertEqual(snapshot["log_tail"], ["line-c"])
 
+    def test_connect_ctx_closes_connection(self) -> None:
+        provider = DashboardDataProvider(
+            db_path=self.db_path,
+            log_file=self.log_file,
+            timezone_name="UTC",
+            entry_hour=7,
+            entry_minute=40,
+        )
+        conn = None
+        with provider._connect_ctx() as active:
+            conn = active
+            active.execute("SELECT 1").fetchone()
+        self.assertIsNotNone(conn)
+        with self.assertRaises(sqlite3.ProgrammingError):
+            conn.execute("SELECT 1").fetchone()  # type: ignore[union-attr]
+
     def test_equity_curve_and_wallet_cache(self) -> None:
         run_id, _ = self.store.create_run("2026-02-14")
         now = datetime.now(timezone.utc).replace(microsecond=0)
