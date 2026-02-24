@@ -2431,45 +2431,207 @@ ACCOUNTS_OVERVIEW_HTML = """<!doctype html>
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>Bubble Buster Overview</title>
   <style>
-    :root { --bg:#0a1118; --panel:#101c27cc; --line:#20445a; --text:#eaf6ff; --muted:#8db0c4; --ok:#26d07c; --warn:#ffb340; --bad:#ff5d5d; --accent:#4ec1ff; }
+    :root {
+      --bg: #060d12;
+      --bg-2: #0b141c;
+      --card: #121f2ae8;
+      --line: #2a4254;
+      --text: #e8f4fb;
+      --muted: #8ca7bb;
+      --accent: #49c4ff;
+      --ok: #2fda8f;
+      --warn: #ffbf57;
+      --bad: #ff6975;
+      --shadow: 0 14px 36px rgba(0, 0, 0, 0.35);
+      --radius: 14px;
+    }
+
     * { box-sizing: border-box; }
-    body { margin:0; font-family:"Avenir Next","SF Pro Text","PingFang SC","Noto Sans SC",sans-serif; color:var(--text); background:linear-gradient(180deg,#081018 0%,#050a0f 100%); }
-    .wrap { max-width: 1200px; margin: 0 auto; padding: 24px; }
-    .title { font-size: 24px; font-weight: 700; margin: 0 0 6px; }
-    .sub { color: var(--muted); margin: 0 0 18px; }
-    .grid { display: grid; grid-template-columns: repeat(auto-fit,minmax(240px,1fr)); gap: 12px; }
-    .card { background: var(--panel); border:1px solid var(--line); border-radius:12px; padding:14px; box-shadow:0 8px 20px rgba(0,0,0,0.25); }
-    .row { display:flex; align-items:center; justify-content:space-between; margin-top: 8px; }
-    .aid { font-size:18px; font-weight:700; color: var(--accent); }
-    .label { color: var(--muted); font-size: 12px; }
-    .val { font-family: ui-monospace, Menlo, Monaco, Consolas, monospace; }
-    .status-ok { color: var(--ok); }
-    .status-warn { color: var(--warn); }
-    .status-bad { color: var(--bad); }
-    .actions { display:flex; gap:8px; margin-top: 12px; }
-    .btn { text-decoration:none; color:#081018; background:var(--accent); border-radius:8px; padding:6px 10px; font-size:12px; font-weight:700; }
-    .btn.alt { background: transparent; border: 1px solid var(--line); color: var(--text); }
+
+    body {
+      margin: 0;
+      color: var(--text);
+      background:
+        radial-gradient(900px 420px at -10% -10%, #16435f 0%, transparent 55%),
+        radial-gradient(920px 460px at 110% -20%, #1b3940 0%, transparent 55%),
+        linear-gradient(180deg, var(--bg-2) 0%, var(--bg) 100%);
+      font-family: "DIN Alternate", "Avenir Next", "PingFang SC", "Noto Sans SC", sans-serif;
+      min-height: 100vh;
+    }
+
+    .wrap {
+      max-width: 1280px;
+      margin: 0 auto;
+      padding: 26px 20px 30px;
+    }
+
+    .head {
+      display: flex;
+      align-items: baseline;
+      justify-content: space-between;
+      gap: 16px;
+      border-bottom: 1px solid #1e3342;
+      padding-bottom: 14px;
+      margin-bottom: 18px;
+    }
+
+    .title {
+      margin: 0;
+      font-size: 30px;
+      letter-spacing: 0.04em;
+      color: var(--accent);
+      text-transform: uppercase;
+      font-weight: 800;
+    }
+
+    .sub {
+      margin: 0;
+      color: var(--muted);
+      font-size: 13px;
+      letter-spacing: 0.02em;
+      text-align: right;
+    }
+
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+      gap: 14px;
+    }
+
+    .card {
+      background: var(--card);
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      box-shadow: var(--shadow);
+      padding: 14px 14px 12px;
+      position: relative;
+      overflow: hidden;
+    }
+
+    .card::before {
+      content: "";
+      position: absolute;
+      inset: 0 auto auto 0;
+      width: 100%;
+      height: 2px;
+      background: linear-gradient(90deg, transparent 0%, #49c4ff66 28%, transparent 100%);
+      pointer-events: none;
+    }
+
+    .top {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 10px;
+      margin-bottom: 10px;
+    }
+
+    .aid {
+      font-size: 18px;
+      font-weight: 700;
+      letter-spacing: 0.03em;
+      color: #d9f0ff;
+    }
+
+    .status {
+      display: inline-flex;
+      align-items: center;
+      gap: 5px;
+      border: 1px solid #2d4659;
+      border-radius: 999px;
+      padding: 4px 10px;
+      font-size: 11px;
+      letter-spacing: 0.06em;
+      text-transform: uppercase;
+      font-weight: 700;
+      color: var(--muted);
+      background: #0b1822;
+    }
+
+    .status.ok { color: var(--ok); border-color: #1f6f52; background: #0b1e17; }
+    .status.warn { color: var(--warn); border-color: #70562a; background: #211a0d; }
+    .status.bad { color: var(--bad); border-color: #7a3540; background: #261217; }
+
+    .metrics {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 8px;
+      margin-top: 6px;
+    }
+
+    .metric {
+      border: 1px solid #263f50;
+      background: #0c1923;
+      border-radius: 10px;
+      padding: 8px 10px;
+      min-height: 58px;
+    }
+
+    .label {
+      color: var(--muted);
+      font-size: 11px;
+      letter-spacing: 0.03em;
+      margin-bottom: 5px;
+    }
+
+    .val {
+      font-family: ui-monospace, Menlo, Monaco, Consolas, monospace;
+      font-size: 18px;
+      font-weight: 700;
+      color: #eaf7ff;
+      line-height: 1;
+    }
+
+    .actions {
+      margin-top: 12px;
+      display: flex;
+      justify-content: flex-end;
+    }
+
+    .btn {
+      text-decoration: none;
+      border-radius: 9px;
+      padding: 8px 12px;
+      font-size: 12px;
+      font-weight: 800;
+      letter-spacing: 0.03em;
+      color: #051018;
+      background: linear-gradient(180deg, #67d6ff 0%, #2caee9 100%);
+      border: 1px solid #5ed1ff;
+    }
+
+    .empty {
+      border: 1px dashed #365166;
+      border-radius: var(--radius);
+      color: var(--muted);
+      padding: 20px;
+      text-align: center;
+      background: #0c1720;
+      grid-column: 1 / -1;
+    }
   </style>
 </head>
 <body>
   <main class="wrap">
-    <h1 class="title">Bubble Buster 账户总览</h1>
-    <p class="sub">自动刷新：<span id="refresh">__REFRESH_SEC__</span>s</p>
+    <header class="head">
+      <h1 class="title">Bubble Buster Dashboard</h1>
+      <p class="sub">账户总览 · 自动刷新 <span id="refresh">__REFRESH_SEC__</span>s</p>
+    </header>
     <section id="cards" class="grid"></section>
   </main>
 <script>
 (function () {
   var refreshSec = Number(document.getElementById("refresh").textContent || "5");
-  var pathPrefix = (window.location.pathname || "/").replace(/\\/+$/, "");
+  var pathPrefix = (window.location.pathname || "/").replace(/[/]+$/, "");
   if (!pathPrefix) pathPrefix = "";
   var api = pathPrefix + "/api/accounts/summary";
   var cards = document.getElementById("cards");
 
-  function statusCls(status) {
+  function statusMeta(status) {
     var s = String(status || "").toUpperCase();
-    if (s.indexOf("SUCCESS") >= 0 || s.indexOf("RUNNING") >= 0) return "status-ok";
-    if (s.indexOf("SKIPPED") >= 0 || s === "") return "status-warn";
-    return "status-bad";
+    if (s.indexOf("SUCCESS") >= 0 || s.indexOf("RUNNING") >= 0) return {cls: "ok", text: s || "RUNNING"};
+    if (!s || s.indexOf("SKIPPED") >= 0) return {cls: "warn", text: s || "NO RUN"};
+    return {cls: "bad", text: s};
   }
 
   function fmt(v, digits) {
@@ -2493,15 +2655,19 @@ ACCOUNTS_OVERVIEW_HTML = """<!doctype html>
         var r = rows[i] || {};
         var aid = String(r.account_id || "");
         var base = pathPrefix + "/account/" + encodeURIComponent(aid) + "/";
+        var st = statusMeta(r.last_run_status);
         html += '<article class="card">'
-          + '<div class="aid">' + aid + '</div>'
-          + '<div class="row"><span class="label">余额(USDT)</span><span class="val">' + fmt(r.wallet_balance_usdt, 4) + '</span></div>'
-          + '<div class="row"><span class="label">持仓数</span><span class="val">' + fmt(r.open_positions, 0) + '</span></div>'
-          + '<div class="row"><span class="label">最近状态</span><span class="val ' + statusCls(r.last_run_status) + '">' + (r.last_run_status || "--") + '</span></div>'
-          + '<div class="actions"><a class="btn" href="' + base + '">详情</a></div>'
+          + '<div class="top"><div class="aid">' + aid + '</div><div class="status ' + st.cls + '">' + st.text + '</div></div>'
+          + '<div class="metrics">'
+          + '<div class="metric"><div class="label">账户权益 (USDT)</div><div class="val">' + fmt(r.wallet_balance_usdt, 4) + '</div></div>'
+          + '<div class="metric"><div class="label">持仓数量</div><div class="val">' + fmt(r.open_positions, 0) + '</div></div>'
+          + '<div class="metric"><div class="label">账户 ID</div><div class="val">' + aid + '</div></div>'
+          + '<div class="metric"><div class="label">最近运行</div><div class="val">' + st.text + '</div></div>'
+          + '</div>'
+          + '<div class="actions"><a class="btn" href="' + base + '">查看详情</a></div>'
           + '</article>';
       }
-      cards.innerHTML = html || '<article class="card">暂无账户数据</article>';
+      cards.innerHTML = html || '<div class="empty">暂无账户数据</div>';
     };
     xhr.send();
   }
