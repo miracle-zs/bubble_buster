@@ -181,6 +181,9 @@ strategy_note.acc02 = TP 9% / 清仓100% / 浮亏砍仓ON
             curve_payload = curve.json()
             self.assertIn("strategy_equity_curve", curve_payload)
             self.assertTrue(isinstance(curve_payload.get("strategy_equity_curve"), list))
+            self.assertIn("balance_curve", curve_payload)
+            self.assertTrue(isinstance(curve_payload.get("balance_curve"), list))
+            self.assertGreater(len(curve_payload.get("balance_curve") or []), 0)
 
             details = client.get("/api/account/acc01/details")
             self.assertEqual(details.status_code, 200)

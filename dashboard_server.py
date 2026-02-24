@@ -1381,7 +1381,7 @@ def _make_handler(provider: DashboardDataProvider, cfg: DashboardServerConfig):
                         include_details=include_details,
                         include_log=include_log,
                         include_curves=include_curves,
-                        include_balance_curve=(account_suffix.endswith("/curve") is False and include_curves),
+                        include_balance_curve=include_curves,
                         include_trade_stats=(account_suffix.endswith("/curve") is False and include_curves),
                     )
                 )

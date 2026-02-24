@@ -558,7 +558,7 @@ def create_app(config_path: Optional[str] = None) -> FastAPI:
                 include_details=False,
                 include_log=False,
                 include_curves=True,
-                include_balance_curve=False,
+                include_balance_curve=True,
                 include_trade_stats=True,
             )
             payload["config_path"] = ctx.config_path
@@ -592,7 +592,7 @@ def create_app(config_path: Optional[str] = None) -> FastAPI:
                 include_details=False,
                 include_log=False,
                 include_curves=True,
-                include_balance_curve=False,
+                include_balance_curve=True,
                 include_trade_stats=False,
             )
             payload["config_path"] = ctx.config_path
