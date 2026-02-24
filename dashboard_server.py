@@ -2431,7 +2431,7 @@ ACCOUNTS_OVERVIEW_HTML = """<!doctype html>
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>Bubble Buster Overview</title>
   <style>
-    :root { --bg:#0a1118; --panel:#101c27cc; --line:#20445a; --text:#eaf6ff; --muted:#8db0c4; --ok:#26d07c; --warn:#ffb340; --bad:#ff5d5d; --accent:#4ec1ff; }
+    :root { --bg:#0a1118; --panel:#101c27cc; --line:#20445a; --text:#eaf6ff; --muted:#8db0c4; --ok:#26d07c; --warn:#ffb340; --bad:#ff5d5d; --accent:#4ec1ff; --spark:#18d29f; --spark-fill:rgba(24,210,159,0.14); }
     * { box-sizing: border-box; }
     body { margin:0; font-family:"Avenir Next","SF Pro Text","PingFang SC","Noto Sans SC",sans-serif; color:var(--text); background:linear-gradient(180deg,#081018 0%,#050a0f 100%); }
     .wrap { max-width: 1200px; margin: 0 auto; padding: 24px; }
@@ -2446,6 +2446,15 @@ ACCOUNTS_OVERVIEW_HTML = """<!doctype html>
     .status-ok { color: var(--ok); }
     .status-warn { color: var(--warn); }
     .status-bad { color: var(--bad); }
+    .spark-block { margin-top: 10px; padding-top: 10px; border-top:1px dashed #1e3e52; }
+    .spark-title { display:flex; justify-content:space-between; align-items:center; margin-bottom:6px; }
+    .spark-box { height:76px; border:1px solid #1d3f53; border-radius:8px; background:linear-gradient(180deg,rgba(11,23,33,0.75) 0%, rgba(9,18,27,0.88) 100%); overflow:hidden; }
+    .spark-svg { width:100%; height:100%; display:block; }
+    .spark-path { fill:none; stroke:var(--spark); stroke-width:2; vector-effect:non-scaling-stroke; stroke-linejoin:round; stroke-linecap:round; }
+    .spark-area { fill:var(--spark-fill); }
+    .spark-empty { display:flex; align-items:center; justify-content:center; height:100%; color:var(--muted); font-size:12px; }
+    .spark-up { color: var(--ok); }
+    .spark-down { color: var(--bad); }
     .actions { display:flex; gap:8px; margin-top: 12px; }
     .btn { text-decoration:none; color:#081018; background:var(--accent); border-radius:8px; padding:6px 10px; font-size:12px; font-weight:700; }
     .btn.alt { background: transparent; border: 1px solid var(--line); color: var(--text); }
@@ -2460,10 +2469,24 @@ ACCOUNTS_OVERVIEW_HTML = """<!doctype html>
 <script>
 (function () {
   var refreshSec = Number(document.getElementById("refresh").textContent || "5");
-  var pathPrefix = (window.location.pathname || "/").replace(/\\/+$/, "");
+  var pathPrefix = (window.location.pathname || "/").replace(/[/]+$/, "");
   if (!pathPrefix) pathPrefix = "";
-  var api = pathPrefix + "/api/accounts/summary";
+  var summaryApi = pathPrefix + "/api/accounts/summary";
   var cards = document.getElementById("cards");
+  var curveCache = {};
+  var curveInFlight = {};
+  var curveObserver = null;
+  var summaryRows = [];
+  var curveTtlMs = Math.max(30000, Math.max(2, refreshSec) * 3000);
+
+  function escapeHtml(text) {
+    return String(text || "")
+      .replace(/&/g, "&amp;")
+      .replace(/</g, "&lt;")
+      .replace(/>/g, "&gt;")
+      .replace(/"/g, "&quot;")
+      .replace(/'/g, "&#39;");
+  }
 
   function statusCls(status) {
     var s = String(status || "").toUpperCase();
@@ -2479,29 +2502,169 @@ ACCOUNTS_OVERVIEW_HTML = """<!doctype html>
     return n.toFixed(digits);
   }
 
+  function createObserver() {
+    if (curveObserver || !window.IntersectionObserver) return;
+    curveObserver = new IntersectionObserver(function (entries) {
+      for (var i = 0; i < entries.length; i += 1) {
+        var ent = entries[i];
+        if (!ent.isIntersecting) continue;
+        var aid = ent.target.getAttribute("data-account-id") || "";
+        if (aid) fetchCurve(aid);
+        curveObserver.unobserve(ent.target);
+      }
+    }, { rootMargin: "200px 0px" });
+  }
+
+  function polylinePoints(values, width, height) {
+    if (!values || values.length < 2) return "";
+    var min = values[0];
+    var max = values[0];
+    for (var i = 1; i < values.length; i += 1) {
+      var v = values[i];
+      if (v < min) min = v;
+      if (v > max) max = v;
+    }
+    var span = max - min;
+    if (!(span > 0)) span = Math.max(1e-8, Math.abs(max) * 0.00001);
+    var points = [];
+    for (var j = 0; j < values.length; j += 1) {
+      var x = (j / (values.length - 1)) * width;
+      var y = height - ((values[j] - min) / span) * height;
+      points.push(x.toFixed(2) + "," + y.toFixed(2));
+    }
+    return points.join(" ");
+  }
+
+  function renderCurve(aid) {
+    var box = document.querySelector('.spark-box[data-account-id="' + aid + '"]');
+    var deltaEl = document.querySelector('.spark-delta[data-account-id="' + aid + '"]');
+    if (!box || !deltaEl) return;
+    var cached = curveCache[aid];
+    if (!cached || !cached.values || cached.values.length < 2) {
+      box.innerHTML = '<div class="spark-empty">暂无曲线</div>';
+      deltaEl.textContent = "--";
+      deltaEl.className = "val spark-delta";
+      deltaEl.setAttribute("data-account-id", aid);
+      return;
+    }
+    var vals = cached.values;
+    var width = 280;
+    var height = 74;
+    var points = polylinePoints(vals, width, height);
+    if (!points) {
+      box.innerHTML = '<div class="spark-empty">暂无曲线</div>';
+      return;
+    }
+    var first = vals[0];
+    var last = vals[vals.length - 1];
+    var changePct = first ? ((last - first) / first) * 100 : 0;
+    var deltaCls = changePct >= 0 ? "spark-up" : "spark-down";
+    deltaEl.textContent = (changePct >= 0 ? "+" : "") + fmt(changePct, 2) + "%";
+    deltaEl.className = "val spark-delta " + deltaCls;
+    deltaEl.setAttribute("data-account-id", aid);
+    var area = points + " " + width + "," + height + " 0," + height;
+    box.innerHTML = ''
+      + '<svg class="spark-svg" viewBox="0 0 ' + width + " " + height + '" preserveAspectRatio="none">'
+      + '<polyline class="spark-area" points="' + area + '"></polyline>'
+      + '<polyline class="spark-path" points="' + points + '"></polyline>'
+      + "</svg>";
+  }
+
+  function fetchCurve(aid) {
+    if (!aid) return;
+    var now = Date.now();
+    var cached = curveCache[aid];
+    if (cached && cached.ts && (now - cached.ts) < curveTtlMs) {
+      renderCurve(aid);
+      return;
+    }
+    if (curveInFlight[aid]) {
+      renderCurve(aid);
+      return;
+    }
+    curveInFlight[aid] = true;
+    var url = pathPrefix + "/api/account/" + encodeURIComponent(aid) + "/snapshot"
+      + "?window_hours=24&curve_points=180&log_lines=0&_=" + now;
+    var xhr = new XMLHttpRequest();
+    xhr.open("GET", url, true);
+    xhr.onreadystatechange = function () {
+      if (xhr.readyState !== 4) return;
+      curveInFlight[aid] = false;
+      if (xhr.status < 200 || xhr.status >= 300) {
+        renderCurve(aid);
+        return;
+      }
+      try {
+        var payload = JSON.parse(xhr.responseText || "{}");
+        var curve = payload.strategy_equity_curve || payload.equity_curve || [];
+        var values = [];
+        for (var i = 0; i < curve.length; i += 1) {
+          var p = curve[i] || {};
+          var n = Number(p.equity);
+          if (Number.isFinite(n)) values.push(n);
+        }
+        if (values.length >= 2) {
+          curveCache[aid] = { values: values.slice(-180), ts: Date.now() };
+        }
+      } catch (e) {}
+      renderCurve(aid);
+    };
+    xhr.send();
+  }
+
+  function primeCurveLoad() {
+    createObserver();
+    var nodes = document.querySelectorAll(".spark-box");
+    for (var i = 0; i < nodes.length; i += 1) {
+      var node = nodes[i];
+      var aid = node.getAttribute("data-account-id") || "";
+      renderCurve(aid);
+      var cached = curveCache[aid];
+      var fresh = !!(cached && cached.ts && (Date.now() - cached.ts) < curveTtlMs);
+      if (!aid || fresh) continue;
+      if (curveObserver) {
+        curveObserver.observe(node);
+      } else {
+        fetchCurve(aid);
+      }
+    }
+  }
+
+  function renderCards() {
+    var rows = summaryRows || [];
+    var html = "";
+    for (var i = 0; i < rows.length; i += 1) {
+      var r = rows[i] || {};
+      var aid = String(r.account_id || "");
+      var safeAid = escapeHtml(aid);
+      var base = pathPrefix + "/account/" + encodeURIComponent(aid) + "/";
+      var st = r.last_run_status || "--";
+      html += '<article class="card">'
+        + '<div class="aid">' + safeAid + '</div>'
+        + '<div class="row"><span class="label">余额(USDT)</span><span class="val">' + fmt(r.wallet_balance_usdt, 4) + '</span></div>'
+        + '<div class="row"><span class="label">持仓数</span><span class="val">' + fmt(r.open_positions, 0) + '</span></div>'
+        + '<div class="row"><span class="label">最近状态</span><span class="val ' + statusCls(st) + '">' + escapeHtml(st) + "</span></div>"
+        + '<div class="spark-block">'
+        + '<div class="spark-title"><span class="label">1D 策略权益曲线</span><span class="val spark-delta" data-account-id="' + safeAid + '">--</span></div>'
+        + '<div class="spark-box" data-account-id="' + safeAid + '"><div class="spark-empty">加载中...</div></div>'
+        + "</div>"
+        + '<div class="actions"><a class="btn" href="' + base + '">详情</a></div>'
+        + "</article>";
+    }
+    cards.innerHTML = html || '<article class="card">暂无账户数据</article>';
+    primeCurveLoad();
+  }
+
   function fetchSummary() {
     var xhr = new XMLHttpRequest();
-    xhr.open("GET", api + "?_=" + Date.now(), true);
+    xhr.open("GET", summaryApi + "?_=" + Date.now(), true);
     xhr.onreadystatechange = function () {
       if (xhr.readyState !== 4) return;
       if (xhr.status < 200 || xhr.status >= 300) return;
       var payload = {};
       try { payload = JSON.parse(xhr.responseText || "{}"); } catch (e) { return; }
-      var rows = payload.accounts || [];
-      var html = "";
-      for (var i = 0; i < rows.length; i += 1) {
-        var r = rows[i] || {};
-        var aid = String(r.account_id || "");
-        var base = pathPrefix + "/account/" + encodeURIComponent(aid) + "/";
-        html += '<article class="card">'
-          + '<div class="aid">' + aid + '</div>'
-          + '<div class="row"><span class="label">余额(USDT)</span><span class="val">' + fmt(r.wallet_balance_usdt, 4) + '</span></div>'
-          + '<div class="row"><span class="label">持仓数</span><span class="val">' + fmt(r.open_positions, 0) + '</span></div>'
-          + '<div class="row"><span class="label">最近状态</span><span class="val ' + statusCls(r.last_run_status) + '">' + (r.last_run_status || "--") + '</span></div>'
-          + '<div class="actions"><a class="btn" href="' + base + '">详情</a></div>'
-          + '</article>';
-      }
-      cards.innerHTML = html || '<article class="card">暂无账户数据</article>';
+      summaryRows = payload.accounts || [];
+      renderCards();
     };
     xhr.send();
   }
@@ -2513,6 +2676,3 @@ ACCOUNTS_OVERVIEW_HTML = """<!doctype html>
 </body>
 </html>
 """
-
-
-
