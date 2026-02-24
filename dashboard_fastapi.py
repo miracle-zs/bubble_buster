@@ -555,7 +555,7 @@ def create_app(config_path: Optional[str] = None) -> FastAPI:
                 account_id=account_id,
                 include_details=False,
                 include_log=False,
-                include_curves=True,
+                include_curves=False,
             )
             payload["config_path"] = ctx.config_path
             payload["db_path"] = ctx.db_path
@@ -570,6 +570,33 @@ def create_app(config_path: Optional[str] = None) -> FastAPI:
             return JSONResponse(payload)
         except Exception as exc:  # noqa: BLE001
             raise HTTPException(status_code=500, detail=f"account core failed: {exc}") from exc
+
+    @app.get("/api/account/{account_id}/curve")
+    def account_curve(
+        request: Request,
+        account_id: str,
+        window_hours: Optional[float] = Query(default=24.0, gt=0.0, le=8784.0),
+        curve_points: Optional[int] = Query(default=None, ge=100, le=5000),
+    ):
+        ctx: DashboardRuntimeContext = request.app.state.ctx
+        try:
+            payload = ctx.provider.snapshot(
+                log_lines=0,
+                window_hours=window_hours,
+                curve_points=curve_points,
+                account_id=account_id,
+                include_details=False,
+                include_log=False,
+                include_curves=True,
+                include_balance_curve=False,
+                include_trade_stats=False,
+            )
+            payload["config_path"] = ctx.config_path
+            payload["db_path"] = ctx.db_path
+            payload["account_id"] = account_id
+            return JSONResponse(payload)
+        except Exception as exc:  # noqa: BLE001
+            raise HTTPException(status_code=500, detail=f"account curve failed: {exc}") from exc
 
     @app.get("/api/account/{account_id}/details")
     def account_details(

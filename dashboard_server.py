@@ -666,6 +666,7 @@ class DashboardDataProvider:
         window_start_utc: Optional[str],
         max_points: int,
         account_id: Optional[str] = None,
+        include_trade_stats: bool = True,
     ) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
         wallet_rows = self._query_wallet_rows(
             conn=conn,
@@ -761,7 +762,23 @@ class DashboardDataProvider:
 
         curve = self._resample_curve(curve, max_points)
         dd = self._apply_drawdown(curve)
-        trade_stats = self._load_trade_outcome_stats(conn, now_utc, account_id=account_id)
+        trade_stats = {
+            "closed_trades_priced": 0,
+            "wins": 0,
+            "losses": 0,
+            "breakeven": 0,
+            "win_rate_pct": 0.0,
+            "gross_profit": 0.0,
+            "gross_loss_abs": 0.0,
+            "avg_win": 0.0,
+            "avg_loss_abs": 0.0,
+            "profit_factor": None,
+            "avg_win_loss_ratio": None,
+            "trade_realized_pnl": 0.0,
+            "unpriced_closed_positions": 0,
+        }
+        if include_trade_stats:
+            trade_stats = self._load_trade_outcome_stats(conn, now_utc, account_id=account_id)
         stats = {
             "wallet_balance_usdt": round(wallet_balance_usdt, 8) if wallet_balance_usdt is not None else None,
             "total_realized_pnl": round(float(curve[-1]["cum_pnl"]), 8),
@@ -796,6 +813,8 @@ class DashboardDataProvider:
         include_details: bool = True,
         include_log: bool = True,
         include_curves: bool = True,
+        include_balance_curve: bool = True,
+        include_trade_stats: bool = True,
     ) -> Dict[str, Any]:
         now_utc = datetime.now(timezone.utc)
         now_local = now_utc.astimezone(self.local_tz)
@@ -1066,22 +1085,28 @@ class DashboardDataProvider:
                         window_start_utc=window_start_utc,
                         max_points=points_limit,
                         account_id=scoped_account,
-                    )
-                    balance_curve, balance_stats = self._build_balance_curve(
-                        conn=conn,
-                        now_utc=now_utc,
-                        wallet_balance_usdt=self._safe_float(data["wallet"].get("balance_usdt")),
-                        window_start_utc=window_start_utc,
-                        max_points=points_limit,
-                        account_id=scoped_account,
+                        include_trade_stats=include_trade_stats,
                     )
                     data["strategy_equity_curve"] = strategy_curve[-points_limit:]
-                    data["balance_curve"] = balance_curve[-points_limit:]
                     data["drawdown_stats_strategy"] = strategy_stats
-                    data["drawdown_stats_balance"] = balance_stats
                     data["summary"]["net_cashflow_usdt"] = strategy_stats.get("net_cashflow_usdt", 0.0)
                     data["equity_curve"] = data["strategy_equity_curve"]
-                    data["drawdown_stats"] = data["drawdown_stats_balance"]
+                    if include_balance_curve:
+                        balance_curve, balance_stats = self._build_balance_curve(
+                            conn=conn,
+                            now_utc=now_utc,
+                            wallet_balance_usdt=self._safe_float(data["wallet"].get("balance_usdt")),
+                            window_start_utc=window_start_utc,
+                            max_points=points_limit,
+                            account_id=scoped_account,
+                        )
+                        data["balance_curve"] = balance_curve[-points_limit:]
+                        data["drawdown_stats_balance"] = balance_stats
+                        data["drawdown_stats"] = data["drawdown_stats_balance"]
+                    else:
+                        data["balance_curve"] = []
+                        data["drawdown_stats_balance"] = dict(strategy_stats)
+                        data["drawdown_stats"] = data["drawdown_stats_strategy"]
         except sqlite3.Error as exc:
             data["summary"]["last_run_status"] = "DB_ERROR"
             data["db_error"] = str(exc)
@@ -1235,6 +1260,8 @@ def _make_handler(provider: DashboardDataProvider, cfg: DashboardServerConfig):
                 include_details = path != "/api/dashboard/core"
                 include_log = path != "/api/dashboard/core"
                 include_curves = path != "/api/dashboard/details"
+                include_balance_curve = path != "/api/dashboard/core"
+                include_trade_stats = path != "/api/dashboard/core"
                 window_hours: Optional[float] = None
                 curve_points: Optional[int] = None
                 try:
@@ -1255,6 +1282,8 @@ def _make_handler(provider: DashboardDataProvider, cfg: DashboardServerConfig):
                         include_details=include_details,
                         include_log=include_log,
                         include_curves=include_curves,
+                        include_balance_curve=include_balance_curve,
+                        include_trade_stats=include_trade_stats,
                     )
                 )
                 self.send_response(200)
@@ -1290,6 +1319,10 @@ def _make_handler(provider: DashboardDataProvider, cfg: DashboardServerConfig):
                 elif account_suffix.endswith("/details"):
                     account_id = account_suffix[: -len("/details")].strip().strip("/")
                     include_curves = False
+                elif account_suffix.endswith("/curve"):
+                    account_id = account_suffix[: -len("/curve")].strip().strip("/")
+                    include_details = False
+                    include_log = False
                 else:
                     account_id = ""
                 if not account_id:
@@ -1321,6 +1354,8 @@ def _make_handler(provider: DashboardDataProvider, cfg: DashboardServerConfig):
                         include_details=include_details,
                         include_log=include_log,
                         include_curves=include_curves,
+                        include_balance_curve=(account_suffix.endswith("/curve") is False and include_curves),
+                        include_trade_stats=(account_suffix.endswith("/curve") is False and include_curves),
                     )
                 )
                 self.send_response(200)
@@ -2121,6 +2156,17 @@ DASHBOARD_HTML = """<!doctype html>
     xhr.send();
   }
 
+  function mergeLatest(partial) {
+    if (!partial || typeof partial !== "object") return;
+    if (!latestData || typeof latestData !== "object") {
+      latestData = {};
+    }
+    var keys = Object.keys(partial);
+    for (var i = 0; i < keys.length; i += 1) {
+      latestData[keys[i]] = partial[keys[i]];
+    }
+  }
+
   function renderEquityChart(curve) {
     if (!el.equityChart) return;
     if (typeof window.echarts === "undefined") {
@@ -2381,7 +2427,8 @@ DASHBOARD_HTML = """<!doctype html>
         return;
       }
 
-      latestData = d;
+      mergeLatest(d);
+      d = latestData || d;
       var summary = d.summary || {};
       var wallet = d.wallet || {};
       var stats = activeStats(d);
@@ -2421,6 +2468,14 @@ DASHBOARD_HTML = """<!doctype html>
       }
       rerenderFromLatest();
 
+    });
+  }
+
+  function refreshCurveFast() {
+    fetchDashboard(api + "/curve", { lite: true }, function (err, d) {
+      if (err) return;
+      mergeLatest(d);
+      rerenderFromLatest();
     });
   }
 
@@ -2556,10 +2611,14 @@ DASHBOARD_HTML = """<!doctype html>
     }, isMobile ? 4500 : 3500);
   }
 
+  refreshCurveFast();
   refreshCore({ lite: true });
   ensureEcharts();
   setupDetailsLazyLoad();
-  setTimeout(function () { refreshCore({ lite: false }); }, isMobile ? 1400 : 500);
+  setTimeout(function () {
+    refreshCurveFast();
+    refreshCore({ lite: false });
+  }, isMobile ? 1400 : 500);
   if (el.tabStrategy) {
     el.tabStrategy.addEventListener("click", function () {
       currentCurveTab = "strategy";
@@ -2582,17 +2641,20 @@ DASHBOARD_HTML = """<!doctype html>
       if (!Number.isFinite(parsed) || parsed <= 0) return;
       currentWindowHours = parsed;
       renderCurveTabState();
-      refresh();
+      refreshCurveFast();
+      refreshCore({ lite: true });
     });
   }
   setInterval(function () {
     refreshTick += 1;
     if (isMobile) {
       var fullEvery = 3;
+      refreshCurveFast();
       refreshCore({ lite: (refreshTick % fullEvery) !== 0 });
       if (fullLoadedOnce && (refreshTick % fullEvery) === 0) refreshDetails();
       return;
     }
+    refreshCurveFast();
     refreshCore({ lite: false });
     if (fullLoadedOnce && (refreshTick % 2) === 0) refreshDetails();
   }, Math.max(2000, REFRESH_SEC * 1000));
