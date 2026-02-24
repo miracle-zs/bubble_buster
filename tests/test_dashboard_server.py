@@ -5,7 +5,11 @@ from datetime import datetime, timedelta, timezone
 from typing import Dict
 from pathlib import Path
 
-from dashboard_server import DashboardDataProvider
+from dashboard_server import (
+    DashboardDataProvider,
+    _safe_query_int,
+    render_account_dashboard_html,
+)
 from core.state_store import StateStore
 
 
@@ -600,6 +604,46 @@ class DashboardServerTest(unittest.TestCase):
         self.assertAlmostEqual(stats["avg_loss_abs"], 10.0)
         self.assertAlmostEqual(stats["profit_factor"], 1.0)
         self.assertAlmostEqual(stats["avg_win_loss_ratio"], 1.0)
+
+    def test_render_account_dashboard_html_escapes_account_id(self) -> None:
+        html = render_account_dashboard_html(
+            refresh_sec=5,
+            account_id='acc01";alert(1);//',
+        )
+        self.assertIn("encodeURIComponent(accountId)", html)
+        self.assertNotIn('/api/account/acc01";alert(1);//', html)
+
+    def test_safe_query_int_handles_invalid_values(self) -> None:
+        self.assertEqual(_safe_query_int("abc", default=80, min_value=0, max_value=300), 80)
+        self.assertEqual(_safe_query_int(None, default=80, min_value=0, max_value=300), 80)
+        self.assertEqual(_safe_query_int("9999", default=80, min_value=0, max_value=300), 300)
+        self.assertEqual(_safe_query_int("-1", default=80, min_value=0, max_value=300), 0)
+
+    def test_live_wallet_snapshot_uses_configured_account_id(self) -> None:
+        calls = {"n": 0}
+
+        def _mock_balance_fetcher() -> float:
+            calls["n"] += 1
+            return 321.0
+
+        provider = DashboardDataProvider(
+            db_path=self.db_path,
+            log_file=self.log_file,
+            timezone_name="UTC",
+            entry_hour=7,
+            entry_minute=40,
+            balance_fetcher=_mock_balance_fetcher,
+            live_wallet_account_id="acc01",
+        )
+        snapshot = provider.snapshot(log_lines=0)
+        self.assertEqual(snapshot["wallet"]["source"], "DB")
+        with sqlite3.connect(self.db_path) as conn:
+            row = conn.execute(
+                "SELECT account_id, balance_usdt FROM wallet_snapshots ORDER BY id DESC LIMIT 1"
+            ).fetchone()
+        self.assertIsNotNone(row)
+        self.assertEqual(str(row[0]), "acc01")
+        self.assertAlmostEqual(float(row[1]), 321.0)
 
 
 if __name__ == "__main__":

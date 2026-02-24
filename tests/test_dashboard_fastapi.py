@@ -62,7 +62,8 @@ strategy_note.acc02 = TP 9% / 清仓100% / 浮亏砍仓ON
             compact = client.get("/account/acc01/")
             self.assertEqual(compact.status_code, 200)
             self.assertIn("acc01", compact.text)
-            self.assertIn("api/account/acc01", compact.text)
+            self.assertIn('var accountId = "acc01";', compact.text)
+            self.assertIn("encodeURIComponent(accountId)", compact.text)
 
             health = client.get("/healthz")
             self.assertEqual(health.status_code, 200)

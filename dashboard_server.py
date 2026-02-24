@@ -40,6 +40,7 @@ class DashboardDataProvider:
         default_curve_points: int = 600,
         account_strategy_notes: Optional[Dict[str, str]] = None,
         overview_account_ids: Optional[List[str]] = None,
+        live_wallet_account_id: str = "default",
     ):
         self.db_path = db_path
         self.log_file = log_file
@@ -57,6 +58,7 @@ class DashboardDataProvider:
         }
         overview_ids = [str(x).strip() for x in (overview_account_ids or []) if str(x).strip()]
         self.overview_account_ids: Optional[Set[str]] = set(overview_ids) if overview_ids else None
+        self.live_wallet_account_id = (live_wallet_account_id or "").strip() or "default"
         self._balance_cache_value: Optional[float] = None
         self._balance_cache_at: Optional[datetime] = None
         self._balance_last_attempt_at: Optional[datetime] = None
@@ -944,7 +946,7 @@ class DashboardDataProvider:
                             conn=conn,
                             captured_at_utc=str(live_wallet.get("as_of_utc") or now_utc.replace(microsecond=0).isoformat()),
                             balance_usdt=float(live_wallet["balance_usdt"]),
-                            account_id="default",
+                            account_id=self.live_wallet_account_id,
                             source="API",
                             error=None,
                         )
@@ -1219,9 +1221,11 @@ def render_account_dashboard_html(
     safe_account_id = (account_id or "").strip()
     if not safe_account_id:
         return render_dashboard_html(refresh_sec, echarts_src=echarts_src)
+    account_json = json.dumps(safe_account_id, ensure_ascii=False)
     api_expr = (
         'var apiBase = pathPrefix.replace(/\\/legacy$/, "").replace(/\\/account\\/[^/]+$/, "");\n'
-        f'  var api = apiBase + "/api/account/{safe_account_id}";'
+        f"  var accountId = {account_json};\n"
+        '  var api = apiBase + "/api/account/" + encodeURIComponent(accountId);'
     )
     return (
         render_dashboard_html(refresh_sec, echarts_src=echarts_src)
@@ -1235,6 +1239,19 @@ def render_accounts_overview_html(refresh_sec: int) -> str:
 
 def _json_bytes(payload: Dict[str, Any]) -> bytes:
     return json.dumps(payload, ensure_ascii=False).encode("utf-8")
+
+
+def _safe_query_int(
+    raw_value: Optional[str],
+    default: int,
+    min_value: int,
+    max_value: int,
+) -> int:
+    try:
+        value = int(raw_value) if raw_value not in (None, "") else int(default)
+    except (TypeError, ValueError):
+        value = int(default)
+    return max(min_value, min(max_value, value))
 
 
 def _make_handler(provider: DashboardDataProvider, cfg: DashboardServerConfig):
@@ -1254,7 +1271,12 @@ def _make_handler(provider: DashboardDataProvider, cfg: DashboardServerConfig):
 
             if path in {"/api/dashboard", "/api/dashboard/core", "/api/dashboard/details"}:
                 params = parse_qs(parsed.query)
-                lines = max(0, int(params.get("log_lines", ["80"])[0]))
+                lines = _safe_query_int(
+                    params.get("log_lines", ["80"])[0],
+                    default=80,
+                    min_value=0,
+                    max_value=300,
+                )
                 window_hours_raw = params.get("window_hours", [None])[0]
                 curve_points_raw = params.get("curve_points", [None])[0]
                 include_details = path != "/api/dashboard/core"
@@ -1330,7 +1352,12 @@ def _make_handler(provider: DashboardDataProvider, cfg: DashboardServerConfig):
                     self.end_headers()
                     return
                 params = parse_qs(parsed.query)
-                lines = max(0, int(params.get("log_lines", ["80"])[0]))
+                lines = _safe_query_int(
+                    params.get("log_lines", ["80"])[0],
+                    default=80,
+                    min_value=0,
+                    max_value=300,
+                )
                 window_hours_raw = params.get("window_hours", [None])[0]
                 curve_points_raw = params.get("curve_points", [None])[0]
                 window_hours: Optional[float] = None

@@ -170,6 +170,7 @@ class StrategyRuntimeService:
         else:
             timeout_sec = max(0.1, float(self.cfg.account_task_timeout_sec))
             done_futures = set()
+            slow_accounts = set()
             with ThreadPoolExecutor(max_workers=min(self.max_account_workers, len(account_ids))) as ex:
                 futures = {}
                 for aid in account_ids:
@@ -193,8 +194,23 @@ class StrategyRuntimeService:
                 for future, aid in futures.items():
                     if future in done_futures:
                         continue
-                    future.cancel()
-                    results[aid] = {"error": "TIMEOUT"}
+                    slow_accounts.add(aid)
+                    LOGGER.warning(
+                        "service entry account exceeded soft-timeout %.2fs, waiting completion account=%s",
+                        timeout_sec,
+                        aid,
+                    )
+                    try:
+                        result = future.result()
+                        if isinstance(result, dict):
+                            result.setdefault("slow", True)
+                        results[aid] = result
+                    except Exception as exc:  # noqa: BLE001
+                        results[aid] = {"error": str(exc)}
+
+                for aid in slow_accounts:
+                    if isinstance(results.get(aid), dict):
+                        results[aid].setdefault("slow", True)
 
         self._last_entry_local_date = now_local.date()
         LOGGER.info("service entry result: %s", results)
@@ -349,6 +365,7 @@ class StrategyRuntimeService:
         else:
             timeout_sec = max(0.1, float(self.cfg.account_task_timeout_sec))
             done_futures = set()
+            slow_accounts = set()
             with ThreadPoolExecutor(max_workers=min(self.max_account_workers, len(account_ids))) as ex:
                 futures = {}
                 for aid in account_ids:
@@ -372,8 +389,22 @@ class StrategyRuntimeService:
                 for future, aid in futures.items():
                     if future in done_futures:
                         continue
-                    future.cancel()
-                    results[aid] = {"error": "TIMEOUT"}
+                    slow_accounts.add(aid)
+                    LOGGER.warning(
+                        "service daily loss-cut account exceeded soft-timeout %.2fs, waiting completion account=%s",
+                        timeout_sec,
+                        aid,
+                    )
+                    try:
+                        result = future.result()
+                        if isinstance(result, dict):
+                            result.setdefault("slow", True)
+                        results[aid] = result
+                    except Exception as exc:  # noqa: BLE001
+                        results[aid] = {"error": str(exc)}
+                for aid in slow_accounts:
+                    if isinstance(results.get(aid), dict):
+                        results[aid].setdefault("slow", True)
         LOGGER.info("service daily loss-cut result: %s", results)
 
     def _run_manage_if_due(self, now_monotonic: float) -> None:
@@ -484,6 +515,7 @@ class StrategyRuntimeService:
         with ThreadPoolExecutor(max_workers=min(self.max_account_workers, len(eligible_accounts))) as ex:
             futures = {ex.submit(self._run_manage_for_account, aid): aid for aid in eligible_accounts}
             done_futures = set()
+            slow_accounts = set()
             try:
                 for future in as_completed(futures, timeout=timeout_sec):
                     done_futures.add(future)
@@ -500,9 +532,22 @@ class StrategyRuntimeService:
             for future, aid in futures.items():
                 if future in done_futures:
                     continue
-                future.cancel()
-                self._record_account_failure(aid, f"timeout>{timeout_sec}s")
-                outputs[aid] = {"account_id": aid, "error": "TIMEOUT"}
+                slow_accounts.add(aid)
+                LOGGER.warning(
+                    "service manage account exceeded soft-timeout %.2fs, waiting completion account=%s",
+                    timeout_sec,
+                    aid,
+                )
+                try:
+                    outputs[aid] = future.result()
+                    self.account_states[aid].failures = 0
+                except Exception as exc:  # noqa: BLE001
+                    self._record_account_failure(aid, str(exc))
+                    outputs[aid] = {"account_id": aid, "error": str(exc)}
+            for aid in slow_accounts:
+                output = outputs.get(aid)
+                if isinstance(output, dict):
+                    output["slow"] = True
         return outputs
 
     def run_cycle(

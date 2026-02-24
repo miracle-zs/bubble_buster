@@ -108,6 +108,7 @@ def create_dashboard_context(config_path: str) -> DashboardRuntimeContext:
         "yes",
         "on",
     }
+    default_account_id = runtime_cfg.get("default_account_id", "default").strip() or "default"
     enabled_accounts_raw = account_cfg.get("enabled", fallback="") if account_cfg else ""
     enabled_accounts = [x.strip() for x in enabled_accounts_raw.split(",") if x.strip()]
     overview_account_ids = [
@@ -241,6 +242,7 @@ def create_dashboard_context(config_path: str) -> DashboardRuntimeContext:
         default_curve_points=curve_points,
         account_strategy_notes=account_strategy_notes,
         overview_account_ids=overview_account_ids,
+        live_wallet_account_id=default_account_id,
     )
 
     echarts_src = _ensure_local_echarts_asset()
