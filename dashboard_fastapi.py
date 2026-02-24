@@ -1,6 +1,9 @@
 import configparser
+import glob
 import logging
 import os
+import shutil
+import sys
 import threading
 import time
 from dataclasses import dataclass, replace
@@ -10,6 +13,7 @@ from typing import Optional
 
 from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.staticfiles import StaticFiles
 
 from core.runtime_components import build_proxies, create_components, resolve_path
 from core.runtime_service import StrategyRuntimeService
@@ -34,6 +38,7 @@ class DashboardRuntimeContext:
     log_file: str
     timezone_name: str
     refresh_sec: int
+    echarts_src: str
     provider: DashboardDataProvider
 
 
@@ -238,12 +243,15 @@ def create_dashboard_context(config_path: str) -> DashboardRuntimeContext:
         overview_account_ids=overview_account_ids,
     )
 
+    echarts_src = _ensure_local_echarts_asset()
+
     return DashboardRuntimeContext(
         config_path=str(Path(config_path).resolve()),
         db_path=db_path,
         log_file=log_file,
         timezone_name=timezone_name,
         refresh_sec=refresh_sec,
+        echarts_src=echarts_src,
         provider=provider,
     )
 
@@ -253,6 +261,32 @@ def _default_config_path() -> str:
     if env_path:
         return str(Path(env_path).resolve())
     return str((Path.cwd() / "config.ini").resolve())
+
+
+def _ensure_local_echarts_asset() -> str:
+    static_root = (Path(__file__).resolve().parent / "app_static").resolve()
+    target = static_root / "vendor" / "echarts.min.js"
+    if target.exists():
+        return "/static/vendor/echarts.min.js"
+
+    candidates = []
+    for base in sys.path:
+        if not base or not os.path.isdir(base):
+            continue
+        candidates.extend(
+            glob.glob(os.path.join(base, "**", "echarts.min.js"), recursive=True)
+        )
+    for src in candidates:
+        if "site-packages" not in src:
+            continue
+        try:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(src, target)
+            return "/static/vendor/echarts.min.js"
+        except OSError:
+            continue
+    # Fallback to CDN if local asset unavailable.
+    return "https://cdn.jsdelivr.net/npm/echarts@5/dist/echarts.min.js"
 
 
 def _build_service_state(enabled: bool = False) -> dict:
@@ -403,6 +437,9 @@ def _shutdown_background_service(app: FastAPI) -> None:
 
 def create_app(config_path: Optional[str] = None) -> FastAPI:
     app = FastAPI(title="Bubble Buster Dashboard", version="1.1.0")
+    static_root = (Path(__file__).resolve().parent / "app_static").resolve()
+    static_root.mkdir(parents=True, exist_ok=True)
+    app.mount("/static", StaticFiles(directory=str(static_root)), name="static")
 
     @app.on_event("startup")
     def _startup() -> None:
@@ -427,7 +464,13 @@ def create_app(config_path: Optional[str] = None) -> FastAPI:
         account_id: str,
     ):
         ctx: DashboardRuntimeContext = request.app.state.ctx
-        return HTMLResponse(render_account_dashboard_html(ctx.refresh_sec, account_id=account_id))
+        return HTMLResponse(
+            render_account_dashboard_html(
+                ctx.refresh_sec,
+                account_id=account_id,
+                echarts_src=ctx.echarts_src,
+            )
+        )
 
     @app.get("/api/dashboard")
     def dashboard_data(
@@ -495,6 +538,62 @@ def create_app(config_path: Optional[str] = None) -> FastAPI:
             return JSONResponse(payload)
         except Exception as exc:  # noqa: BLE001
             raise HTTPException(status_code=500, detail=f"account snapshot failed: {exc}") from exc
+
+    @app.get("/api/account/{account_id}/core")
+    def account_core(
+        request: Request,
+        account_id: str,
+        window_hours: Optional[float] = Query(default=24.0, gt=0.0, le=8784.0),
+        curve_points: Optional[int] = Query(default=None, ge=100, le=5000),
+    ):
+        ctx: DashboardRuntimeContext = request.app.state.ctx
+        try:
+            payload = ctx.provider.snapshot(
+                log_lines=0,
+                window_hours=window_hours,
+                curve_points=curve_points,
+                account_id=account_id,
+                include_details=False,
+                include_log=False,
+                include_curves=True,
+            )
+            payload["config_path"] = ctx.config_path
+            payload["db_path"] = ctx.db_path
+            payload["account_id"] = account_id
+            service_state = getattr(request.app.state, "service_state", {}) or {}
+            thread = service_state.get("thread")
+            payload["service"] = {
+                "enabled": bool(service_state.get("enabled", False)),
+                "running": bool(service_state.get("running", False)) and bool(thread and thread.is_alive()),
+                "error": service_state.get("error"),
+            }
+            return JSONResponse(payload)
+        except Exception as exc:  # noqa: BLE001
+            raise HTTPException(status_code=500, detail=f"account core failed: {exc}") from exc
+
+    @app.get("/api/account/{account_id}/details")
+    def account_details(
+        request: Request,
+        account_id: str,
+        log_lines: int = Query(default=80, ge=0, le=300),
+    ):
+        ctx: DashboardRuntimeContext = request.app.state.ctx
+        try:
+            payload = ctx.provider.snapshot(
+                log_lines=log_lines,
+                window_hours=None,
+                curve_points=100,
+                account_id=account_id,
+                include_details=True,
+                include_log=True,
+                include_curves=False,
+            )
+            payload["config_path"] = ctx.config_path
+            payload["db_path"] = ctx.db_path
+            payload["account_id"] = account_id
+            return JSONResponse(payload)
+        except Exception as exc:  # noqa: BLE001
+            raise HTTPException(status_code=500, detail=f"account details failed: {exc}") from exc
 
     @app.get("/api/runtime/settings")
     def runtime_settings(request: Request):

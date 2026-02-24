@@ -793,6 +793,9 @@ class DashboardDataProvider:
         window_hours: Optional[float] = None,
         curve_points: Optional[int] = None,
         account_id: Optional[str] = None,
+        include_details: bool = True,
+        include_log: bool = True,
+        include_curves: bool = True,
     ) -> Dict[str, Any]:
         now_utc = datetime.now(timezone.utc)
         now_local = now_utc.astimezone(self.local_tz)
@@ -908,7 +911,7 @@ class DashboardDataProvider:
                 "unpriced_closed_positions": 0,
                 "equity_baseline": live_wallet["balance_usdt"] if live_wallet["balance_usdt"] is not None else 0.0,
             },
-            "log_tail": self._tail_log(lines=log_lines),
+            "log_tail": self._tail_log(lines=log_lines) if include_log else [],
         }
 
         if not os.path.exists(self.db_path):
@@ -965,43 +968,6 @@ class DashboardDataProvider:
                     data["latest_run"] = dict(latest_run)
                     data["summary"]["last_run_status"] = latest_run["status"]
 
-                data["runs"] = self._query_rows(
-                    conn,
-                    (
-                        """
-                        SELECT run_id, account_id, trade_day_utc, started_at_utc, completed_at_utc, status, message
-                        FROM runs
-                        WHERE account_id = ?
-                        ORDER BY started_at_utc DESC
-                        LIMIT 30
-                        """
-                        if scoped_account
-                        else """
-                        SELECT run_id, account_id, trade_day_utc, started_at_utc, completed_at_utc, status, message
-                        FROM runs
-                        ORDER BY started_at_utc DESC
-                        LIMIT 30
-                        """
-                    ),
-                    ((scoped_account,) if scoped_account else ()),
-                )
-
-                data["open_positions"] = self._query_rows(
-                    conn,
-                    """
-                    SELECT p.id, p.run_id, p.symbol, p.side, p.qty, p.entry_price,
-                           p.liq_price_latest, p.tp_price, p.sl_price,
-                           p.opened_at_utc, p.expire_at_utc, p.status, p.last_error
-                    FROM positions p
-                    LEFT JOIN runs r ON r.run_id = p.run_id
-                    WHERE p.status = 'OPEN'
-                      AND (? IS NULL OR r.account_id = ?)
-                    ORDER BY p.opened_at_utc DESC
-                    LIMIT 100
-                    """,
-                    (scoped_account, scoped_account),
-                )
-
                 summary_row = conn.execute(
                     """
                     SELECT
@@ -1019,64 +985,103 @@ class DashboardDataProvider:
                     data["summary"]["open_symbols"] = int(summary_row["open_symbols"] or 0)
                     data["summary"]["recent_errors"] = int(summary_row["recent_errors"] or 0)
 
-                data["events"] = self._query_rows(
-                    conn,
-                    """
-                    SELECT
-                        oe.id, oe.position_id, oe.symbol, oe.order_id, oe.client_order_id,
-                        oe.type, oe.side, oe.price, oe.qty, oe.status,
-                        oe.event_time_utc,
-                        p.status AS position_status,
-                        p.close_reason AS position_close_reason
-                    FROM order_events oe
-                    LEFT JOIN positions p ON p.id = oe.position_id
-                    LEFT JOIN runs r ON r.run_id = p.run_id
-                    WHERE (? IS NULL OR r.account_id = ?)
-                    ORDER BY oe.id DESC
-                    LIMIT 120
-                    """,
-                    (scoped_account, scoped_account),
-                )
-                data["cashflow_events"] = self._query_rows(
-                    conn,
-                    """
-                    SELECT id, event_time_utc, asset, amount, income_type, symbol, tran_id, info
-                    FROM cashflow_events
-                    WHERE (? IS NULL OR account_id = ?)
-                    ORDER BY event_time_utc DESC, id DESC
-                    LIMIT 80
-                    """,
-                    (scoped_account, scoped_account),
-                )
-                data["unpriced_closed_details"] = self._list_unpriced_closed_positions(
-                    conn,
-                    limit=120,
-                    account_id=scoped_account,
-                )
+                if include_details:
+                    data["runs"] = self._query_rows(
+                        conn,
+                        (
+                            """
+                            SELECT run_id, account_id, trade_day_utc, started_at_utc, completed_at_utc, status, message
+                            FROM runs
+                            WHERE account_id = ?
+                            ORDER BY started_at_utc DESC
+                            LIMIT 30
+                            """
+                            if scoped_account
+                            else """
+                            SELECT run_id, account_id, trade_day_utc, started_at_utc, completed_at_utc, status, message
+                            FROM runs
+                            ORDER BY started_at_utc DESC
+                            LIMIT 30
+                            """
+                        ),
+                        ((scoped_account,) if scoped_account else ()),
+                    )
 
-                strategy_curve, strategy_stats = self._build_strategy_equity_curve(
-                    conn=conn,
-                    now_utc=now_utc,
-                    wallet_balance_usdt=self._safe_float(data["wallet"].get("balance_usdt")),
-                    window_start_utc=window_start_utc,
-                    max_points=points_limit,
-                    account_id=scoped_account,
-                )
-                balance_curve, balance_stats = self._build_balance_curve(
-                    conn=conn,
-                    now_utc=now_utc,
-                    wallet_balance_usdt=self._safe_float(data["wallet"].get("balance_usdt")),
-                    window_start_utc=window_start_utc,
-                    max_points=points_limit,
-                    account_id=scoped_account,
-                )
-                data["strategy_equity_curve"] = strategy_curve[-points_limit:]
-                data["balance_curve"] = balance_curve[-points_limit:]
-                data["drawdown_stats_strategy"] = strategy_stats
-                data["drawdown_stats_balance"] = balance_stats
-                data["summary"]["net_cashflow_usdt"] = strategy_stats.get("net_cashflow_usdt", 0.0)
-                data["equity_curve"] = data["strategy_equity_curve"]
-                data["drawdown_stats"] = data["drawdown_stats_balance"]
+                    data["open_positions"] = self._query_rows(
+                        conn,
+                        """
+                        SELECT p.id, p.run_id, p.symbol, p.side, p.qty, p.entry_price,
+                               p.liq_price_latest, p.tp_price, p.sl_price,
+                               p.opened_at_utc, p.expire_at_utc, p.status, p.last_error
+                        FROM positions p
+                        LEFT JOIN runs r ON r.run_id = p.run_id
+                        WHERE p.status = 'OPEN'
+                          AND (? IS NULL OR r.account_id = ?)
+                        ORDER BY p.opened_at_utc DESC
+                        LIMIT 100
+                        """,
+                        (scoped_account, scoped_account),
+                    )
+
+                    data["events"] = self._query_rows(
+                        conn,
+                        """
+                        SELECT
+                            oe.id, oe.position_id, oe.symbol, oe.order_id, oe.client_order_id,
+                            oe.type, oe.side, oe.price, oe.qty, oe.status,
+                            oe.event_time_utc,
+                            p.status AS position_status,
+                            p.close_reason AS position_close_reason
+                        FROM order_events oe
+                        LEFT JOIN positions p ON p.id = oe.position_id
+                        LEFT JOIN runs r ON r.run_id = p.run_id
+                        WHERE (? IS NULL OR r.account_id = ?)
+                        ORDER BY oe.id DESC
+                        LIMIT 120
+                        """,
+                        (scoped_account, scoped_account),
+                    )
+                    data["cashflow_events"] = self._query_rows(
+                        conn,
+                        """
+                        SELECT id, event_time_utc, asset, amount, income_type, symbol, tran_id, info
+                        FROM cashflow_events
+                        WHERE (? IS NULL OR account_id = ?)
+                        ORDER BY event_time_utc DESC, id DESC
+                        LIMIT 80
+                        """,
+                        (scoped_account, scoped_account),
+                    )
+                    data["unpriced_closed_details"] = self._list_unpriced_closed_positions(
+                        conn,
+                        limit=120,
+                        account_id=scoped_account,
+                    )
+
+                if include_curves:
+                    strategy_curve, strategy_stats = self._build_strategy_equity_curve(
+                        conn=conn,
+                        now_utc=now_utc,
+                        wallet_balance_usdt=self._safe_float(data["wallet"].get("balance_usdt")),
+                        window_start_utc=window_start_utc,
+                        max_points=points_limit,
+                        account_id=scoped_account,
+                    )
+                    balance_curve, balance_stats = self._build_balance_curve(
+                        conn=conn,
+                        now_utc=now_utc,
+                        wallet_balance_usdt=self._safe_float(data["wallet"].get("balance_usdt")),
+                        window_start_utc=window_start_utc,
+                        max_points=points_limit,
+                        account_id=scoped_account,
+                    )
+                    data["strategy_equity_curve"] = strategy_curve[-points_limit:]
+                    data["balance_curve"] = balance_curve[-points_limit:]
+                    data["drawdown_stats_strategy"] = strategy_stats
+                    data["drawdown_stats_balance"] = balance_stats
+                    data["summary"]["net_cashflow_usdt"] = strategy_stats.get("net_cashflow_usdt", 0.0)
+                    data["equity_curve"] = data["strategy_equity_curve"]
+                    data["drawdown_stats"] = data["drawdown_stats_balance"]
         except sqlite3.Error as exc:
             data["summary"]["last_run_status"] = "DB_ERROR"
             data["db_error"] = str(exc)
@@ -1171,20 +1176,30 @@ class DashboardDataProvider:
             return payload
 
 
-def render_dashboard_html(refresh_sec: int) -> str:
-    return DASHBOARD_HTML.replace("__REFRESH_SEC__", str(max(2, refresh_sec)))
-
-
-def render_account_dashboard_html(refresh_sec: int, account_id: str) -> str:
-    safe_account_id = (account_id or "").strip()
-    if not safe_account_id:
-        return render_dashboard_html(refresh_sec)
-    api_expr = (
-        'var apiBase = pathPrefix.replace(/\\/legacy$/, "").replace(/\\/account\\/[^/]+$/, "");\n'
-        f'  var api = apiBase + "/api/account/{safe_account_id}/snapshot";'
-    )
+def render_dashboard_html(
+    refresh_sec: int,
+    echarts_src: str = "https://cdn.jsdelivr.net/npm/echarts@5/dist/echarts.min.js",
+) -> str:
     return (
         DASHBOARD_HTML.replace("__REFRESH_SEC__", str(max(2, refresh_sec)))
+        .replace("__ECHARTS_SRC__", echarts_src or "https://cdn.jsdelivr.net/npm/echarts@5/dist/echarts.min.js")
+    )
+
+
+def render_account_dashboard_html(
+    refresh_sec: int,
+    account_id: str,
+    echarts_src: str = "https://cdn.jsdelivr.net/npm/echarts@5/dist/echarts.min.js",
+) -> str:
+    safe_account_id = (account_id or "").strip()
+    if not safe_account_id:
+        return render_dashboard_html(refresh_sec, echarts_src=echarts_src)
+    api_expr = (
+        'var apiBase = pathPrefix.replace(/\\/legacy$/, "").replace(/\\/account\\/[^/]+$/, "");\n'
+        f'  var api = apiBase + "/api/account/{safe_account_id}";'
+    )
+    return (
+        render_dashboard_html(refresh_sec, echarts_src=echarts_src)
         .replace('var api = pathPrefix + "/api/dashboard";', api_expr)
     )
 
@@ -1212,11 +1227,14 @@ def _make_handler(provider: DashboardDataProvider, cfg: DashboardServerConfig):
                 self.wfile.write(body)
                 return
 
-            if path == "/api/dashboard":
+            if path in {"/api/dashboard", "/api/dashboard/core", "/api/dashboard/details"}:
                 params = parse_qs(parsed.query)
                 lines = max(0, int(params.get("log_lines", ["80"])[0]))
                 window_hours_raw = params.get("window_hours", [None])[0]
                 curve_points_raw = params.get("curve_points", [None])[0]
+                include_details = path != "/api/dashboard/core"
+                include_log = path != "/api/dashboard/core"
+                include_curves = path != "/api/dashboard/details"
                 window_hours: Optional[float] = None
                 curve_points: Optional[int] = None
                 try:
@@ -1234,6 +1252,9 @@ def _make_handler(provider: DashboardDataProvider, cfg: DashboardServerConfig):
                         log_lines=min(lines, 300),
                         window_hours=window_hours,
                         curve_points=curve_points,
+                        include_details=include_details,
+                        include_log=include_log,
+                        include_curves=include_curves,
                     )
                 )
                 self.send_response(200)
@@ -1254,8 +1275,27 @@ def _make_handler(provider: DashboardDataProvider, cfg: DashboardServerConfig):
                 self.wfile.write(body)
                 return
 
-            if path.startswith("/api/account/") and path.endswith("/snapshot"):
-                account_id = path[len("/api/account/") : -len("/snapshot")].strip().strip("/")
+            if path.startswith("/api/account/"):
+                account_suffix = path[len("/api/account/") :].strip()
+                include_details = True
+                include_log = True
+                include_curves = True
+                account_id = ""
+                if account_suffix.endswith("/snapshot"):
+                    account_id = account_suffix[: -len("/snapshot")].strip().strip("/")
+                elif account_suffix.endswith("/core"):
+                    account_id = account_suffix[: -len("/core")].strip().strip("/")
+                    include_details = False
+                    include_log = False
+                elif account_suffix.endswith("/details"):
+                    account_id = account_suffix[: -len("/details")].strip().strip("/")
+                    include_curves = False
+                else:
+                    account_id = ""
+                if not account_id:
+                    self.send_response(404)
+                    self.end_headers()
+                    return
                 params = parse_qs(parsed.query)
                 lines = max(0, int(params.get("log_lines", ["80"])[0]))
                 window_hours_raw = params.get("window_hours", [None])[0]
@@ -1278,6 +1318,9 @@ def _make_handler(provider: DashboardDataProvider, cfg: DashboardServerConfig):
                         window_hours=window_hours,
                         curve_points=curve_points,
                         account_id=account_id or None,
+                        include_details=include_details,
+                        include_log=include_log,
+                        include_curves=include_curves,
                     )
                 )
                 self.send_response(200)
@@ -1891,6 +1934,7 @@ DASHBOARD_HTML = """<!doctype html>
 (function () {
   var refreshNode = document.getElementById("refresh");
   var REFRESH_SEC = Number((refreshNode && refreshNode.textContent) || "5");
+  var ECHARTS_SRC = "__ECHARTS_SRC__";
   var isMobile = !!(window.matchMedia && window.matchMedia("(max-width: 900px)").matches);
   var pathPrefix = "/";
   if (window && window.location && typeof window.location.pathname === "string") {
@@ -2044,7 +2088,7 @@ DASHBOARD_HTML = """<!doctype html>
     return capped;
   }
 
-  function fetchDashboard(options, callback) {
+  function fetchDashboard(apiUrl, options, callback) {
     var opts = options || {};
     var lite = !!opts.lite;
     var xhr = new XMLHttpRequest();
@@ -2058,7 +2102,7 @@ DASHBOARD_HTML = """<!doctype html>
       "curve_points=" + encodeURIComponent(String(curvePoints)),
       "log_lines=" + encodeURIComponent(lite ? "0" : "80")
     ];
-    xhr.open("GET", api + "?" + q.join("&"), true);
+    xhr.open("GET", apiUrl + "?" + q.join("&"), true);
     xhr.onreadystatechange = function () {
       if (xhr.readyState !== 4) return;
       if (xhr.status < 200 || xhr.status >= 300) {
@@ -2194,7 +2238,7 @@ DASHBOARD_HTML = """<!doctype html>
     if (window.__bb_echarts_loading) return;
     window.__bb_echarts_loading = true;
     var script = document.createElement("script");
-    script.src = "https://cdn.jsdelivr.net/npm/echarts@5/dist/echarts.min.js";
+    script.src = ECHARTS_SRC || "https://cdn.jsdelivr.net/npm/echarts@5/dist/echarts.min.js";
     script.async = true;
     script.onload = function () {
       window.__bb_echarts_loading = false;
@@ -2328,10 +2372,10 @@ DASHBOARD_HTML = """<!doctype html>
     el.drawdownStats.innerHTML = html;
   }
 
-  function refresh(options) {
+  function refreshCore(options) {
     var opts = options || {};
     var lite = !!opts.lite;
-    fetchDashboard({ lite: lite }, function (err, d) {
+    fetchDashboard(api + "/core", { lite: lite }, function (err, d) {
       if (err) {
         setText(el.meta, "dashboard fetch error: " + err);
         return;
@@ -2377,10 +2421,10 @@ DASHBOARD_HTML = """<!doctype html>
       }
       rerenderFromLatest();
 
-      if (lite && fullLoadedOnce) {
-        return;
-      }
+    });
+  }
 
+  function renderDetails(d) {
       renderRows(el.positionsBody, d.open_positions || [], function (p) {
         var errClass = p.last_error ? " bad" : "";
         return (
@@ -2458,12 +2502,64 @@ DASHBOARD_HTML = """<!doctype html>
         el.logTail.textContent = logLines.join("\\n") || "No log lines";
       }
       fullLoadedOnce = true;
+  }
+
+  function refreshDetails() {
+    fetchDashboard(api + "/details", { lite: false }, function (err, d) {
+      if (err) {
+        return;
+      }
+      renderDetails(d || {});
     });
   }
 
-  refresh({ lite: true });
+  function setupDetailsLazyLoad() {
+    var targets = [];
+    if (el.positionsBody && el.positionsBody.closest) {
+      var panel = el.positionsBody.closest(".panel");
+      if (panel) targets.push(panel);
+    }
+    if (el.logTail && el.logTail.closest) {
+      var logPanel = el.logTail.closest(".panel");
+      if (logPanel) targets.push(logPanel);
+    }
+
+    if (!targets.length || !window.IntersectionObserver) {
+      setTimeout(function () {
+        if (!fullLoadedOnce) refreshDetails();
+      }, isMobile ? 1800 : 1200);
+      return;
+    }
+
+    var loaded = false;
+    var obs = new IntersectionObserver(function (entries) {
+      if (loaded) return;
+      for (var i = 0; i < entries.length; i += 1) {
+        if (entries[i].isIntersecting) {
+          loaded = true;
+          refreshDetails();
+          obs.disconnect();
+          return;
+        }
+      }
+    }, { rootMargin: "240px 0px" });
+    for (var j = 0; j < targets.length; j += 1) {
+      obs.observe(targets[j]);
+    }
+
+    setTimeout(function () {
+      if (!loaded && !fullLoadedOnce) {
+        loaded = true;
+        refreshDetails();
+        obs.disconnect();
+      }
+    }, isMobile ? 4500 : 3500);
+  }
+
+  refreshCore({ lite: true });
   ensureEcharts();
-  setTimeout(function () { refresh({ lite: false }); }, isMobile ? 1400 : 500);
+  setupDetailsLazyLoad();
+  setTimeout(function () { refreshCore({ lite: false }); }, isMobile ? 1400 : 500);
   if (el.tabStrategy) {
     el.tabStrategy.addEventListener("click", function () {
       currentCurveTab = "strategy";
@@ -2493,10 +2589,12 @@ DASHBOARD_HTML = """<!doctype html>
     refreshTick += 1;
     if (isMobile) {
       var fullEvery = 3;
-      refresh({ lite: (refreshTick % fullEvery) !== 0 });
+      refreshCore({ lite: (refreshTick % fullEvery) !== 0 });
+      if (fullLoadedOnce && (refreshTick % fullEvery) === 0) refreshDetails();
       return;
     }
-    refresh({ lite: false });
+    refreshCore({ lite: false });
+    if (fullLoadedOnce && (refreshTick % 2) === 0) refreshDetails();
   }, Math.max(2000, REFRESH_SEC * 1000));
 })();
 </script>

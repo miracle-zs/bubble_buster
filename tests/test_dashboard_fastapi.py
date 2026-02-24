@@ -62,7 +62,7 @@ strategy_note.acc02 = TP 9% / 清仓100% / 浮亏砍仓ON
             compact = client.get("/account/acc01/")
             self.assertEqual(compact.status_code, 200)
             self.assertIn("acc01", compact.text)
-            self.assertIn("api/account/acc01/snapshot", compact.text)
+            self.assertIn("api/account/acc01", compact.text)
 
             health = client.get("/healthz")
             self.assertEqual(health.status_code, 200)
@@ -166,6 +166,20 @@ strategy_note.acc02 = TP 9% / 清仓100% / 浮亏砍仓ON
             self.assertIn("service", payload)
             symbols = {row["symbol"] for row in payload["open_positions"]}
             self.assertEqual(symbols, {"AUSDT"})
+
+            core = client.get("/api/account/acc01/core")
+            self.assertEqual(core.status_code, 200)
+            core_payload = core.json()
+            self.assertIn("strategy_equity_curve", core_payload)
+            self.assertEqual(core_payload.get("open_positions"), [])
+            self.assertEqual(core_payload.get("log_tail"), [])
+
+            details = client.get("/api/account/acc01/details")
+            self.assertEqual(details.status_code, 200)
+            detail_payload = details.json()
+            self.assertIn("open_positions", detail_payload)
+            self.assertIn("log_tail", detail_payload)
+            self.assertEqual(detail_payload.get("strategy_equity_curve"), [])
 
 
 if __name__ == "__main__":
