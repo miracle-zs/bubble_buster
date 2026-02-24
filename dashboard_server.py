@@ -1887,11 +1887,11 @@ DASHBOARD_HTML = """<!doctype html>
     </section>
   </main>
 
-<script src="https://cdn.jsdelivr.net/npm/echarts@5/dist/echarts.min.js"></script>
 <script>
 (function () {
   var refreshNode = document.getElementById("refresh");
   var REFRESH_SEC = Number((refreshNode && refreshNode.textContent) || "5");
+  var isMobile = !!(window.matchMedia && window.matchMedia("(max-width: 900px)").matches);
   var pathPrefix = "/";
   if (window && window.location && typeof window.location.pathname === "string") {
     pathPrefix = window.location.pathname || "/";
@@ -1903,6 +1903,8 @@ DASHBOARD_HTML = """<!doctype html>
   var currentCurveTab = "strategy";
   var currentWindowHours = 24;
   var latestData = null;
+  var refreshTick = 0;
+  var fullLoadedOnce = false;
 
   var el = {
     meta: document.getElementById("meta"),
@@ -2035,16 +2037,26 @@ DASHBOARD_HTML = """<!doctype html>
     if (!Number.isFinite(h) || h <= 0) return 600;
     // Wallet snapshots are typically per-minute; request more points for longer windows.
     var estimatedPoints = Math.ceil(h * 60);
-    return Math.max(600, Math.min(5000, estimatedPoints));
+    var capped = Math.max(600, Math.min(5000, estimatedPoints));
+    if (isMobile) {
+      return Math.max(320, Math.min(1200, Math.ceil(capped * 0.5)));
+    }
+    return capped;
   }
 
-  function fetchDashboard(callback) {
+  function fetchDashboard(options, callback) {
+    var opts = options || {};
+    var lite = !!opts.lite;
     var xhr = new XMLHttpRequest();
     var curvePoints = curvePointsForWindow(currentWindowHours);
+    if (!lite && currentWindowHours >= 24) {
+      curvePoints = Math.max(curvePoints, 1200);
+    }
     var q = [
       "_=" + encodeURIComponent(String(new Date().getTime())),
       "window_hours=" + encodeURIComponent(String(currentWindowHours)),
-      "curve_points=" + encodeURIComponent(String(curvePoints))
+      "curve_points=" + encodeURIComponent(String(curvePoints)),
+      "log_lines=" + encodeURIComponent(lite ? "0" : "80")
     ];
     xhr.open("GET", api + "?" + q.join("&"), true);
     xhr.onreadystatechange = function () {
@@ -2177,6 +2189,23 @@ DASHBOARD_HTML = """<!doctype html>
 
   }
 
+  function ensureEcharts() {
+    if (typeof window.echarts !== "undefined") return;
+    if (window.__bb_echarts_loading) return;
+    window.__bb_echarts_loading = true;
+    var script = document.createElement("script");
+    script.src = "https://cdn.jsdelivr.net/npm/echarts@5/dist/echarts.min.js";
+    script.async = true;
+    script.onload = function () {
+      window.__bb_echarts_loading = false;
+      rerenderFromLatest();
+    };
+    script.onerror = function () {
+      window.__bb_echarts_loading = false;
+    };
+    document.head.appendChild(script);
+  }
+
   function activeStats(data) {
     if (!data) return {};
     if (currentCurveTab === "balance") {
@@ -2299,8 +2328,10 @@ DASHBOARD_HTML = """<!doctype html>
     el.drawdownStats.innerHTML = html;
   }
 
-  function refresh() {
-    fetchDashboard(function (err, d) {
+  function refresh(options) {
+    var opts = options || {};
+    var lite = !!opts.lite;
+    fetchDashboard({ lite: lite }, function (err, d) {
       if (err) {
         setText(el.meta, "dashboard fetch error: " + err);
         return;
@@ -2345,6 +2376,10 @@ DASHBOARD_HTML = """<!doctype html>
         el.lastRunStatus.className = "v " + clsForStatus(summary.last_run_status);
       }
       rerenderFromLatest();
+
+      if (lite && fullLoadedOnce) {
+        return;
+      }
 
       renderRows(el.positionsBody, d.open_positions || [], function (p) {
         var errClass = p.last_error ? " bad" : "";
@@ -2422,10 +2457,13 @@ DASHBOARD_HTML = """<!doctype html>
         }
         el.logTail.textContent = logLines.join("\\n") || "No log lines";
       }
+      fullLoadedOnce = true;
     });
   }
 
-  refresh();
+  refresh({ lite: true });
+  ensureEcharts();
+  setTimeout(function () { refresh({ lite: false }); }, isMobile ? 1400 : 500);
   if (el.tabStrategy) {
     el.tabStrategy.addEventListener("click", function () {
       currentCurveTab = "strategy";
@@ -2451,7 +2489,15 @@ DASHBOARD_HTML = """<!doctype html>
       refresh();
     });
   }
-  setInterval(refresh, Math.max(2000, REFRESH_SEC * 1000));
+  setInterval(function () {
+    refreshTick += 1;
+    if (isMobile) {
+      var fullEvery = 3;
+      refresh({ lite: (refreshTick % fullEvery) !== 0 });
+      return;
+    }
+    refresh({ lite: false });
+  }, Math.max(2000, REFRESH_SEC * 1000));
 })();
 </script>
 </body>
