@@ -2479,7 +2479,8 @@ ACCOUNTS_OVERVIEW_HTML = """<!doctype html>
     .aid { font-size:18px; font-weight:700; color: var(--accent); }
     .label { color: var(--muted); font-size: 12px; }
     .val { font-family: ui-monospace, Menlo, Monaco, Consolas, monospace; }
-    .val.text { font-family: "Avenir Next","SF Pro Text","PingFang SC","Noto Sans SC",sans-serif; text-align: right; white-space: normal; max-width: 62%; line-height: 1.35; font-size: 11px; font-weight: 500; color: #b8cddd; }
+    .val.text { font-family: "Avenir Next","SF Pro Text","PingFang SC","Noto Sans SC",sans-serif; text-align: right; white-space: normal; max-width: 62%; line-height: 1.35; font-size: 11px; font-weight: 500; color: #b8cddd; display:flex; flex-direction:column; gap:2px; }
+    .note-line { display:block; }
     .status-ok { color: var(--ok); }
     .status-warn { color: var(--warn); }
     .status-bad { color: var(--bad); }
@@ -2537,6 +2538,18 @@ ACCOUNTS_OVERVIEW_HTML = """<!doctype html>
     var n = Number(v);
     if (!Number.isFinite(n)) return String(v);
     return n.toFixed(digits);
+  }
+
+  function formatStrategyNote(note) {
+    var raw = String(note || "").trim();
+    if (!raw) return "--";
+    var parts = raw.split("/").map(function (s) { return String(s || "").trim(); }).filter(Boolean);
+    if (parts.length <= 1) return escapeHtml(raw);
+    var html = "";
+    for (var i = 0; i < parts.length; i += 1) {
+      html += '<span class="note-line">' + escapeHtml(parts[i]) + '</span>';
+    }
+    return html;
   }
 
   function createObserver() {
@@ -2682,7 +2695,7 @@ ACCOUNTS_OVERVIEW_HTML = """<!doctype html>
         + '<div class="row"><span class="label">余额(USDT)</span><span class="val">' + fmt(r.wallet_balance_usdt, 4) + '</span></div>'
         + '<div class="row"><span class="label">持仓数</span><span class="val">' + fmt(r.open_positions, 0) + '</span></div>'
         + '<div class="row"><span class="label">最近状态</span><span class="val ' + statusCls(st) + '">' + escapeHtml(st) + "</span></div>"
-        + '<div class="row note"><span class="label">策略说明</span><span class="val text">' + (note ? escapeHtml(note) : "--") + "</span></div>"
+        + '<div class="row note"><span class="label">策略说明</span><span class="val text">' + formatStrategyNote(note) + "</span></div>"
         + '<div class="spark-block">'
         + '<div class="spark-title"><span class="label">1D 策略权益曲线</span><span class="val spark-delta" data-account-id="' + safeAid + '">--</span></div>'
         + '<div class="spark-box" data-account-id="' + safeAid + '"><div class="spark-empty">加载中...</div></div>'
