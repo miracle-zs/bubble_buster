@@ -54,10 +54,7 @@ log_dir = logs
             compact = client.get("/account/acc01/")
             self.assertEqual(compact.status_code, 200)
             self.assertIn("acc01", compact.text)
-
-            advanced = client.get("/account/acc01/?view=advanced")
-            self.assertEqual(advanced.status_code, 200)
-            self.assertIn("api/account/acc01/snapshot", advanced.text)
+            self.assertIn("api/account/acc01/snapshot", compact.text)
 
             health = client.get("/healthz")
             self.assertEqual(health.status_code, 200)

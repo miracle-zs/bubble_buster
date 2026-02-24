@@ -1158,11 +1158,6 @@ def render_accounts_overview_html(refresh_sec: int) -> str:
     return ACCOUNTS_OVERVIEW_HTML.replace("__REFRESH_SEC__", str(max(2, refresh_sec)))
 
 
-def render_account_compact_html(refresh_sec: int, account_id: str) -> str:
-    html = ACCOUNT_COMPACT_HTML.replace("__REFRESH_SEC__", str(max(2, refresh_sec)))
-    return html.replace("__ACCOUNT_ID__", (account_id or "").strip())
-
-
 def _json_bytes(payload: Dict[str, Any]) -> bytes:
     return json.dumps(payload, ensure_ascii=False).encode("utf-8")
 
@@ -2503,7 +2498,7 @@ ACCOUNTS_OVERVIEW_HTML = """<!doctype html>
           + '<div class="row"><span class="label">余额(USDT)</span><span class="val">' + fmt(r.wallet_balance_usdt, 4) + '</span></div>'
           + '<div class="row"><span class="label">持仓数</span><span class="val">' + fmt(r.open_positions, 0) + '</span></div>'
           + '<div class="row"><span class="label">最近状态</span><span class="val ' + statusCls(r.last_run_status) + '">' + (r.last_run_status || "--") + '</span></div>'
-          + '<div class="actions"><a class="btn" href="' + base + '?view=compact">详情</a><a class="btn alt" href="' + base + '?view=advanced">高级</a></div>'
+          + '<div class="actions"><a class="btn" href="' + base + '">详情</a></div>'
           + '</article>';
       }
       cards.innerHTML = html || '<article class="card">暂无账户数据</article>';
@@ -2520,102 +2515,4 @@ ACCOUNTS_OVERVIEW_HTML = """<!doctype html>
 """
 
 
-ACCOUNT_COMPACT_HTML = """<!doctype html>
-<html lang="zh-CN">
-<head>
-  <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Bubble Buster Account</title>
-  <style>
-    :root { --bg:#0a1118; --panel:#101c27cc; --line:#20445a; --text:#eaf6ff; --muted:#8db0c4; --accent:#4ec1ff; --ok:#26d07c; --warn:#ffb340; --bad:#ff5d5d; }
-    * { box-sizing: border-box; }
-    body { margin:0; font-family:"Avenir Next","SF Pro Text","PingFang SC","Noto Sans SC",sans-serif; color:var(--text); background:linear-gradient(180deg,#081018 0%,#050a0f 100%); }
-    .wrap { max-width: 1100px; margin: 0 auto; padding: 20px; }
-    .bar { display:flex; align-items:center; justify-content:space-between; gap: 10px; flex-wrap:wrap; }
-    .h { margin:0; font-size: 22px; }
-    .muted { color: var(--muted); }
-    .btn { text-decoration:none; color:#081018; background:var(--accent); border-radius:8px; padding:7px 11px; font-size:12px; font-weight:700; }
-    .btn.alt { background: transparent; border: 1px solid var(--line); color: var(--text); }
-    .grid { display:grid; grid-template-columns: repeat(auto-fit,minmax(180px,1fr)); gap:10px; margin-top:12px; }
-    .card { background:var(--panel); border:1px solid var(--line); border-radius:10px; padding:10px; }
-    .k { color: var(--muted); font-size:12px; }
-    .v { font-family: ui-monospace, Menlo, Monaco, Consolas, monospace; font-size:16px; margin-top:4px; }
-    table { width:100%; border-collapse: collapse; margin-top: 12px; }
-    th,td { border-bottom:1px solid var(--line); padding:8px; text-align:left; font-size:13px; }
-  </style>
-</head>
-<body>
-  <main class="wrap">
-    <div class="bar">
-      <h1 class="h">账户 __ACCOUNT_ID__ 详情（精简）</h1>
-      <div>
-        <a class="btn alt" id="backLink" href="../">返回总览</a>
-        <a class="btn" id="advLink" href="?view=advanced">高级</a>
-      </div>
-    </div>
-    <p class="muted">自动刷新：<span id="refresh">__REFRESH_SEC__</span>s</p>
-    <section class="grid">
-      <article class="card"><div class="k">余额(USDT)</div><div class="v" id="wallet">--</div></article>
-      <article class="card"><div class="k">持仓数</div><div class="v" id="openPos">--</div></article>
-      <article class="card"><div class="k">最近状态</div><div class="v" id="lastStatus">--</div></article>
-      <article class="card"><div class="k">最近错误</div><div class="v" id="errCount">--</div></article>
-    </section>
-    <section class="card" style="margin-top:12px;">
-      <div class="k">最近运行（最多5条）</div>
-      <table>
-        <thead><tr><th>Trade Day</th><th>Status</th><th>Started</th></tr></thead>
-        <tbody id="runsBody"></tbody>
-      </table>
-    </section>
-  </main>
-<script>
-(function () {
-  var refreshSec = Number(document.getElementById("refresh").textContent || "5");
-  var accountId = "__ACCOUNT_ID__";
-  var path = (window.location.pathname || "").replace(/\\/+$/, "");
-  var base = path.replace(new RegExp("/account/" + accountId + "$"), "");
-  var api = base + "/api/account/" + encodeURIComponent(accountId) + "/snapshot";
-  document.getElementById("backLink").href = base + "/";
-  document.getElementById("advLink").href = path + "/?view=advanced";
 
-  function fmt(v) {
-    if (v === null || v === undefined || v === "") return "--";
-    var n = Number(v);
-    if (Number.isFinite(n)) return n.toFixed(4);
-    return String(v);
-  }
-
-  function render(data) {
-    var summary = data.summary || {};
-    var wallet = data.wallet || {};
-    document.getElementById("wallet").textContent = fmt(wallet.balance_usdt);
-    document.getElementById("openPos").textContent = String(summary.open_positions || 0);
-    document.getElementById("lastStatus").textContent = String(summary.last_run_status || "--");
-    document.getElementById("errCount").textContent = String(summary.recent_errors || 0);
-    var runs = data.runs || [];
-    var body = document.getElementById("runsBody");
-    var html = "";
-    for (var i = 0; i < Math.min(5, runs.length); i += 1) {
-      var r = runs[i] || {};
-      html += "<tr><td>" + (r.trade_day_utc || "--") + "</td><td>" + (r.status || "--") + "</td><td>" + (r.started_at_utc || "--") + "</td></tr>";
-    }
-    body.innerHTML = html || "<tr><td colspan='3'>No data</td></tr>";
-  }
-
-  function fetchOnce() {
-    var xhr = new XMLHttpRequest();
-    xhr.open("GET", api + "?window_hours=24&curve_points=600&_=" + Date.now(), true);
-    xhr.onreadystatechange = function () {
-      if (xhr.readyState !== 4) return;
-      if (xhr.status < 200 || xhr.status >= 300) return;
-      try { render(JSON.parse(xhr.responseText || "{}")); } catch (e) {}
-    };
-    xhr.send();
-  }
-  fetchOnce();
-  setInterval(fetchOnce, Math.max(2, refreshSec) * 1000);
-})();
-</script>
-</body>
-</html>
-"""

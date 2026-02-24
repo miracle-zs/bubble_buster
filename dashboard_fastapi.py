@@ -16,7 +16,6 @@ from core.runtime_service import StrategyRuntimeService
 from core.state_store import StateStore
 from dashboard_server import (
     DashboardDataProvider,
-    render_account_compact_html,
     render_account_dashboard_html,
     render_accounts_overview_html,
 )
@@ -412,13 +411,9 @@ def create_app(config_path: Optional[str] = None) -> FastAPI:
     def account_detail_page(
         request: Request,
         account_id: str,
-        view: str = Query(default="compact"),
     ):
         ctx: DashboardRuntimeContext = request.app.state.ctx
-        normalized_view = (view or "compact").strip().lower()
-        if normalized_view == "advanced":
-            return HTMLResponse(render_account_dashboard_html(ctx.refresh_sec, account_id=account_id))
-        return HTMLResponse(render_account_compact_html(ctx.refresh_sec, account_id=account_id))
+        return HTMLResponse(render_account_dashboard_html(ctx.refresh_sec, account_id=account_id))
 
     @app.get("/api/dashboard")
     def dashboard_data(
