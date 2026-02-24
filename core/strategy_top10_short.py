@@ -127,7 +127,11 @@ class Top10ShortStrategy:
         self.equity_recovery_reduce_ratio = min(0.95, max(0.05, float(equity_recovery_reduce_ratio)))
         self.account_id = (account_id or "").strip() or "default"
 
-    def run_entry(self, trade_day_utc: Optional[str] = None) -> Dict[str, object]:
+    def run_entry(
+        self,
+        trade_day_utc: Optional[str] = None,
+        shared_top_gainers: Optional[List[Dict[str, Any]]] = None,
+    ) -> Dict[str, object]:
         trade_day = (trade_day_utc or "").strip() or datetime.now(timezone.utc).date().isoformat()
         trade_day_utc = trade_day
         run_id, created = self.store.create_run(trade_day_utc, account_id=self.account_id)
@@ -162,25 +166,24 @@ class Top10ShortStrategy:
                 self.top_n * self.entry_rank_fetch_multiplier,
                 self.top_n + len(open_symbols),
             )
-            top_gainers = build_top_gainers(
-                top_n=fetch_top_n,
-                volume_threshold=self.volume_threshold,
-                session=self.client.session,
-                base_url=self.client.base_url,
-                max_workers=self.ranker_max_workers,
-                weight_limit_per_minute=self.ranker_weight_limit_per_minute,
-                min_request_interval_ms=self.ranker_min_request_interval_ms,
-            )
-
-            ranked = [
-                RankEntry(
-                    symbol=item["symbol"],
-                    pct_change=float(item["change"]),
-                    last_price=float(item["current_price"]),
-                    quote_volume=float(item["volume"]),
+            if shared_top_gainers is None:
+                top_gainers = build_top_gainers(
+                    top_n=fetch_top_n,
+                    volume_threshold=self.volume_threshold,
+                    session=self.client.session,
+                    base_url=self.client.base_url,
+                    max_workers=self.ranker_max_workers,
+                    weight_limit_per_minute=self.ranker_weight_limit_per_minute,
+                    min_request_interval_ms=self.ranker_min_request_interval_ms,
                 )
-                for item in top_gainers
-            ]
+            else:
+                top_gainers = shared_top_gainers
+                fetch_top_n = max(fetch_top_n, len(top_gainers))
+
+            ranked = self._build_ranked_entries(top_gainers)
+            ranked.sort(key=lambda item: item.pct_change, reverse=True)
+            if self.volume_threshold > 0:
+                ranked = [item for item in ranked if item.quote_volume >= self.volume_threshold]
 
             if not ranked:
                 self.store.finalize_run(run_id, "SUCCESS", "No ranked symbols")
@@ -1616,6 +1619,23 @@ class Top10ShortStrategy:
             if len(candidates) >= target:
                 break
         return candidates, skipped_symbols
+
+    @staticmethod
+    def _build_ranked_entries(top_gainers: List[Dict[str, Any]]) -> List[RankEntry]:
+        ranked: List[RankEntry] = []
+        for item in top_gainers:
+            try:
+                ranked.append(
+                    RankEntry(
+                        symbol=str(item["symbol"]),
+                        pct_change=float(item["change"]),
+                        last_price=float(item["current_price"]),
+                        quote_volume=float(item["volume"]),
+                    )
+                )
+            except Exception:  # noqa: BLE001
+                continue
+        return ranked
 
     def _place_market_short_with_shrink_retry(
         self,

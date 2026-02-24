@@ -2,6 +2,7 @@ import unittest
 from datetime import datetime
 from threading import Event, Thread
 import time
+from unittest.mock import patch
 from zoneinfo import ZoneInfo
 
 from core.runtime_service import ServiceRuntimeConfig, StrategyRuntimeService
@@ -519,3 +520,76 @@ def test_manage_timeout_marks_account_timeout() -> None:
     service.run_cycle(now_local=now_local, now_monotonic=0.0)
     summary = service.run_manage_tick()
     assert summary["slow"]["error"] == "TIMEOUT"
+
+
+def test_entry_uses_shared_ranking_once_for_multi_accounts() -> None:
+    class StoreStub:
+        def __init__(self, symbols):
+            self._symbols = symbols
+
+        def list_open_symbols(self):
+            return set(self._symbols)
+
+    class ClientStub:
+        def __init__(self):
+            self.session = object()
+            self.base_url = "https://fapi.binance.com"
+
+    class StrategyStub:
+        def __init__(self, open_symbols):
+            self.top_n = 10
+            self.entry_rank_fetch_multiplier = 3
+            self.volume_threshold = 0.0
+            self.ranker_max_workers = 24
+            self.ranker_weight_limit_per_minute = 1000
+            self.ranker_min_request_interval_ms = 20
+            self.store = StoreStub(open_symbols)
+            self.client = ClientStub()
+            self.received = None
+
+        def run_entry(self, shared_top_gainers=None):
+            self.received = shared_top_gainers
+            return {"status": "SUCCESS"}
+
+    class ManagerStub:
+        def run_once(self):
+            return {"total": 0}
+
+        def run_daily_loss_cut(self):
+            return {"total": 0, "closed_loss_cut": 0, "errors": 0}
+
+    s1 = StrategyStub({"A"})
+    s2 = StrategyStub({"B", "C"})
+    manager = ManagerStub()
+    cfg = ServiceRuntimeConfig(
+        timezone_name="UTC",
+        entry_hour=11,
+        entry_minute=0,
+        entry_misfire_grace_min=120,
+        entry_catchup_enabled=True,
+        daily_loss_cut_enabled=False,
+        daily_loss_cut_hour=23,
+        daily_loss_cut_minute=59,
+        manager_interval_sec=3600,
+        manager_max_catch_up_runs=1,
+        loop_sleep_sec=1.0,
+        run_manage_on_startup=False,
+    )
+    service = StrategyRuntimeService(
+        strategy=s1,
+        manager=manager,
+        cfg=cfg,
+        now_monotonic=0.0,
+        account_runtimes={
+            "acc01": {"mode": "full", "strategy": s1, "manager": manager, "balance_sampler": None},
+            "acc02": {"mode": "full", "strategy": s2, "manager": manager, "balance_sampler": None},
+        },
+        max_account_workers=2,
+    )
+    shared = [{"symbol": "AAAUSDT", "change": 1.23, "current_price": 2.0, "volume": 1000.0}]
+    with patch.object(service, "_build_shared_top_gainers", return_value=shared) as mocked_ranker:
+        service.run_cycle(now_local=datetime(2026, 2, 13, 11, 0, tzinfo=ZoneInfo("UTC")), now_monotonic=1.0)
+
+    assert mocked_ranker.call_count == 1
+    assert s1.received == shared
+    assert s2.received == shared

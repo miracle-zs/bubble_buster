@@ -5,7 +5,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from concurrent.futures import TimeoutError as FutureTimeoutError
-from typing import Dict, Optional
+from typing import Any, Dict, List, Optional
 from zoneinfo import ZoneInfo
 
 
@@ -151,6 +151,7 @@ class StrategyRuntimeService:
             self._last_entry_local_date = now_local.date()
             return
 
+        shared_top_gainers = self._build_shared_top_gainers(account_ids)
         results: Dict[str, object] = {}
         if len(account_ids) == 1:
             aid = account_ids[0]
@@ -158,7 +159,10 @@ class StrategyRuntimeService:
             strategy = ctx.get("strategy")
             if strategy is not None:
                 try:
-                    results[aid] = strategy.run_entry()  # type: ignore[attr-defined]
+                    results[aid] = self._run_entry_with_shared(
+                        strategy=strategy,
+                        shared_top_gainers=shared_top_gainers,
+                    )
                 except Exception as exc:  # noqa: BLE001
                     results[aid] = {"error": str(exc)}
             else:
@@ -173,7 +177,7 @@ class StrategyRuntimeService:
                     if strategy is None:
                         results[aid] = {"error": "strategy_missing"}
                         continue
-                    futures[ex.submit(strategy.run_entry)] = aid  # type: ignore[attr-defined]
+                    futures[ex.submit(self._run_entry_with_shared, strategy, shared_top_gainers)] = aid
 
                 try:
                     for future in as_completed(futures, timeout=timeout_sec):
@@ -194,6 +198,99 @@ class StrategyRuntimeService:
 
         self._last_entry_local_date = now_local.date()
         LOGGER.info("service entry result: %s", results)
+
+    def _run_entry_with_shared(
+        self,
+        strategy: object,
+        shared_top_gainers: Optional[List[Dict[str, Any]]],
+    ) -> Dict[str, object]:
+        run_entry = getattr(strategy, "run_entry", None)
+        if run_entry is None:
+            raise RuntimeError("strategy_missing")
+        if shared_top_gainers is None:
+            return run_entry()  # type: ignore[misc]
+        try:
+            return run_entry(shared_top_gainers=shared_top_gainers)  # type: ignore[misc]
+        except TypeError:
+            return run_entry()  # type: ignore[misc]
+
+    def _build_shared_top_gainers(self, account_ids: List[str]) -> Optional[List[Dict[str, Any]]]:
+        if len(account_ids) <= 1:
+            return None
+
+        strategies: List[Any] = []
+        for aid in account_ids:
+            strategy = self.account_runtimes.get(aid, {}).get("strategy")
+            if strategy is None:
+                return None
+            required_attrs = (
+                "top_n",
+                "entry_rank_fetch_multiplier",
+                "volume_threshold",
+                "ranker_max_workers",
+                "ranker_weight_limit_per_minute",
+                "ranker_min_request_interval_ms",
+                "store",
+                "client",
+            )
+            if not all(hasattr(strategy, attr) for attr in required_attrs):
+                return None
+            if not hasattr(strategy.client, "session") or not hasattr(strategy.client, "base_url"):
+                return None
+            strategies.append(strategy)
+
+        fetch_top_n = 0
+        min_volume_threshold = float("inf")
+        max_workers = 1
+        weight_limit_per_minute = float("inf")
+        min_request_interval_ms = 0
+
+        for strategy in strategies:
+            try:
+                open_symbols = strategy.store.list_open_symbols()
+                open_count = len(open_symbols)
+            except Exception:  # noqa: BLE001
+                open_count = 0
+            strategy_top_n = int(strategy.top_n)
+            strategy_fetch_top_n = max(
+                strategy_top_n,
+                strategy_top_n * int(strategy.entry_rank_fetch_multiplier),
+                strategy_top_n + open_count,
+            )
+            fetch_top_n = max(fetch_top_n, strategy_fetch_top_n)
+            min_volume_threshold = min(min_volume_threshold, float(strategy.volume_threshold))
+            max_workers = max(max_workers, int(strategy.ranker_max_workers))
+            weight_limit_per_minute = min(
+                weight_limit_per_minute,
+                int(strategy.ranker_weight_limit_per_minute),
+            )
+            min_request_interval_ms = max(
+                min_request_interval_ms,
+                int(strategy.ranker_min_request_interval_ms),
+            )
+
+        reference_strategy = strategies[0]
+        try:
+            from infra.binance_top10_monitor import build_top_gainers
+
+            top_gainers = build_top_gainers(
+                top_n=max(1, fetch_top_n),
+                volume_threshold=0.0 if min_volume_threshold == float("inf") else max(0.0, min_volume_threshold),
+                session=reference_strategy.client.session,
+                base_url=reference_strategy.client.base_url,
+                max_workers=max(1, max_workers),
+                weight_limit_per_minute=max(100, int(weight_limit_per_minute)),
+                min_request_interval_ms=max(0, int(min_request_interval_ms)),
+            )
+            LOGGER.info(
+                "service shared ranking built once for accounts=%s fetched=%s",
+                len(account_ids),
+                len(top_gainers),
+            )
+            return top_gainers
+        except Exception as exc:  # noqa: BLE001
+            LOGGER.warning("service shared ranking unavailable, fallback to per-account ranking: %s", exc)
+            return None
 
     def _loss_cut_schedule_for_day(self, day: date) -> datetime:
         return datetime(
