@@ -30,9 +30,10 @@ db_path = data/state.db
 log_dir = logs
 
 [accounts]
-enabled = acc01,acc02
+enabled = acc01,acc02,55
 mode.acc01 = full
 mode.acc02 = full
+mode.55 = loss_cut_only
 strategy_note.acc01 = TP 9% / 减仓50% / 浮亏砍仓ON
 strategy_note.acc02 = TP 9% / 清仓100% / 浮亏砍仓ON
 """.strip()
@@ -91,6 +92,7 @@ strategy_note.acc02 = TP 9% / 清仓100% / 浮亏砍仓ON
             now = "2026-02-13T00:00:00+00:00"
             run1, _ = store.create_run("2026-02-13", account_id="acc01")
             run2, _ = store.create_run("2026-02-13", account_id="acc02")
+            run3, _ = store.create_run("2026-02-13", account_id="55")
             store.insert_position(
                 run_id=run1,
                 symbol="AUSDT",
@@ -125,8 +127,26 @@ strategy_note.acc02 = TP 9% / 清仓100% / 浮亏砍仓ON
                 expire_at_utc=now,
                 status="OPEN",
             )
+            store.insert_position(
+                run_id=run3,
+                symbol="CUSDT",
+                side="SHORT",
+                qty=1.0,
+                entry_price=100.0,
+                liq_price_open=150.0,
+                tp_price=90.0,
+                sl_price=120.0,
+                tp_order_id=None,
+                sl_order_id=None,
+                tp_client_order_id=None,
+                sl_client_order_id=None,
+                opened_at_utc=now,
+                expire_at_utc=now,
+                status="OPEN",
+            )
             store.scoped("acc01").add_wallet_snapshot(now, 111.0, source="API")
             store.scoped("acc02").add_wallet_snapshot(now, 222.0, source="API")
+            store.scoped("55").add_wallet_snapshot(now, 333.0, source="API")
 
             summary = client.get("/api/accounts/summary")
             self.assertEqual(summary.status_code, 200)
@@ -134,6 +154,7 @@ strategy_note.acc02 = TP 9% / 清仓100% / 浮亏砍仓ON
             ids = [row["account_id"] for row in rows]
             self.assertIn("acc01", ids)
             self.assertIn("acc02", ids)
+            self.assertNotIn("55", ids)
             notes = {row["account_id"]: row.get("strategy_note") for row in rows}
             self.assertEqual(notes.get("acc01"), "TP 9% / 减仓50% / 浮亏砍仓ON")
             self.assertEqual(notes.get("acc02"), "TP 9% / 清仓100% / 浮亏砍仓ON")

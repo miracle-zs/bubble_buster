@@ -105,9 +105,14 @@ def create_dashboard_context(config_path: str) -> DashboardRuntimeContext:
     }
     enabled_accounts_raw = account_cfg.get("enabled", fallback="") if account_cfg else ""
     enabled_accounts = [x.strip() for x in enabled_accounts_raw.split(",") if x.strip()]
+    overview_account_ids = [
+        aid
+        for aid in enabled_accounts
+        if account_cfg.get(f"mode.{aid}", fallback="full", raw=True).strip() != "loss_cut_only"
+    ]
     account_strategy_notes = {
         aid: account_cfg.get(f"strategy_note.{aid}", fallback="", raw=True).strip()
-        for aid in enabled_accounts
+        for aid in overview_account_ids
     }
 
     balance_fetcher = None
@@ -230,6 +235,7 @@ def create_dashboard_context(config_path: str) -> DashboardRuntimeContext:
         balance_cache_ttl_sec=balance_refresh_sec,
         default_curve_points=curve_points,
         account_strategy_notes=account_strategy_notes,
+        overview_account_ids=overview_account_ids,
     )
 
     return DashboardRuntimeContext(

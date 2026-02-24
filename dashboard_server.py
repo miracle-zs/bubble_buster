@@ -6,7 +6,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 from urllib.parse import parse_qs, urlparse
 from zoneinfo import ZoneInfo
 
@@ -39,6 +39,7 @@ class DashboardDataProvider:
         balance_cache_ttl_sec: int = 60,
         default_curve_points: int = 600,
         account_strategy_notes: Optional[Dict[str, str]] = None,
+        overview_account_ids: Optional[List[str]] = None,
     ):
         self.db_path = db_path
         self.log_file = log_file
@@ -54,6 +55,8 @@ class DashboardDataProvider:
             for k, v in (account_strategy_notes or {}).items()
             if str(k).strip()
         }
+        overview_ids = [str(x).strip() for x in (overview_account_ids or []) if str(x).strip()]
+        self.overview_account_ids: Optional[Set[str]] = set(overview_ids) if overview_ids else None
         self._balance_cache_value: Optional[float] = None
         self._balance_cache_at: Optional[datetime] = None
         self._balance_last_attempt_at: Optional[datetime] = None
@@ -1140,13 +1143,19 @@ class DashboardDataProvider:
                     aid = str(row.get("account_id") or "").strip()
                     if not aid:
                         continue
+                    if self.overview_account_ids is not None and aid not in self.overview_account_ids:
+                        continue
                     row["strategy_note"] = self.account_strategy_notes.get(aid, "")
                     by_account[aid] = row
 
                 # Ensure configured accounts can appear in overview even when DB has no rows yet.
-                for aid, note in self.account_strategy_notes.items():
+                configured_ids = sorted(self.overview_account_ids) if self.overview_account_ids is not None else sorted(
+                    self.account_strategy_notes.keys()
+                )
+                for aid in configured_ids:
                     if aid in by_account:
                         continue
+                    note = self.account_strategy_notes.get(aid, "")
                     by_account[aid] = {
                         "account_id": aid,
                         "open_positions": 0,
@@ -2466,10 +2475,11 @@ ACCOUNTS_OVERVIEW_HTML = """<!doctype html>
     .grid { display: grid; grid-template-columns: repeat(auto-fit,minmax(240px,1fr)); gap: 12px; }
     .card { background: var(--panel); border:1px solid var(--line); border-radius:12px; padding:14px; box-shadow:0 8px 20px rgba(0,0,0,0.25); }
     .row { display:flex; align-items:center; justify-content:space-between; margin-top: 8px; }
+    .row.note { align-items:flex-start; margin-top: 6px; }
     .aid { font-size:18px; font-weight:700; color: var(--accent); }
     .label { color: var(--muted); font-size: 12px; }
     .val { font-family: ui-monospace, Menlo, Monaco, Consolas, monospace; }
-    .val.text { font-family: "Avenir Next","SF Pro Text","PingFang SC","Noto Sans SC",sans-serif; text-align: right; white-space: normal; max-width: 62%; line-height: 1.35; }
+    .val.text { font-family: "Avenir Next","SF Pro Text","PingFang SC","Noto Sans SC",sans-serif; text-align: right; white-space: normal; max-width: 62%; line-height: 1.35; font-size: 11px; font-weight: 500; color: #b8cddd; }
     .status-ok { color: var(--ok); }
     .status-warn { color: var(--warn); }
     .status-bad { color: var(--bad); }
@@ -2672,7 +2682,7 @@ ACCOUNTS_OVERVIEW_HTML = """<!doctype html>
         + '<div class="row"><span class="label">余额(USDT)</span><span class="val">' + fmt(r.wallet_balance_usdt, 4) + '</span></div>'
         + '<div class="row"><span class="label">持仓数</span><span class="val">' + fmt(r.open_positions, 0) + '</span></div>'
         + '<div class="row"><span class="label">最近状态</span><span class="val ' + statusCls(st) + '">' + escapeHtml(st) + "</span></div>"
-        + '<div class="row"><span class="label">策略说明</span><span class="val text">' + (note ? escapeHtml(note) : "--") + "</span></div>"
+        + '<div class="row note"><span class="label">策略说明</span><span class="val text">' + (note ? escapeHtml(note) : "--") + "</span></div>"
         + '<div class="spark-block">'
         + '<div class="spark-title"><span class="label">1D 策略权益曲线</span><span class="val spark-delta" data-account-id="' + safeAid + '">--</span></div>'
         + '<div class="spark-box" data-account-id="' + safeAid + '"><div class="spark-empty">加载中...</div></div>'
