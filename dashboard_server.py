@@ -2298,7 +2298,16 @@ DASHBOARD_HTML = """<!doctype html>
     if (window.__bb_echarts_loading) return;
     window.__bb_echarts_loading = true;
     var script = document.createElement("script");
-    script.src = ECHARTS_SRC || "https://cdn.jsdelivr.net/npm/echarts@5/dist/echarts.min.js";
+    var resolvedSrc = ECHARTS_SRC || "https://cdn.jsdelivr.net/npm/echarts@5/dist/echarts.min.js";
+    // When deployed behind a path prefix (e.g. /bubble), map absolute local static
+    // path to prefixed path so echarts can be loaded from the same upstream.
+    if (resolvedSrc.charAt(0) === "/" && resolvedSrc.indexOf("://") < 0) {
+      var basePrefix = pathPrefix.replace(/\\/legacy$/, "").replace(/\\/account\\/[^/]+$/, "");
+      if (basePrefix && basePrefix !== "/") {
+        resolvedSrc = basePrefix + resolvedSrc;
+      }
+    }
+    script.src = resolvedSrc;
     script.async = true;
     script.onload = function () {
       window.__bb_echarts_loading = false;
