@@ -1984,6 +1984,8 @@ DASHBOARD_HTML = """<!doctype html>
   var latestData = null;
   var refreshTick = 0;
   var fullLoadedOnce = false;
+  var detailsLoaded = false;
+  var detailsInFlight = false;
 
   var el = {
     meta: document.getElementById("meta"),
@@ -2165,6 +2167,18 @@ DASHBOARD_HTML = """<!doctype html>
     for (var i = 0; i < keys.length; i += 1) {
       latestData[keys[i]] = partial[keys[i]];
     }
+  }
+
+  function mergeCurveOnly(curvePayload) {
+    if (!curvePayload || typeof curvePayload !== "object") return;
+    if (!latestData || typeof latestData !== "object") {
+      latestData = {};
+    }
+    latestData.curve_window_hours = curvePayload.curve_window_hours;
+    latestData.curve_points = curvePayload.curve_points;
+    latestData.strategy_equity_curve = curvePayload.strategy_equity_curve || [];
+    latestData.balance_curve = curvePayload.balance_curve || [];
+    latestData.equity_curve = curvePayload.equity_curve || latestData.strategy_equity_curve || [];
   }
 
   function renderEquityChart(curve) {
@@ -2474,8 +2488,9 @@ DASHBOARD_HTML = """<!doctype html>
   function refreshCurveFast() {
     fetchDashboard(api + "/curve", { lite: true }, function (err, d) {
       if (err) return;
-      mergeLatest(d);
-      rerenderFromLatest();
+      mergeCurveOnly(d);
+      renderCurveTabState();
+      renderEquityChart(activeCurve(latestData || d));
     });
   }
 
@@ -2560,11 +2575,15 @@ DASHBOARD_HTML = """<!doctype html>
   }
 
   function refreshDetails() {
+    if (detailsInFlight) return;
+    detailsInFlight = true;
     fetchDashboard(api + "/details", { lite: false }, function (err, d) {
+      detailsInFlight = false;
       if (err) {
         return;
       }
       renderDetails(d || {});
+      detailsLoaded = true;
     });
   }
 
@@ -2579,10 +2598,11 @@ DASHBOARD_HTML = """<!doctype html>
       if (logPanel) targets.push(logPanel);
     }
 
+    setTimeout(function () {
+      if (!detailsLoaded) refreshDetails();
+    }, isMobile ? 1800 : 1200);
+
     if (!targets.length || !window.IntersectionObserver) {
-      setTimeout(function () {
-        if (!fullLoadedOnce) refreshDetails();
-      }, isMobile ? 1800 : 1200);
       return;
     }
 
@@ -2603,7 +2623,7 @@ DASHBOARD_HTML = """<!doctype html>
     }
 
     setTimeout(function () {
-      if (!loaded && !fullLoadedOnce) {
+      if (!loaded && !detailsLoaded) {
         loaded = true;
         refreshDetails();
         obs.disconnect();

@@ -555,7 +555,9 @@ def create_app(config_path: Optional[str] = None) -> FastAPI:
                 account_id=account_id,
                 include_details=False,
                 include_log=False,
-                include_curves=False,
+                include_curves=True,
+                include_balance_curve=False,
+                include_trade_stats=True,
             )
             payload["config_path"] = ctx.config_path
             payload["db_path"] = ctx.db_path
