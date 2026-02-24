@@ -102,8 +102,8 @@ api_secret = REPLACE_WITH_ACC55_API_SECRET
 
 
 [account.acc01.strategy]
-equity_recovery_take_profit_enabled = false
-equity_recovery_trigger_pct = 0.08
+equity_recovery_take_profit_enabled = true
+equity_recovery_trigger_pct = 0.09
 equity_recovery_reduce_ratio = 0.50
 
 [account.acc02.strategy]
@@ -114,13 +114,19 @@ equity_recovery_reduce_ratio = 1.0
 
 [account.acc03.strategy]
 equity_recovery_take_profit_enabled = true
-equity_recovery_trigger_pct = 0.08
+equity_recovery_trigger_pct = 0.09
 equity_recovery_reduce_ratio = 1.0
 
 [account.acc04.strategy]
-equity_recovery_take_profit_enabled = true
+equity_recovery_take_profit_enabled = false
 equity_recovery_trigger_pct = 0.09
 equity_recovery_reduce_ratio = 0.50
+
+[account.acc03.runtime]
+daily_loss_cut_enabled = false
+
+[account.acc04.runtime]
+daily_loss_cut_enabled = false
 
 [account.55.runtime]
 daily_loss_cut_enabled = true
