@@ -28,6 +28,13 @@ dashboard_refresh_sec = 9
 run_service_with_dashboard = false
 db_path = data/state.db
 log_dir = logs
+
+[accounts]
+enabled = acc01,acc02
+mode.acc01 = full
+mode.acc02 = full
+strategy_note.acc01 = TP 9% / 减仓50% / 浮亏砍仓ON
+strategy_note.acc02 = TP 9% / 清仓100% / 浮亏砍仓ON
 """.strip()
             + "\n",
             encoding="utf-8",
@@ -123,9 +130,13 @@ log_dir = logs
 
             summary = client.get("/api/accounts/summary")
             self.assertEqual(summary.status_code, 200)
-            ids = [row["account_id"] for row in summary.json()["accounts"]]
+            rows = summary.json()["accounts"]
+            ids = [row["account_id"] for row in rows]
             self.assertIn("acc01", ids)
             self.assertIn("acc02", ids)
+            notes = {row["account_id"]: row.get("strategy_note") for row in rows}
+            self.assertEqual(notes.get("acc01"), "TP 9% / 减仓50% / 浮亏砍仓ON")
+            self.assertEqual(notes.get("acc02"), "TP 9% / 清仓100% / 浮亏砍仓ON")
 
             snap = client.get("/api/account/acc01/snapshot")
             self.assertEqual(snap.status_code, 200)

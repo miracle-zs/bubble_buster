@@ -79,6 +79,11 @@ mode.acc02 = full
 mode.acc03 = full
 mode.acc04 = full
 mode.55 = loss_cut_only
+strategy_note.acc01 = TP 9% / 减仓50% / 浮亏砍仓ON
+strategy_note.acc02 = TP 9% / 清仓100% / 浮亏砍仓ON
+strategy_note.acc03 = TP 9% / 清仓100% / 浮亏砍仓OFF
+strategy_note.acc04 = 组合止盈OFF / 浮亏砍仓OFF
+strategy_note.55 = 仅浮亏砍仓（cron）
 
 [account.acc01.binance]
 api_key = REPLACE_WITH_ACC01_API_KEY

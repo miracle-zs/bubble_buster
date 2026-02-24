@@ -84,6 +84,7 @@ def _load_config(config_path: str) -> configparser.ConfigParser:
 def create_dashboard_context(config_path: str) -> DashboardRuntimeContext:
     cfg = _load_config(config_path)
     runtime_cfg = cfg["runtime"] if cfg.has_section("runtime") else {}
+    account_cfg = cfg["accounts"] if cfg.has_section("accounts") else {}
 
     base_dir = str(Path(config_path).resolve().parent)
     db_path = resolve_path(runtime_cfg.get("db_path", "state.db"), base_dir)
@@ -101,6 +102,12 @@ def create_dashboard_context(config_path: str) -> DashboardRuntimeContext:
         "true",
         "yes",
         "on",
+    }
+    enabled_accounts_raw = account_cfg.get("enabled", fallback="") if account_cfg else ""
+    enabled_accounts = [x.strip() for x in enabled_accounts_raw.split(",") if x.strip()]
+    account_strategy_notes = {
+        aid: account_cfg.get(f"strategy_note.{aid}", fallback="", raw=True).strip()
+        for aid in enabled_accounts
     }
 
     balance_fetcher = None
@@ -222,6 +229,7 @@ def create_dashboard_context(config_path: str) -> DashboardRuntimeContext:
         close_price_fetcher=close_price_fetcher,
         balance_cache_ttl_sec=balance_refresh_sec,
         default_curve_points=curve_points,
+        account_strategy_notes=account_strategy_notes,
     )
 
     return DashboardRuntimeContext(

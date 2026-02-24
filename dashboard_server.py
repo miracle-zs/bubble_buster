@@ -38,6 +38,7 @@ class DashboardDataProvider:
         close_price_fetcher: Optional[Callable[[str, int], Optional[float]]] = None,
         balance_cache_ttl_sec: int = 60,
         default_curve_points: int = 600,
+        account_strategy_notes: Optional[Dict[str, str]] = None,
     ):
         self.db_path = db_path
         self.log_file = log_file
@@ -48,6 +49,11 @@ class DashboardDataProvider:
         self.balance_cache_ttl_sec = max(5, int(balance_cache_ttl_sec))
         self.default_curve_points = max(100, min(5000, int(default_curve_points)))
         self._close_price_cache: Dict[Tuple[str, int], Optional[float]] = {}
+        self.account_strategy_notes = {
+            str(k).strip(): str(v).strip()
+            for k, v in (account_strategy_notes or {}).items()
+            if str(k).strip()
+        }
         self._balance_cache_value: Optional[float] = None
         self._balance_cache_at: Optional[datetime] = None
         self._balance_last_attempt_at: Optional[datetime] = None
@@ -1129,7 +1135,27 @@ class DashboardDataProvider:
                     ORDER BY a.account_id ASC
                     """
                 )
-                payload["accounts"] = rows
+                by_account: Dict[str, Dict[str, Any]] = {}
+                for row in rows:
+                    aid = str(row.get("account_id") or "").strip()
+                    if not aid:
+                        continue
+                    row["strategy_note"] = self.account_strategy_notes.get(aid, "")
+                    by_account[aid] = row
+
+                # Ensure configured accounts can appear in overview even when DB has no rows yet.
+                for aid, note in self.account_strategy_notes.items():
+                    if aid in by_account:
+                        continue
+                    by_account[aid] = {
+                        "account_id": aid,
+                        "open_positions": 0,
+                        "last_run_status": None,
+                        "wallet_balance_usdt": None,
+                        "strategy_note": note,
+                    }
+
+                payload["accounts"] = [by_account[k] for k in sorted(by_account.keys())]
                 return payload
         except sqlite3.Error as exc:
             payload["db_error"] = str(exc)
@@ -2443,6 +2469,7 @@ ACCOUNTS_OVERVIEW_HTML = """<!doctype html>
     .aid { font-size:18px; font-weight:700; color: var(--accent); }
     .label { color: var(--muted); font-size: 12px; }
     .val { font-family: ui-monospace, Menlo, Monaco, Consolas, monospace; }
+    .val.text { font-family: "Avenir Next","SF Pro Text","PingFang SC","Noto Sans SC",sans-serif; text-align: right; white-space: normal; max-width: 62%; line-height: 1.35; }
     .status-ok { color: var(--ok); }
     .status-warn { color: var(--warn); }
     .status-bad { color: var(--bad); }
@@ -2639,11 +2666,13 @@ ACCOUNTS_OVERVIEW_HTML = """<!doctype html>
       var safeAid = escapeHtml(aid);
       var base = pathPrefix + "/account/" + encodeURIComponent(aid) + "/";
       var st = r.last_run_status || "--";
+      var note = String(r.strategy_note || "");
       html += '<article class="card">'
         + '<div class="aid">' + safeAid + '</div>'
         + '<div class="row"><span class="label">余额(USDT)</span><span class="val">' + fmt(r.wallet_balance_usdt, 4) + '</span></div>'
         + '<div class="row"><span class="label">持仓数</span><span class="val">' + fmt(r.open_positions, 0) + '</span></div>'
         + '<div class="row"><span class="label">最近状态</span><span class="val ' + statusCls(st) + '">' + escapeHtml(st) + "</span></div>"
+        + '<div class="row"><span class="label">策略说明</span><span class="val text">' + (note ? escapeHtml(note) : "--") + "</span></div>"
         + '<div class="spark-block">'
         + '<div class="spark-title"><span class="label">1D 策略权益曲线</span><span class="val spark-delta" data-account-id="' + safeAid + '">--</span></div>'
         + '<div class="spark-box" data-account-id="' + safeAid + '"><div class="spark-empty">加载中...</div></div>'

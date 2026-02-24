@@ -75,11 +75,14 @@ log_level = INFO
 [accounts]
 enabled = default
 mode.default = full
+strategy_note.default = 默认策略
 
 ; Example:
 ; enabled = acc01,55
 ; mode.acc01 = full
 ; mode.55 = loss_cut_only
+; strategy_note.acc01 = TP 9% / 减仓50% / 浮亏砍仓ON
+; strategy_note.55 = 仅浮亏砍仓（cron）
 ; [account.acc01.binance]
 ; api_key = ACCOUNT_01_KEY
 ; api_secret = ACCOUNT_01_SECRET
