@@ -235,6 +235,67 @@ class RuntimeServiceTest(unittest.TestCase):
         service.run_cycle(now_local=missed, now_monotonic=2.0)
         self.assertEqual(manager.daily_loss_calls, 0)
 
+    def test_daily_loss_cut_skips_accounts_with_daily_loss_cut_disabled(self):
+        class StrategyStub:
+            def run_entry(self):
+                return {"status": "SKIPPED"}
+
+        class ManagerStub:
+            def __init__(self):
+                self.calls = 0
+
+            def run_once(self):
+                return {"total": 0}
+
+            def run_daily_loss_cut(self):
+                self.calls += 1
+                return {"total": 0, "closed_loss_cut": 0, "errors": 0}
+
+        m_enabled = ManagerStub()
+        m_disabled = ManagerStub()
+        strategy = StrategyStub()
+        cfg = ServiceRuntimeConfig(
+            timezone_name="UTC",
+            entry_hour=23,
+            entry_minute=59,
+            entry_misfire_grace_min=120,
+            entry_catchup_enabled=True,
+            daily_loss_cut_enabled=True,
+            daily_loss_cut_hour=11,
+            daily_loss_cut_minute=55,
+            manager_interval_sec=3600,
+            manager_max_catch_up_runs=1,
+            loop_sleep_sec=1.0,
+            run_manage_on_startup=False,
+        )
+        service = StrategyRuntimeService(
+            strategy=strategy,
+            manager=m_enabled,
+            cfg=cfg,
+            now_monotonic=0.0,
+            account_runtimes={
+                "acc01": {
+                    "mode": "full",
+                    "strategy": strategy,
+                    "manager": m_enabled,
+                    "balance_sampler": None,
+                    "daily_loss_cut_enabled": True,
+                },
+                "acc55": {
+                    "mode": "loss_cut_only",
+                    "strategy": strategy,
+                    "manager": m_disabled,
+                    "balance_sampler": None,
+                    "daily_loss_cut_enabled": False,
+                },
+            },
+            max_account_workers=2,
+        )
+        due = datetime(2026, 2, 13, 11, 55, tzinfo=ZoneInfo("UTC"))
+        service.run_cycle(now_local=due, now_monotonic=2.0)
+        self.assertEqual(m_enabled.calls, 1)
+        self.assertEqual(m_disabled.calls, 0)
+
 
 if __name__ == "__main__":
     unittest.main()

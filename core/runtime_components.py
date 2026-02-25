@@ -191,6 +191,7 @@ def _build_single_account_components(
     return {
         "account_id": account_id,
         "mode": mode,
+        "daily_loss_cut_enabled": runtime_cfg.getboolean("daily_loss_cut_enabled", fallback=True),
         "strategy": strategy,
         "manager": manager,
         "balance_sampler": wallet_sampler,

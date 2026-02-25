@@ -342,11 +342,19 @@ class StrategyRuntimeService:
             return
 
         self._last_loss_cut_local_date = today
-        account_ids = [
-            aid
-            for aid, ctx in self.account_runtimes.items()
-            if str(ctx.get("mode", "full")).strip().lower() in {"full", "loss_cut_only"}
-        ]
+        account_ids = []
+        for aid, ctx in self.account_runtimes.items():
+            mode = str(ctx.get("mode", "full")).strip().lower()
+            if mode not in {"full", "loss_cut_only"}:
+                continue
+            enabled_raw = ctx.get("daily_loss_cut_enabled", True)
+            if isinstance(enabled_raw, str):
+                enabled = enabled_raw.strip().lower() in {"1", "true", "yes", "on"}
+            else:
+                enabled = bool(enabled_raw)
+            if not enabled:
+                continue
+            account_ids.append(aid)
         if not account_ids:
             LOGGER.warning("service daily loss-cut skipped: no account is enabled")
             return
