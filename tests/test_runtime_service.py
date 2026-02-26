@@ -656,3 +656,79 @@ def test_entry_uses_shared_ranking_once_for_multi_accounts() -> None:
     assert mocked_ranker.call_count == 1
     assert s1.received == shared
     assert s2.received == shared
+
+
+def test_noon_protection_runs_once_for_full_and_loss_cut_only_accounts() -> None:
+    class StrategyStub:
+        def run_entry(self):
+            return {"status": "SKIPPED"}
+
+    class ManagerStub:
+        def __init__(self) -> None:
+            self.noon_calls = 0
+            self.last_day_start = None
+            self.last_noon_time = None
+
+        def run_once(self):
+            return {"total": 0}
+
+        def run_daily_loss_cut(self):
+            return {"total": 0, "closed_loss_cut": 0, "errors": 0}
+
+        def run_noon_protection_stop(self, day_start_utc, noon_time_utc):
+            self.noon_calls += 1
+            self.last_day_start = day_start_utc
+            self.last_noon_time = noon_time_utc
+            return {"total": 0, "updated_sl": 0, "errors": 0}
+
+    full_manager = ManagerStub()
+    loss_cut_only_manager = ManagerStub()
+    cfg = ServiceRuntimeConfig(
+        timezone_name="UTC",
+        entry_hour=23,
+        entry_minute=59,
+        entry_misfire_grace_min=120,
+        entry_catchup_enabled=True,
+        daily_loss_cut_enabled=False,
+        daily_loss_cut_hour=11,
+        daily_loss_cut_minute=55,
+        manager_interval_sec=3600,
+        manager_max_catch_up_runs=1,
+        loop_sleep_sec=1.0,
+        run_manage_on_startup=False,
+        noon_protection_enabled=True,
+        noon_protection_hour=12,
+        noon_protection_minute=0,
+    )
+    service = StrategyRuntimeService(
+        strategy=StrategyStub(),
+        manager=full_manager,
+        cfg=cfg,
+        now_monotonic=0.0,
+        account_runtimes={
+            "acc01": {"mode": "full", "strategy": StrategyStub(), "manager": full_manager, "balance_sampler": None},
+            "acc55": {
+                "mode": "loss_cut_only",
+                "strategy": StrategyStub(),
+                "manager": loss_cut_only_manager,
+                "balance_sampler": None,
+            },
+        },
+        max_account_workers=2,
+    )
+
+    service.run_cycle(now_local=datetime(2026, 2, 13, 11, 59, tzinfo=ZoneInfo("UTC")), now_monotonic=1.0)
+    assert full_manager.noon_calls == 0
+    assert loss_cut_only_manager.noon_calls == 0
+
+    service.run_cycle(now_local=datetime(2026, 2, 13, 12, 0, tzinfo=ZoneInfo("UTC")), now_monotonic=2.0)
+    assert full_manager.noon_calls == 1
+    assert loss_cut_only_manager.noon_calls == 1
+    assert full_manager.last_day_start == datetime(2026, 2, 13, 0, 0, tzinfo=ZoneInfo("UTC"))
+    assert full_manager.last_noon_time == datetime(2026, 2, 13, 12, 0, tzinfo=ZoneInfo("UTC"))
+    assert loss_cut_only_manager.last_day_start == datetime(2026, 2, 13, 0, 0, tzinfo=ZoneInfo("UTC"))
+    assert loss_cut_only_manager.last_noon_time == datetime(2026, 2, 13, 12, 0, tzinfo=ZoneInfo("UTC"))
+
+    service.run_cycle(now_local=datetime(2026, 2, 13, 16, 0, tzinfo=ZoneInfo("UTC")), now_monotonic=3.0)
+    assert full_manager.noon_calls == 1
+    assert loss_cut_only_manager.noon_calls == 1

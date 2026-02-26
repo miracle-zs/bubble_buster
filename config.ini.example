@@ -49,6 +49,9 @@ daily_loss_cut_enabled = true
 daily_loss_cut_hour = 11
 daily_loss_cut_minute = 55
 daily_loss_cut_scope = exchange
+noon_protection_enabled = true
+noon_protection_hour = 12
+noon_protection_minute = 0
 manager_interval_sec = 60
 manager_max_catch_up_runs = 3
 service_loop_sleep_sec = 1.0
@@ -75,14 +78,14 @@ log_level = INFO
 [accounts]
 enabled = default
 mode.default = full
-strategy_note.default = 默认策略
+strategy_note.default = 默认策略 / 中午保护止损ON
 
 ; Example:
 ; enabled = acc01,55
 ; mode.acc01 = full
 ; mode.55 = loss_cut_only
-; strategy_note.acc01 = TP 9% / 减仓50% / 浮亏砍仓ON
-; strategy_note.55 = 仅浮亏砍仓（cron）
+; strategy_note.acc01 = TP 9% / 减仓50% / 浮亏砍仓ON / 中午保护止损ON
+; strategy_note.55 = 仅浮亏砍仓 + 中午保护止损（loss_cut_only）
 ; [account.acc01.binance]
 ; api_key = ACCOUNT_01_KEY
 ; api_secret = ACCOUNT_01_SECRET

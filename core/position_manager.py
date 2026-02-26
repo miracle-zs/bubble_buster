@@ -18,6 +18,7 @@ LOGGER = logging.getLogger(__name__)
 class PositionManager:
     DAILY_LOSS_CUT_SCOPE_TRACKED = "tracked"
     DAILY_LOSS_CUT_SCOPE_EXCHANGE = "exchange"
+    NOON_PROTECTION_LOCK_NAME = "noon_protection_stop_caps_v1"
 
     def __init__(
         self,
@@ -36,11 +37,188 @@ class PositionManager:
         self.trigger_price_type = trigger_price_type
         self.daily_loss_cut_scope = self._normalize_daily_loss_cut_scope(daily_loss_cut_scope)
         self.account_id = (account_id or "").strip() or "default"
+        self._noon_protection_caps_cache: Optional[Dict[str, float]] = None
 
     def run_daily_loss_cut(self) -> Dict[str, int]:
         if self.daily_loss_cut_scope == self.DAILY_LOSS_CUT_SCOPE_EXCHANGE:
             return self._run_daily_loss_cut_exchange_positions()
         return self._run_daily_loss_cut_tracked_positions()
+
+    def run_noon_protection_stop(
+        self,
+        day_start_utc: datetime,
+        noon_time_utc: datetime,
+    ) -> Dict[str, int]:
+        day_start = day_start_utc.astimezone(timezone.utc).replace(microsecond=0)
+        noon_time = noon_time_utc.astimezone(timezone.utc).replace(microsecond=0)
+
+        tracked_positions = self.store.list_open_positions()
+        tracked_by_symbol: Dict[str, Dict[str, object]] = {}
+        for pos in tracked_positions:
+            symbol = str(pos.get("symbol") or "").strip()
+            if symbol and symbol not in tracked_by_symbol:
+                tracked_by_symbol[symbol] = pos
+
+        try:
+            risks = self.client.get_position_risk()
+        except Exception as exc:  # noqa: BLE001
+            LOGGER.exception("Noon protection failed to query exchange positions: %s", exc)
+            return {
+                "total": 0,
+                "updated_sl": 0,
+                "skipped": 0,
+                "errors": 1,
+            }
+        candidate_risks = []
+        for risk in risks:
+            position_amt = self._safe_float(risk.get("positionAmt"), default=0.0)
+            if abs(position_amt) <= 1e-12:
+                continue
+            symbol = str(risk.get("symbol") or "").strip()
+            if not symbol:
+                continue
+            candidate_risks.append(risk)
+
+        summary = {
+            "total": len(candidate_risks),
+            "updated_sl": 0,
+            "skipped": 0,
+            "errors": 0,
+        }
+        details: Dict[str, List[str]] = {
+            "updated_sl": [],
+            "errors": [],
+        }
+        if noon_time <= day_start:
+            summary["errors"] += 1
+            details["errors"].append(f"invalid_time_window day_start={day_start.isoformat()} noon={noon_time.isoformat()}")
+            return summary
+
+        caps = self._load_noon_protection_caps()
+        active_cap_keys = set()
+        for risk in candidate_risks:
+            symbol = str(risk.get("symbol") or "").strip()
+            position_amt = self._safe_float(risk.get("positionAmt"), default=0.0)
+            position_side = str(risk.get("positionSide") or "BOTH").strip().upper() or "BOTH"
+            close_side, use_reduce_only = self._resolve_close_side_for_exchange_position(
+                position_amt=position_amt,
+                position_side=position_side,
+            )
+            tracked_pos = tracked_by_symbol.get(symbol)
+            tracked_position_id: Optional[int] = None
+            if tracked_pos is not None:
+                try:
+                    tracked_position_id = int(tracked_pos["id"])
+                except (TypeError, ValueError, KeyError):
+                    tracked_position_id = None
+            cap_key = self._build_noon_cap_key(
+                symbol=symbol,
+                position_side=position_side,
+                position_amt=position_amt,
+                tracked_position_id=tracked_position_id,
+            )
+            active_cap_keys.add(cap_key)
+            try:
+                opened_at_raw = str(tracked_pos.get("opened_at_utc") or "") if tracked_pos is not None else ""
+                opened_at_utc = self._parse_iso_utc(opened_at_raw) if opened_at_raw else day_start
+                start_utc = opened_at_utc if opened_at_utc > day_start else day_start
+                if start_utc >= noon_time:
+                    summary["skipped"] += 1
+                    old_sl_price = self._safe_positive_float(tracked_pos.get("sl_price")) if tracked_pos is not None else None
+                    if old_sl_price:
+                        caps[cap_key] = old_sl_price
+                    continue
+
+                highest_price, lowest_price = self._fetch_symbol_extremes_between(
+                    symbol=symbol,
+                    start_utc=start_utc,
+                    end_utc=noon_time,
+                )
+                noon_ref_price = highest_price if close_side == "BUY" else lowest_price
+                if not noon_ref_price:
+                    raise RuntimeError(
+                        f"no_klines_ref_between start={start_utc.isoformat()} end={noon_time.isoformat()}"
+                    )
+
+                old_sl_price = self._safe_positive_float(tracked_pos.get("sl_price")) if tracked_pos is not None else None
+                if old_sl_price is None:
+                    old_sl_price = self._safe_positive_float(caps.get(cap_key))
+
+                round_up = close_side == "BUY"
+                noon_sl_price = self.client.normalize_trigger_price(symbol, noon_ref_price, round_up=round_up)
+                if old_sl_price:
+                    merged_sl_price = min(old_sl_price, noon_sl_price) if close_side == "BUY" else max(old_sl_price, noon_sl_price)
+                else:
+                    merged_sl_price = noon_sl_price
+                caps[cap_key] = merged_sl_price
+
+                rules = self.client.get_symbol_rules().get(symbol)
+                min_delta = rules.tick_size if rules else 0.0
+                if old_sl_price and abs(merged_sl_price - old_sl_price) <= max(min_delta, 1e-12):
+                    summary["skipped"] += 1
+                    continue
+
+                qty = abs(position_amt)
+                if qty <= 0:
+                    raise RuntimeError("position qty is zero")
+
+                if tracked_pos is not None:
+                    self._cancel_order_if_exists(symbol, tracked_pos.get("sl_order_id"), tracked_pos.get("sl_client_order_id"))
+
+                sl_stop_price = self.client.format_trigger_price(symbol, merged_sl_price, round_up=round_up)
+                sl_order = self._create_stop_order_with_fallback(
+                    symbol=symbol,
+                    side=close_side,
+                    stop_price=sl_stop_price,
+                    qty=qty,
+                    client_order_id=self._new_client_id("nsl", symbol),
+                    position_side=position_side if position_side in {"LONG", "SHORT"} else None,
+                    use_reduce_only=use_reduce_only,
+                )
+
+                self.store.add_order_event(
+                    symbol=symbol,
+                    position_id=tracked_position_id,
+                    event_time_utc=self._utc_now_iso(),
+                    order_payload=sl_order,
+                )
+                if tracked_position_id is not None:
+                    self.store.update_stop_loss(
+                        position_id=tracked_position_id,
+                        sl_order_id=sl_order.get("orderId"),
+                        sl_client_order_id=sl_order.get("clientOrderId"),
+                        sl_price=merged_sl_price,
+                        liq_price_latest=self._safe_positive_float(risk.get("liquidationPrice")),
+                    )
+                    self.store.clear_position_error(tracked_position_id)
+                summary["updated_sl"] += 1
+                details["updated_sl"].append(
+                    (
+                        f"{symbol}(cap={cap_key}, old_sl={old_sl_price}, "
+                        f"noon_ref={noon_ref_price}, new_sl={merged_sl_price}, side={close_side})"
+                    )
+                )
+            except Exception as exc:  # noqa: BLE001
+                summary["errors"] += 1
+                LOGGER.exception("Noon protection stop failed for symbol=%s cap=%s: %s", symbol, cap_key, exc)
+                if tracked_position_id is not None:
+                    self.store.set_position_error(tracked_position_id, f"noon_protection: {exc}")
+                details["errors"].append(f"{symbol}(cap={cap_key}): {exc}")
+
+        pruned_caps = {
+            cap_key: cap_price
+            for cap_key, cap_price in caps.items()
+            if cap_key in active_cap_keys
+        }
+        self._persist_noon_protection_caps(pruned_caps)
+        self._noon_protection_caps_cache = pruned_caps
+
+        if summary["updated_sl"] > 0 or summary["errors"] > 0:
+            self.notifier.send(
+                "【Top10做空】12:00保护止损汇总",
+                self._build_noon_protection_notification(summary, details),
+            )
+        return summary
 
     def _run_daily_loss_cut_tracked_positions(self) -> Dict[str, int]:
         positions = self.store.list_open_positions()
@@ -173,6 +351,7 @@ class PositionManager:
         return summary
 
     def run_once(self) -> Dict[str, int]:
+        self._noon_protection_caps_cache = self._load_noon_protection_caps()
         positions = self.store.list_open_positions()
         summary = {
             "total": len(positions),
@@ -214,6 +393,7 @@ class PositionManager:
                 self._build_manage_notification(summary, event_details),
             )
 
+        self._noon_protection_caps_cache = None
         return summary
 
     def _manage_position(self, pos: Dict[str, object]) -> Optional[Dict[str, object]]:
@@ -415,6 +595,10 @@ class PositionManager:
         old_sl_price = self._safe_positive_float(pos.get("sl_price"))
         new_sl_raw = liq_price * (1 - self.sl_liq_buffer_pct / 100.0)
         new_sl_price = self.client.normalize_trigger_price(symbol, new_sl_raw, round_up=True)
+
+        noon_cap_price = self._get_noon_protection_cap(position_id)
+        if noon_cap_price:
+            new_sl_price = min(new_sl_price, noon_cap_price)
         new_sl_stop_price = self.client.format_trigger_price(symbol, new_sl_price, round_up=True)
 
         rules = self.client.get_symbol_rules().get(symbol)
@@ -426,6 +610,7 @@ class PositionManager:
         self._cancel_order_if_exists(symbol, pos.get("sl_order_id"), pos.get("sl_client_order_id"))
         sl_order = self._create_stop_order_with_fallback(
             symbol=symbol,
+            side="BUY",
             stop_price=new_sl_stop_price,
             qty=position_amt,
             client_order_id=self._new_client_id("sl", symbol),
@@ -453,20 +638,26 @@ class PositionManager:
     def _create_stop_order_with_fallback(
         self,
         symbol: str,
+        side: str,
         stop_price: str,
         qty: float,
         client_order_id: str,
+        position_side: Optional[str] = None,
+        use_reduce_only: bool = True,
     ) -> Dict[str, object]:
+        create_order_params: Dict[str, object] = {
+            "symbol": symbol,
+            "side": side,
+            "type": "STOP_MARKET",
+            "stopPrice": stop_price,
+            "closePosition": True,
+            "workingType": self.trigger_price_type,
+            "newClientOrderId": client_order_id,
+        }
+        if position_side in {"LONG", "SHORT"}:
+            create_order_params["positionSide"] = position_side
         try:
-            return self.client.create_order(
-                symbol=symbol,
-                side="BUY",
-                type="STOP_MARKET",
-                stopPrice=stop_price,
-                closePosition=True,
-                workingType=self.trigger_price_type,
-                newClientOrderId=client_order_id,
-            )
+            return self.client.create_order(**create_order_params)
         except BinanceAPIError as exc:
             try:
                 code = int(exc.code)
@@ -476,16 +667,20 @@ class PositionManager:
                 raise
 
             LOGGER.warning("Fallback to reduceOnly stop for %s due to -4120", symbol)
-            return self.client.create_order(
-                symbol=symbol,
-                side="BUY",
-                type="STOP_MARKET",
-                stopPrice=stop_price,
-                quantity=self.client.format_order_qty(symbol, qty),
-                reduceOnly=True,
-                workingType=self.trigger_price_type,
-                newClientOrderId=client_order_id,
-            )
+            fallback_params: Dict[str, object] = {
+                "symbol": symbol,
+                "side": side,
+                "type": "STOP_MARKET",
+                "stopPrice": stop_price,
+                "quantity": self.client.format_order_qty(symbol, qty),
+                "workingType": self.trigger_price_type,
+                "newClientOrderId": client_order_id,
+            }
+            if use_reduce_only:
+                fallback_params["reduceOnly"] = True
+            if position_side in {"LONG", "SHORT"}:
+                fallback_params["positionSide"] = position_side
+            return self.client.create_order(**fallback_params)
 
     def _get_order_status(
         self,
@@ -592,6 +787,110 @@ class PositionManager:
 
         return "\n".join(lines)
 
+    @staticmethod
+    def _build_noon_protection_notification(summary: Dict[str, int], details: Dict[str, List[str]]) -> str:
+        rows = [
+            ("open_positions", summary["total"]),
+            ("updated_sl", summary["updated_sl"]),
+            ("skipped", summary["skipped"]),
+            ("errors", summary["errors"]),
+        ]
+        lines = [
+            "### Top10 做空 12:00 保护止损汇总",
+            "",
+            f"- 巡检时间(UTC): `{datetime.now(timezone.utc).replace(microsecond=0).isoformat()}`",
+            "",
+            "### 摘要",
+            "",
+            format_markdown_kv_table(rows),
+        ]
+
+        for key, title in [
+            ("updated_sl", "保护止损更新明细"),
+            ("errors", "错误明细"),
+        ]:
+            values = [item for item in details.get(key, []) if item]
+            block = format_markdown_list_section(title, values, max_items=20)
+            if block:
+                lines.extend(["", block])
+        return "\n".join(lines)
+
+    def _fetch_symbol_extremes_between(
+        self,
+        symbol: str,
+        start_utc: datetime,
+        end_utc: datetime,
+    ) -> tuple[Optional[float], Optional[float]]:
+        if end_utc <= start_utc:
+            return None, None
+        start_ms = int(start_utc.timestamp() * 1000)
+        end_ms = int(end_utc.timestamp() * 1000)
+        rows = self.client.get_klines(
+            symbol=symbol,
+            interval="1m",
+            start_time=start_ms,
+            end_time=end_ms,
+            limit=1000,
+        )
+        highs: List[float] = []
+        lows: List[float] = []
+        for row in rows or []:
+            if len(row) < 4:
+                continue
+            high = self._safe_positive_float(row[2])
+            low = self._safe_positive_float(row[3])
+            if high:
+                highs.append(high)
+            if low:
+                lows.append(low)
+        return (max(highs) if highs else None, min(lows) if lows else None)
+
+    def _load_noon_protection_caps(self) -> Dict[str, float]:
+        state = self.store.get_lock_state(self.NOON_PROTECTION_LOCK_NAME) or {}
+        raw_caps = state.get("caps")
+        if not isinstance(raw_caps, dict):
+            return {}
+        parsed: Dict[str, float] = {}
+        for key, value in raw_caps.items():
+            try:
+                cap_price = float(value)
+            except (TypeError, ValueError):
+                continue
+            cap_key = str(key).strip()
+            if not cap_key or cap_price <= 0:
+                continue
+            parsed[cap_key] = cap_price
+        return parsed
+
+    def _persist_noon_protection_caps(self, caps: Dict[str, float]) -> None:
+        payload = {
+            "caps": {str(cap_key): float(price) for cap_key, price in caps.items() if price > 0},
+            "updated_at_utc": self._utc_now_iso(),
+        }
+        self.store.set_lock_state(self.NOON_PROTECTION_LOCK_NAME, payload)
+
+    def _get_noon_protection_cap(self, position_id: int) -> Optional[float]:
+        if self._noon_protection_caps_cache is None:
+            self._noon_protection_caps_cache = self._load_noon_protection_caps()
+        value = self._noon_protection_caps_cache.get(str(int(position_id)))
+        if value is None or value <= 0:
+            return None
+        return float(value)
+
+    @staticmethod
+    def _build_noon_cap_key(
+        symbol: str,
+        position_side: str,
+        position_amt: float,
+        tracked_position_id: Optional[int],
+    ) -> str:
+        if tracked_position_id is not None:
+            return str(int(tracked_position_id))
+        normalized_side = str(position_side or "").strip().upper() or "BOTH"
+        if normalized_side == "BOTH":
+            normalized_side = "BOTH_SHORT" if position_amt < 0 else "BOTH_LONG"
+        return f"EX:{symbol}:{normalized_side}"
+
     def _get_symbol_position_risk(self, symbol: str) -> Optional[Dict[str, str]]:
         rows = self.client.get_position_risk(symbol=symbol)
         for row in rows:
@@ -655,3 +954,10 @@ class PositionManager:
     @staticmethod
     def _utc_now_iso() -> str:
         return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+
+    @staticmethod
+    def _parse_iso_utc(text: str) -> datetime:
+        parsed = datetime.fromisoformat(text)
+        if parsed.tzinfo is None:
+            return parsed.replace(tzinfo=timezone.utc)
+        return parsed.astimezone(timezone.utc)

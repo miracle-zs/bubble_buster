@@ -3,7 +3,7 @@ import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 from concurrent.futures import TimeoutError as FutureTimeoutError
 from typing import Any, Dict, List, Optional
 from zoneinfo import ZoneInfo
@@ -30,6 +30,9 @@ class ServiceRuntimeConfig:
     account_failure_threshold: int = 3
     account_cooldown_cycles: int = 2
     account_task_timeout_sec: float = 30.0
+    noon_protection_enabled: bool = True
+    noon_protection_hour: int = 12
+    noon_protection_minute: int = 0
 
 
 @dataclass
@@ -89,6 +92,7 @@ class StrategyRuntimeService:
         self._last_entry_skipped_date: Optional[date] = None
         self._last_loss_cut_local_date: Optional[date] = None
         self._last_loss_cut_skipped_date: Optional[date] = None
+        self._last_noon_protection_local_date: Optional[date] = None
 
     def _entry_schedule_for_day(self, day: date) -> datetime:
         return datetime(
@@ -415,6 +419,106 @@ class StrategyRuntimeService:
                         results[aid].setdefault("slow", True)
         LOGGER.info("service daily loss-cut result: %s", results)
 
+    def _noon_protection_schedule_for_day(self, day: date) -> datetime:
+        return datetime(
+            year=day.year,
+            month=day.month,
+            day=day.day,
+            hour=self.cfg.noon_protection_hour % 24,
+            minute=self.cfg.noon_protection_minute % 60,
+            second=0,
+            microsecond=0,
+            tzinfo=self.timezone,
+        )
+
+    def _run_noon_protection_if_due(self, now_local: datetime) -> None:
+        if not self.cfg.noon_protection_enabled:
+            return
+        today = now_local.date()
+        if self._last_noon_protection_local_date == today:
+            return
+        target = self._noon_protection_schedule_for_day(today)
+        if now_local < target:
+            return
+
+        day_start_local = target.replace(hour=0, minute=0, second=0, microsecond=0)
+        day_start_utc = day_start_local.astimezone(timezone.utc)
+        noon_time_utc = target.astimezone(timezone.utc)
+        account_ids = [
+            aid
+            for aid, ctx in self.account_runtimes.items()
+            if str(ctx.get("mode", "full")).strip().lower() in {"full", "loss_cut_only"}
+        ]
+        self._last_noon_protection_local_date = today
+        if not account_ids:
+            LOGGER.warning("service noon protection skipped: no account is enabled")
+            return
+
+        results: Dict[str, object] = {}
+        if len(account_ids) == 1:
+            aid = account_ids[0]
+            manager = self.account_runtimes[aid].get("manager")
+            if manager is None or not hasattr(manager, "run_noon_protection_stop"):
+                results[aid] = {"error": "manager_missing"}
+            else:
+                try:
+                    results[aid] = manager.run_noon_protection_stop(  # type: ignore[attr-defined]
+                        day_start_utc=day_start_utc,
+                        noon_time_utc=noon_time_utc,
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    results[aid] = {"error": str(exc)}
+        else:
+            timeout_sec = max(0.1, float(self.cfg.account_task_timeout_sec))
+            done_futures = set()
+            slow_accounts = set()
+            with ThreadPoolExecutor(max_workers=min(self.max_account_workers, len(account_ids))) as ex:
+                futures = {}
+                for aid in account_ids:
+                    manager = self.account_runtimes[aid].get("manager")
+                    if manager is None or not hasattr(manager, "run_noon_protection_stop"):
+                        results[aid] = {"error": "manager_missing"}
+                        continue
+                    futures[
+                        ex.submit(
+                            manager.run_noon_protection_stop,  # type: ignore[attr-defined]
+                            day_start_utc=day_start_utc,
+                            noon_time_utc=noon_time_utc,
+                        )
+                    ] = aid
+
+                try:
+                    for future in as_completed(futures, timeout=timeout_sec):
+                        done_futures.add(future)
+                        aid = futures[future]
+                        try:
+                            results[aid] = future.result()
+                        except Exception as exc:  # noqa: BLE001
+                            results[aid] = {"error": str(exc)}
+                except FutureTimeoutError:
+                    pass
+
+                for future, aid in futures.items():
+                    if future in done_futures:
+                        continue
+                    slow_accounts.add(aid)
+                    LOGGER.warning(
+                        "service noon protection account exceeded soft-timeout %.2fs, waiting completion account=%s",
+                        timeout_sec,
+                        aid,
+                    )
+                    try:
+                        result = future.result()
+                        if isinstance(result, dict):
+                            result.setdefault("slow", True)
+                        results[aid] = result
+                    except Exception as exc:  # noqa: BLE001
+                        results[aid] = {"error": str(exc)}
+                for aid in slow_accounts:
+                    if isinstance(results.get(aid), dict):
+                        results[aid].setdefault("slow", True)
+        LOGGER.info("service noon protection result: %s", results)
+
     def _run_manage_if_due(self, now_monotonic: float) -> None:
         if now_monotonic < self._next_manage_monotonic:
             return
@@ -567,6 +671,7 @@ class StrategyRuntimeService:
         mono = now_monotonic if now_monotonic is not None else time.monotonic()
         self._run_entry_if_due(local_dt)
         self._run_daily_loss_cut_if_due(local_dt)
+        self._run_noon_protection_if_due(local_dt)
         self._run_manage_if_due(mono)
 
     def run_forever(self, stop_event: Optional[threading.Event] = None) -> None:

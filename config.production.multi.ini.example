@@ -65,7 +65,7 @@ dashboard_host = 127.0.0.1
 dashboard_port = 8787
 dashboard_refresh_sec = 5
 dashboard_curve_points = 1200
-run_service_with_dashboard = false
+run_service_with_dashboard = true
 lock_file = runtime.lock
 lock_wait_sec = 30
 db_path = state.db
@@ -79,11 +79,11 @@ mode.acc02 = full
 mode.acc03 = full
 mode.acc04 = full
 mode.55 = loss_cut_only
-strategy_note.acc01 = TP 9% / 减仓50% / 浮亏砍仓ON
-strategy_note.acc02 = TP 9% / 清仓100% / 浮亏砍仓ON
-strategy_note.acc03 = TP 9% / 清仓100% / 浮亏砍仓OFF
-strategy_note.acc04 = 组合止盈OFF / 浮亏砍仓OFF
-strategy_note.55 = 仅浮亏砍仓（cron）
+strategy_note.acc01 = TP 9% / 减仓50% / 浮亏砍仓ON / 中午保护止损ON
+strategy_note.acc02 = TP 9% / 清仓100% / 浮亏砍仓ON / 中午保护止损ON
+strategy_note.acc03 = TP 9% / 清仓100% / 浮亏砍仓OFF / 中午保护止损ON
+strategy_note.acc04 = 组合止盈OFF / 浮亏砍仓ON / 中午保护止损ON
+strategy_note.55 = 仅浮亏砍仓 + 中午保护止损（loss_cut_only）
 
 [account.acc01.binance]
 api_key = REPLACE_WITH_ACC01_API_KEY
@@ -104,7 +104,6 @@ api_secret = REPLACE_WITH_ACC04_API_SECRET
 [account.55.binance]
 api_key = REPLACE_WITH_ACC55_API_KEY
 api_secret = REPLACE_WITH_ACC55_API_SECRET
-
 
 [account.acc01.strategy]
 equity_recovery_take_profit_enabled = true
@@ -130,8 +129,6 @@ equity_recovery_reduce_ratio = 0.50
 [account.acc03.runtime]
 daily_loss_cut_enabled = false
 
-[account.acc04.runtime]
-daily_loss_cut_enabled = false
 
 [account.55.runtime]
 daily_loss_cut_enabled = true
