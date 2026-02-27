@@ -154,6 +154,24 @@ class DashboardDataProvider:
         return "FAILED"
 
     @staticmethod
+    def _format_symbol_field(value: Any, limit: int = 8) -> str:
+        if isinstance(value, str):
+            symbols = [x.strip().upper() for x in value.split(",") if x.strip()]
+        elif isinstance(value, list):
+            symbols = [str(x).strip().upper() for x in value if str(x).strip()]
+        else:
+            symbols = []
+        if not symbols:
+            return "-"
+        unique: List[str] = []
+        for sym in symbols:
+            if sym not in unique:
+                unique.append(sym)
+        shown = unique[:limit]
+        suffix = f"+{len(unique) - limit}" if len(unique) > limit else ""
+        return ",".join(shown) + suffix
+
+    @staticmethod
     def _log_time_from_line(line: str) -> Optional[str]:
         if len(line) < 19:
             return None
@@ -181,20 +199,34 @@ class DashboardDataProvider:
                 status = status_raw
             else:
                 status = self._status_from_error_count(failed, opened)
-            summary = f"opened={opened} failed={failed} skipped={skipped}"
+            entry_failed_symbols = self._format_symbol_field(payload.get("entry_failed_symbols"))
+            skipped_symbols = self._format_symbol_field(payload.get("skipped_symbols"))
+            summary = (
+                f"opened={opened} failed={failed} skipped={skipped} "
+                f"failed_symbols={entry_failed_symbols} skipped_symbols={skipped_symbols}"
+            )
         elif task_key == "daily_loss_cut":
             total = self._safe_int(payload.get("total"), 0)
             closed_loss_cut = self._safe_int(payload.get("closed_loss_cut"), 0)
             errors = self._safe_int(payload.get("errors"), 0)
             status = self._status_from_error_count(errors, max(0, total - errors))
-            summary = f"total={total} closed={closed_loss_cut} errors={errors}"
+            closed_symbols = self._format_symbol_field(payload.get("closed_symbols"))
+            failed_symbols = self._format_symbol_field(payload.get("failed_symbols"))
+            summary = (
+                f"total={total} closed={closed_loss_cut} errors={errors} "
+                f"closed_symbols={closed_symbols} failed_symbols={failed_symbols}"
+            )
         elif task_key == "noon_protection":
             total = self._safe_int(payload.get("total"), 0)
             updated_sl = self._safe_int(payload.get("updated_sl"), 0)
             skipped = self._safe_int(payload.get("skipped"), 0)
             errors = self._safe_int(payload.get("errors"), 0)
             status = self._status_from_error_count(errors, max(0, updated_sl + skipped))
-            summary = f"total={total} updated={updated_sl} skipped={skipped} errors={errors}"
+            failed_symbols = self._format_symbol_field(payload.get("failed_symbols"))
+            summary = (
+                f"total={total} updated={updated_sl} skipped={skipped} errors={errors} "
+                f"failed_symbols={failed_symbols}"
+            )
         elif task_key == "manage":
             if payload.get("skipped"):
                 status = "SKIPPED"

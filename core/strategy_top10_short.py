@@ -505,6 +505,9 @@ class Top10ShortStrategy:
                 "entry_failed": entry_failed_count,
                 "exit_setup_failed": exit_setup_failed_count,
                 "skipped": len(skipped_symbols),
+                "skipped_symbols": skipped_symbols,
+                "entry_failed_symbols": self._extract_symbol_prefixes(entry_failure_details),
+                "exit_setup_failed_symbols": self._extract_symbol_prefixes(exit_setup_failure_details),
                 "rebalance_pre": pre_rebalance_summary,
                 "rebalance_post": post_rebalance_summary,
             }
@@ -529,7 +532,24 @@ class Top10ShortStrategy:
                 "failed": entry_failed_count + exit_setup_failed_count,
                 "entry_failed": entry_failed_count,
                 "exit_setup_failed": exit_setup_failed_count,
+                "skipped_symbols": [],
+                "entry_failed_symbols": self._extract_symbol_prefixes(entry_failure_details),
+                "exit_setup_failed_symbols": self._extract_symbol_prefixes(exit_setup_failure_details),
             }
+
+    @staticmethod
+    def _extract_symbol_prefixes(items: List[str]) -> List[str]:
+        symbols: List[str] = []
+        for item in items:
+            text = str(item or "").strip()
+            if not text:
+                continue
+            symbol = text.split(":", 1)[0].strip().upper()
+            if not symbol:
+                continue
+            if symbol not in symbols:
+                symbols.append(symbol)
+        return symbols
 
     def run_equity_recovery_take_profit(self) -> Dict[str, object]:
         if not self.equity_recovery_take_profit_enabled:

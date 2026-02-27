@@ -39,7 +39,7 @@ class PositionManager:
         self.account_id = (account_id or "").strip() or "default"
         self._noon_protection_caps_cache: Optional[Dict[str, float]] = None
 
-    def run_daily_loss_cut(self) -> Dict[str, int]:
+    def run_daily_loss_cut(self) -> Dict[str, object]:
         if self.daily_loss_cut_scope == self.DAILY_LOSS_CUT_SCOPE_EXCHANGE:
             return self._run_daily_loss_cut_exchange_positions()
         return self._run_daily_loss_cut_tracked_positions()
@@ -48,7 +48,7 @@ class PositionManager:
         self,
         day_start_utc: datetime,
         noon_time_utc: datetime,
-    ) -> Dict[str, int]:
+    ) -> Dict[str, object]:
         day_start = day_start_utc.astimezone(timezone.utc).replace(microsecond=0)
         noon_time = noon_time_utc.astimezone(timezone.utc).replace(microsecond=0)
 
@@ -89,6 +89,7 @@ class PositionManager:
             "updated_sl": [],
             "errors": [],
         }
+        failed_symbols: List[str] = []
         if noon_time <= day_start:
             summary["errors"] += 1
             details["errors"].append(f"invalid_time_window day_start={day_start.isoformat()} noon={noon_time.isoformat()}")
@@ -204,6 +205,8 @@ class PositionManager:
                 if tracked_position_id is not None:
                     self.store.set_position_error(tracked_position_id, f"noon_protection: {exc}")
                 details["errors"].append(f"{symbol}(cap={cap_key}): {exc}")
+                if symbol and symbol not in failed_symbols:
+                    failed_symbols.append(symbol)
 
         pruned_caps = {
             cap_key: cap_price
@@ -218,9 +221,10 @@ class PositionManager:
                 "【Top10做空】12:00保护止损汇总",
                 self._build_noon_protection_notification(summary, details),
             )
+        summary["failed_symbols"] = failed_symbols
         return summary
 
-    def _run_daily_loss_cut_tracked_positions(self) -> Dict[str, int]:
+    def _run_daily_loss_cut_tracked_positions(self) -> Dict[str, object]:
         positions = self.store.list_open_positions()
         summary = {
             "total": len(positions),
@@ -231,6 +235,8 @@ class PositionManager:
             "closed_loss_cut": [],
             "errors": [],
         }
+        closed_symbols: List[str] = []
+        failed_symbols: List[str] = []
 
         for pos in positions:
             position_id = int(pos["id"])
@@ -261,12 +267,16 @@ class PositionManager:
                     f"{symbol}(id={position_id}, upnl={unrealized_pnl:.6f}, qty={close_info['qty']}, "
                     f"close_order_id={close_info['close_order_id']})"
                 )
+                if symbol and symbol not in closed_symbols:
+                    closed_symbols.append(symbol)
                 self.store.clear_position_error(position_id)
             except Exception as exc:  # noqa: BLE001
                 summary["errors"] += 1
                 LOGGER.exception("Daily loss-cut failed for position id=%s symbol=%s: %s", position_id, symbol, exc)
                 self.store.set_position_error(position_id, str(exc))
                 details["errors"].append(f"{symbol}(id={position_id}): {exc}")
+                if symbol and symbol not in failed_symbols:
+                    failed_symbols.append(symbol)
 
         if summary["closed_loss_cut"] > 0 or summary["errors"] > 0:
             self.notifier.send(
@@ -274,9 +284,11 @@ class PositionManager:
                 self._build_daily_loss_cut_notification(summary, details),
             )
 
+        summary["closed_symbols"] = closed_symbols
+        summary["failed_symbols"] = failed_symbols
         return summary
 
-    def _run_daily_loss_cut_exchange_positions(self) -> Dict[str, int]:
+    def _run_daily_loss_cut_exchange_positions(self) -> Dict[str, object]:
         summary = {
             "total": 0,
             "closed_loss_cut": 0,
@@ -286,6 +298,8 @@ class PositionManager:
             "closed_loss_cut": [],
             "errors": [],
         }
+        closed_symbols: List[str] = []
+        failed_symbols: List[str] = []
 
         try:
             risks = self.client.get_position_risk()
@@ -334,6 +348,8 @@ class PositionManager:
                     f"position_side={position_side}, reduce_only={use_reduce_only}, "
                     f"close_order_id={close_info['close_order_id']})"
                 )
+                if symbol and symbol not in closed_symbols:
+                    closed_symbols.append(symbol)
             except Exception as exc:  # noqa: BLE001
                 summary["errors"] += 1
                 LOGGER.exception("Daily loss-cut failed for exchange position symbol=%s: %s", symbol, exc)
@@ -341,6 +357,8 @@ class PositionManager:
                     f"{symbol}(upnl={unrealized_pnl:.6f}, side={close_side}, position_side={position_side}, "
                     f"qty={abs(position_amt)}): {exc}"
                 )
+                if symbol and symbol not in failed_symbols:
+                    failed_symbols.append(symbol)
 
         if summary["closed_loss_cut"] > 0 or summary["errors"] > 0:
             self.notifier.send(
@@ -348,6 +366,8 @@ class PositionManager:
                 self._build_daily_loss_cut_notification(summary, details),
             )
 
+        summary["closed_symbols"] = closed_symbols
+        summary["failed_symbols"] = failed_symbols
         return summary
 
     def run_once(self) -> Dict[str, int]:
