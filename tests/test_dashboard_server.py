@@ -176,6 +176,41 @@ class DashboardServerTest(unittest.TestCase):
         self.assertIn("acc01", account_ids)
         self.assertIn("acc02", account_ids)
 
+    def test_accounts_summary_includes_task_status_from_service_logs(self) -> None:
+        self.store.create_run("2026-02-13", account_id="acc01")
+        self.store.create_run("2026-02-13", account_id="acc02")
+        self.store.create_run("2026-02-13", account_id="acc03")
+        with open(self.log_file, "w", encoding="utf-8") as f:
+            f.write(
+                "\n".join(
+                    [
+                        "2026-02-27 07:40:15,865 - INFO - core.runtime_service - service entry result: {'acc01': {'status': 'SUCCESS', 'opened': 10, 'failed': 0, 'skipped': 0}, 'acc02': {'status': 'FAILED', 'opened': 2, 'failed': 8, 'skipped': 0}}",
+                        "2026-02-27 11:55:01,180 - INFO - core.runtime_service - service daily loss-cut result: {'acc01': {'total': 16, 'closed_loss_cut': 5, 'errors': 0}, 'acc02': {'total': 10, 'closed_loss_cut': 4, 'errors': 1}}",
+                        "2026-02-27 12:00:08,090 - INFO - core.runtime_service - service noon protection result: {'acc01': {'total': 11, 'updated_sl': 11, 'skipped': 0, 'errors': 0}, 'acc02': {'total': 6, 'updated_sl': 1, 'skipped': 0, 'errors': 5}}",
+                        "2026-02-27 12:01:08,090 - INFO - core.runtime_service - service manage summary: {'acc01': {'account_id': 'acc01', 'summary': {'total': 3, 'closed_tp': 0, 'closed_sl': 0, 'closed_timeout': 0, 'closed_external': 0, 'updated_sl': 0, 'errors': 0}}, 'acc02': {'account_id': 'acc02', 'error': 'cooling-off'}}",
+                    ]
+                )
+                + "\n"
+            )
+
+        provider = DashboardDataProvider(
+            db_path=self.db_path,
+            log_file=self.log_file,
+            timezone_name="UTC",
+            entry_hour=7,
+            entry_minute=40,
+        )
+        payload = provider.accounts_summary()
+        rows = {row["account_id"]: row for row in payload["accounts"]}
+
+        self.assertEqual(rows["acc01"]["tasks"]["entry"]["status"], "SUCCESS")
+        self.assertIn("opened=10", rows["acc01"]["tasks"]["entry"]["summary"])
+        self.assertEqual(rows["acc02"]["tasks"]["entry"]["status"], "FAILED")
+        self.assertEqual(rows["acc02"]["tasks"]["daily_loss_cut"]["status"], "PARTIAL")
+        self.assertEqual(rows["acc02"]["tasks"]["noon_protection"]["status"], "PARTIAL")
+        self.assertEqual(rows["acc02"]["tasks"]["manage"]["status"], "FAILED")
+        self.assertEqual(rows["acc03"]["tasks"]["entry"]["status"], "UNKNOWN")
+
     def test_account_snapshot_filters_by_account_id(self) -> None:
         now = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
         run1, _ = self.store.create_run("2026-02-13", account_id="acc01")

@@ -1,7 +1,9 @@
+import ast
 import json
 import logging
 import os
 import sqlite3
+import glob
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -51,6 +53,8 @@ class DashboardDataProvider:
         self.balance_cache_ttl_sec = max(5, int(balance_cache_ttl_sec))
         self.default_curve_points = max(100, min(5000, int(default_curve_points)))
         self._close_price_cache: Dict[Tuple[str, int], Optional[float]] = {}
+        self._task_status_cache_key: Optional[Tuple[Tuple[str, int, int], ...]] = None
+        self._task_status_cache_value: Optional[Dict[str, Dict[str, Dict[str, Any]]]] = None
         self.account_strategy_notes = {
             str(k).strip(): str(v).strip()
             for k, v in (account_strategy_notes or {}).items()
@@ -107,6 +111,236 @@ class DashboardDataProvider:
                 return f.read().splitlines()[-lines:]
         except OSError:
             return []
+
+    @staticmethod
+    def _task_status_template() -> Dict[str, Dict[str, Any]]:
+        return {
+            "entry": {"status": "UNKNOWN", "time_local": None, "summary": "--"},
+            "daily_loss_cut": {"status": "UNKNOWN", "time_local": None, "summary": "--"},
+            "noon_protection": {"status": "UNKNOWN", "time_local": None, "summary": "--"},
+            "manage": {"status": "UNKNOWN", "time_local": None, "summary": "--"},
+        }
+
+    @staticmethod
+    def _safe_int(value: Any, default: int = 0) -> int:
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            try:
+                return int(float(value))
+            except (TypeError, ValueError):
+                return default
+
+    @staticmethod
+    def _status_from_error_count(errors: int, successes: int) -> str:
+        if errors <= 0:
+            return "SUCCESS"
+        if successes > 0:
+            return "PARTIAL"
+        return "FAILED"
+
+    @staticmethod
+    def _log_time_from_line(line: str) -> Optional[str]:
+        if len(line) < 19:
+            return None
+        candidate = line[:19]
+        try:
+            datetime.strptime(candidate, "%Y-%m-%d %H:%M:%S")
+            return candidate
+        except ValueError:
+            return None
+
+    def _task_status_from_payload(
+        self,
+        task_key: str,
+        payload: Dict[str, Any],
+        time_local: Optional[str],
+    ) -> Dict[str, Any]:
+        status = "UNKNOWN"
+        summary = "--"
+        if task_key == "entry":
+            opened = self._safe_int(payload.get("opened"), 0)
+            failed = self._safe_int(payload.get("failed"), 0)
+            skipped = self._safe_int(payload.get("skipped"), 0)
+            status_raw = str(payload.get("status") or "").upper()
+            if status_raw in {"SUCCESS", "FAILED", "SKIPPED", "RUNNING"}:
+                status = status_raw
+            else:
+                status = self._status_from_error_count(failed, opened)
+            summary = f"opened={opened} failed={failed} skipped={skipped}"
+        elif task_key == "daily_loss_cut":
+            total = self._safe_int(payload.get("total"), 0)
+            closed_loss_cut = self._safe_int(payload.get("closed_loss_cut"), 0)
+            errors = self._safe_int(payload.get("errors"), 0)
+            status = self._status_from_error_count(errors, max(0, total - errors))
+            summary = f"total={total} closed={closed_loss_cut} errors={errors}"
+        elif task_key == "noon_protection":
+            total = self._safe_int(payload.get("total"), 0)
+            updated_sl = self._safe_int(payload.get("updated_sl"), 0)
+            skipped = self._safe_int(payload.get("skipped"), 0)
+            errors = self._safe_int(payload.get("errors"), 0)
+            status = self._status_from_error_count(errors, max(0, updated_sl + skipped))
+            summary = f"total={total} updated={updated_sl} skipped={skipped} errors={errors}"
+        elif task_key == "manage":
+            if payload.get("skipped"):
+                status = "SKIPPED"
+                reason = str(payload.get("reason") or "SKIPPED").strip() or "SKIPPED"
+                summary = f"reason={reason}"
+            elif payload.get("error"):
+                status = "FAILED"
+                summary = f"error={str(payload.get('error'))[:80]}"
+            else:
+                manage_summary = payload.get("summary")
+                if isinstance(manage_summary, dict):
+                    total = self._safe_int(manage_summary.get("total"), 0)
+                    closed_tp = self._safe_int(manage_summary.get("closed_tp"), 0)
+                    closed_sl = self._safe_int(manage_summary.get("closed_sl"), 0)
+                    closed_timeout = self._safe_int(manage_summary.get("closed_timeout"), 0)
+                    updated_sl = self._safe_int(manage_summary.get("updated_sl"), 0)
+                    errors = self._safe_int(manage_summary.get("errors"), 0)
+                    status = self._status_from_error_count(
+                        errors,
+                        max(0, total + closed_tp + closed_sl + closed_timeout + updated_sl),
+                    )
+                    summary = (
+                        f"total={total} tp={closed_tp} sl={closed_sl} "
+                        f"timeout={closed_timeout} updated={updated_sl} errors={errors}"
+                    )
+                else:
+                    status = "SUCCESS"
+                    summary = "ok"
+
+        return {
+            "status": status,
+            "time_local": time_local,
+            "summary": summary,
+        }
+
+    @staticmethod
+    def _read_log_lines(path: str, max_lines: int = 25000) -> List[str]:
+        if not os.path.exists(path):
+            return []
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                lines = f.read().splitlines()
+            if max_lines > 0 and len(lines) > max_lines:
+                return lines[-max_lines:]
+            return lines
+        except OSError:
+            return []
+
+    def _task_log_files(self) -> List[str]:
+        files: List[str] = []
+        rotated = sorted(glob.glob(f"{self.log_file}.*"))
+        if rotated:
+            files.append(rotated[-1])
+        files.append(self.log_file)
+        seen = set()
+        deduped: List[str] = []
+        for path in files:
+            if not path or path in seen or not os.path.exists(path):
+                continue
+            deduped.append(path)
+            seen.add(path)
+        return deduped
+
+    def _task_status_cache_signature(self, files: List[str]) -> Tuple[Tuple[str, int, int], ...]:
+        signature: List[Tuple[str, int, int]] = []
+        for path in files:
+            try:
+                stat = os.stat(path)
+                signature.append((path, int(stat.st_mtime), int(stat.st_size)))
+            except OSError:
+                continue
+        return tuple(signature)
+
+    def _parse_task_statuses_from_logs(self) -> Dict[str, Dict[str, Dict[str, Any]]]:
+        file_paths = self._task_log_files()
+        signature = self._task_status_cache_signature(file_paths)
+        if self._task_status_cache_key == signature and self._task_status_cache_value is not None:
+            return self._task_status_cache_value
+
+        statuses: Dict[str, Dict[str, Dict[str, Any]]] = {}
+        markers = {
+            "entry": "service entry result:",
+            "daily_loss_cut": "service daily loss-cut result:",
+            "noon_protection": "service noon protection result:",
+            "manage": "service manage summary:",
+        }
+        for path in file_paths:
+            for line in self._read_log_lines(path):
+                task_key = None
+                marker = None
+                for maybe_task, maybe_marker in markers.items():
+                    if maybe_marker in line:
+                        task_key = maybe_task
+                        marker = maybe_marker
+                        break
+                if task_key is None or marker is None:
+                    continue
+
+                payload_raw = line.split(marker, 1)[1].strip()
+                if not payload_raw.startswith("{"):
+                    continue
+                try:
+                    parsed = ast.literal_eval(payload_raw)
+                except (SyntaxError, ValueError):
+                    continue
+                if not isinstance(parsed, dict):
+                    continue
+
+                time_local = self._log_time_from_line(line)
+
+                # Single-account legacy shape: manage summary and task summaries without account map.
+                if task_key == "manage" and "summary" in parsed and "account_id" in parsed:
+                    account_id = str(parsed.get("account_id") or "").strip()
+                    if account_id:
+                        statuses.setdefault(account_id, self._task_status_template())[task_key] = (
+                            self._task_status_from_payload(task_key, parsed, time_local)
+                        )
+                    continue
+                if task_key in {"daily_loss_cut", "noon_protection"} and "total" in parsed:
+                    statuses.setdefault("__GLOBAL__", self._task_status_template())[task_key] = (
+                        self._task_status_from_payload(task_key, parsed, time_local)
+                    )
+                    continue
+
+                for account_id, account_payload in parsed.items():
+                    aid = str(account_id or "").strip()
+                    if not aid or not isinstance(account_payload, dict):
+                        continue
+                    statuses.setdefault(aid, self._task_status_template())[task_key] = (
+                        self._task_status_from_payload(task_key, account_payload, time_local)
+                    )
+
+        self._task_status_cache_key = signature
+        self._task_status_cache_value = statuses
+        return statuses
+
+    def _latest_task_statuses_for_accounts(
+        self,
+        account_ids: List[str],
+    ) -> Dict[str, Dict[str, Dict[str, Any]]]:
+        normalized_ids = [str(aid).strip() for aid in account_ids if str(aid).strip()]
+        payload = {aid: self._task_status_template() for aid in normalized_ids}
+        if not normalized_ids:
+            return payload
+
+        parsed = self._parse_task_statuses_from_logs()
+        global_fallback = parsed.get("__GLOBAL__")
+        for aid in normalized_ids:
+            tasks = payload[aid]
+            if global_fallback:
+                for key, value in global_fallback.items():
+                    if isinstance(value, dict):
+                        tasks[key] = dict(value)
+            account_tasks = parsed.get(aid)
+            if not account_tasks:
+                continue
+            for key, value in account_tasks.items():
+                if key in tasks and isinstance(value, dict):
+                    tasks[key] = dict(value)
+        return payload
 
     def _query_rows(self, conn: sqlite3.Connection, query: str, params: tuple = ()) -> List[Dict[str, Any]]:
         rows = conn.execute(query, params).fetchall()
@@ -1195,6 +1429,10 @@ class DashboardDataProvider:
                         "wallet_balance_usdt": None,
                         "strategy_note": note,
                     }
+
+                task_statuses = self._latest_task_statuses_for_accounts(list(by_account.keys()))
+                for aid, row in by_account.items():
+                    row["tasks"] = task_statuses.get(aid, self._task_status_template())
 
                 payload["accounts"] = [by_account[k] for k in sorted(by_account.keys())]
                 return payload
@@ -2755,6 +2993,16 @@ ACCOUNTS_OVERVIEW_HTML = """<!doctype html>
     .spark-empty { display:flex; align-items:center; justify-content:center; height:100%; color:var(--muted); font-size:12px; }
     .spark-up { color: var(--ok); }
     .spark-down { color: var(--bad); }
+    .task-block { margin-top: 10px; padding-top: 10px; border-top:1px dashed #1e3e52; }
+    .task-row { display:flex; align-items:flex-start; justify-content:space-between; gap:8px; margin-top:6px; }
+    .task-name { color:var(--muted); font-size:12px; min-width: 72px; }
+    .task-meta { display:flex; align-items:center; gap:6px; min-width: 110px; justify-content:flex-end; }
+    .task-badge { border:1px solid #2e5065; border-radius:6px; padding:1px 6px; font-size:11px; font-weight:700; line-height:1.3; }
+    .task-time { color:var(--muted); font-size:11px; font-family: ui-monospace, Menlo, Monaco, Consolas, monospace; }
+    .task-detail { color:#b8cddd; font-size:11px; text-align:right; flex:1; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+    .task-badge.status-ok { border-color:#1f7148; background:rgba(38,208,124,0.15); }
+    .task-badge.status-warn { border-color:#8a6521; background:rgba(255,179,64,0.15); }
+    .task-badge.status-bad { border-color:#8d3535; background:rgba(255,93,93,0.15); }
     .actions { display:flex; gap:8px; margin-top: 12px; }
     .btn { text-decoration:none; color:#081018; background:var(--accent); border-radius:8px; padding:6px 10px; font-size:12px; font-weight:700; }
     .btn.alt { background: transparent; border: 1px solid var(--line); color: var(--text); }
@@ -2793,6 +3041,42 @@ ACCOUNTS_OVERVIEW_HTML = """<!doctype html>
     if (s.indexOf("SUCCESS") >= 0 || s.indexOf("RUNNING") >= 0) return "status-ok";
     if (s.indexOf("SKIPPED") >= 0 || s === "") return "status-warn";
     return "status-bad";
+  }
+
+  function taskStatusText(status) {
+    var s = String(status || "UNKNOWN").toUpperCase();
+    if (s === "SUCCESS") return "SUCCESS";
+    if (s === "FAILED") return "FAILED";
+    if (s === "PARTIAL") return "PARTIAL";
+    if (s === "SKIPPED") return "SKIPPED";
+    if (s === "RUNNING") return "RUNNING";
+    return "UNKNOWN";
+  }
+
+  function taskStatusCls(status) {
+    var s = String(status || "UNKNOWN").toUpperCase();
+    if (s === "SUCCESS" || s === "RUNNING") return "status-ok";
+    if (s === "PARTIAL" || s === "SKIPPED" || s === "UNKNOWN") return "status-warn";
+    return "status-bad";
+  }
+
+  function taskRowHtml(name, task) {
+    var t = task || {};
+    var status = String(t.status || "UNKNOWN");
+    var statusText = taskStatusText(status);
+    var cls = taskStatusCls(status);
+    var timeRaw = String(t.time_local || "");
+    var timeText = timeRaw ? timeRaw.slice(11, 19) : "--";
+    var detailRaw = String(t.summary || "--");
+    var detailEscaped = escapeHtml(detailRaw);
+    return '<div class="task-row">'
+      + '<span class="task-name">' + escapeHtml(name) + '</span>'
+      + '<span class="task-meta">'
+      + '<span class="task-badge ' + cls + '">' + escapeHtml(statusText) + '</span>'
+      + '<span class="task-time">' + escapeHtml(timeText) + '</span>'
+      + "</span>"
+      + '<span class="task-detail" title="' + detailEscaped + '">' + detailEscaped + "</span>"
+      + "</div>";
   }
 
   function fmt(v, digits) {
@@ -2952,6 +3236,7 @@ ACCOUNTS_OVERVIEW_HTML = """<!doctype html>
       var base = pathPrefix + "/account/" + encodeURIComponent(aid) + "/";
       var st = r.last_run_status || "--";
       var note = String(r.strategy_note || "");
+      var tasks = r.tasks || {};
       html += '<article class="card">'
         + '<div class="aid">' + safeAid + '</div>'
         + '<div class="row"><span class="label">余额(USDT)</span><span class="val">' + fmt(r.wallet_balance_usdt, 4) + '</span></div>'
@@ -2961,6 +3246,12 @@ ACCOUNTS_OVERVIEW_HTML = """<!doctype html>
         + '<div class="spark-block">'
         + '<div class="spark-title"><span class="label">1D 策略权益曲线</span><span class="val spark-delta" data-account-id="' + safeAid + '">--</span></div>'
         + '<div class="spark-box" data-account-id="' + safeAid + '"><div class="spark-empty">加载中...</div></div>'
+        + "</div>"
+        + '<div class="task-block">'
+        + taskRowHtml("开仓(entry)", tasks.entry)
+        + taskRowHtml("浮亏砍仓", tasks.daily_loss_cut)
+        + taskRowHtml("中午保护", tasks.noon_protection)
+        + taskRowHtml("巡检(manage)", tasks.manage)
         + "</div>"
         + '<div class="actions"><a class="btn" href="' + base + '">详情</a></div>'
         + "</article>";

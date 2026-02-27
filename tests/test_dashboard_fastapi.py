@@ -159,6 +159,8 @@ strategy_note.acc02 = TP 9% / 清仓100% / 浮亏砍仓ON
             notes = {row["account_id"]: row.get("strategy_note") for row in rows}
             self.assertEqual(notes.get("acc01"), "TP 9% / 减仓50% / 浮亏砍仓ON")
             self.assertEqual(notes.get("acc02"), "TP 9% / 清仓100% / 浮亏砍仓ON")
+            task_keys = set((rows[0].get("tasks") or {}).keys())
+            self.assertEqual(task_keys, {"entry", "daily_loss_cut", "noon_protection", "manage"})
 
             snap = client.get("/api/account/acc01/snapshot")
             self.assertEqual(snap.status_code, 200)
