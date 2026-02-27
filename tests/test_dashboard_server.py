@@ -657,7 +657,7 @@ class DashboardServerTest(unittest.TestCase):
         self.assertIn("renderTaskBoard", html)
         self.assertIn(".task-table", html)
         self.assertIn(".task-row", html)
-        self.assertIn(".task-row-detail", html)
+        self.assertIn(".task-result", html)
         self.assertIn("detailedTaskSummary", html)
 
     def test_safe_query_int_handles_invalid_values(self) -> None:
