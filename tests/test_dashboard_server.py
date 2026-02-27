@@ -9,6 +9,7 @@ from dashboard_server import (
     DashboardDataProvider,
     _safe_query_int,
     render_account_dashboard_html,
+    render_accounts_overview_html,
 )
 from core.state_store import StateStore
 
@@ -647,6 +648,13 @@ class DashboardServerTest(unittest.TestCase):
         )
         self.assertIn("encodeURIComponent(accountId)", html)
         self.assertNotIn('/api/account/acc01";alert(1);//', html)
+
+    def test_render_overview_uses_readable_task_layout(self) -> None:
+        html = render_accounts_overview_html(refresh_sec=5)
+        self.assertIn(".task-grid", html)
+        self.assertIn(".task-card", html)
+        self.assertIn(".task-summary", html)
+        self.assertIn("renderTaskSummary", html)
 
     def test_safe_query_int_handles_invalid_values(self) -> None:
         self.assertEqual(_safe_query_int("abc", default=80, min_value=0, max_value=300), 80)

@@ -2993,16 +2993,25 @@ ACCOUNTS_OVERVIEW_HTML = """<!doctype html>
     .spark-empty { display:flex; align-items:center; justify-content:center; height:100%; color:var(--muted); font-size:12px; }
     .spark-up { color: var(--ok); }
     .spark-down { color: var(--bad); }
-    .task-block { margin-top: 10px; padding-top: 10px; border-top:1px dashed #1e3e52; }
-    .task-row { display:flex; align-items:flex-start; justify-content:space-between; gap:8px; margin-top:6px; }
-    .task-name { color:var(--muted); font-size:12px; min-width: 72px; }
-    .task-meta { display:flex; align-items:center; gap:6px; min-width: 110px; justify-content:flex-end; }
+    .task-block { margin-top: 12px; padding-top: 12px; border-top:1px dashed #1e3e52; }
+    .task-title { color:var(--muted); font-size:12px; margin-bottom:8px; }
+    .task-grid { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:8px; }
+    .task-card { border:1px solid #1f3f53; border-radius:8px; background:linear-gradient(180deg,rgba(8,24,35,0.72) 0%, rgba(6,17,26,0.88) 100%); padding:8px; min-height:74px; }
+    .task-top { display:flex; align-items:center; justify-content:space-between; gap:8px; }
+    .task-name { color:#c6def0; font-size:12px; font-weight:600; white-space:nowrap; }
+    .task-meta { display:flex; align-items:center; gap:6px; }
     .task-badge { border:1px solid #2e5065; border-radius:6px; padding:1px 6px; font-size:11px; font-weight:700; line-height:1.3; }
     .task-time { color:var(--muted); font-size:11px; font-family: ui-monospace, Menlo, Monaco, Consolas, monospace; }
-    .task-detail { color:#b8cddd; font-size:11px; text-align:right; flex:1; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+    .task-summary { margin-top:6px; display:flex; flex-wrap:wrap; gap:5px; align-items:center; }
+    .task-chip { border:1px solid #2a4f66; border-radius:999px; padding:1px 6px; font-size:10px; color:#b8d2e6; background:rgba(21,45,61,0.45); }
+    .task-chip-key { color:#8fb8d1; margin-right:3px; }
+    .task-summary-text { color:#b8cddd; font-size:11px; line-height:1.35; white-space:normal; word-break:break-word; }
     .task-badge.status-ok { border-color:#1f7148; background:rgba(38,208,124,0.15); }
     .task-badge.status-warn { border-color:#8a6521; background:rgba(255,179,64,0.15); }
     .task-badge.status-bad { border-color:#8d3535; background:rgba(255,93,93,0.15); }
+    @media (max-width: 640px) {
+      .task-grid { grid-template-columns:1fr; }
+    }
     .actions { display:flex; gap:8px; margin-top: 12px; }
     .btn { text-decoration:none; color:#081018; background:var(--accent); border-radius:8px; padding:6px 10px; font-size:12px; font-weight:700; }
     .btn.alt { background: transparent; border: 1px solid var(--line); color: var(--text); }
@@ -3060,6 +3069,41 @@ ACCOUNTS_OVERVIEW_HTML = """<!doctype html>
     return "status-bad";
   }
 
+  function renderTaskSummary(summary) {
+    var raw = String(summary || "--").trim();
+    if (!raw || raw === "--") {
+      return '<span class="task-summary-text">--</span>';
+    }
+    var parts = raw.split(/\\s+/);
+    var chips = [];
+    var leftovers = [];
+    for (var i = 0; i < parts.length; i += 1) {
+      var part = String(parts[i] || "");
+      if (!part) continue;
+      var eq = part.indexOf("=");
+      if (eq > 0 && eq < part.length - 1) {
+        var key = part.slice(0, eq);
+        var val = part.slice(eq + 1);
+        chips.push(
+          '<span class="task-chip"><span class="task-chip-key">'
+          + escapeHtml(key)
+          + "</span>"
+          + escapeHtml(val)
+          + "</span>"
+        );
+      } else {
+        leftovers.push(part);
+      }
+    }
+    if (!chips.length) {
+      return '<span class="task-summary-text">' + escapeHtml(raw) + "</span>";
+    }
+    if (leftovers.length) {
+      chips.push('<span class="task-summary-text">' + escapeHtml(leftovers.join(" ")) + "</span>");
+    }
+    return chips.join("");
+  }
+
   function taskRowHtml(name, task) {
     var t = task || {};
     var status = String(t.status || "UNKNOWN");
@@ -3068,14 +3112,15 @@ ACCOUNTS_OVERVIEW_HTML = """<!doctype html>
     var timeRaw = String(t.time_local || "");
     var timeText = timeRaw ? timeRaw.slice(11, 19) : "--";
     var detailRaw = String(t.summary || "--");
-    var detailEscaped = escapeHtml(detailRaw);
-    return '<div class="task-row">'
+    return '<div class="task-card">'
+      + '<div class="task-top">'
       + '<span class="task-name">' + escapeHtml(name) + '</span>'
       + '<span class="task-meta">'
       + '<span class="task-badge ' + cls + '">' + escapeHtml(statusText) + '</span>'
       + '<span class="task-time">' + escapeHtml(timeText) + '</span>'
       + "</span>"
-      + '<span class="task-detail" title="' + detailEscaped + '">' + detailEscaped + "</span>"
+      + "</div>"
+      + '<div class="task-summary">' + renderTaskSummary(detailRaw) + "</div>"
       + "</div>";
   }
 
@@ -3248,10 +3293,13 @@ ACCOUNTS_OVERVIEW_HTML = """<!doctype html>
         + '<div class="spark-box" data-account-id="' + safeAid + '"><div class="spark-empty">加载中...</div></div>'
         + "</div>"
         + '<div class="task-block">'
+        + '<div class="task-title">定时任务执行</div>'
+        + '<div class="task-grid">'
         + taskRowHtml("开仓(entry)", tasks.entry)
         + taskRowHtml("浮亏砍仓", tasks.daily_loss_cut)
         + taskRowHtml("中午保护", tasks.noon_protection)
         + taskRowHtml("巡检(manage)", tasks.manage)
+        + "</div>"
         + "</div>"
         + '<div class="actions"><a class="btn" href="' + base + '">详情</a></div>'
         + "</article>";
