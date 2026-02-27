@@ -657,8 +657,8 @@ class DashboardServerTest(unittest.TestCase):
         self.assertIn("renderTaskBoard", html)
         self.assertIn(".task-table", html)
         self.assertIn(".task-row", html)
-        self.assertIn(".task-col-summary", html)
-        self.assertIn("compactTaskSummary", html)
+        self.assertIn(".task-row-detail", html)
+        self.assertIn("detailedTaskSummary", html)
 
     def test_safe_query_int_handles_invalid_values(self) -> None:
         self.assertEqual(_safe_query_int("abc", default=80, min_value=0, max_value=300), 80)

@@ -3064,30 +3064,31 @@ ACCOUNTS_OVERVIEW_HTML = """<!doctype html>
     .spark-up { color: var(--ok); }
     .spark-down { color: var(--bad); }
     .task-panel { margin-top: 18px; }
-    .task-board-grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(320px,1fr)); gap:12px; }
+    .task-board-list { display:block; }
     .task-account-card { background: var(--panel); border:1px solid var(--line); border-radius:12px; padding:12px; box-shadow:0 8px 20px rgba(0,0,0,0.22); }
+    .task-account-card + .task-account-card { margin-top:12px; }
     .task-account-head { display:flex; align-items:center; justify-content:space-between; margin-bottom:8px; }
     .task-account-id { color: var(--accent); font-size:16px; font-weight:700; }
     .task-last-run { font-size:12px; }
     .task-table { border:1px solid #1f3f53; border-radius:8px; overflow:hidden; background:linear-gradient(180deg,rgba(8,24,35,0.72) 0%, rgba(6,17,26,0.88) 100%); }
-    .task-head, .task-row { display:grid; grid-template-columns: 1.05fr 0.9fr 0.7fr 1.35fr; align-items:center; column-gap:6px; }
+    .task-head, .task-row-main { display:grid; grid-template-columns: 1.2fr 0.9fr 0.8fr; align-items:center; column-gap:8px; }
     .task-head { background:rgba(14,33,47,0.7); border-bottom:1px solid #21465c; padding:7px 8px; }
-    .task-row { padding:8px; border-bottom:1px solid rgba(35,71,92,0.55); }
-    .task-row:last-child { border-bottom:none; }
+    .task-row { border-bottom:1px solid rgba(35,71,92,0.55); padding:8px; }
+    .task-row:last-child { border-bottom: none; }
+    .task-row-main { padding-bottom:4px; }
+    .task-row-detail { margin-top:2px; padding-left:2px; color:#b8d2e6; font-size:11px; line-height:1.45; white-space:normal; word-break:break-word; }
     .task-col-h { color:#84a8bd; font-size:10px; letter-spacing:0.02em; text-transform:uppercase; }
     .task-name { color:#d9ebf8; font-size:13px; font-weight:600; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
     .task-meta { display:flex; align-items:center; justify-content:flex-start; }
     .task-badge { border:1px solid #2e5065; border-radius:6px; padding:1px 6px; font-size:11px; font-weight:700; line-height:1.3; }
     .task-time { color:var(--muted); font-size:11px; font-family: ui-monospace, Menlo, Monaco, Consolas, monospace; }
-    .task-col-summary { color:#b8d2e6; font-size:11px; white-space:normal; line-height:1.35; text-align:left; }
     .task-badge.status-ok { border-color:#1f7148; background:rgba(38,208,124,0.15); }
     .task-badge.status-warn { border-color:#8a6521; background:rgba(255,179,64,0.15); }
     .task-badge.status-bad { border-color:#8d3535; background:rgba(255,93,93,0.15); }
     @media (max-width: 640px) {
-      .task-board-grid { grid-template-columns:1fr; }
-      .task-head, .task-row { grid-template-columns: 1fr 0.95fr 0.75fr 1.4fr; }
+      .task-head, .task-row-main { grid-template-columns: 1.1fr 0.95fr 0.95fr; }
       .task-name { font-size:12px; }
-      .task-col-summary { font-size:10px; }
+      .task-row-detail { font-size:10px; }
     }
     .actions { display:flex; gap:8px; margin-top: 12px; }
     .btn { text-decoration:none; color:#081018; background:var(--accent); border-radius:8px; padding:6px 10px; font-size:12px; font-weight:700; }
@@ -3101,7 +3102,7 @@ ACCOUNTS_OVERVIEW_HTML = """<!doctype html>
     <section id="cards" class="grid"></section>
     <section class="task-panel">
       <h2 class="section-title">定时任务执行总览</h2>
-      <div id="task-board" class="task-board-grid"></div>
+      <div id="task-board" class="task-board-list"></div>
     </section>
   </main>
 <script>
@@ -3169,42 +3170,18 @@ ACCOUNTS_OVERVIEW_HTML = """<!doctype html>
     return pairs;
   }
 
-  function compactTaskSummary(taskKey, summary) {
+  function detailedTaskSummary(summary) {
     var raw = String(summary || "--").trim();
     if (!raw || raw === "--") return "--";
     var pairs = parseSummaryPairs(raw);
-
-    function pick(keys) {
-      var out = [];
-      for (var i = 0; i < keys.length; i += 1) {
-        var key = keys[i];
-        if (Object.prototype.hasOwnProperty.call(pairs, key)) {
-          out.push(key + ":" + pairs[key]);
-        }
-      }
-      return out;
+    var keys = Object.keys(pairs);
+    if (!keys.length) return raw;
+    var items = [];
+    for (var i = 0; i < keys.length; i += 1) {
+      var key = keys[i];
+      items.push(key + ":" + pairs[key]);
     }
-
-    var selected = [];
-    if (taskKey === "entry") {
-      selected = pick(["opened", "failed", "skipped"]);
-    } else if (taskKey === "daily_loss_cut") {
-      selected = pick(["total", "closed", "errors"]);
-    } else if (taskKey === "noon_protection") {
-      selected = pick(["total", "updated", "skipped", "errors"]);
-    } else if (taskKey === "manage") {
-      selected = pick(["total", "updated", "errors"]);
-      if (!selected.length) {
-        selected = pick(["reason", "error"]);
-      }
-    } else if (taskKey === "equity_recovery_take_profit") {
-      selected = pick(["adjusted", "errors", "reduced"]);
-      if (!selected.length) {
-        selected = pick(["reason", "error"]);
-      }
-    }
-    if (selected.length) return selected.join("  ");
-    return raw;
+    return items.join(" | ");
   }
 
   function taskRowHtml(taskKey, name, task) {
@@ -3214,14 +3191,14 @@ ACCOUNTS_OVERVIEW_HTML = """<!doctype html>
     var cls = taskStatusCls(status);
     var timeRaw = String(t.time_local || "");
     var timeText = timeRaw ? timeRaw.slice(11, 19) : "--";
-    var compact = compactTaskSummary(taskKey, String(t.summary || "--"));
+    var detail = detailedTaskSummary(String(t.summary || "--"));
     return '<div class="task-row">'
-      + '<span class="task-name">' + escapeHtml(name) + '</span>'
-      + '<span class="task-meta">'
-      + '<span class="task-badge ' + cls + '">' + escapeHtml(statusText) + '</span>'
-      + "</span>"
-      + '<span class="task-time">' + escapeHtml(timeText) + '</span>'
-      + '<span class="task-col-summary">' + escapeHtml(compact) + "</span>"
+      + '<div class="task-row-main">'
+      + '<span class="task-name">' + escapeHtml(name) + "</span>"
+      + '<span class="task-meta"><span class="task-badge ' + cls + '">' + escapeHtml(statusText) + "</span></span>"
+      + '<span class="task-time">' + escapeHtml(timeText) + "</span>"
+      + "</div>"
+      + '<div class="task-row-detail">' + escapeHtml(detail) + "</div>"
       + "</div>";
   }
 
@@ -3438,7 +3415,6 @@ ACCOUNTS_OVERVIEW_HTML = """<!doctype html>
         + '<span class="task-col-h">任务</span>'
         + '<span class="task-col-h">状态</span>'
         + '<span class="task-col-h">时间</span>'
-        + '<span class="task-col-h">结果</span>'
         + "</div>"
         + taskRowsForAccount(r)
         + "</div>"
