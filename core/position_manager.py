@@ -650,37 +650,15 @@ class PositionManager:
             "side": side,
             "type": "STOP_MARKET",
             "stopPrice": stop_price,
-            "closePosition": True,
+            "quantity": self.client.format_order_qty(symbol, qty),
             "workingType": self.trigger_price_type,
             "newClientOrderId": client_order_id,
         }
+        if use_reduce_only:
+            create_order_params["reduceOnly"] = True
         if position_side in {"LONG", "SHORT"}:
             create_order_params["positionSide"] = position_side
-        try:
-            return self.client.create_order(**create_order_params)
-        except BinanceAPIError as exc:
-            try:
-                code = int(exc.code)
-            except (TypeError, ValueError):
-                code = None
-            if code != -4120:
-                raise
-
-            LOGGER.warning("Fallback to reduceOnly stop for %s due to -4120", symbol)
-            fallback_params: Dict[str, object] = {
-                "symbol": symbol,
-                "side": side,
-                "type": "STOP_MARKET",
-                "stopPrice": stop_price,
-                "quantity": self.client.format_order_qty(symbol, qty),
-                "workingType": self.trigger_price_type,
-                "newClientOrderId": client_order_id,
-            }
-            if use_reduce_only:
-                fallback_params["reduceOnly"] = True
-            if position_side in {"LONG", "SHORT"}:
-                fallback_params["positionSide"] = position_side
-            return self.client.create_order(**fallback_params)
+        return self.client.create_order(**create_order_params)
 
     def _get_order_status(
         self,

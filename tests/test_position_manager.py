@@ -89,6 +89,9 @@ class PositionManagerTest(unittest.TestCase):
         self.assertEqual(create_kwargs["type"], "STOP_MARKET")
         self.assertEqual(create_kwargs["workingType"], "CONTRACT_PRICE")
         self.assertEqual(create_kwargs["symbol"], "BTCUSDT")
+        self.assertEqual(create_kwargs["quantity"], "0.01")
+        self.assertTrue(create_kwargs["reduceOnly"])
+        self.assertNotIn("closePosition", create_kwargs)
 
         row = self._get_position(position_id)
         self.assertEqual(row["status"], "OPEN")
@@ -586,6 +589,9 @@ class PositionManagerTest(unittest.TestCase):
         order_kwargs = client.create_order.call_args.kwargs
         self.assertEqual(order_kwargs["symbol"], "XRPUSDT")
         self.assertEqual(order_kwargs["side"], "BUY")
+        self.assertEqual(order_kwargs["quantity"], "1500.0")
+        self.assertTrue(order_kwargs["reduceOnly"])
+        self.assertNotIn("closePosition", order_kwargs)
         lock_state = self.store.get_lock_state(PositionManager.NOON_PROTECTION_LOCK_NAME)
         self.assertIsNotNone(lock_state)
         assert lock_state is not None
