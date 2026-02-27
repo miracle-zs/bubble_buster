@@ -4,6 +4,7 @@ import logging
 import os
 import sqlite3
 import glob
+import re
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -41,6 +42,8 @@ class DashboardDataProvider:
         balance_cache_ttl_sec: int = 60,
         default_curve_points: int = 600,
         account_strategy_notes: Optional[Dict[str, str]] = None,
+        account_modes: Optional[Dict[str, str]] = None,
+        account_equity_recovery_enabled: Optional[Dict[str, bool]] = None,
         overview_account_ids: Optional[List[str]] = None,
         live_wallet_account_id: str = "default",
     ):
@@ -58,6 +61,16 @@ class DashboardDataProvider:
         self.account_strategy_notes = {
             str(k).strip(): str(v).strip()
             for k, v in (account_strategy_notes or {}).items()
+            if str(k).strip()
+        }
+        self.account_modes = {
+            str(k).strip(): str(v).strip().lower() or "full"
+            for k, v in (account_modes or {}).items()
+            if str(k).strip()
+        }
+        self.account_equity_recovery_enabled = {
+            str(k).strip(): bool(v)
+            for k, v in (account_equity_recovery_enabled or {}).items()
             if str(k).strip()
         }
         overview_ids = [str(x).strip() for x in (overview_account_ids or []) if str(x).strip()]
@@ -119,6 +132,7 @@ class DashboardDataProvider:
             "daily_loss_cut": {"status": "UNKNOWN", "time_local": None, "summary": "--"},
             "noon_protection": {"status": "UNKNOWN", "time_local": None, "summary": "--"},
             "manage": {"status": "UNKNOWN", "time_local": None, "summary": "--"},
+            "equity_recovery_take_profit": {"status": "UNKNOWN", "time_local": None, "summary": "--"},
         }
 
     @staticmethod
@@ -209,6 +223,20 @@ class DashboardDataProvider:
                 else:
                     status = "SUCCESS"
                     summary = "ok"
+        elif task_key == "equity_recovery_take_profit":
+            status_raw = str(payload.get("status") or "").upper()
+            if status_raw in {"TRIGGERED", "PARTIAL"}:
+                status = "SUCCESS"
+            elif status_raw in {"NOT_TRIGGERED", "SKIPPED", "DISABLED"}:
+                status = "SKIPPED"
+            elif status_raw in {"FAILED", "ERROR"}:
+                status = "FAILED"
+            else:
+                status = "UNKNOWN"
+            adjusted = self._safe_int(payload.get("adjusted"), 0)
+            errors = self._safe_int(payload.get("errors"), 0)
+            reduced_notional = self._safe_float(payload.get("reduced_notional")) or 0.0
+            summary = f"adjusted={adjusted} errors={errors} reduced={reduced_notional:.2f}"
 
         return {
             "status": status,
@@ -269,6 +297,39 @@ class DashboardDataProvider:
         }
         for path in file_paths:
             for line in self._read_log_lines(path):
+                if "service equity recovery take-profit " in line:
+                    time_local = self._log_time_from_line(line)
+                    matched_result = re.search(
+                        r"service equity recovery take-profit account=([A-Za-z0-9_.-]+)\s+result:\s+(\{.*\})",
+                        line,
+                    )
+                    if matched_result:
+                        aid = matched_result.group(1).strip()
+                        payload_raw = matched_result.group(2).strip()
+                        try:
+                            parsed = ast.literal_eval(payload_raw)
+                        except (SyntaxError, ValueError):
+                            parsed = None
+                        if aid and isinstance(parsed, dict):
+                            statuses.setdefault(aid, self._task_status_template())["equity_recovery_take_profit"] = (
+                                self._task_status_from_payload("equity_recovery_take_profit", parsed, time_local)
+                            )
+                            continue
+                    matched_error = re.search(
+                        r"service equity recovery take-profit failed account=([A-Za-z0-9_.-]+):\s*(.*)$",
+                        line,
+                    )
+                    if matched_error:
+                        aid = matched_error.group(1).strip()
+                        err = matched_error.group(2).strip()
+                        if aid:
+                            statuses.setdefault(aid, self._task_status_template())["equity_recovery_take_profit"] = {
+                                "status": "FAILED",
+                                "time_local": time_local,
+                                "summary": f"error={err[:80]}",
+                            }
+                        continue
+
                 task_key = None
                 marker = None
                 for maybe_task, maybe_marker in markers.items():
@@ -1412,6 +1473,10 @@ class DashboardDataProvider:
                     if self.overview_account_ids is not None and aid not in self.overview_account_ids:
                         continue
                     row["strategy_note"] = self.account_strategy_notes.get(aid, "")
+                    row["mode"] = self.account_modes.get(aid, "full")
+                    row["equity_recovery_take_profit_enabled"] = bool(
+                        self.account_equity_recovery_enabled.get(aid, False)
+                    )
                     by_account[aid] = row
 
                 # Ensure configured accounts can appear in overview even when DB has no rows yet.
@@ -1428,6 +1493,10 @@ class DashboardDataProvider:
                         "last_run_status": None,
                         "wallet_balance_usdt": None,
                         "strategy_note": note,
+                        "mode": self.account_modes.get(aid, "full"),
+                        "equity_recovery_take_profit_enabled": bool(
+                            self.account_equity_recovery_enabled.get(aid, False)
+                        ),
                     }
 
                 task_statuses = self._latest_task_statuses_for_accounts(list(by_account.keys()))
@@ -3128,6 +3197,11 @@ ACCOUNTS_OVERVIEW_HTML = """<!doctype html>
       if (!selected.length) {
         selected = pick(["reason", "error"]);
       }
+    } else if (taskKey === "equity_recovery_take_profit") {
+      selected = pick(["adjusted", "errors", "reduced"]);
+      if (!selected.length) {
+        selected = pick(["reason", "error"]);
+      }
     }
     if (selected.length) return selected.join("  ");
     return raw;
@@ -3149,6 +3223,24 @@ ACCOUNTS_OVERVIEW_HTML = """<!doctype html>
       + '<span class="task-time">' + escapeHtml(timeText) + '</span>'
       + '<span class="task-col-summary">' + escapeHtml(compact) + "</span>"
       + "</div>";
+  }
+
+  function taskRowsForAccount(row) {
+    var mode = String((row && row.mode) || "full").toLowerCase();
+    var tasks = (row && row.tasks) || {};
+    var rows = [];
+    if (mode === "full") {
+      rows.push(taskRowHtml("entry", "开仓(entry)", tasks.entry));
+    }
+    rows.push(taskRowHtml("daily_loss_cut", "浮亏砍仓", tasks.daily_loss_cut));
+    rows.push(taskRowHtml("noon_protection", "中午保护", tasks.noon_protection));
+    if (mode === "full") {
+      rows.push(taskRowHtml("manage", "巡检(manage)", tasks.manage));
+      if (row && row.equity_recovery_take_profit_enabled) {
+        rows.push(taskRowHtml("equity_recovery_take_profit", "组合止盈", tasks.equity_recovery_take_profit));
+      }
+    }
+    return rows.join("");
   }
 
   function fmt(v, digits) {
@@ -3303,6 +3395,8 @@ ACCOUNTS_OVERVIEW_HTML = """<!doctype html>
     var html = "";
     for (var i = 0; i < rows.length; i += 1) {
       var r = rows[i] || {};
+      var mode = String(r.mode || "full").toLowerCase();
+      if (mode !== "full") continue;
       var aid = String(r.account_id || "");
       var safeAid = escapeHtml(aid);
       var base = pathPrefix + "/account/" + encodeURIComponent(aid) + "/";
@@ -3334,7 +3428,6 @@ ACCOUNTS_OVERVIEW_HTML = """<!doctype html>
       var aid = String(r.account_id || "");
       var safeAid = escapeHtml(aid);
       var st = r.last_run_status || "--";
-      var tasks = r.tasks || {};
       html += '<article class="task-account-card">'
         + '<div class="task-account-head">'
         + '<span class="task-account-id">' + safeAid + "</span>"
@@ -3347,10 +3440,7 @@ ACCOUNTS_OVERVIEW_HTML = """<!doctype html>
         + '<span class="task-col-h">时间</span>'
         + '<span class="task-col-h">结果</span>'
         + "</div>"
-        + taskRowHtml("entry", "开仓(entry)", tasks.entry)
-        + taskRowHtml("daily_loss_cut", "浮亏砍仓", tasks.daily_loss_cut)
-        + taskRowHtml("noon_protection", "中午保护", tasks.noon_protection)
-        + taskRowHtml("manage", "巡检(manage)", tasks.manage)
+        + taskRowsForAccount(r)
         + "</div>"
         + "</article>";
     }

@@ -160,7 +160,12 @@ strategy_note.acc02 = TP 9% / 清仓100% / 浮亏砍仓ON
             self.assertEqual(notes.get("acc01"), "TP 9% / 减仓50% / 浮亏砍仓ON")
             self.assertEqual(notes.get("acc02"), "TP 9% / 清仓100% / 浮亏砍仓ON")
             task_keys = set((rows[0].get("tasks") or {}).keys())
-            self.assertEqual(task_keys, {"entry", "daily_loss_cut", "noon_protection", "manage"})
+            self.assertEqual(
+                task_keys,
+                {"entry", "daily_loss_cut", "noon_protection", "manage", "equity_recovery_take_profit"},
+            )
+            modes = {row["account_id"]: row.get("mode") for row in rows}
+            self.assertEqual(modes.get("55"), "loss_cut_only")
 
             snap = client.get("/api/account/acc01/snapshot")
             self.assertEqual(snap.status_code, 200)

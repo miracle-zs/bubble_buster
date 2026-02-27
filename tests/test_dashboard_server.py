@@ -189,6 +189,7 @@ class DashboardServerTest(unittest.TestCase):
                         "2026-02-27 11:55:01,180 - INFO - core.runtime_service - service daily loss-cut result: {'acc01': {'total': 16, 'closed_loss_cut': 5, 'errors': 0}, 'acc02': {'total': 10, 'closed_loss_cut': 4, 'errors': 1}}",
                         "2026-02-27 12:00:08,090 - INFO - core.runtime_service - service noon protection result: {'acc01': {'total': 11, 'updated_sl': 11, 'skipped': 0, 'errors': 0}, 'acc02': {'total': 6, 'updated_sl': 1, 'skipped': 0, 'errors': 5}}",
                         "2026-02-27 12:01:08,090 - INFO - core.runtime_service - service manage summary: {'acc01': {'account_id': 'acc01', 'summary': {'total': 3, 'closed_tp': 0, 'closed_sl': 0, 'closed_timeout': 0, 'closed_external': 0, 'updated_sl': 0, 'errors': 0}}, 'acc02': {'account_id': 'acc02', 'error': 'cooling-off'}}",
+                        "2026-02-27 12:02:08,090 - INFO - core.runtime_service - service equity recovery take-profit account=acc01 result: {'status': 'TRIGGERED', 'adjusted': 4, 'errors': 0, 'reduced_notional': 320.5}",
                     ]
                 )
                 + "\n"
@@ -210,6 +211,7 @@ class DashboardServerTest(unittest.TestCase):
         self.assertEqual(rows["acc02"]["tasks"]["daily_loss_cut"]["status"], "PARTIAL")
         self.assertEqual(rows["acc02"]["tasks"]["noon_protection"]["status"], "PARTIAL")
         self.assertEqual(rows["acc02"]["tasks"]["manage"]["status"], "FAILED")
+        self.assertEqual(rows["acc01"]["tasks"]["equity_recovery_take_profit"]["status"], "SUCCESS")
         self.assertEqual(rows["acc03"]["tasks"]["entry"]["status"], "UNKNOWN")
 
     def test_account_snapshot_filters_by_account_id(self) -> None:

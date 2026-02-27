@@ -112,10 +112,26 @@ def create_dashboard_context(config_path: str) -> DashboardRuntimeContext:
     enabled_accounts_raw = account_cfg.get("enabled", fallback="") if account_cfg else ""
     enabled_accounts = [x.strip() for x in enabled_accounts_raw.split(",") if x.strip()]
     overview_account_ids = list(enabled_accounts)
+    account_modes = {
+        aid: account_cfg.get(f"mode.{aid}", fallback="full", raw=True).strip().lower() or "full"
+        for aid in overview_account_ids
+    }
     account_strategy_notes = {
         aid: account_cfg.get(f"strategy_note.{aid}", fallback="", raw=True).strip()
         for aid in overview_account_ids
     }
+    global_equity_recovery_enabled = str(
+        cfg.get("strategy", "equity_recovery_take_profit_enabled", fallback="false")
+    ).strip().lower() in {"1", "true", "yes", "on"}
+    account_equity_recovery_enabled = {}
+    for aid in overview_account_ids:
+        section_name = f"account.{aid}.strategy"
+        if cfg.has_option(section_name, "equity_recovery_take_profit_enabled"):
+            raw = cfg.get(section_name, "equity_recovery_take_profit_enabled", fallback="false")
+            enabled = str(raw).strip().lower() in {"1", "true", "yes", "on"}
+        else:
+            enabled = global_equity_recovery_enabled
+        account_equity_recovery_enabled[aid] = enabled
 
     balance_fetcher = None
     close_price_fetcher = None
@@ -237,6 +253,8 @@ def create_dashboard_context(config_path: str) -> DashboardRuntimeContext:
         balance_cache_ttl_sec=balance_refresh_sec,
         default_curve_points=curve_points,
         account_strategy_notes=account_strategy_notes,
+        account_modes=account_modes,
+        account_equity_recovery_enabled=account_equity_recovery_enabled,
         overview_account_ids=overview_account_ids,
         live_wallet_account_id=default_account_id,
     )
