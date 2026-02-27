@@ -111,11 +111,7 @@ def create_dashboard_context(config_path: str) -> DashboardRuntimeContext:
     default_account_id = runtime_cfg.get("default_account_id", "default").strip() or "default"
     enabled_accounts_raw = account_cfg.get("enabled", fallback="") if account_cfg else ""
     enabled_accounts = [x.strip() for x in enabled_accounts_raw.split(",") if x.strip()]
-    overview_account_ids = [
-        aid
-        for aid in enabled_accounts
-        if account_cfg.get(f"mode.{aid}", fallback="full", raw=True).strip() != "loss_cut_only"
-    ]
+    overview_account_ids = list(enabled_accounts)
     account_strategy_notes = {
         aid: account_cfg.get(f"strategy_note.{aid}", fallback="", raw=True).strip()
         for aid in overview_account_ids

@@ -651,6 +651,8 @@ class DashboardServerTest(unittest.TestCase):
 
     def test_render_overview_uses_readable_task_layout(self) -> None:
         html = render_accounts_overview_html(refresh_sec=5)
+        self.assertIn('id="task-board"', html)
+        self.assertIn("renderTaskBoard", html)
         self.assertIn(".task-table", html)
         self.assertIn(".task-row", html)
         self.assertIn(".task-col-summary", html)

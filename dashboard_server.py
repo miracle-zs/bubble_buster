@@ -2972,6 +2972,7 @@ ACCOUNTS_OVERVIEW_HTML = """<!doctype html>
     .wrap { max-width: 1200px; margin: 0 auto; padding: 24px; }
     .title { font-size: 24px; font-weight: 700; margin: 0 0 6px; }
     .sub { color: var(--muted); margin: 0 0 18px; }
+    .section-title { margin: 22px 0 10px; color:#c7dff0; font-size:16px; font-weight:700; letter-spacing:0.02em; }
     .grid { display: grid; grid-template-columns: repeat(auto-fit,minmax(240px,1fr)); gap: 12px; }
     .card { background: var(--panel); border:1px solid var(--line); border-radius:12px; padding:14px; box-shadow:0 8px 20px rgba(0,0,0,0.25); }
     .row { display:flex; align-items:center; justify-content:space-between; margin-top: 8px; }
@@ -2993,8 +2994,12 @@ ACCOUNTS_OVERVIEW_HTML = """<!doctype html>
     .spark-empty { display:flex; align-items:center; justify-content:center; height:100%; color:var(--muted); font-size:12px; }
     .spark-up { color: var(--ok); }
     .spark-down { color: var(--bad); }
-    .task-block { margin-top: 12px; padding-top: 12px; border-top:1px dashed #1e3e52; }
-    .task-title { color:var(--muted); font-size:12px; margin-bottom:8px; }
+    .task-panel { margin-top: 18px; }
+    .task-board-grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(320px,1fr)); gap:12px; }
+    .task-account-card { background: var(--panel); border:1px solid var(--line); border-radius:12px; padding:12px; box-shadow:0 8px 20px rgba(0,0,0,0.22); }
+    .task-account-head { display:flex; align-items:center; justify-content:space-between; margin-bottom:8px; }
+    .task-account-id { color: var(--accent); font-size:16px; font-weight:700; }
+    .task-last-run { font-size:12px; }
     .task-table { border:1px solid #1f3f53; border-radius:8px; overflow:hidden; background:linear-gradient(180deg,rgba(8,24,35,0.72) 0%, rgba(6,17,26,0.88) 100%); }
     .task-head, .task-row { display:grid; grid-template-columns: 1.05fr 0.9fr 0.7fr 1.35fr; align-items:center; column-gap:6px; }
     .task-head { background:rgba(14,33,47,0.7); border-bottom:1px solid #21465c; padding:7px 8px; }
@@ -3010,6 +3015,7 @@ ACCOUNTS_OVERVIEW_HTML = """<!doctype html>
     .task-badge.status-warn { border-color:#8a6521; background:rgba(255,179,64,0.15); }
     .task-badge.status-bad { border-color:#8d3535; background:rgba(255,93,93,0.15); }
     @media (max-width: 640px) {
+      .task-board-grid { grid-template-columns:1fr; }
       .task-head, .task-row { grid-template-columns: 1fr 0.95fr 0.75fr 1.4fr; }
       .task-name { font-size:12px; }
       .task-col-summary { font-size:10px; }
@@ -3024,6 +3030,10 @@ ACCOUNTS_OVERVIEW_HTML = """<!doctype html>
     <h1 class="title">Bubble Buster 账户总览</h1>
     <p class="sub">自动刷新：<span id="refresh">__REFRESH_SEC__</span>s</p>
     <section id="cards" class="grid"></section>
+    <section class="task-panel">
+      <h2 class="section-title">定时任务执行总览</h2>
+      <div id="task-board" class="task-board-grid"></div>
+    </section>
   </main>
 <script>
 (function () {
@@ -3032,6 +3042,7 @@ ACCOUNTS_OVERVIEW_HTML = """<!doctype html>
   if (!pathPrefix) pathPrefix = "";
   var summaryApi = pathPrefix + "/api/accounts/summary";
   var cards = document.getElementById("cards");
+  var taskBoard = document.getElementById("task-board");
   var curveCache = {};
   var curveInFlight = {};
   var curveObserver = null;
@@ -3297,7 +3308,6 @@ ACCOUNTS_OVERVIEW_HTML = """<!doctype html>
       var base = pathPrefix + "/account/" + encodeURIComponent(aid) + "/";
       var st = r.last_run_status || "--";
       var note = String(r.strategy_note || "");
-      var tasks = r.tasks || {};
       html += '<article class="card">'
         + '<div class="aid">' + safeAid + '</div>'
         + '<div class="row"><span class="label">余额(USDT)</span><span class="val">' + fmt(r.wallet_balance_usdt, 4) + '</span></div>'
@@ -3308,8 +3318,28 @@ ACCOUNTS_OVERVIEW_HTML = """<!doctype html>
         + '<div class="spark-title"><span class="label">1D 策略权益曲线</span><span class="val spark-delta" data-account-id="' + safeAid + '">--</span></div>'
         + '<div class="spark-box" data-account-id="' + safeAid + '"><div class="spark-empty">加载中...</div></div>'
         + "</div>"
-        + '<div class="task-block">'
-        + '<div class="task-title">定时任务执行</div>'
+        + '<div class="actions"><a class="btn" href="' + base + '">详情</a></div>'
+        + "</article>";
+    }
+    cards.innerHTML = html || '<article class="card">暂无账户数据</article>';
+    primeCurveLoad();
+  }
+
+  function renderTaskBoard() {
+    var rows = summaryRows || [];
+    if (!taskBoard) return;
+    var html = "";
+    for (var i = 0; i < rows.length; i += 1) {
+      var r = rows[i] || {};
+      var aid = String(r.account_id || "");
+      var safeAid = escapeHtml(aid);
+      var st = r.last_run_status || "--";
+      var tasks = r.tasks || {};
+      html += '<article class="task-account-card">'
+        + '<div class="task-account-head">'
+        + '<span class="task-account-id">' + safeAid + "</span>"
+        + '<span class="task-last-run ' + statusCls(st) + '">' + escapeHtml(st) + "</span>"
+        + "</div>"
         + '<div class="task-table">'
         + '<div class="task-head">'
         + '<span class="task-col-h">任务</span>'
@@ -3322,12 +3352,9 @@ ACCOUNTS_OVERVIEW_HTML = """<!doctype html>
         + taskRowHtml("noon_protection", "中午保护", tasks.noon_protection)
         + taskRowHtml("manage", "巡检(manage)", tasks.manage)
         + "</div>"
-        + "</div>"
-        + '<div class="actions"><a class="btn" href="' + base + '">详情</a></div>'
         + "</article>";
     }
-    cards.innerHTML = html || '<article class="card">暂无账户数据</article>';
-    primeCurveLoad();
+    taskBoard.innerHTML = html || '<article class="task-account-card">暂无任务数据</article>';
   }
 
   function fetchSummary() {
@@ -3340,6 +3367,7 @@ ACCOUNTS_OVERVIEW_HTML = """<!doctype html>
       try { payload = JSON.parse(xhr.responseText || "{}"); } catch (e) { return; }
       summaryRows = payload.accounts || [];
       renderCards();
+      renderTaskBoard();
     };
     xhr.send();
   }

@@ -155,7 +155,7 @@ strategy_note.acc02 = TP 9% / 清仓100% / 浮亏砍仓ON
             ids = [row["account_id"] for row in rows]
             self.assertIn("acc01", ids)
             self.assertIn("acc02", ids)
-            self.assertNotIn("55", ids)
+            self.assertIn("55", ids)
             notes = {row["account_id"]: row.get("strategy_note") for row in rows}
             self.assertEqual(notes.get("acc01"), "TP 9% / 减仓50% / 浮亏砍仓ON")
             self.assertEqual(notes.get("acc02"), "TP 9% / 清仓100% / 浮亏砍仓ON")
