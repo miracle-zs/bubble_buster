@@ -253,6 +253,9 @@ class StrategyEquityRecoveryTest(unittest.TestCase):
         store.list_open_positions.return_value = [{"id": 1, "symbol": "AUSDT", "entry_price": 10.0}]
 
         strategy = self._build_strategy(client, store)
+        client.get_position_risk.return_value = [
+            {"symbol": "AUSDT", "positionAmt": "-10", "markPrice": "10", "entryPrice": "10"},
+        ]
         strategy._refresh_exit_orders_for_positions = MagicMock()
 
         result = strategy.run_equity_recovery_take_profit()
@@ -297,6 +300,42 @@ class StrategyEquityRecoveryTest(unittest.TestCase):
         self.assertEqual(result["status"], "TRIGGERED")
         strategy._load_short_position.assert_not_called()
         self.assertEqual(client.get_position_risk.call_count, 1)
+
+    def test_equity_recovery_uses_position_qty_path_instead_of_notional_conversion(self) -> None:
+        client = MagicMock()
+        client.normalize_order_qty.side_effect = RuntimeError("should not be called")
+        client.format_order_qty.side_effect = lambda _s, qty: f"{qty:.3f}"
+        client.create_order.side_effect = self._mock_order_factory()
+        client.get_position_risk.return_value = [
+            {"symbol": "AUSDT", "positionAmt": "-10", "markPrice": "10", "entryPrice": "10"},
+        ]
+        client.get_symbol_rules.return_value = {"AUSDT": types.SimpleNamespace(min_qty=0.001, min_notional=5.0)}
+
+        store = MagicMock()
+        store.get_latest_wallet_snapshot.return_value = {
+            "captured_at_utc": "2026-02-23T07:40:00+00:00",
+            "balance_usdt": 1000.0,
+        }
+        store.get_wallet_snapshot_min_since.return_value = {
+            "captured_at_utc": "2026-02-23T01:00:00+00:00",
+            "balance_usdt": 900.0,
+        }
+        store.get_lock_state.return_value = None
+        store.list_open_positions.return_value = [{"id": 1, "symbol": "AUSDT", "entry_price": 10.0}]
+
+        strategy = self._build_strategy(client, store)
+        client.get_position_risk.return_value = [
+            {"symbol": "AUSDT", "positionAmt": "-10", "markPrice": "10", "entryPrice": "10"},
+        ]
+        strategy._refresh_exit_orders_for_positions = MagicMock()
+
+        result = strategy.run_equity_recovery_take_profit()
+
+        self.assertEqual(result["status"], "TRIGGERED")
+        self.assertEqual(client.create_order.call_count, 1)
+        client.normalize_order_qty.assert_not_called()
+        call_kwargs = client.create_order.call_args.kwargs
+        self.assertEqual(call_kwargs["quantity"], "5.000")
 
 
 if __name__ == "__main__":

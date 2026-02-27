@@ -629,6 +629,11 @@ class Top10ShortStrategy:
             for row in risk_rows
             if str(row.get("symbol") or "").strip()
         }
+        symbol_rules: Dict[str, Any] = {}
+        try:
+            symbol_rules = self.client.get_symbol_rules()
+        except Exception as exc:  # noqa: BLE001
+            LOGGER.warning("Failed to fetch symbol rules in equity recovery stage: %s", exc)
         for pos in open_positions:
             position_id = int(pos["id"])
             symbol = str(pos["symbol"])
@@ -650,17 +655,29 @@ class Top10ShortStrategy:
                     continue
 
                 reduce_target_qty = position_amt * self.equity_recovery_reduce_ratio
-                reduce_notional = reduce_target_qty * mark_price
-                reduce_qty = self.client.normalize_order_qty(symbol, reduce_notional, mark_price)
+                reduce_qty_text = self.client.format_order_qty(symbol, reduce_target_qty)
+                reduce_qty = self._safe_float(reduce_qty_text, default=0.0)
                 if reduce_qty <= 0:
                     detail_rows.append({"symbol": symbol, "position_id": position_id, "status": "SKIPPED_QTY_ZERO"})
+                    continue
+                rules = symbol_rules.get(symbol)
+                min_qty = self._safe_float(getattr(rules, "min_qty", 0.0), default=0.0)
+                if min_qty > 0 and reduce_qty + 1e-12 < min_qty:
+                    detail_rows.append({"symbol": symbol, "position_id": position_id, "status": "SKIPPED_BELOW_MIN_QTY"})
+                    continue
+                min_notional = self._safe_float(getattr(rules, "min_notional", 0.0), default=0.0)
+                reduce_notional = reduce_qty * mark_price
+                if min_notional > 0 and reduce_notional + 1e-12 < min_notional:
+                    detail_rows.append(
+                        {"symbol": symbol, "position_id": position_id, "status": "SKIPPED_BELOW_MIN_NOTIONAL"}
+                    )
                     continue
 
                 order = self.client.create_order(
                     symbol=symbol,
                     side="BUY",
                     type="MARKET",
-                    quantity=self.client.format_order_qty(symbol, reduce_qty),
+                    quantity=reduce_qty_text,
                     reduceOnly=True,
                     newClientOrderId=self._new_client_id("ptp", symbol),
                     newOrderRespType="RESULT",
