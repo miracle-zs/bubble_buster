@@ -651,10 +651,10 @@ class DashboardServerTest(unittest.TestCase):
 
     def test_render_overview_uses_readable_task_layout(self) -> None:
         html = render_accounts_overview_html(refresh_sec=5)
-        self.assertIn(".task-grid", html)
-        self.assertIn(".task-card", html)
-        self.assertIn(".task-summary", html)
-        self.assertIn("renderTaskSummary", html)
+        self.assertIn(".task-table", html)
+        self.assertIn(".task-row", html)
+        self.assertIn(".task-col-summary", html)
+        self.assertIn("compactTaskSummary", html)
 
     def test_safe_query_int_handles_invalid_values(self) -> None:
         self.assertEqual(_safe_query_int("abc", default=80, min_value=0, max_value=300), 80)

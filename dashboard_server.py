@@ -2995,22 +2995,24 @@ ACCOUNTS_OVERVIEW_HTML = """<!doctype html>
     .spark-down { color: var(--bad); }
     .task-block { margin-top: 12px; padding-top: 12px; border-top:1px dashed #1e3e52; }
     .task-title { color:var(--muted); font-size:12px; margin-bottom:8px; }
-    .task-grid { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:8px; }
-    .task-card { border:1px solid #1f3f53; border-radius:8px; background:linear-gradient(180deg,rgba(8,24,35,0.72) 0%, rgba(6,17,26,0.88) 100%); padding:8px; min-height:74px; }
-    .task-top { display:flex; align-items:center; justify-content:space-between; gap:8px; }
-    .task-name { color:#c6def0; font-size:12px; font-weight:600; white-space:nowrap; }
-    .task-meta { display:flex; align-items:center; gap:6px; }
+    .task-table { border:1px solid #1f3f53; border-radius:8px; overflow:hidden; background:linear-gradient(180deg,rgba(8,24,35,0.72) 0%, rgba(6,17,26,0.88) 100%); }
+    .task-head, .task-row { display:grid; grid-template-columns: 1.05fr 0.9fr 0.7fr 1.35fr; align-items:center; column-gap:6px; }
+    .task-head { background:rgba(14,33,47,0.7); border-bottom:1px solid #21465c; padding:7px 8px; }
+    .task-row { padding:8px; border-bottom:1px solid rgba(35,71,92,0.55); }
+    .task-row:last-child { border-bottom:none; }
+    .task-col-h { color:#84a8bd; font-size:10px; letter-spacing:0.02em; text-transform:uppercase; }
+    .task-name { color:#d9ebf8; font-size:13px; font-weight:600; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+    .task-meta { display:flex; align-items:center; justify-content:flex-start; }
     .task-badge { border:1px solid #2e5065; border-radius:6px; padding:1px 6px; font-size:11px; font-weight:700; line-height:1.3; }
     .task-time { color:var(--muted); font-size:11px; font-family: ui-monospace, Menlo, Monaco, Consolas, monospace; }
-    .task-summary { margin-top:6px; display:flex; flex-wrap:wrap; gap:5px; align-items:center; }
-    .task-chip { border:1px solid #2a4f66; border-radius:999px; padding:1px 6px; font-size:10px; color:#b8d2e6; background:rgba(21,45,61,0.45); }
-    .task-chip-key { color:#8fb8d1; margin-right:3px; }
-    .task-summary-text { color:#b8cddd; font-size:11px; line-height:1.35; white-space:normal; word-break:break-word; }
+    .task-col-summary { color:#b8d2e6; font-size:11px; white-space:normal; line-height:1.35; text-align:left; }
     .task-badge.status-ok { border-color:#1f7148; background:rgba(38,208,124,0.15); }
     .task-badge.status-warn { border-color:#8a6521; background:rgba(255,179,64,0.15); }
     .task-badge.status-bad { border-color:#8d3535; background:rgba(255,93,93,0.15); }
     @media (max-width: 640px) {
-      .task-grid { grid-template-columns:1fr; }
+      .task-head, .task-row { grid-template-columns: 1fr 0.95fr 0.75fr 1.4fr; }
+      .task-name { font-size:12px; }
+      .task-col-summary { font-size:10px; }
     }
     .actions { display:flex; gap:8px; margin-top: 12px; }
     .btn { text-decoration:none; color:#081018; background:var(--accent); border-radius:8px; padding:6px 10px; font-size:12px; font-weight:700; }
@@ -3069,14 +3071,11 @@ ACCOUNTS_OVERVIEW_HTML = """<!doctype html>
     return "status-bad";
   }
 
-  function renderTaskSummary(summary) {
+  function parseSummaryPairs(summary) {
     var raw = String(summary || "--").trim();
-    if (!raw || raw === "--") {
-      return '<span class="task-summary-text">--</span>';
-    }
+    var pairs = {};
+    if (!raw || raw === "--") return pairs;
     var parts = raw.split(/\\s+/);
-    var chips = [];
-    var leftovers = [];
     for (var i = 0; i < parts.length; i += 1) {
       var part = String(parts[i] || "");
       if (!part) continue;
@@ -3084,43 +3083,60 @@ ACCOUNTS_OVERVIEW_HTML = """<!doctype html>
       if (eq > 0 && eq < part.length - 1) {
         var key = part.slice(0, eq);
         var val = part.slice(eq + 1);
-        chips.push(
-          '<span class="task-chip"><span class="task-chip-key">'
-          + escapeHtml(key)
-          + "</span>"
-          + escapeHtml(val)
-          + "</span>"
-        );
-      } else {
-        leftovers.push(part);
+        pairs[key] = val;
       }
     }
-    if (!chips.length) {
-      return '<span class="task-summary-text">' + escapeHtml(raw) + "</span>";
-    }
-    if (leftovers.length) {
-      chips.push('<span class="task-summary-text">' + escapeHtml(leftovers.join(" ")) + "</span>");
-    }
-    return chips.join("");
+    return pairs;
   }
 
-  function taskRowHtml(name, task) {
+  function compactTaskSummary(taskKey, summary) {
+    var raw = String(summary || "--").trim();
+    if (!raw || raw === "--") return "--";
+    var pairs = parseSummaryPairs(raw);
+
+    function pick(keys) {
+      var out = [];
+      for (var i = 0; i < keys.length; i += 1) {
+        var key = keys[i];
+        if (Object.prototype.hasOwnProperty.call(pairs, key)) {
+          out.push(key + ":" + pairs[key]);
+        }
+      }
+      return out;
+    }
+
+    var selected = [];
+    if (taskKey === "entry") {
+      selected = pick(["opened", "failed", "skipped"]);
+    } else if (taskKey === "daily_loss_cut") {
+      selected = pick(["total", "closed", "errors"]);
+    } else if (taskKey === "noon_protection") {
+      selected = pick(["total", "updated", "skipped", "errors"]);
+    } else if (taskKey === "manage") {
+      selected = pick(["total", "updated", "errors"]);
+      if (!selected.length) {
+        selected = pick(["reason", "error"]);
+      }
+    }
+    if (selected.length) return selected.join("  ");
+    return raw;
+  }
+
+  function taskRowHtml(taskKey, name, task) {
     var t = task || {};
     var status = String(t.status || "UNKNOWN");
     var statusText = taskStatusText(status);
     var cls = taskStatusCls(status);
     var timeRaw = String(t.time_local || "");
     var timeText = timeRaw ? timeRaw.slice(11, 19) : "--";
-    var detailRaw = String(t.summary || "--");
-    return '<div class="task-card">'
-      + '<div class="task-top">'
+    var compact = compactTaskSummary(taskKey, String(t.summary || "--"));
+    return '<div class="task-row">'
       + '<span class="task-name">' + escapeHtml(name) + '</span>'
       + '<span class="task-meta">'
       + '<span class="task-badge ' + cls + '">' + escapeHtml(statusText) + '</span>'
-      + '<span class="task-time">' + escapeHtml(timeText) + '</span>'
       + "</span>"
-      + "</div>"
-      + '<div class="task-summary">' + renderTaskSummary(detailRaw) + "</div>"
+      + '<span class="task-time">' + escapeHtml(timeText) + '</span>'
+      + '<span class="task-col-summary">' + escapeHtml(compact) + "</span>"
       + "</div>";
   }
 
@@ -3294,11 +3310,17 @@ ACCOUNTS_OVERVIEW_HTML = """<!doctype html>
         + "</div>"
         + '<div class="task-block">'
         + '<div class="task-title">定时任务执行</div>'
-        + '<div class="task-grid">'
-        + taskRowHtml("开仓(entry)", tasks.entry)
-        + taskRowHtml("浮亏砍仓", tasks.daily_loss_cut)
-        + taskRowHtml("中午保护", tasks.noon_protection)
-        + taskRowHtml("巡检(manage)", tasks.manage)
+        + '<div class="task-table">'
+        + '<div class="task-head">'
+        + '<span class="task-col-h">任务</span>'
+        + '<span class="task-col-h">状态</span>'
+        + '<span class="task-col-h">时间</span>'
+        + '<span class="task-col-h">结果</span>'
+        + "</div>"
+        + taskRowHtml("entry", "开仓(entry)", tasks.entry)
+        + taskRowHtml("daily_loss_cut", "浮亏砍仓", tasks.daily_loss_cut)
+        + taskRowHtml("noon_protection", "中午保护", tasks.noon_protection)
+        + taskRowHtml("manage", "巡检(manage)", tasks.manage)
         + "</div>"
         + "</div>"
         + '<div class="actions"><a class="btn" href="' + base + '">详情</a></div>'
