@@ -214,6 +214,40 @@ class DashboardServerTest(unittest.TestCase):
         self.assertEqual(rows["acc01"]["tasks"]["equity_recovery_take_profit"]["status"], "SUCCESS")
         self.assertEqual(rows["acc03"]["tasks"]["entry"]["status"], "UNKNOWN")
 
+    def test_accounts_summary_keeps_full_symbol_lists_for_task_details(self) -> None:
+        self.store.create_run("2026-02-13", account_id="acc01")
+        with open(self.log_file, "w", encoding="utf-8") as f:
+            f.write(
+                "\n".join(
+                    [
+                        "2026-02-27 07:40:15,865 - INFO - core.runtime_service - service entry result: {'acc01': {'status': 'PARTIAL', 'opened': 5, 'failed': 4, 'skipped': 1, 'entry_failed_symbols': ['OPNUSDT', 'METUSDT', 'BTCUSDT', 'ETHUSDT', 'SOLUSDT', 'DOGEUSDT'], 'skipped_symbols': ['XRPUSDT']}}",
+                        "2026-02-27 11:55:01,180 - INFO - core.runtime_service - service daily loss-cut result: {'acc01': {'total': 7, 'closed_loss_cut': 3, 'errors': 1, 'closed_symbols': ['BTCUSDT', 'ETHUSDT', 'SOLUSDT', 'DOGEUSDT'], 'failed_symbols': ['OPNUSDT']}}",
+                    ]
+                )
+                + "\n"
+            )
+
+        provider = DashboardDataProvider(
+            db_path=self.db_path,
+            log_file=self.log_file,
+            timezone_name="UTC",
+            entry_hour=7,
+            entry_minute=40,
+        )
+        payload = provider.accounts_summary()
+        rows = {row["account_id"]: row for row in payload["accounts"]}
+
+        self.assertIn(
+            "failed_symbols=OPNUSDT,METUSDT,BTCUSDT,ETHUSDT,SOLUSDT,DOGEUSDT",
+            rows["acc01"]["tasks"]["entry"]["summary"],
+        )
+        self.assertIn("skipped_symbols=XRPUSDT", rows["acc01"]["tasks"]["entry"]["summary"])
+        self.assertIn(
+            "closed_symbols=BTCUSDT,ETHUSDT,SOLUSDT,DOGEUSDT",
+            rows["acc01"]["tasks"]["daily_loss_cut"]["summary"],
+        )
+        self.assertIn("failed_symbols=OPNUSDT", rows["acc01"]["tasks"]["daily_loss_cut"]["summary"])
+
     def test_account_snapshot_filters_by_account_id(self) -> None:
         now = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
         run1, _ = self.store.create_run("2026-02-13", account_id="acc01")
@@ -654,11 +688,25 @@ class DashboardServerTest(unittest.TestCase):
     def test_render_overview_uses_readable_task_layout(self) -> None:
         html = render_accounts_overview_html(refresh_sec=5)
         self.assertIn('id="task-board"', html)
+        self.assertIn('id="task-updated-at"', html)
+        self.assertIn('id="task-filter-all"', html)
+        self.assertIn('id="task-filter-anomaly"', html)
+        self.assertIn('id="task-filter-symbols"', html)
         self.assertIn("renderTaskBoard", html)
+        self.assertIn("renderTaskBoardHeader", html)
+        self.assertIn("toggleTaskFilter", html)
+        self.assertIn("toggleSymbolDetail", html)
+        self.assertIn("formatTaskResultLines", html)
+        self.assertIn("sortTaskAccounts", html)
         self.assertIn(".task-table", html)
         self.assertIn(".task-row", html)
+        self.assertIn(".task-mode-badge", html)
+        self.assertIn(".task-result-lines", html)
+        self.assertIn(".task-symbol-toggle", html)
+        self.assertIn(".task-filter-chip", html)
         self.assertIn(".task-result", html)
-        self.assertIn("detailedTaskSummary", html)
+        self.assertIn("组合止盈监控", html)
+        self.assertIn("巡检内触发", html)
 
     def test_safe_query_int_handles_invalid_values(self) -> None:
         self.assertEqual(_safe_query_int("abc", default=80, min_value=0, max_value=300), 80)

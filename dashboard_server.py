@@ -154,7 +154,7 @@ class DashboardDataProvider:
         return "FAILED"
 
     @staticmethod
-    def _format_symbol_field(value: Any, limit: int = 8) -> str:
+    def _format_symbol_field(value: Any) -> str:
         if isinstance(value, str):
             symbols = [x.strip().upper() for x in value.split(",") if x.strip()]
         elif isinstance(value, list):
@@ -167,9 +167,7 @@ class DashboardDataProvider:
         for sym in symbols:
             if sym not in unique:
                 unique.append(sym)
-        shown = unique[:limit]
-        suffix = f"+{len(unique) - limit}" if len(unique) > limit else ""
-        return ",".join(shown) + suffix
+        return ",".join(unique)
 
     @staticmethod
     def _append_summary_part(parts: List[str], key: str, value: Any) -> None:
@@ -3101,32 +3099,59 @@ ACCOUNTS_OVERVIEW_HTML = """<!doctype html>
     .spark-empty { display:flex; align-items:center; justify-content:center; height:100%; color:var(--muted); font-size:12px; }
     .spark-up { color: var(--ok); }
     .spark-down { color: var(--bad); }
-    .task-panel { margin-top: 18px; }
+    .task-panel { margin-top: 22px; }
+    .task-panel-head { display:flex; align-items:flex-start; justify-content:space-between; gap:12px; margin-bottom:12px; }
+    .task-panel-meta { display:flex; flex-direction:column; align-items:flex-end; gap:8px; }
+    .task-updated { color:var(--muted); font-size:12px; }
+    .task-filter-bar { display:flex; flex-wrap:wrap; gap:8px; }
+    .task-filter-chip { appearance:none; border:1px solid #29536a; background:rgba(12,27,38,0.72); color:#b8d2e3; border-radius:999px; padding:5px 10px; font-size:12px; font-weight:600; cursor:pointer; transition:all 140ms ease; }
+    .task-filter-chip:hover { border-color:#4ea6d0; color:#eff8ff; }
+    .task-filter-chip.active { background:rgba(78,193,255,0.16); color:#ecf8ff; border-color:#4ec1ff; box-shadow:0 0 0 1px rgba(78,193,255,0.14) inset; }
     .task-board-list { display:block; }
-    .task-account-card { background: var(--panel); border:1px solid var(--line); border-radius:12px; padding:12px; box-shadow:0 8px 20px rgba(0,0,0,0.22); }
+    .task-account-card { background:linear-gradient(180deg,rgba(16,28,39,0.95) 0%, rgba(10,20,30,0.98) 100%); border:1px solid var(--line); border-radius:14px; padding:14px; box-shadow:0 12px 28px rgba(0,0,0,0.24); }
     .task-account-card + .task-account-card { margin-top:12px; }
-    .task-account-head { display:flex; align-items:center; justify-content:space-between; margin-bottom:8px; }
-    .task-account-id { color: var(--accent); font-size:16px; font-weight:700; }
+    .task-account-card.task-account-anomaly { border-color:#5e4032; box-shadow:0 14px 30px rgba(42,15,10,0.22); }
+    .task-account-head { display:flex; align-items:center; justify-content:space-between; gap:10px; margin-bottom:10px; }
+    .task-account-title { display:flex; align-items:center; flex-wrap:wrap; gap:8px; }
+    .task-account-id { color: var(--accent); font-size:17px; font-weight:700; }
+    .task-mode-badge, .task-feature-badge { display:inline-flex; align-items:center; border:1px solid #294e62; border-radius:999px; padding:2px 8px; font-size:11px; font-weight:700; letter-spacing:0.02em; color:#d7ecfa; background:rgba(20,41,54,0.8); }
+    .task-feature-badge { border-color:#5b6e29; color:#eff5cf; background:rgba(65,83,17,0.26); }
     .task-last-run { font-size:12px; }
-    .task-table { border:1px solid #1f3f53; border-radius:8px; overflow:hidden; background:linear-gradient(180deg,rgba(8,24,35,0.72) 0%, rgba(6,17,26,0.88) 100%); }
-    .task-head, .task-row-main { display:grid; grid-template-columns: 1.1fr 0.9fr 0.8fr 1.6fr; align-items:center; column-gap:8px; }
-    .task-head { background:rgba(14,33,47,0.7); border-bottom:1px solid #21465c; padding:7px 8px; }
-    .task-row { border-bottom:1px solid rgba(35,71,92,0.55); padding:8px; }
+    .task-table { border:1px solid #1f3f53; border-radius:10px; overflow:hidden; background:linear-gradient(180deg,rgba(8,24,35,0.72) 0%, rgba(6,17,26,0.92) 100%); }
+    .task-head, .task-row-main { display:grid; grid-template-columns: minmax(170px,1.1fr) 110px 96px minmax(260px,1.7fr); align-items:start; column-gap:10px; }
+    .task-head { background:rgba(14,33,47,0.8); border-bottom:1px solid #21465c; padding:8px 10px; }
+    .task-row { border-bottom:1px solid rgba(35,71,92,0.55); padding:9px 10px; }
     .task-row:last-child { border-bottom: none; }
-    .task-row-main { min-height: 24px; }
-    .task-col-h { color:#84a8bd; font-size:10px; letter-spacing:0.02em; text-transform:uppercase; }
-    .task-name { color:#d9ebf8; font-size:13px; font-weight:600; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
-    .task-result { color:#9fc0d5; font-size:11px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+    .task-row-main { min-height: 32px; }
+    .task-col-h { color:#84a8bd; font-size:10px; letter-spacing:0.08em; text-transform:uppercase; }
+    .task-name-wrap { display:flex; flex-direction:column; gap:3px; min-width:0; }
+    .task-name { color:#d9ebf8; font-size:13px; font-weight:700; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+    .task-task-tag { color:#8db0c4; font-size:11px; }
+    .task-result { min-width:0; }
+    .task-result-lines { display:flex; flex-direction:column; gap:4px; }
+    .task-stat-line, .task-symbol-line { color:#b6d0e0; font-size:11px; line-height:1.4; }
+    .task-stat-line { color:#d9ecf8; }
+    .task-symbol-line { color:#8fb4c9; display:flex; align-items:flex-start; gap:6px; }
+    .task-symbol-label { color:#7fa2b7; flex:0 0 auto; }
+    .task-symbol-text { min-width:0; word-break:break-word; }
+    .task-symbol-toggle { appearance:none; border:none; background:none; color:var(--accent); cursor:pointer; font-size:11px; font-weight:700; padding:0; }
     .task-meta { display:flex; align-items:center; justify-content:flex-start; }
-    .task-badge { border:1px solid #2e5065; border-radius:6px; padding:1px 6px; font-size:11px; font-weight:700; line-height:1.3; }
-    .task-time { color:var(--muted); font-size:11px; font-family: ui-monospace, Menlo, Monaco, Consolas, monospace; }
+    .task-badge { border:1px solid #2e5065; border-radius:999px; padding:3px 8px; font-size:11px; font-weight:800; line-height:1.2; min-width:72px; justify-content:center; display:inline-flex; }
+    .task-time { color:var(--muted); font-size:11px; font-family: ui-monospace, Menlo, Monaco, Consolas, monospace; padding-top:4px; }
     .task-badge.status-ok { border-color:#1f7148; background:rgba(38,208,124,0.15); }
     .task-badge.status-warn { border-color:#8a6521; background:rgba(255,179,64,0.15); }
     .task-badge.status-bad { border-color:#8d3535; background:rgba(255,93,93,0.15); }
+    @media (max-width: 900px) {
+      .task-panel-head { flex-direction:column; align-items:flex-start; }
+      .task-panel-meta { align-items:flex-start; }
+      .task-head, .task-row-main { grid-template-columns: minmax(120px,1fr) 92px 84px minmax(180px,1.35fr); }
+    }
     @media (max-width: 640px) {
-      .task-head, .task-row-main { grid-template-columns: 1fr 0.95fr 0.95fr 1.3fr; }
-      .task-name { font-size:12px; }
-      .task-result { font-size:10px; }
+      .task-account-head { flex-direction:column; align-items:flex-start; }
+      .task-head { display:none; }
+      .task-row-main { grid-template-columns: 1fr; row-gap:6px; }
+      .task-meta, .task-time { padding-top:0; }
+      .task-result { border-top:1px dashed rgba(39,75,96,0.7); padding-top:6px; }
     }
     .actions { display:flex; gap:8px; margin-top: 12px; }
     .btn { text-decoration:none; color:#081018; background:var(--accent); border-radius:8px; padding:6px 10px; font-size:12px; font-weight:700; }
@@ -3139,7 +3164,19 @@ ACCOUNTS_OVERVIEW_HTML = """<!doctype html>
     <p class="sub">自动刷新：<span id="refresh">__REFRESH_SEC__</span>s</p>
     <section id="cards" class="grid"></section>
     <section class="task-panel">
-      <h2 class="section-title">定时任务执行总览</h2>
+      <div class="task-panel-head">
+        <div>
+          <h2 class="section-title">定时任务执行总览</h2>
+        </div>
+        <div class="task-panel-meta">
+          <div id="task-updated-at" class="task-updated">数据更新时间 --</div>
+          <div class="task-filter-bar">
+            <button id="task-filter-all" class="task-filter-chip active" type="button">全部</button>
+            <button id="task-filter-anomaly" class="task-filter-chip" type="button">仅异常</button>
+            <button id="task-filter-symbols" class="task-filter-chip" type="button">仅有symbol明细</button>
+          </div>
+        </div>
+      </div>
       <div id="task-board" class="task-board-list"></div>
     </section>
   </main>
@@ -3151,10 +3188,13 @@ ACCOUNTS_OVERVIEW_HTML = """<!doctype html>
   var summaryApi = pathPrefix + "/api/accounts/summary";
   var cards = document.getElementById("cards");
   var taskBoard = document.getElementById("task-board");
+  var taskUpdatedAt = document.getElementById("task-updated-at");
   var curveCache = {};
   var curveInFlight = {};
   var curveObserver = null;
   var summaryRows = [];
+  var taskFilter = "all";
+  var expandedTaskSymbols = {};
   var curveTtlMs = Math.max(30000, Math.max(2, refreshSec) * 3000);
 
   function escapeHtml(text) {
@@ -3190,6 +3230,16 @@ ACCOUNTS_OVERVIEW_HTML = """<!doctype html>
     return "status-bad";
   }
 
+  function taskSeverity(status) {
+    var s = String(status || "UNKNOWN").toUpperCase();
+    if (s === "FAILED") return 0;
+    if (s === "PARTIAL") return 1;
+    if (s === "UNKNOWN") return 2;
+    if (s === "RUNNING") return 3;
+    if (s === "SKIPPED") return 4;
+    return 5;
+  }
+
   function parseSummaryPairs(summary) {
     var raw = String(summary || "--").trim();
     var pairs = {};
@@ -3208,34 +3258,208 @@ ACCOUNTS_OVERVIEW_HTML = """<!doctype html>
     return pairs;
   }
 
-  function detailedTaskSummary(summary) {
-    var raw = String(summary || "--").trim();
-    if (!raw || raw === "--") return "--";
-    var pairs = parseSummaryPairs(raw);
-    var keys = Object.keys(pairs);
-    if (!keys.length) return raw;
-    var items = [];
-    for (var i = 0; i < keys.length; i += 1) {
-      var key = keys[i];
-      items.push(key + ":" + pairs[key]);
-    }
-    return items.join(" | ");
+  function taskTimeValue(task) {
+    var raw = String((task && task.time_local) || "");
+    return raw ? raw : "";
   }
 
-  function taskRowHtml(taskKey, name, task) {
+  function latestTaskTimeForAccount(row) {
+    var tasks = (row && row.tasks) || {};
+    var keys = Object.keys(tasks);
+    var best = "";
+    for (var i = 0; i < keys.length; i += 1) {
+      var val = taskTimeValue(tasks[keys[i]]);
+      if (val && (!best || val > best)) best = val;
+    }
+    return best;
+  }
+
+  function latestTaskTime(rows) {
+    var best = "";
+    for (var i = 0; i < rows.length; i += 1) {
+      var val = latestTaskTimeForAccount(rows[i]);
+      if (val && (!best || val > best)) best = val;
+    }
+    return best;
+  }
+
+  function hasAnomalyTask(row) {
+    var tasks = (row && row.tasks) || {};
+    var keys = Object.keys(tasks);
+    for (var i = 0; i < keys.length; i += 1) {
+      var status = String(((tasks[keys[i]] || {}).status) || "UNKNOWN").toUpperCase();
+      if (status === "FAILED" || status === "PARTIAL") return true;
+    }
+    return false;
+  }
+
+  function hasSymbolDetails(row) {
+    var tasks = (row && row.tasks) || {};
+    var keys = Object.keys(tasks);
+    for (var i = 0; i < keys.length; i += 1) {
+      var pairs = parseSummaryPairs((tasks[keys[i]] || {}).summary || "--");
+      var pairKeys = Object.keys(pairs);
+      for (var j = 0; j < pairKeys.length; j += 1) {
+        if (pairKeys[j].indexOf("_symbols") > 0) return true;
+      }
+    }
+    return false;
+  }
+
+  function sortTaskAccounts(rows) {
+    var cloned = (rows || []).slice();
+    cloned.sort(function (a, b) {
+      var aAnomaly = hasAnomalyTask(a) ? 0 : 1;
+      var bAnomaly = hasAnomalyTask(b) ? 0 : 1;
+      if (aAnomaly !== bAnomaly) return aAnomaly - bAnomaly;
+      var aTime = latestTaskTimeForAccount(a);
+      var bTime = latestTaskTimeForAccount(b);
+      if (aTime !== bTime) return aTime < bTime ? 1 : -1;
+      return String((a && a.account_id) || "").localeCompare(String((b && b.account_id) || ""));
+    });
+    return cloned;
+  }
+
+  function visibleTaskAccounts(rows) {
+    var sorted = sortTaskAccounts(rows || []);
+    if (taskFilter === "anomaly") {
+      return sorted.filter(hasAnomalyTask);
+    }
+    if (taskFilter === "symbols") {
+      return sorted.filter(hasSymbolDetails);
+    }
+    return sorted;
+  }
+
+  function taskMetaLabel(taskKey) {
+    if (taskKey === "equity_recovery_take_profit") return "巡检内触发";
+    if (taskKey === "manage") return "例行巡检";
+    return "";
+  }
+
+  function symbolList(rawValue) {
+    var raw = String(rawValue || "").trim();
+    if (!raw || raw === "-" || raw === "--") return [];
+    return raw.split(",").map(function (item) {
+      return String(item || "").trim();
+    }).filter(Boolean);
+  }
+
+  function collapseSymbolText(taskKey, labelKey, symbols) {
+    var items = symbols || [];
+    if (!items.length) return { text: "", hidden: 0 };
+    var stateKey = taskKey + ":" + labelKey;
+    var expanded = !!expandedTaskSymbols[stateKey];
+    var limit = 4;
+    if (expanded || items.length <= limit) {
+      return { text: items.join(", "), hidden: 0 };
+    }
+    return { text: items.slice(0, limit).join(", "), hidden: items.length - limit };
+  }
+
+  function toggleSymbolDetail(key) {
+    expandedTaskSymbols[key] = !expandedTaskSymbols[key];
+    renderTaskBoard();
+  }
+
+  function formatTaskResultLines(taskKey, task) {
+    var t = task || {};
+    var pairs = parseSummaryPairs(String(t.summary || "--"));
+    var statParts = [];
+    var symbolLines = [];
+    function addSymbols(label, key) {
+      var items = symbolList(pairs[key]);
+      if (!items.length) return;
+      symbolLines.push({ label: label, key: key, symbols: items });
+    }
+    if (taskKey === "entry") {
+      statParts.push("opened=" + (pairs.opened || "0"));
+      statParts.push("failed=" + (pairs.failed || "0"));
+      statParts.push("skipped=" + (pairs.skipped || "0"));
+      addSymbols("failed", "failed_symbols");
+      addSymbols("skipped", "skipped_symbols");
+    } else if (taskKey === "daily_loss_cut") {
+      statParts.push("total=" + (pairs.total || "0"));
+      statParts.push("closed=" + (pairs.closed || "0"));
+      statParts.push("errors=" + (pairs.errors || "0"));
+      addSymbols("closed", "closed_symbols");
+      addSymbols("failed", "failed_symbols");
+    } else if (taskKey === "noon_protection") {
+      statParts.push("total=" + (pairs.total || "0"));
+      statParts.push("updated=" + (pairs.updated || "0"));
+      statParts.push("skipped=" + (pairs.skipped || "0"));
+      statParts.push("errors=" + (pairs.errors || "0"));
+      addSymbols("failed", "failed_symbols");
+    } else if (taskKey === "manage") {
+      if (pairs.reason) statParts.push("reason=" + pairs.reason);
+      if (pairs.error) statParts.push("error=" + pairs.error);
+      if (pairs.total) statParts.push("total=" + pairs.total);
+      if (pairs.tp) statParts.push("tp=" + pairs.tp);
+      if (pairs.sl) statParts.push("sl=" + pairs.sl);
+      if (pairs.timeout) statParts.push("timeout=" + pairs.timeout);
+      if (pairs.updated) statParts.push("updated=" + pairs.updated);
+      if (pairs.errors) statParts.push("errors=" + pairs.errors);
+    } else if (taskKey === "equity_recovery_take_profit") {
+      statParts.push("adjusted=" + (pairs.adjusted || "0"));
+      statParts.push("errors=" + (pairs.errors || "0"));
+      if (pairs.reduced) statParts.push("reduced=" + pairs.reduced);
+    } else {
+      var keys = Object.keys(pairs);
+      for (var i = 0; i < keys.length; i += 1) {
+        statParts.push(keys[i] + "=" + pairs[keys[i]]);
+      }
+    }
+    var fullText = statParts.join(" | ");
+    for (var j = 0; j < symbolLines.length; j += 1) {
+      fullText += (fullText ? "\n" : "") + symbolLines[j].label + ": " + symbolLines[j].symbols.join(", ");
+    }
+    return {
+      statLine: statParts.join(" | ") || "--",
+      symbolLines: symbolLines,
+      tooltip: fullText || "--",
+    };
+  }
+
+  function taskResultHtml(accountId, taskKey, task) {
+    var formatted = formatTaskResultLines(taskKey, task);
+    var html = '<div class="task-result-lines" title="' + escapeHtml(formatted.tooltip) + '">'
+      + '<div class="task-stat-line">' + escapeHtml(formatted.statLine) + "</div>";
+    for (var i = 0; i < formatted.symbolLines.length; i += 1) {
+      var line = formatted.symbolLines[i];
+      var stateKey = accountId + ":" + taskKey + ":" + line.key;
+      var collapsed = collapseSymbolText(stateKey, line.key, line.symbols);
+      var full = line.symbols.join(", ");
+      var toggleArg = JSON.stringify(stateKey).replace(/</g, "\\u003c");
+      html += '<div class="task-symbol-line" title="' + escapeHtml(line.label + ": " + full) + '">'
+        + '<span class="task-symbol-label">' + escapeHtml(line.label + ":") + "</span>"
+        + '<span class="task-symbol-text">' + escapeHtml(collapsed.text) + "</span>";
+      if (collapsed.hidden > 0) {
+        html += '<button class="task-symbol-toggle" type="button" onclick=\'toggleSymbolDetail(' + toggleArg + ')\'>' + "+" + String(collapsed.hidden) + "</button>";
+      } else if (line.symbols.length > 4) {
+        html += '<button class="task-symbol-toggle" type="button" onclick=\'toggleSymbolDetail(' + toggleArg + ')\'>' + "收起" + "</button>";
+      }
+      html += "</div>";
+    }
+    html += "</div>";
+    return html;
+  }
+
+  function taskRowHtml(accountId, taskKey, name, task) {
     var t = task || {};
     var status = String(t.status || "UNKNOWN");
     var statusText = taskStatusText(status);
     var cls = taskStatusCls(status);
     var timeRaw = String(t.time_local || "");
     var timeText = timeRaw ? timeRaw.slice(11, 19) : "--";
-    var detail = detailedTaskSummary(String(t.summary || "--"));
+    var metaText = taskMetaLabel(taskKey);
     return '<div class="task-row">'
       + '<div class="task-row-main">'
-      + '<span class="task-name">' + escapeHtml(name) + "</span>"
+      + '<div class="task-name-wrap"><span class="task-name">' + escapeHtml(name) + '</span>'
+      + (metaText ? '<span class="task-task-tag">' + escapeHtml(metaText) + "</span>" : "")
+      + "</div>"
       + '<span class="task-meta"><span class="task-badge ' + cls + '">' + escapeHtml(statusText) + "</span></span>"
       + '<span class="task-time">' + escapeHtml(timeText) + "</span>"
-      + '<span class="task-result">' + escapeHtml(detail) + "</span>"
+      + '<span class="task-result">' + taskResultHtml(accountId, taskKey, t) + "</span>"
       + "</div>"
       + "</div>";
   }
@@ -3245,17 +3469,29 @@ ACCOUNTS_OVERVIEW_HTML = """<!doctype html>
     var tasks = (row && row.tasks) || {};
     var rows = [];
     if (mode === "full") {
-      rows.push(taskRowHtml("entry", "开仓(entry)", tasks.entry));
+      rows.push({ key: "entry", name: "开仓(entry)", task: tasks.entry });
     }
-    rows.push(taskRowHtml("daily_loss_cut", "浮亏砍仓", tasks.daily_loss_cut));
-    rows.push(taskRowHtml("noon_protection", "中午保护", tasks.noon_protection));
+    rows.push({ key: "daily_loss_cut", name: "浮亏砍仓", task: tasks.daily_loss_cut });
+    rows.push({ key: "noon_protection", name: "中午保护", task: tasks.noon_protection });
     if (mode === "full") {
-      rows.push(taskRowHtml("manage", "巡检(manage)", tasks.manage));
+      rows.push({ key: "manage", name: "巡检(manage)", task: tasks.manage });
       if (row && row.equity_recovery_take_profit_enabled) {
-        rows.push(taskRowHtml("equity_recovery_take_profit", "组合止盈", tasks.equity_recovery_take_profit));
+        rows.push({ key: "equity_recovery_take_profit", name: "组合止盈监控", task: tasks.equity_recovery_take_profit });
       }
     }
-    return rows.join("");
+    rows.sort(function (a, b) {
+      var severityDiff = taskSeverity((a.task || {}).status) - taskSeverity((b.task || {}).status);
+      if (severityDiff !== 0) return severityDiff;
+      var aTime = taskTimeValue(a.task);
+      var bTime = taskTimeValue(b.task);
+      if (aTime !== bTime) return aTime < bTime ? 1 : -1;
+      return 0;
+    });
+    var html = "";
+    for (var i = 0; i < rows.length; i += 1) {
+      html += taskRowHtml(String((row && row.account_id) || ""), rows[i].key, rows[i].name, rows[i].task);
+    }
+    return html;
   }
 
   function fmt(v, digits) {
@@ -3434,18 +3670,43 @@ ACCOUNTS_OVERVIEW_HTML = """<!doctype html>
     primeCurveLoad();
   }
 
+  function renderTaskBoardHeader(rows) {
+    if (!taskUpdatedAt) return;
+    var latest = latestTaskTime(rows || []);
+    taskUpdatedAt.textContent = "数据更新时间 " + (latest ? latest.slice(11, 19) : "--");
+    var filters = ["all", "anomaly", "symbols"];
+    for (var i = 0; i < filters.length; i += 1) {
+      var el = document.getElementById("task-filter-" + (filters[i] === "all" ? "all" : (filters[i] === "anomaly" ? "anomaly" : "symbols")));
+      if (!el) continue;
+      if (filters[i] === taskFilter) el.classList.add("active");
+      else el.classList.remove("active");
+    }
+  }
+
+  function toggleTaskFilter(nextFilter) {
+    taskFilter = nextFilter || "all";
+    renderTaskBoard();
+  }
+
   function renderTaskBoard() {
-    var rows = summaryRows || [];
+    var rows = visibleTaskAccounts(summaryRows || []);
     if (!taskBoard) return;
+    renderTaskBoardHeader(summaryRows || []);
     var html = "";
     for (var i = 0; i < rows.length; i += 1) {
       var r = rows[i] || {};
       var aid = String(r.account_id || "");
       var safeAid = escapeHtml(aid);
       var st = r.last_run_status || "--";
-      html += '<article class="task-account-card">'
+      var mode = String(r.mode || "full").toLowerCase();
+      var accountCls = hasAnomalyTask(r) ? "task-account-card task-account-anomaly" : "task-account-card";
+      html += '<article class="' + accountCls + '">'
         + '<div class="task-account-head">'
+        + '<div class="task-account-title">'
         + '<span class="task-account-id">' + safeAid + "</span>"
+        + '<span class="task-mode-badge">' + escapeHtml(mode) + "</span>"
+        + (r && r.equity_recovery_take_profit_enabled ? '<span class="task-feature-badge">组合止盈监控</span>' : "")
+        + "</div>"
         + '<span class="task-last-run ' + statusCls(st) + '">' + escapeHtml(st) + "</span>"
         + "</div>"
         + '<div class="task-table">'
@@ -3478,6 +3739,14 @@ ACCOUNTS_OVERVIEW_HTML = """<!doctype html>
   }
 
   fetchSummary();
+  window.toggleSymbolDetail = toggleSymbolDetail;
+  window.toggleTaskFilter = toggleTaskFilter;
+  var filterAll = document.getElementById("task-filter-all");
+  var filterAnomaly = document.getElementById("task-filter-anomaly");
+  var filterSymbols = document.getElementById("task-filter-symbols");
+  if (filterAll) filterAll.addEventListener("click", function () { toggleTaskFilter("all"); });
+  if (filterAnomaly) filterAnomaly.addEventListener("click", function () { toggleTaskFilter("anomaly"); });
+  if (filterSymbols) filterSymbols.addEventListener("click", function () { toggleTaskFilter("symbols"); });
   setInterval(fetchSummary, Math.max(2, refreshSec) * 1000);
 })();
 </script>
