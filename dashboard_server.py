@@ -3118,7 +3118,7 @@ ACCOUNTS_OVERVIEW_HTML = """<!doctype html>
     .task-feature-badge { border-color:#5b6e29; color:#eff5cf; background:rgba(65,83,17,0.26); }
     .task-last-run { font-size:12px; }
     .task-table { border:1px solid #1f3f53; border-radius:10px; overflow:hidden; background:linear-gradient(180deg,rgba(8,24,35,0.72) 0%, rgba(6,17,26,0.92) 100%); }
-    .task-head, .task-row-main { display:grid; grid-template-columns: minmax(170px,1.1fr) 110px 96px minmax(260px,1.7fr); align-items:start; column-gap:10px; }
+    .task-head, .task-row-main { display:grid; grid-template-columns: minmax(170px,1.1fr) 120px 180px minmax(260px,1.6fr); align-items:start; column-gap:10px; }
     .task-head { background:rgba(14,33,47,0.8); border-bottom:1px solid #21465c; padding:8px 10px; }
     .task-row { border-bottom:1px solid rgba(35,71,92,0.55); padding:9px 10px; }
     .task-row:last-child { border-bottom: none; }
@@ -3143,7 +3143,7 @@ ACCOUNTS_OVERVIEW_HTML = """<!doctype html>
     @media (max-width: 900px) {
       .task-panel-head { flex-direction:column; align-items:flex-start; }
       .task-panel-meta { align-items:flex-start; }
-      .task-head, .task-row-main { grid-template-columns: minmax(120px,1fr) 92px 84px minmax(180px,1.35fr); }
+      .task-head, .task-row-main { grid-template-columns: minmax(120px,1fr) 92px 160px minmax(180px,1.2fr); }
     }
     @media (max-width: 640px) {
       .task-account-head { flex-direction:column; align-items:flex-start; }

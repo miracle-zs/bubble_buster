@@ -708,6 +708,8 @@ class DashboardServerTest(unittest.TestCase):
         self.assertIn('fullText += (fullText ? "\\n" : "")', html)
         self.assertIn('taskUpdatedAt.textContent = "数据更新时间 " + (latest || "--")', html)
         self.assertIn('var timeText = timeRaw || "--";', html)
+        self.assertIn("grid-template-columns: minmax(170px,1.1fr) 120px 180px minmax(260px,1.6fr);", html)
+        self.assertIn("grid-template-columns: minmax(120px,1fr) 92px 160px minmax(180px,1.2fr);", html)
         self.assertNotIn("toggleSymbolDetail", html)
         self.assertNotIn(".task-symbol-toggle", html)
         self.assertNotIn('title="', html)
