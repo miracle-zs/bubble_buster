@@ -3411,7 +3411,7 @@ ACCOUNTS_OVERVIEW_HTML = """<!doctype html>
     }
     var fullText = statParts.join(" | ");
     for (var j = 0; j < symbolLines.length; j += 1) {
-      fullText += (fullText ? "\n" : "") + symbolLines[j].label + ": " + symbolLines[j].symbols.join(", ");
+      fullText += (fullText ? "\\n" : "") + symbolLines[j].label + ": " + symbolLines[j].symbols.join(", ");
     }
     return {
       statLine: statParts.join(" | ") || "--",
@@ -3434,9 +3434,9 @@ ACCOUNTS_OVERVIEW_HTML = """<!doctype html>
         + '<span class="task-symbol-label">' + escapeHtml(line.label + ":") + "</span>"
         + '<span class="task-symbol-text">' + escapeHtml(collapsed.text) + "</span>";
       if (collapsed.hidden > 0) {
-        html += '<button class="task-symbol-toggle" type="button" onclick=\'toggleSymbolDetail(' + toggleArg + ')\'>' + "+" + String(collapsed.hidden) + "</button>";
+        html += '<button class="task-symbol-toggle" type="button" onclick="toggleSymbolDetail(' + escapeHtml(toggleArg) + ')">' + "+" + String(collapsed.hidden) + "</button>";
       } else if (line.symbols.length > 4) {
-        html += '<button class="task-symbol-toggle" type="button" onclick=\'toggleSymbolDetail(' + toggleArg + ')\'>' + "收起" + "</button>";
+        html += '<button class="task-symbol-toggle" type="button" onclick="toggleSymbolDetail(' + escapeHtml(toggleArg) + ')">' + "收起" + "</button>";
       }
       html += "</div>";
     }
