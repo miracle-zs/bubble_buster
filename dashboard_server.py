@@ -3228,16 +3228,6 @@ ACCOUNTS_OVERVIEW_HTML = """<!doctype html>
     return "status-bad";
   }
 
-  function taskSeverity(status) {
-    var s = String(status || "UNKNOWN").toUpperCase();
-    if (s === "FAILED") return 0;
-    if (s === "PARTIAL") return 1;
-    if (s === "UNKNOWN") return 2;
-    if (s === "RUNNING") return 3;
-    if (s === "SKIPPED") return 4;
-    return 5;
-  }
-
   function parseSummaryPairs(summary) {
     var raw = String(summary || "--").trim();
     var pairs = {};
@@ -3305,17 +3295,7 @@ ACCOUNTS_OVERVIEW_HTML = """<!doctype html>
   }
 
   function sortTaskAccounts(rows) {
-    var cloned = (rows || []).slice();
-    cloned.sort(function (a, b) {
-      var aAnomaly = hasAnomalyTask(a) ? 0 : 1;
-      var bAnomaly = hasAnomalyTask(b) ? 0 : 1;
-      if (aAnomaly !== bAnomaly) return aAnomaly - bAnomaly;
-      var aTime = latestTaskTimeForAccount(a);
-      var bTime = latestTaskTimeForAccount(b);
-      if (aTime !== bTime) return aTime < bTime ? 1 : -1;
-      return String((a && a.account_id) || "").localeCompare(String((b && b.account_id) || ""));
-    });
-    return cloned;
+    return (rows || []).slice();
   }
 
   function visibleTaskAccounts(rows) {
@@ -3451,14 +3431,6 @@ ACCOUNTS_OVERVIEW_HTML = """<!doctype html>
         rows.push({ key: "equity_recovery_take_profit", name: "组合止盈监控", task: tasks.equity_recovery_take_profit });
       }
     }
-    rows.sort(function (a, b) {
-      var severityDiff = taskSeverity((a.task || {}).status) - taskSeverity((b.task || {}).status);
-      if (severityDiff !== 0) return severityDiff;
-      var aTime = taskTimeValue(a.task);
-      var bTime = taskTimeValue(b.task);
-      if (aTime !== bTime) return aTime < bTime ? 1 : -1;
-      return 0;
-    });
     var html = "";
     for (var i = 0; i < rows.length; i += 1) {
       html += taskRowHtml(String((row && row.account_id) || ""), rows[i].key, rows[i].name, rows[i].task);
