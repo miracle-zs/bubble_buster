@@ -3,6 +3,7 @@ import math
 import time
 import hashlib
 from dataclasses import dataclass
+from decimal import Decimal, InvalidOperation
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Set, Tuple
 from uuid import uuid4
@@ -664,7 +665,12 @@ class Top10ShortStrategy:
                 if not risk:
                     detail_rows.append({"symbol": symbol, "position_id": position_id, "status": "SKIPPED_NO_RISK"})
                     continue
-                position_amt = abs(self._safe_float(risk.get("positionAmt"), default=0.0))
+                position_amt_raw = str(risk.get("positionAmt") or "").strip()
+                try:
+                    position_amt_decimal = abs(Decimal(position_amt_raw))
+                except (InvalidOperation, TypeError, ValueError):
+                    position_amt_decimal = Decimal("0")
+                position_amt = float(position_amt_decimal)
                 mark_price = (
                     self._safe_positive_float(risk.get("markPrice"))
                     or self._safe_positive_float(risk.get("entryPrice"))
@@ -674,7 +680,10 @@ class Top10ShortStrategy:
                     detail_rows.append({"symbol": symbol, "position_id": position_id, "status": "SKIPPED_INVALID_QTY"})
                     continue
 
-                reduce_target_qty = position_amt * self.equity_recovery_reduce_ratio
+                if self.equity_recovery_reduce_ratio >= 1.0 - 1e-12:
+                    reduce_target_qty: object = position_amt_raw.lstrip("+-")
+                else:
+                    reduce_target_qty = position_amt_decimal * Decimal(str(self.equity_recovery_reduce_ratio))
                 reduce_qty_text = self.client.format_order_qty(symbol, reduce_target_qty)
                 reduce_qty = self._safe_float(reduce_qty_text, default=0.0)
                 if reduce_qty <= 0:

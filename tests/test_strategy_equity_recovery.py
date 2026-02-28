@@ -337,6 +337,46 @@ class StrategyEquityRecoveryTest(unittest.TestCase):
         call_kwargs = client.create_order.call_args.kwargs
         self.assertEqual(call_kwargs["quantity"], "5.000")
 
+    def test_equity_recovery_uses_raw_position_amt_for_full_reduce(self) -> None:
+        client = MagicMock()
+        client.normalize_order_qty.side_effect = RuntimeError("should not be called")
+        client.create_order.side_effect = self._mock_order_factory()
+        client.get_position_risk.return_value = [
+            {"symbol": "AUSDT", "positionAmt": "-56.8", "markPrice": "10", "entryPrice": "10"},
+        ]
+        client.get_symbol_rules.return_value = {"AUSDT": types.SimpleNamespace(min_qty=0.1, min_notional=5.0)}
+
+        def _format_order_qty(_symbol, qty):
+            if qty != "56.8":
+                raise AssertionError(f"expected raw position qty string, got {qty!r}")
+            return "56.8"
+
+        client.format_order_qty.side_effect = _format_order_qty
+
+        store = MagicMock()
+        store.get_latest_wallet_snapshot.return_value = {
+            "captured_at_utc": "2026-02-23T07:40:00+00:00",
+            "balance_usdt": 1000.0,
+        }
+        store.get_wallet_snapshot_min_since.return_value = {
+            "captured_at_utc": "2026-02-23T01:00:00+00:00",
+            "balance_usdt": 900.0,
+        }
+        store.get_lock_state.return_value = None
+        store.list_open_positions.return_value = [{"id": 1, "symbol": "AUSDT", "entry_price": 10.0}]
+
+        strategy = self._build_strategy(client, store)
+        strategy.equity_recovery_reduce_ratio = 1.0
+        client.get_position_risk.return_value = [
+            {"symbol": "AUSDT", "positionAmt": "-56.8", "markPrice": "10", "entryPrice": "10"},
+        ]
+        strategy._refresh_exit_orders_for_positions = MagicMock()
+
+        result = strategy.run_equity_recovery_take_profit()
+
+        self.assertEqual(result["status"], "TRIGGERED")
+        self.assertEqual(client.create_order.call_args.kwargs["quantity"], "56.8")
+
 
 if __name__ == "__main__":
     unittest.main()
