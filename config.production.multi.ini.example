@@ -129,6 +129,10 @@ equity_recovery_reduce_ratio = 0.50
 [account.acc03.runtime]
 daily_loss_cut_enabled = false
 
+[account.acc02.runtime]
+entry_hour = 7
+entry_minute = 45
+
 
 [account.55.runtime]
 daily_loss_cut_enabled = true

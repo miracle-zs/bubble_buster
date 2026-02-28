@@ -296,6 +296,173 @@ class RuntimeServiceTest(unittest.TestCase):
         self.assertEqual(m_enabled.calls, 1)
         self.assertEqual(m_disabled.calls, 0)
 
+    def test_entry_runs_only_accounts_due_at_current_time(self):
+        class StrategyStub:
+            def __init__(self, name: str) -> None:
+                self.name = name
+                self.entry_calls = 0
+
+            def run_entry(self, shared_top_gainers=None):
+                self.entry_calls += 1
+                return {"status": "SUCCESS", "shared": shared_top_gainers}
+
+        class ManagerStub:
+            def run_once(self):
+                return {"total": 0}
+
+            def run_daily_loss_cut(self):
+                return {"total": 0, "closed_loss_cut": 0, "errors": 0}
+
+        acc01 = StrategyStub("acc01")
+        acc02 = StrategyStub("acc02")
+        manager = ManagerStub()
+        cfg = ServiceRuntimeConfig(
+            timezone_name="UTC",
+            entry_hour=7,
+            entry_minute=40,
+            entry_misfire_grace_min=120,
+            entry_catchup_enabled=True,
+            daily_loss_cut_enabled=False,
+            daily_loss_cut_hour=23,
+            daily_loss_cut_minute=59,
+            manager_interval_sec=3600,
+            manager_max_catch_up_runs=1,
+            loop_sleep_sec=1.0,
+            run_manage_on_startup=False,
+            max_account_workers=2,
+        )
+        service = StrategyRuntimeService(
+            strategy=acc01,
+            manager=manager,
+            cfg=cfg,
+            now_monotonic=0.0,
+            account_runtimes={
+                "acc01": {
+                    "mode": "full",
+                    "strategy": acc01,
+                    "manager": manager,
+                    "balance_sampler": None,
+                    "entry_hour": 7,
+                    "entry_minute": 40,
+                },
+                "acc02": {
+                    "mode": "full",
+                    "strategy": acc02,
+                    "manager": manager,
+                    "balance_sampler": None,
+                    "entry_hour": 7,
+                    "entry_minute": 45,
+                },
+            },
+            max_account_workers=2,
+        )
+
+        service.run_cycle(
+            now_local=datetime(2026, 2, 13, 7, 40, tzinfo=ZoneInfo("UTC")),
+            now_monotonic=10.0,
+        )
+        self.assertEqual(acc01.entry_calls, 1)
+        self.assertEqual(acc02.entry_calls, 0)
+
+        service.run_cycle(
+            now_local=datetime(2026, 2, 13, 7, 45, tzinfo=ZoneInfo("UTC")),
+            now_monotonic=20.0,
+        )
+        self.assertEqual(acc01.entry_calls, 1)
+        self.assertEqual(acc02.entry_calls, 1)
+
+    def test_entry_reuses_cached_ranking_for_staggered_accounts(self):
+        class StrategyStub:
+            def __init__(self, name: str) -> None:
+                self.name = name
+                self.shared_payloads = []
+
+            def run_entry(self, shared_top_gainers=None):
+                self.shared_payloads.append(shared_top_gainers)
+                return {"status": "SUCCESS"}
+
+        class ManagerStub:
+            def run_once(self):
+                return {"total": 0}
+
+            def run_daily_loss_cut(self):
+                return {"total": 0, "closed_loss_cut": 0, "errors": 0}
+
+        ranking = [{"symbol": "AAAUSDT", "pctChange": "10.0"}]
+        build_calls = []
+        acc01 = StrategyStub("acc01")
+        acc03 = StrategyStub("acc03")
+        acc02 = StrategyStub("acc02")
+        manager = ManagerStub()
+        cfg = ServiceRuntimeConfig(
+            timezone_name="UTC",
+            entry_hour=7,
+            entry_minute=40,
+            entry_misfire_grace_min=120,
+            entry_catchup_enabled=True,
+            daily_loss_cut_enabled=False,
+            daily_loss_cut_hour=23,
+            daily_loss_cut_minute=59,
+            manager_interval_sec=3600,
+            manager_max_catch_up_runs=1,
+            loop_sleep_sec=1.0,
+            run_manage_on_startup=False,
+            max_account_workers=3,
+        )
+        service = StrategyRuntimeService(
+            strategy=acc01,
+            manager=manager,
+            cfg=cfg,
+            now_monotonic=0.0,
+            account_runtimes={
+                "acc01": {
+                    "mode": "full",
+                    "strategy": acc01,
+                    "manager": manager,
+                    "balance_sampler": None,
+                    "entry_hour": 7,
+                    "entry_minute": 40,
+                },
+                "acc03": {
+                    "mode": "full",
+                    "strategy": acc03,
+                    "manager": manager,
+                    "balance_sampler": None,
+                    "entry_hour": 7,
+                    "entry_minute": 40,
+                },
+                "acc02": {
+                    "mode": "full",
+                    "strategy": acc02,
+                    "manager": manager,
+                    "balance_sampler": None,
+                    "entry_hour": 7,
+                    "entry_minute": 45,
+                },
+            },
+            max_account_workers=3,
+        )
+
+        def fake_build(account_ids):
+            build_calls.append(tuple(sorted(account_ids)))
+            return ranking
+
+        service._build_shared_top_gainers = fake_build  # type: ignore[method-assign]
+
+        service.run_cycle(
+            now_local=datetime(2026, 2, 13, 7, 40, tzinfo=ZoneInfo("UTC")),
+            now_monotonic=10.0,
+        )
+        service.run_cycle(
+            now_local=datetime(2026, 2, 13, 7, 45, tzinfo=ZoneInfo("UTC")),
+            now_monotonic=20.0,
+        )
+
+        self.assertEqual(build_calls, [("acc01", "acc03")])
+        self.assertIs(acc01.shared_payloads[0], ranking)
+        self.assertIs(acc03.shared_payloads[0], ranking)
+        self.assertIs(acc02.shared_payloads[0], ranking)
+
 
 if __name__ == "__main__":
     unittest.main()

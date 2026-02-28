@@ -191,6 +191,8 @@ def _build_single_account_components(
     return {
         "account_id": account_id,
         "mode": mode,
+        "entry_hour": runtime_cfg.getint("entry_hour", fallback=7),
+        "entry_minute": runtime_cfg.getint("entry_minute", fallback=40),
         "daily_loss_cut_enabled": runtime_cfg.getboolean("daily_loss_cut_enabled", fallback=True),
         "strategy": strategy,
         "manager": manager,

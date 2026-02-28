@@ -88,63 +88,68 @@ class StrategyRuntimeService:
             if cfg.run_manage_on_startup
             else now_monotonic + cfg.manager_interval_sec
         )
-        self._last_entry_local_date: Optional[date] = None
-        self._last_entry_skipped_date: Optional[date] = None
+        self._last_entry_local_date_by_account: Dict[str, date] = {}
+        self._last_entry_skipped_date_by_account: Dict[str, date] = {}
         self._last_loss_cut_local_date: Optional[date] = None
         self._last_loss_cut_skipped_date: Optional[date] = None
         self._last_noon_protection_local_date: Optional[date] = None
+        self._shared_ranking_cache: Optional[List[Dict[str, Any]]] = None
+        self._shared_ranking_cache_day: Optional[date] = None
+        self._shared_ranking_cache_expires_at: Optional[datetime] = None
 
-    def _entry_schedule_for_day(self, day: date) -> datetime:
+    def _entry_schedule_for_day(self, day: date, account_id: Optional[str] = None) -> datetime:
+        account_ctx = self.account_runtimes.get(account_id or "", {})
+        entry_hour = int(account_ctx.get("entry_hour", self.cfg.entry_hour))
+        entry_minute = int(account_ctx.get("entry_minute", self.cfg.entry_minute))
         return datetime(
             year=day.year,
             month=day.month,
             day=day.day,
-            hour=self.cfg.entry_hour % 24,
-            minute=self.cfg.entry_minute % 60,
+            hour=entry_hour % 24,
+            minute=entry_minute % 60,
             second=0,
             microsecond=0,
             tzinfo=self.timezone,
         )
 
-    def _should_run_entry(self, now_local: datetime) -> bool:
+    def _should_run_entry(self, account_id: str, now_local: datetime) -> bool:
         today = now_local.date()
-        if self._last_entry_local_date == today:
+        if self._last_entry_local_date_by_account.get(account_id) == today:
             return False
 
-        target = self._entry_schedule_for_day(today)
+        target = self._entry_schedule_for_day(today, account_id=account_id)
         if now_local < target:
             return False
 
         if not self.cfg.entry_catchup_enabled and now_local > target:
-            if self._last_entry_skipped_date != today:
+            if self._last_entry_skipped_date_by_account.get(account_id) != today:
                 LOGGER.warning(
-                    "Entry missed scheduled time and catch-up disabled, skip for today: now=%s target=%s",
+                    "Entry missed scheduled time and catch-up disabled, skip for today: account=%s now=%s target=%s",
+                    account_id,
                     now_local.isoformat(timespec="seconds"),
                     target.isoformat(timespec="seconds"),
                 )
-                self._last_entry_skipped_date = today
-            self._last_entry_local_date = today
+                self._last_entry_skipped_date_by_account[account_id] = today
+            self._last_entry_local_date_by_account[account_id] = today
             return False
 
         grace = timedelta(minutes=max(0, self.cfg.entry_misfire_grace_min))
         if now_local - target > grace:
-            if self._last_entry_skipped_date != today:
+            if self._last_entry_skipped_date_by_account.get(account_id) != today:
                 LOGGER.warning(
-                    "Entry missed beyond grace window, skip for today: now=%s target=%s grace_min=%s",
+                    "Entry missed beyond grace window, skip for today: account=%s now=%s target=%s grace_min=%s",
+                    account_id,
                     now_local.isoformat(timespec="seconds"),
                     target.isoformat(timespec="seconds"),
                     self.cfg.entry_misfire_grace_min,
                 )
-                self._last_entry_skipped_date = today
-            self._last_entry_local_date = today
+                self._last_entry_skipped_date_by_account[account_id] = today
+            self._last_entry_local_date_by_account[account_id] = today
             return False
 
         return True
 
     def _run_entry_if_due(self, now_local: datetime) -> None:
-        if not self._should_run_entry(now_local):
-            return
-
         account_ids = [
             aid
             for aid, ctx in self.account_runtimes.items()
@@ -152,13 +157,16 @@ class StrategyRuntimeService:
         ]
         if not account_ids:
             LOGGER.warning("service entry skipped: no account is enabled for full mode")
-            self._last_entry_local_date = now_local.date()
             return
 
-        shared_top_gainers = self._build_shared_top_gainers(account_ids)
+        due_account_ids = [aid for aid in account_ids if self._should_run_entry(aid, now_local)]
+        if not due_account_ids:
+            return
+
+        shared_top_gainers = self._get_entry_ranking(now_local, due_account_ids)
         results: Dict[str, object] = {}
-        if len(account_ids) == 1:
-            aid = account_ids[0]
+        if len(due_account_ids) == 1:
+            aid = due_account_ids[0]
             ctx = self.account_runtimes[aid]
             strategy = ctx.get("strategy")
             if strategy is not None:
@@ -175,9 +183,9 @@ class StrategyRuntimeService:
             timeout_sec = max(0.1, float(self.cfg.account_task_timeout_sec))
             done_futures = set()
             slow_accounts = set()
-            with ThreadPoolExecutor(max_workers=min(self.max_account_workers, len(account_ids))) as ex:
+            with ThreadPoolExecutor(max_workers=min(self.max_account_workers, len(due_account_ids))) as ex:
                 futures = {}
-                for aid in account_ids:
+                for aid in due_account_ids:
                     strategy = self.account_runtimes[aid].get("strategy")
                     if strategy is None:
                         results[aid] = {"error": "strategy_missing"}
@@ -216,8 +224,32 @@ class StrategyRuntimeService:
                     if isinstance(results.get(aid), dict):
                         results[aid].setdefault("slow", True)
 
-        self._last_entry_local_date = now_local.date()
+        for aid in due_account_ids:
+            self._last_entry_local_date_by_account[aid] = now_local.date()
         LOGGER.info("service entry result: %s", results)
+
+    def _get_entry_ranking(
+        self,
+        now_local: datetime,
+        due_account_ids: List[str],
+    ) -> Optional[List[Dict[str, Any]]]:
+        today = now_local.date()
+        if (
+            self._shared_ranking_cache is not None
+            and self._shared_ranking_cache_day == today
+            and self._shared_ranking_cache_expires_at is not None
+            and now_local <= self._shared_ranking_cache_expires_at
+        ):
+            return self._shared_ranking_cache
+
+        shared_top_gainers = self._build_shared_top_gainers(due_account_ids)
+        if shared_top_gainers is None:
+            return None
+
+        self._shared_ranking_cache = shared_top_gainers
+        self._shared_ranking_cache_day = today
+        self._shared_ranking_cache_expires_at = now_local + timedelta(minutes=10)
+        return shared_top_gainers
 
     def _run_entry_with_shared(
         self,

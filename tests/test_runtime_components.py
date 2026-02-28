@@ -124,3 +124,68 @@ serverchan_sendkey =
 
     assert account_runtimes["acc01"]["daily_loss_cut_enabled"] is True
     assert account_runtimes["55"]["daily_loss_cut_enabled"] is False
+
+
+def test_create_components_exposes_account_runtime_entry_schedule_override(tmp_path) -> None:
+    cfg_path = tmp_path / "config.ini"
+    db_path = tmp_path / "state.db"
+    cfg_path.write_text(
+        f"""
+[accounts]
+enabled = acc01,acc02
+mode.acc01 = full
+mode.acc02 = full
+
+[binance]
+api_key =
+api_secret =
+base_url = https://fapi.binance.com
+timeout_sec = 10
+retry_count = 3
+retry_delay_sec = 1
+recv_window = 5000
+http_pool_maxsize = 64
+
+[account.acc01.binance]
+api_key = key1
+api_secret = sec1
+
+[account.acc02.binance]
+api_key = key2
+api_secret = sec2
+
+[strategy]
+leverage = 2
+top_n = 10
+
+[runtime]
+db_path = {db_path}
+default_account_id = acc01
+timezone = UTC
+entry_hour = 7
+entry_minute = 40
+manager_interval_sec = 60
+
+[account.acc02.runtime]
+entry_hour = 7
+entry_minute = 45
+
+[notify]
+enabled = false
+serverchan_sendkey =
+""",
+        encoding="utf-8",
+    )
+
+    cfg = configparser.ConfigParser()
+    assert cfg.read(str(cfg_path))
+
+    _, _, _, _, _, account_runtimes = create_components(
+        cfg,
+        base_dir=str(tmp_path),
+    )
+
+    assert account_runtimes["acc01"]["entry_hour"] == 7
+    assert account_runtimes["acc01"]["entry_minute"] == 40
+    assert account_runtimes["acc02"]["entry_hour"] == 7
+    assert account_runtimes["acc02"]["entry_minute"] == 45
