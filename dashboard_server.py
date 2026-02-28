@@ -3134,10 +3134,9 @@ ACCOUNTS_OVERVIEW_HTML = """<!doctype html>
     .task-symbol-line { color:#8fb4c9; display:flex; align-items:flex-start; gap:6px; }
     .task-symbol-label { color:#7fa2b7; flex:0 0 auto; }
     .task-symbol-text { min-width:0; word-break:break-word; }
-    .task-symbol-toggle { appearance:none; border:none; background:none; color:var(--accent); cursor:pointer; font-size:11px; font-weight:700; padding:0; }
     .task-meta { display:flex; align-items:center; justify-content:flex-start; }
     .task-badge { border:1px solid #2e5065; border-radius:999px; padding:3px 8px; font-size:11px; font-weight:800; line-height:1.2; min-width:72px; justify-content:center; display:inline-flex; }
-    .task-time { color:var(--muted); font-size:11px; font-family: ui-monospace, Menlo, Monaco, Consolas, monospace; padding-top:4px; }
+    .task-time { color:var(--muted); font-size:11px; font-family: ui-monospace, Menlo, Monaco, Consolas, monospace; padding-top:4px; white-space:nowrap; }
     .task-badge.status-ok { border-color:#1f7148; background:rgba(38,208,124,0.15); }
     .task-badge.status-warn { border-color:#8a6521; background:rgba(255,179,64,0.15); }
     .task-badge.status-bad { border-color:#8d3535; background:rgba(255,93,93,0.15); }
@@ -3194,7 +3193,6 @@ ACCOUNTS_OVERVIEW_HTML = """<!doctype html>
   var curveObserver = null;
   var summaryRows = [];
   var taskFilter = "all";
-  var expandedTaskSymbols = {};
   var curveTtlMs = Math.max(30000, Math.max(2, refreshSec) * 3000);
 
   function escapeHtml(text) {
@@ -3345,23 +3343,6 @@ ACCOUNTS_OVERVIEW_HTML = """<!doctype html>
     }).filter(Boolean);
   }
 
-  function collapseSymbolText(taskKey, labelKey, symbols) {
-    var items = symbols || [];
-    if (!items.length) return { text: "", hidden: 0 };
-    var stateKey = taskKey + ":" + labelKey;
-    var expanded = !!expandedTaskSymbols[stateKey];
-    var limit = 4;
-    if (expanded || items.length <= limit) {
-      return { text: items.join(", "), hidden: 0 };
-    }
-    return { text: items.slice(0, limit).join(", "), hidden: items.length - limit };
-  }
-
-  function toggleSymbolDetail(key) {
-    expandedTaskSymbols[key] = !expandedTaskSymbols[key];
-    renderTaskBoard();
-  }
-
   function formatTaskResultLines(taskKey, task) {
     var t = task || {};
     var pairs = parseSummaryPairs(String(t.summary || "--"));
@@ -3422,23 +3403,14 @@ ACCOUNTS_OVERVIEW_HTML = """<!doctype html>
 
   function taskResultHtml(accountId, taskKey, task) {
     var formatted = formatTaskResultLines(taskKey, task);
-    var html = '<div class="task-result-lines" title="' + escapeHtml(formatted.tooltip) + '">'
+    var html = '<div class="task-result-lines">'
       + '<div class="task-stat-line">' + escapeHtml(formatted.statLine) + "</div>";
     for (var i = 0; i < formatted.symbolLines.length; i += 1) {
       var line = formatted.symbolLines[i];
-      var stateKey = accountId + ":" + taskKey + ":" + line.key;
-      var collapsed = collapseSymbolText(stateKey, line.key, line.symbols);
-      var full = line.symbols.join(", ");
-      var toggleArg = JSON.stringify(stateKey).replace(/</g, "\\u003c");
-      html += '<div class="task-symbol-line" title="' + escapeHtml(line.label + ": " + full) + '">'
+      html += '<div class="task-symbol-line">'
         + '<span class="task-symbol-label">' + escapeHtml(line.label + ":") + "</span>"
-        + '<span class="task-symbol-text">' + escapeHtml(collapsed.text) + "</span>";
-      if (collapsed.hidden > 0) {
-        html += '<button class="task-symbol-toggle" type="button" onclick="toggleSymbolDetail(' + escapeHtml(toggleArg) + ')">' + "+" + String(collapsed.hidden) + "</button>";
-      } else if (line.symbols.length > 4) {
-        html += '<button class="task-symbol-toggle" type="button" onclick="toggleSymbolDetail(' + escapeHtml(toggleArg) + ')">' + "收起" + "</button>";
-      }
-      html += "</div>";
+        + '<span class="task-symbol-text">' + escapeHtml(line.symbols.join(", ")) + "</span>"
+        + "</div>";
     }
     html += "</div>";
     return html;
@@ -3450,7 +3422,7 @@ ACCOUNTS_OVERVIEW_HTML = """<!doctype html>
     var statusText = taskStatusText(status);
     var cls = taskStatusCls(status);
     var timeRaw = String(t.time_local || "");
-    var timeText = timeRaw ? timeRaw.slice(11, 19) : "--";
+    var timeText = timeRaw || "--";
     var metaText = taskMetaLabel(taskKey);
     return '<div class="task-row">'
       + '<div class="task-row-main">'
@@ -3673,7 +3645,7 @@ ACCOUNTS_OVERVIEW_HTML = """<!doctype html>
   function renderTaskBoardHeader(rows) {
     if (!taskUpdatedAt) return;
     var latest = latestTaskTime(rows || []);
-    taskUpdatedAt.textContent = "数据更新时间 " + (latest ? latest.slice(11, 19) : "--");
+    taskUpdatedAt.textContent = "数据更新时间 " + (latest || "--");
     var filters = ["all", "anomaly", "symbols"];
     for (var i = 0; i < filters.length; i += 1) {
       var el = document.getElementById("task-filter-" + (filters[i] === "all" ? "all" : (filters[i] === "anomaly" ? "anomaly" : "symbols")));
@@ -3739,7 +3711,6 @@ ACCOUNTS_OVERVIEW_HTML = """<!doctype html>
   }
 
   fetchSummary();
-  window.toggleSymbolDetail = toggleSymbolDetail;
   window.toggleTaskFilter = toggleTaskFilter;
   var filterAll = document.getElementById("task-filter-all");
   var filterAnomaly = document.getElementById("task-filter-anomaly");
