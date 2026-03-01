@@ -67,6 +67,7 @@ class StrategyRebalanceTest(unittest.TestCase):
             rebalance_max_adjust_orders=30,
             rebalance_mode=overrides.get("rebalance_mode", "equal_risk"),
             rebalance_age_decay_half_life_hours=overrides.get("rebalance_age_decay_half_life_hours", 36.0),
+            entry_symbol_interval_sec=overrides.get("entry_symbol_interval_sec", 0),
         )
 
     @staticmethod
@@ -412,6 +413,112 @@ class StrategyRebalanceTest(unittest.TestCase):
         self.assertAlmostEqual(target_notional_used, expected_target_notional, places=6)
         old_available_formula_notional = 500.0 * 0.99 / 10.0 * 2.0
         self.assertGreater(target_notional_used, old_available_formula_notional)
+
+    def test_entry_paces_each_processed_symbol_when_configured(self) -> None:
+        client = MagicMock()
+        client.get_available_balance.return_value = 500.0
+        client.normalize_order_qty.side_effect = [1.0, 1.0, 0.0]
+
+        store = MagicMock()
+        store.create_run.return_value = ("run-1", True)
+        store.list_open_symbols.return_value = set()
+        store.insert_position.return_value = 1001
+        store.list_open_positions.return_value = [{"id": 1001, "symbol": "AAAUSDT"}]
+
+        strategy = self._build_strategy(client, store, rebalance_enabled=False, entry_symbol_interval_sec=30)
+        strategy.top_n = 3
+        strategy._load_short_position = MagicMock(
+            return_value={
+                "symbol": "AAAUSDT",
+                "entryPrice": "10",
+                "liquidationPrice": "12",
+                "positionAmt": "-1",
+            }
+        )
+        strategy._place_market_short_with_shrink_retry = MagicMock(
+            side_effect=[
+                (
+                    {
+                        "orderId": 2001,
+                        "clientOrderId": "ent-aaa-1",
+                        "status": "FILLED",
+                        "origQty": "1",
+                        "side": "SELL",
+                        "type": "MARKET",
+                        "symbol": "AAAUSDT",
+                    },
+                    0,
+                ),
+                RuntimeError("boom"),
+            ]
+        )
+        strategy._place_exit_orders = MagicMock()
+
+        candidates = [
+            {"symbol": "AAAUSDT", "change": "15", "current_price": "10", "volume": "100"},
+            {"symbol": "BBBUSDT", "change": "14", "current_price": "11", "volume": "100"},
+            {"symbol": "CCCUSDT", "change": "13", "current_price": "12", "volume": "100"},
+        ]
+
+        with patch("core.strategy_top10_short.time.sleep") as sleep_mock:
+            result = strategy.run_entry(
+                trade_day_utc="2026-03-01-test-entry-pacing",
+                shared_top_gainers=candidates,
+            )
+
+        self.assertEqual(result["status"], "SUCCESS")
+        self.assertEqual(result["opened"], 1)
+        self.assertEqual(result["entry_failed"], 2)
+        self.assertEqual(strategy._place_market_short_with_shrink_retry.call_count, 2)
+        self.assertEqual(sleep_mock.call_args_list, [unittest.mock.call(30), unittest.mock.call(30)])
+
+    def test_entry_does_not_sleep_without_symbol_interval(self) -> None:
+        client = MagicMock()
+        client.get_available_balance.return_value = 500.0
+        client.normalize_order_qty.return_value = 1.0
+
+        store = MagicMock()
+        store.create_run.return_value = ("run-1", True)
+        store.list_open_symbols.return_value = set()
+        store.insert_position.return_value = 1001
+        store.list_open_positions.return_value = [{"id": 1001, "symbol": "AAAUSDT"}]
+
+        strategy = self._build_strategy(client, store, rebalance_enabled=False)
+        strategy.top_n = 1
+        strategy._load_short_position = MagicMock(
+            return_value={
+                "symbol": "AAAUSDT",
+                "entryPrice": "10",
+                "liquidationPrice": "12",
+                "positionAmt": "-1",
+            }
+        )
+        strategy._place_market_short_with_shrink_retry = MagicMock(
+            return_value=(
+                {
+                    "orderId": 2001,
+                    "clientOrderId": "ent-aaa-1",
+                    "status": "FILLED",
+                    "origQty": "1",
+                    "side": "SELL",
+                    "type": "MARKET",
+                    "symbol": "AAAUSDT",
+                },
+                0,
+            )
+        )
+        strategy._place_exit_orders = MagicMock()
+
+        with patch("core.strategy_top10_short.time.sleep") as sleep_mock:
+            result = strategy.run_entry(
+                trade_day_utc="2026-03-01-test-entry-no-pacing",
+                shared_top_gainers=[
+                    {"symbol": "AAAUSDT", "change": "15", "current_price": "10", "volume": "100"},
+                ],
+            )
+
+        self.assertEqual(result["status"], "SUCCESS")
+        sleep_mock.assert_not_called()
 
 
 if __name__ == "__main__":

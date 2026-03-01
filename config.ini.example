@@ -89,6 +89,10 @@ strategy_note.default = 默认策略 / 中午保护止损ON
 ; [account.acc01.binance]
 ; api_key = ACCOUNT_01_KEY
 ; api_secret = ACCOUNT_01_SECRET
+; [account.acc02.runtime]
+; entry_hour = 7
+; entry_minute = 45
+; entry_symbol_interval_sec = 30
 ; [account.55.binance]
 ; api_key = ACCOUNT_55_KEY
 ; api_secret = ACCOUNT_55_SECRET

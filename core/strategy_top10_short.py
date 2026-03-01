@@ -92,6 +92,7 @@ class Top10ShortStrategy:
         equity_recovery_lookback_hours: float = 24.0,
         equity_recovery_trigger_pct: float = 0.10,
         equity_recovery_reduce_ratio: float = 0.50,
+        entry_symbol_interval_sec: int = 0,
         account_id: str = "default",
     ):
         self.client = client
@@ -126,6 +127,7 @@ class Top10ShortStrategy:
         self.equity_recovery_lookback_hours = max(1.0, float(equity_recovery_lookback_hours))
         self.equity_recovery_trigger_pct = min(1.0, max(0.001, float(equity_recovery_trigger_pct)))
         self.equity_recovery_reduce_ratio = min(0.95, max(0.05, float(equity_recovery_reduce_ratio)))
+        self.entry_symbol_interval_sec = max(0, int(entry_symbol_interval_sec))
         self.account_id = (account_id or "").strip() or "default"
 
     def run_entry(
@@ -345,7 +347,7 @@ class Top10ShortStrategy:
             successful_positions: List[Dict[str, object]] = []
             failed_notional = 0.0
 
-            for entry in candidates:
+            for idx, entry in enumerate(candidates):
                 try:
                     self.client.ensure_isolated_and_leverage(entry.symbol, self.leverage)
                     qty = self.client.normalize_order_qty(entry.symbol, target_notional, entry.last_price)
@@ -421,6 +423,15 @@ class Top10ShortStrategy:
                     entry_failed_count += 1
                     entry_failure_details.append(f"{entry.symbol}: {exc}")
                     LOGGER.exception("Initial entry failed for %s: %s", entry.symbol, exc)
+
+                if self.entry_symbol_interval_sec > 0 and idx < len(candidates) - 1:
+                    LOGGER.info(
+                        "Entry pacing sleep: account=%s symbol=%s next_wait_sec=%s",
+                        self.account_id,
+                        entry.symbol,
+                        self.entry_symbol_interval_sec,
+                    )
+                    time.sleep(self.entry_symbol_interval_sec)
 
             if failed_notional > 0 and successful_positions:
                 self._redistribute_failed_notional(successful_positions, failed_notional)
