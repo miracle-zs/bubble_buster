@@ -142,7 +142,7 @@ class PositionManager:
                     )
 
                 old_sl_price = self._safe_positive_float(tracked_pos.get("sl_price")) if tracked_pos is not None else None
-                if old_sl_price is None:
+                if old_sl_price is None and tracked_position_id is not None:
                     old_sl_price = self._safe_positive_float(caps.get(cap_key))
 
                 round_up = close_side == "BUY"
