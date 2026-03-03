@@ -127,7 +127,7 @@ class Top10ShortStrategy:
         self.equity_recovery_take_profit_enabled = bool(equity_recovery_take_profit_enabled)
         self.equity_recovery_lookback_hours = max(1.0, float(equity_recovery_lookback_hours))
         self.equity_recovery_trigger_pct = min(1.0, max(0.001, float(equity_recovery_trigger_pct)))
-        self.equity_recovery_reduce_ratio = min(0.95, max(0.05, float(equity_recovery_reduce_ratio)))
+        self.equity_recovery_reduce_ratio = min(1.0, max(0.05, float(equity_recovery_reduce_ratio)))
         self.entry_initial_delay_sec = max(0, int(entry_initial_delay_sec))
         self.entry_symbol_interval_sec = max(0, int(entry_symbol_interval_sec))
         self.account_id = (account_id or "").strip() or "default"

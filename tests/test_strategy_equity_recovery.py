@@ -63,6 +63,34 @@ class StrategyEquityRecoveryTest(unittest.TestCase):
             equity_recovery_reduce_ratio=0.5,
         )
 
+    def test_equity_recovery_preserves_full_reduce_ratio_from_init(self) -> None:
+        strategy = Top10ShortStrategy(
+            client=MagicMock(),
+            store=MagicMock(),
+            notifier=MagicMock(),
+            leverage=2,
+            top_n=10,
+            volume_threshold=0.0,
+            tp_price_drop_pct=20.0,
+            sl_liq_buffer_pct=1.0,
+            max_hold_hours=47.5,
+            trigger_price_type="CONTRACT_PRICE",
+            allocation_splits=10,
+            entry_fee_buffer_pct=1.0,
+            entry_shrink_retry_count=3,
+            entry_shrink_step_pct=10.0,
+            entry_rank_fetch_multiplier=3,
+            ranker_max_workers=4,
+            ranker_weight_limit_per_minute=1000,
+            ranker_min_request_interval_ms=20,
+            equity_recovery_take_profit_enabled=True,
+            equity_recovery_lookback_hours=24.0,
+            equity_recovery_trigger_pct=0.10,
+            equity_recovery_reduce_ratio=1.0,
+        )
+
+        self.assertEqual(strategy.equity_recovery_reduce_ratio, 1.0)
+
     @staticmethod
     def _mock_order_factory():
         state = {"seq": 0}
