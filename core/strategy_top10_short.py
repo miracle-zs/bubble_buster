@@ -92,6 +92,7 @@ class Top10ShortStrategy:
         equity_recovery_lookback_hours: float = 24.0,
         equity_recovery_trigger_pct: float = 0.10,
         equity_recovery_reduce_ratio: float = 0.50,
+        entry_initial_delay_sec: int = 0,
         entry_symbol_interval_sec: int = 0,
         account_id: str = "default",
     ):
@@ -127,6 +128,7 @@ class Top10ShortStrategy:
         self.equity_recovery_lookback_hours = max(1.0, float(equity_recovery_lookback_hours))
         self.equity_recovery_trigger_pct = min(1.0, max(0.001, float(equity_recovery_trigger_pct)))
         self.equity_recovery_reduce_ratio = min(0.95, max(0.05, float(equity_recovery_reduce_ratio)))
+        self.entry_initial_delay_sec = max(0, int(entry_initial_delay_sec))
         self.entry_symbol_interval_sec = max(0, int(entry_symbol_interval_sec))
         self.account_id = (account_id or "").strip() or "default"
 
@@ -346,6 +348,14 @@ class Top10ShortStrategy:
 
             successful_positions: List[Dict[str, object]] = []
             failed_notional = 0.0
+
+            if self.entry_initial_delay_sec > 0:
+                LOGGER.info(
+                    "Entry initial delay: account=%s wait_sec=%s",
+                    self.account_id,
+                    self.entry_initial_delay_sec,
+                )
+                time.sleep(self.entry_initial_delay_sec)
 
             for idx, entry in enumerate(candidates):
                 try:
