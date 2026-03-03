@@ -187,6 +187,7 @@ CRON_TZ=Asia/Shanghai
 - `equity_recovery_lookback_hours`：反弹判定窗口（小时）。
 - `equity_recovery_trigger_pct`：触发阈值，当前权益 >= 窗口最低权益 * (1 + 阈值) 时触发。
 - `equity_recovery_reduce_ratio`：触发后组合减仓比例（按每个持仓当前仓位比例减仓）。
+- 组合止盈时间窗口：按 `runtime.timezone` 的本地时间判断，`07:30` 到 `12:00`（含边界）内不会触发。
 
 ### `[runtime]`
 

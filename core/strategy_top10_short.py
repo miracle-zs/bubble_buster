@@ -4,9 +4,10 @@ import time
 import hashlib
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, time as dt_time, timedelta, timezone
 from typing import Any, Dict, List, Optional, Set, Tuple
 from uuid import uuid4
+from zoneinfo import ZoneInfo
 
 from core.state_store import StateStore
 from infra.binance_futures_client import BinanceAPIError, BinanceFuturesClient
@@ -94,6 +95,7 @@ class Top10ShortStrategy:
         equity_recovery_reduce_ratio: float = 0.50,
         entry_initial_delay_sec: int = 0,
         entry_symbol_interval_sec: int = 0,
+        runtime_timezone: str = "Asia/Shanghai",
         account_id: str = "default",
     ):
         self.client = client
@@ -130,6 +132,13 @@ class Top10ShortStrategy:
         self.equity_recovery_reduce_ratio = min(1.0, max(0.05, float(equity_recovery_reduce_ratio)))
         self.entry_initial_delay_sec = max(0, int(entry_initial_delay_sec))
         self.entry_symbol_interval_sec = max(0, int(entry_symbol_interval_sec))
+        self.runtime_timezone_name = (runtime_timezone or "").strip() or "UTC"
+        try:
+            self.runtime_timezone = ZoneInfo(self.runtime_timezone_name)
+        except Exception:  # noqa: BLE001
+            LOGGER.warning("Invalid runtime_timezone=%s, fallback to UTC", self.runtime_timezone_name)
+            self.runtime_timezone_name = "UTC"
+            self.runtime_timezone = ZoneInfo("UTC")
         self.account_id = (account_id or "").strip() or "default"
 
     def run_entry(
@@ -584,6 +593,8 @@ class Top10ShortStrategy:
         current_equity = self._safe_float(latest.get("balance_usdt"), default=0.0)
         if not current_time_utc or current_equity <= 0:
             return {"status": "SKIPPED", "reason": "INVALID_CURRENT_SNAPSHOT"}
+        if self._is_equity_recovery_time_blocked(current_time_utc):
+            return {"status": "SKIPPED", "reason": "TIME_WINDOW_BLOCKED"}
 
         state = self.store.get_lock_state(self.EQUITY_RECOVERY_LOCK_NAME) or {}
         current_dt = self._parse_iso_utc(current_time_utc)
@@ -1437,6 +1448,10 @@ class Top10ShortStrategy:
         if parsed.tzinfo is None:
             return parsed.replace(tzinfo=timezone.utc)
         return parsed.astimezone(timezone.utc)
+
+    def _is_equity_recovery_time_blocked(self, current_time_utc: str) -> bool:
+        local_time = self._parse_iso_utc(current_time_utc).astimezone(self.runtime_timezone).timetz().replace(tzinfo=None)
+        return dt_time(7, 30) <= local_time <= dt_time(12, 0)
 
     def _refresh_exit_orders_for_positions(self, position_ids: Set[int]) -> None:
         open_positions = self.store.list_open_positions()

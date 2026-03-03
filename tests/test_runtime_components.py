@@ -226,6 +226,60 @@ serverchan_sendkey =
 
 
 class RuntimeComponentsEntryPacingTest(unittest.TestCase):
+    def test_create_components_passes_runtime_timezone_into_strategy(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            tmp_path = Path(tmp_dir)
+            cfg_path = tmp_path / "config.ini"
+            db_path = tmp_path / "state.db"
+            cfg_path.write_text(
+                f"""
+[accounts]
+enabled = good
+mode.good = full
+
+[binance]
+api_key =
+api_secret =
+base_url = https://fapi.binance.com
+timeout_sec = 10
+retry_count = 3
+retry_delay_sec = 1
+recv_window = 5000
+http_pool_maxsize = 64
+
+[account.good.binance]
+api_key = good_key
+api_secret = good_secret
+
+[strategy]
+leverage = 2
+top_n = 10
+
+[runtime]
+db_path = {db_path}
+default_account_id = good
+timezone = UTC
+entry_hour = 7
+entry_minute = 40
+manager_interval_sec = 60
+
+[notify]
+enabled = false
+serverchan_sendkey =
+""",
+                encoding="utf-8",
+            )
+
+            cfg = configparser.ConfigParser()
+            self.assertTrue(cfg.read(str(cfg_path)))
+
+            _, _, _, _, _, account_runtimes = create_components(
+                cfg,
+                base_dir=str(tmp_path),
+            )
+
+            self.assertEqual(account_runtimes["good"]["strategy"].runtime_timezone_name, "UTC")
+
     def test_create_components_exposes_account_entry_symbol_interval_override(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             tmp_path = Path(tmp_dir)

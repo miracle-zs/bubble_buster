@@ -164,6 +164,7 @@ def _build_single_account_components(
         equity_recovery_reduce_ratio=strategy_cfg.getfloat("equity_recovery_reduce_ratio", fallback=0.50),
         entry_initial_delay_sec=max(0, runtime_cfg.getint("entry_initial_delay_sec", fallback=0)),
         entry_symbol_interval_sec=max(0, runtime_cfg.getint("entry_symbol_interval_sec", fallback=0)),
+        runtime_timezone=runtime_cfg.get("timezone", fallback="Asia/Shanghai").strip(),
         account_id=account_id,
     )
 
