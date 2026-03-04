@@ -69,6 +69,8 @@ class StrategyRebalanceTest(unittest.TestCase):
             rebalance_age_decay_half_life_hours=overrides.get("rebalance_age_decay_half_life_hours", 36.0),
             entry_initial_delay_sec=overrides.get("entry_initial_delay_sec", 0),
             entry_symbol_interval_sec=overrides.get("entry_symbol_interval_sec", 0),
+            cooling_off_retry_count=overrides.get("cooling_off_retry_count", 0),
+            cooling_off_retry_delay_sec=overrides.get("cooling_off_retry_delay_sec", 0),
         )
 
     @staticmethod
@@ -592,6 +594,161 @@ class StrategyRebalanceTest(unittest.TestCase):
             )
 
         self.assertEqual(result["status"], "SUCCESS")
+        sleep_mock.assert_not_called()
+
+    def test_market_short_retries_once_after_cooling_off_and_sleeps(self) -> None:
+        client = MagicMock()
+        client.normalize_order_qty.return_value = 1.0
+        client.format_order_qty.return_value = "1"
+        client.create_order.side_effect = [
+            BinanceAPIError(code=-4192, message="Trade forbidden due to Cooling-off Period."),
+            {
+                "orderId": 3001,
+                "clientOrderId": "ent-aaa-1",
+                "status": "FILLED",
+                "origQty": "1",
+                "side": "SELL",
+                "type": "MARKET",
+                "symbol": "AAAUSDT",
+            },
+        ]
+
+        strategy = self._build_strategy(
+            client,
+            MagicMock(),
+            cooling_off_retry_count=1,
+            cooling_off_retry_delay_sec=30,
+        )
+
+        with patch("core.strategy_top10_short.time.sleep") as sleep_mock:
+            order, retries_used = strategy._place_market_short_with_shrink_retry(
+                symbol="AAAUSDT",
+                target_notional=10.0,
+                reference_price=10.0,
+                client_id_tag="ent",
+            )
+
+        self.assertEqual(order["orderId"], 3001)
+        self.assertEqual(retries_used, 0)
+        self.assertEqual(client.create_order.call_count, 2)
+        sleep_mock.assert_called_once_with(30)
+
+    def test_cooling_off_retry_disabled_by_default(self) -> None:
+        client = MagicMock()
+        client.normalize_order_qty.return_value = 1.0
+        client.format_order_qty.return_value = "1"
+        client.create_order.side_effect = BinanceAPIError(
+            code=-4192,
+            message="Trade forbidden due to Cooling-off Period.",
+        )
+
+        strategy = self._build_strategy(client, MagicMock())
+
+        with patch("core.strategy_top10_short.time.sleep") as sleep_mock:
+            with self.assertRaises(BinanceAPIError):
+                strategy._place_market_short_with_shrink_retry(
+                    symbol="AAAUSDT",
+                    target_notional=10.0,
+                    reference_price=10.0,
+                    client_id_tag="ent",
+                )
+
+        self.assertEqual(client.create_order.call_count, 1)
+        sleep_mock.assert_not_called()
+
+    def test_rebalance_sell_retries_once_after_cooling_off_and_sleeps(self) -> None:
+        client = MagicMock()
+        client.get_balance.return_value = [{"asset": "USDT", "balance": "100"}]
+        client.get_position_risk.return_value = [
+            {
+                "symbol": "AAAUSDT",
+                "positionAmt": "-2",
+                "markPrice": "10",
+                "entryPrice": "10",
+                "unRealizedProfit": "0",
+                "marginType": "isolated",
+                "leverage": "2",
+            },
+        ]
+        client.normalize_order_qty.side_effect = lambda _s, notional, price: notional / price
+        client.format_order_qty.side_effect = lambda _s, qty: str(qty)
+        client.create_order.side_effect = [
+            BinanceAPIError(code=-4192, message="Trade forbidden due to Cooling-off Period."),
+            {
+                "orderId": 4001,
+                "clientOrderId": "rbpost-aaa-1",
+                "status": "FILLED",
+                "origQty": "16",
+                "side": "SELL",
+                "type": "MARKET",
+                "symbol": "AAAUSDT",
+            },
+        ]
+
+        store = MagicMock()
+        store.list_open_positions.return_value = [
+            {"id": 1, "symbol": "AAAUSDT", "entry_price": 10.0, "tp_order_id": None, "sl_order_id": None},
+        ]
+
+        strategy = self._build_strategy(
+            client,
+            store,
+            cooling_off_retry_count=1,
+            cooling_off_retry_delay_sec=30,
+        )
+        strategy._load_short_position = MagicMock(
+            return_value={"symbol": "AAAUSDT", "positionAmt": "-18", "entryPrice": "10"}
+        )
+        strategy._refresh_exit_orders_for_positions = MagicMock()
+
+        with patch("core.strategy_top10_short.time.sleep") as sleep_mock:
+            summary = strategy._rebalance_to_target(target_count=1, reduce_only=False, reason_tag="post")
+
+        self.assertEqual(int(summary["adjusted"]), 1)
+        self.assertEqual(int(summary["errors"]), 0)
+        self.assertEqual(client.create_order.call_count, 2)
+        sleep_mock.assert_called_once_with(30)
+
+    def test_rebalance_buy_does_not_retry_after_cooling_off(self) -> None:
+        client = MagicMock()
+        client.get_balance.return_value = [{"asset": "USDT", "balance": "50"}]
+        client.get_position_risk.return_value = [
+            {
+                "symbol": "AAAUSDT",
+                "positionAmt": "-10",
+                "markPrice": "10",
+                "entryPrice": "10",
+                "unRealizedProfit": "0",
+                "marginType": "isolated",
+                "leverage": "2",
+            },
+        ]
+        client.normalize_order_qty.side_effect = lambda _s, notional, price: notional / price
+        client.format_order_qty.side_effect = lambda _s, qty: str(qty)
+        client.create_order.side_effect = BinanceAPIError(
+            code=-4192,
+            message="Trade forbidden due to Cooling-off Period.",
+        )
+
+        store = MagicMock()
+        store.list_open_positions.return_value = [
+            {"id": 1, "symbol": "AAAUSDT", "entry_price": 10.0, "tp_order_id": None, "sl_order_id": None},
+        ]
+
+        strategy = self._build_strategy(
+            client,
+            store,
+            cooling_off_retry_count=1,
+            cooling_off_retry_delay_sec=30,
+        )
+        strategy._refresh_exit_orders_for_positions = MagicMock()
+
+        with patch("core.strategy_top10_short.time.sleep") as sleep_mock:
+            summary = strategy._rebalance_to_target(target_count=2, reduce_only=False, reason_tag="post")
+
+        self.assertEqual(int(summary["adjusted"]), 0)
+        self.assertEqual(int(summary["errors"]), 1)
+        self.assertEqual(client.create_order.call_count, 1)
         sleep_mock.assert_not_called()
 
 

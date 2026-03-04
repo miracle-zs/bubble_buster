@@ -132,6 +132,8 @@ daily_loss_cut_enabled = false
 [account.acc02.runtime]
 entry_hour = 7
 entry_minute = 45
+cooling_off_retry_count = 1
+cooling_off_retry_delay_sec = 30
 
 
 [account.55.runtime]

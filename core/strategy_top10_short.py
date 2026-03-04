@@ -5,7 +5,7 @@ import hashlib
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
 from datetime import datetime, time as dt_time, timedelta, timezone
-from typing import Any, Dict, List, Optional, Set, Tuple
+from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 from uuid import uuid4
 from zoneinfo import ZoneInfo
 
@@ -55,6 +55,7 @@ class RebalancePlan:
 
 class Top10ShortStrategy:
     INSUFFICIENT_MARGIN_ERROR_CODES = {-2019, -2027, -2028}
+    COOLING_OFF_ERROR_CODES = {-4192}
     REBALANCE_MODE_EQUAL_RISK = "equal_risk"
     REBALANCE_MODE_AGE_DECAY = "age_decay"
     EQUITY_RECOVERY_LOCK_NAME = "equity_recovery_take_profit_v1"
@@ -95,6 +96,8 @@ class Top10ShortStrategy:
         equity_recovery_reduce_ratio: float = 0.50,
         entry_initial_delay_sec: int = 0,
         entry_symbol_interval_sec: int = 0,
+        cooling_off_retry_count: int = 0,
+        cooling_off_retry_delay_sec: int = 0,
         runtime_timezone: str = "Asia/Shanghai",
         account_id: str = "default",
     ):
@@ -132,6 +135,8 @@ class Top10ShortStrategy:
         self.equity_recovery_reduce_ratio = min(1.0, max(0.05, float(equity_recovery_reduce_ratio)))
         self.entry_initial_delay_sec = max(0, int(entry_initial_delay_sec))
         self.entry_symbol_interval_sec = max(0, int(entry_symbol_interval_sec))
+        self.cooling_off_retry_count = max(0, int(cooling_off_retry_count))
+        self.cooling_off_retry_delay_sec = max(0, int(cooling_off_retry_delay_sec))
         self.runtime_timezone_name = (runtime_timezone or "").strip() or "UTC"
         try:
             self.runtime_timezone = ZoneInfo(self.runtime_timezone_name)
@@ -1196,12 +1201,25 @@ class Top10ShortStrategy:
                     "side": plan.side,
                     "type": "MARKET",
                     "quantity": self.client.format_order_qty(plan.symbol, plan.qty),
-                    "newClientOrderId": self._new_client_id(f"rb{reason_tag}", plan.symbol),
                     "newOrderRespType": "RESULT",
                 }
                 if plan.side == "BUY":
+                    order_params["newClientOrderId"] = self._new_client_id(f"rb{reason_tag}", plan.symbol)
                     order_params["reduceOnly"] = True
-                order = self.client.create_order(**order_params)
+                if plan.side == "SELL":
+                    order = self._create_order_with_cooling_off_retry(
+                        submit_order=lambda order_params=order_params.copy(): self.client.create_order(
+                            **{
+                                **order_params,
+                                "newClientOrderId": self._new_client_id(f"rb{reason_tag}", plan.symbol),
+                            }
+                        ),
+                        symbol=plan.symbol,
+                        side=plan.side,
+                        context=f"rebalance_{reason_tag}",
+                    )
+                else:
+                    order = self.client.create_order(**order_params)
                 self.store.add_order_event(
                     symbol=plan.symbol,
                     position_id=plan.position_id,
@@ -1736,13 +1754,18 @@ class Top10ShortStrategy:
                 break
 
             try:
-                order = self.client.create_order(
+                order = self._create_order_with_cooling_off_retry(
+                    submit_order=lambda qty_str=self.client.format_order_qty(symbol, qty): self.client.create_order(
+                        symbol=symbol,
+                        side="SELL",
+                        type="MARKET",
+                        quantity=qty_str,
+                        newClientOrderId=self._new_client_id(client_id_tag, symbol),
+                        newOrderRespType="RESULT",
+                    ),
                     symbol=symbol,
                     side="SELL",
-                    type="MARKET",
-                    quantity=self.client.format_order_qty(symbol, qty),
-                    newClientOrderId=self._new_client_id(client_id_tag, symbol),
-                    newOrderRespType="RESULT",
+                    context=self._describe_cooling_off_context(client_id_tag),
                 )
                 return order, retries_used
             except BinanceAPIError as exc:
@@ -1792,6 +1815,52 @@ class Top10ShortStrategy:
             return True
         msg = str(exc.message or "").lower()
         return "insufficient" in msg and "margin" in msg
+
+    @classmethod
+    def _is_cooling_off_error(cls, exc: BinanceAPIError) -> bool:
+        code = cls._safe_int(getattr(exc, "code", None))
+        return code in cls.COOLING_OFF_ERROR_CODES
+
+    @staticmethod
+    def _describe_cooling_off_context(client_id_tag: str) -> str:
+        tag = (client_id_tag or "").strip().lower()
+        if tag == "ent":
+            return "entry"
+        if tag == "red":
+            return "redistribute"
+        return tag or "order"
+
+    def _create_order_with_cooling_off_retry(
+        self,
+        submit_order: Callable[[], Dict[str, object]],
+        symbol: str,
+        side: str,
+        context: str,
+    ) -> Dict[str, object]:
+        max_retries = self.cooling_off_retry_count
+        delay_sec = self.cooling_off_retry_delay_sec
+
+        for attempt in range(max_retries + 1):
+            try:
+                return submit_order()
+            except BinanceAPIError as exc:
+                if not self._is_cooling_off_error(exc):
+                    raise
+                if max_retries <= 0 or delay_sec <= 0 or attempt >= max_retries:
+                    raise
+                LOGGER.warning(
+                    "Cooling-off retry scheduled: account=%s symbol=%s side=%s context=%s wait_sec=%s retry=%s/%s",
+                    self.account_id,
+                    symbol,
+                    str(side or "").upper() or "-",
+                    context,
+                    delay_sec,
+                    attempt + 1,
+                    max_retries,
+                )
+                time.sleep(delay_sec)
+
+        raise RuntimeError(f"Cooling-off retry exhausted unexpectedly for {symbol}")
 
     def _log_margin_shortfall_context(
         self,

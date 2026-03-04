@@ -195,6 +195,12 @@ CRON_TZ=Asia/Shanghai
 - `entry_hour` / `entry_minute`：入场时间。
 - `entry_misfire_grace_min`：entry 允许补跑窗口。
 - `entry_catchup_enabled`：错过是否补跑。
+- `entry_initial_delay_sec`：账户 entry 启动前的额外等待秒数。
+- `entry_symbol_interval_sec`：账户 entry 每个 symbol 之间的额外等待秒数。
+- `cooling_off_retry_count` / `cooling_off_retry_delay_sec`：
+  - 账户级冷静期重试参数，默认 `0` 表示关闭。
+  - 仅对增加空头敞口的下单生效：初始开仓、失败资金再分配、post-entry rebalance 的 `SELL` 补单。
+  - 命中 Binance `-4192` 时按配置等待后重试，后续开单会自然顺延。
 - `daily_loss_cut_enabled` / `daily_loss_cut_hour` / `daily_loss_cut_minute`：每日浮亏砍仓开关与时间。
 - `daily_loss_cut_scope`：
   - `tracked`：只看策略跟踪仓位；
