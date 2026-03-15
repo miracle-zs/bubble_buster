@@ -205,6 +205,10 @@ CRON_TZ=Asia/Shanghai
 - `daily_loss_cut_scope`：
   - `tracked`：只看策略跟踪仓位；
   - `exchange`：看账户全仓位（账户 B 建议）。
+- `hourly_exchange_take_profit_enabled` / `hourly_exchange_take_profit_minute` / `hourly_exchange_take_profit_drop_pct`：
+  - 账户级“整点前保护止盈”任务，默认关闭。
+  - 只对交易所当前空头仓位生效，适合 `loss_cut_only + exchange` 类账户（例如账号 `55`）。
+  - 系统会从该仓位真实开仓时间开始回溯；只要历史上曾达到配置跌幅，且到本地 `59` 分检查时当前 `1h` 正在形成的K线为阳线，就会直接市价平仓。
 - `noon_protection_enabled` / `noon_protection_hour` / `noon_protection_minute`：
   - 中午保护止损开关与时间（默认 12:00）。
   - 规则：对账户当前持仓按方向设置保护止损；空仓取 `max(当日0点, 入场时间)` 到中午窗口最高价并收紧，非策略仓位以当日 0 点为起点。
