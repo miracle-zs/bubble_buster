@@ -96,6 +96,7 @@ class StrategyRuntimeService:
         self._last_loss_cut_local_date: Optional[date] = None
         self._last_loss_cut_skipped_date: Optional[date] = None
         self._last_noon_protection_local_date: Optional[date] = None
+        self._last_hourly_exchange_take_profit_hour_by_account: Dict[str, str] = {}
         self._shared_ranking_cache: Optional[List[Dict[str, Any]]] = None
         self._shared_ranking_cache_day: Optional[date] = None
         self._shared_ranking_cache_expires_at: Optional[datetime] = None
@@ -554,6 +555,57 @@ class StrategyRuntimeService:
                         results[aid].setdefault("slow", True)
         LOGGER.info("service noon protection result: %s", results)
 
+    def _run_hourly_exchange_take_profit_if_due(self, now_local: datetime) -> None:
+        results: Dict[str, object] = {}
+        hour_key = now_local.strftime("%Y-%m-%dT%H")
+
+        for aid, ctx in self.account_runtimes.items():
+            enabled_raw = ctx.get(
+                "hourly_exchange_take_profit_enabled",
+                self.cfg.hourly_exchange_take_profit_enabled,
+            )
+            if isinstance(enabled_raw, str):
+                enabled = enabled_raw.strip().lower() in {"1", "true", "yes", "on"}
+            else:
+                enabled = bool(enabled_raw)
+            if not enabled:
+                continue
+
+            target_minute = int(
+                ctx.get(
+                    "hourly_exchange_take_profit_minute",
+                    self.cfg.hourly_exchange_take_profit_minute,
+                )
+            ) % 60
+            if now_local.minute != target_minute:
+                continue
+            if self._last_hourly_exchange_take_profit_hour_by_account.get(aid) == hour_key:
+                continue
+
+            manager = ctx.get("manager")
+            if manager is None or not hasattr(manager, "run_hourly_exchange_take_profit"):
+                results[aid] = {"error": "manager_missing"}
+                self._last_hourly_exchange_take_profit_hour_by_account[aid] = hour_key
+                continue
+
+            drop_pct = float(
+                ctx.get(
+                    "hourly_exchange_take_profit_drop_pct",
+                    self.cfg.hourly_exchange_take_profit_drop_pct,
+                )
+            )
+            try:
+                results[aid] = manager.run_hourly_exchange_take_profit(  # type: ignore[attr-defined]
+                    now_local=now_local,
+                    drop_pct=drop_pct,
+                )
+            except Exception as exc:  # noqa: BLE001
+                results[aid] = {"error": str(exc)}
+            self._last_hourly_exchange_take_profit_hour_by_account[aid] = hour_key
+
+        if results:
+            LOGGER.info("service hourly exchange take-profit result: %s", results)
+
     def _run_manage_if_due(self, now_monotonic: float) -> None:
         if now_monotonic < self._next_manage_monotonic:
             return
@@ -707,6 +759,7 @@ class StrategyRuntimeService:
         self._run_entry_if_due(local_dt)
         self._run_daily_loss_cut_if_due(local_dt)
         self._run_noon_protection_if_due(local_dt)
+        self._run_hourly_exchange_take_profit_if_due(local_dt)
         self._run_manage_if_due(mono)
 
     def run_forever(self, stop_event: Optional[threading.Event] = None) -> None:

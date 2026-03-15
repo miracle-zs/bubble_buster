@@ -899,3 +899,135 @@ def test_noon_protection_runs_once_for_full_and_loss_cut_only_accounts() -> None
     service.run_cycle(now_local=datetime(2026, 2, 13, 16, 0, tzinfo=ZoneInfo("UTC")), now_monotonic=3.0)
     assert full_manager.noon_calls == 1
     assert loss_cut_only_manager.noon_calls == 1
+
+
+def test_hourly_exchange_take_profit_runs_for_loss_cut_only_account_at_configured_minute() -> None:
+    class StrategyStub:
+        def run_entry(self):
+            return {"status": "SKIPPED"}
+
+    class ManagerStub:
+        def __init__(self) -> None:
+            self.hourly_take_profit_calls = 0
+            self.last_now_local = None
+            self.last_drop_pct = None
+
+        def run_once(self):
+            return {"total": 0}
+
+        def run_daily_loss_cut(self):
+            return {"total": 0, "closed_loss_cut": 0, "errors": 0}
+
+        def run_hourly_exchange_take_profit(self, now_local, drop_pct):
+            self.hourly_take_profit_calls += 1
+            self.last_now_local = now_local
+            self.last_drop_pct = drop_pct
+            return {"closed_take_profit": 0, "errors": 0}
+
+    manager = ManagerStub()
+    cfg = ServiceRuntimeConfig(
+        timezone_name="UTC",
+        entry_hour=23,
+        entry_minute=59,
+        entry_misfire_grace_min=120,
+        entry_catchup_enabled=True,
+        daily_loss_cut_enabled=False,
+        daily_loss_cut_hour=11,
+        daily_loss_cut_minute=55,
+        manager_interval_sec=3600,
+        manager_max_catch_up_runs=1,
+        loop_sleep_sec=1.0,
+        run_manage_on_startup=False,
+    )
+    service = StrategyRuntimeService(
+        strategy=StrategyStub(),
+        manager=manager,
+        cfg=cfg,
+        now_monotonic=0.0,
+        account_runtimes={
+            "55": {
+                "mode": "loss_cut_only",
+                "strategy": StrategyStub(),
+                "manager": manager,
+                "balance_sampler": None,
+                "hourly_exchange_take_profit_enabled": True,
+                "hourly_exchange_take_profit_minute": 59,
+                "hourly_exchange_take_profit_drop_pct": 20.0,
+            },
+        },
+        max_account_workers=1,
+    )
+
+    service._run_hourly_exchange_take_profit_if_due(
+        datetime(2026, 2, 13, 10, 59, tzinfo=ZoneInfo("UTC"))
+    )
+
+    assert manager.hourly_take_profit_calls == 1
+    assert manager.last_now_local == datetime(2026, 2, 13, 10, 59, tzinfo=ZoneInfo("UTC"))
+    assert manager.last_drop_pct == 20.0
+
+
+def test_hourly_exchange_take_profit_runs_only_once_per_local_hour() -> None:
+    class StrategyStub:
+        def run_entry(self):
+            return {"status": "SKIPPED"}
+
+    class ManagerStub:
+        def __init__(self) -> None:
+            self.hourly_take_profit_calls = 0
+
+        def run_once(self):
+            return {"total": 0}
+
+        def run_daily_loss_cut(self):
+            return {"total": 0, "closed_loss_cut": 0, "errors": 0}
+
+        def run_hourly_exchange_take_profit(self, now_local, drop_pct):
+            self.hourly_take_profit_calls += 1
+            return {"closed_take_profit": 0, "errors": 0}
+
+    manager = ManagerStub()
+    cfg = ServiceRuntimeConfig(
+        timezone_name="UTC",
+        entry_hour=23,
+        entry_minute=59,
+        entry_misfire_grace_min=120,
+        entry_catchup_enabled=True,
+        daily_loss_cut_enabled=False,
+        daily_loss_cut_hour=11,
+        daily_loss_cut_minute=55,
+        manager_interval_sec=3600,
+        manager_max_catch_up_runs=1,
+        loop_sleep_sec=1.0,
+        run_manage_on_startup=False,
+    )
+    service = StrategyRuntimeService(
+        strategy=StrategyStub(),
+        manager=manager,
+        cfg=cfg,
+        now_monotonic=0.0,
+        account_runtimes={
+            "55": {
+                "mode": "loss_cut_only",
+                "strategy": StrategyStub(),
+                "manager": manager,
+                "balance_sampler": None,
+                "hourly_exchange_take_profit_enabled": True,
+                "hourly_exchange_take_profit_minute": 59,
+                "hourly_exchange_take_profit_drop_pct": 20.0,
+            },
+        },
+        max_account_workers=1,
+    )
+
+    service._run_hourly_exchange_take_profit_if_due(
+        datetime(2026, 2, 13, 10, 59, tzinfo=ZoneInfo("UTC"))
+    )
+    service._run_hourly_exchange_take_profit_if_due(
+        datetime(2026, 2, 13, 10, 59, 30, tzinfo=ZoneInfo("UTC"))
+    )
+    service._run_hourly_exchange_take_profit_if_due(
+        datetime(2026, 2, 13, 11, 59, tzinfo=ZoneInfo("UTC"))
+    )
+
+    assert manager.hourly_take_profit_calls == 2
