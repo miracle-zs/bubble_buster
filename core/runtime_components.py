@@ -203,6 +203,15 @@ def _build_single_account_components(
         "cooling_off_retry_count": max(0, runtime_cfg.getint("cooling_off_retry_count", fallback=0)),
         "cooling_off_retry_delay_sec": max(0, runtime_cfg.getint("cooling_off_retry_delay_sec", fallback=0)),
         "daily_loss_cut_enabled": runtime_cfg.getboolean("daily_loss_cut_enabled", fallback=True),
+        "hourly_exchange_take_profit_enabled": runtime_cfg.getboolean(
+            "hourly_exchange_take_profit_enabled", fallback=False
+        ),
+        "hourly_exchange_take_profit_minute": runtime_cfg.getint(
+            "hourly_exchange_take_profit_minute", fallback=59
+        ),
+        "hourly_exchange_take_profit_drop_pct": runtime_cfg.getfloat(
+            "hourly_exchange_take_profit_drop_pct", fallback=20.0
+        ),
         "strategy": strategy,
         "manager": manager,
         "balance_sampler": wallet_sampler,
@@ -276,6 +285,15 @@ def create_components(
         noon_protection_enabled=runtime_cfg_selected.getboolean("noon_protection_enabled", fallback=True),
         noon_protection_hour=runtime_cfg_selected.getint("noon_protection_hour", fallback=12),
         noon_protection_minute=runtime_cfg_selected.getint("noon_protection_minute", fallback=0),
+        hourly_exchange_take_profit_enabled=runtime_cfg_selected.getboolean(
+            "hourly_exchange_take_profit_enabled", fallback=False
+        ),
+        hourly_exchange_take_profit_minute=runtime_cfg_selected.getint(
+            "hourly_exchange_take_profit_minute", fallback=59
+        ),
+        hourly_exchange_take_profit_drop_pct=runtime_cfg_selected.getfloat(
+            "hourly_exchange_take_profit_drop_pct", fallback=20.0
+        ),
         manager_interval_sec=max(1, runtime_cfg_selected.getint("manager_interval_sec", fallback=60)),
         manager_max_catch_up_runs=max(1, runtime_cfg_selected.getint("manager_max_catch_up_runs", fallback=3)),
         loop_sleep_sec=max(0.2, runtime_cfg_selected.getfloat("service_loop_sleep_sec", fallback=1.0)),

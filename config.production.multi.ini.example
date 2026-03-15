@@ -49,6 +49,9 @@ daily_loss_cut_enabled = true
 daily_loss_cut_hour = 11
 daily_loss_cut_minute = 55
 daily_loss_cut_scope = exchange
+hourly_exchange_take_profit_enabled = false
+hourly_exchange_take_profit_minute = 59
+hourly_exchange_take_profit_drop_pct = 20
 manager_interval_sec = 60
 manager_max_catch_up_runs = 3
 service_loop_sleep_sec = 1.0
@@ -139,6 +142,9 @@ cooling_off_retry_delay_sec = 30
 [account.55.runtime]
 daily_loss_cut_enabled = true
 daily_loss_cut_scope = exchange
+hourly_exchange_take_profit_enabled = true
+hourly_exchange_take_profit_minute = 59
+hourly_exchange_take_profit_drop_pct = 20
 
 [notify]
 enabled = true

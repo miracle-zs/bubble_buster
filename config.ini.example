@@ -49,6 +49,9 @@ daily_loss_cut_enabled = true
 daily_loss_cut_hour = 11
 daily_loss_cut_minute = 55
 daily_loss_cut_scope = exchange
+hourly_exchange_take_profit_enabled = false
+hourly_exchange_take_profit_minute = 59
+hourly_exchange_take_profit_drop_pct = 20
 noon_protection_enabled = true
 noon_protection_hour = 12
 noon_protection_minute = 0
@@ -96,6 +99,12 @@ strategy_note.default = 默认策略 / 中午保护止损ON
 ; entry_symbol_interval_sec = 30
 ; cooling_off_retry_count = 1
 ; cooling_off_retry_delay_sec = 30
+; [account.55.runtime]
+; daily_loss_cut_enabled = true
+; daily_loss_cut_scope = exchange
+; hourly_exchange_take_profit_enabled = true
+; hourly_exchange_take_profit_minute = 59
+; hourly_exchange_take_profit_drop_pct = 20
 ; [account.55.binance]
 ; api_key = ACCOUNT_55_KEY
 ; api_secret = ACCOUNT_55_SECRET
