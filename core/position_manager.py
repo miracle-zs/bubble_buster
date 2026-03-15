@@ -104,6 +104,68 @@ class PositionManager:
         )
         return summary
 
+    def run_hourly_exchange_take_profit(
+        self,
+        now_local: datetime,
+        drop_pct: float,
+    ) -> Dict[str, object]:
+        self.refresh_hourly_exchange_take_profit_state(now_local=now_local, drop_pct=drop_pct)
+        state = self.store.get_lock_state(self.HOURLY_EXCHANGE_TP_LOCK_NAME) or {}
+        raw_symbols = state.get("symbols")
+        symbols_state = raw_symbols if isinstance(raw_symbols, dict) else {}
+        summary = {
+            "total": 0,
+            "closed_take_profit": 0,
+            "skipped": 0,
+            "errors": 0,
+        }
+
+        risks = self.client.get_position_risk()
+        for risk in risks:
+            position_amt = self._safe_float(risk.get("positionAmt"), default=0.0)
+            if position_amt >= 0:
+                continue
+            symbol = str(risk.get("symbol") or "").strip()
+            if not symbol:
+                continue
+            summary["total"] += 1
+            monitor = symbols_state.get(symbol)
+            if not isinstance(monitor, dict) or not bool(monitor.get("eligible_reached")):
+                summary["skipped"] += 1
+                continue
+
+            try:
+                hour_open, latest_price = self._get_current_hour_open_and_latest_price(
+                    symbol=symbol,
+                    risk=risk,
+                    now_local=now_local,
+                )
+                if hour_open is None or latest_price is None or latest_price <= hour_open:
+                    summary["skipped"] += 1
+                    continue
+
+                close_info = self._close_daily_loss_cut(
+                    symbol=symbol,
+                    qty=abs(position_amt),
+                    side="BUY",
+                    position_id=None,
+                    cancel_pos=None,
+                )
+                summary["closed_take_profit"] += 1
+                monitor["last_triggered_hour_key"] = now_local.strftime("%Y-%m-%dT%H")
+                monitor["last_close_order_id"] = close_info.get("close_order_id")
+            except Exception:  # noqa: BLE001
+                summary["errors"] += 1
+
+        self.store.set_lock_state(
+            self.HOURLY_EXCHANGE_TP_LOCK_NAME,
+            {
+                "symbols": symbols_state,
+                "updated_at_utc": self._utc_now_iso(),
+            },
+        )
+        return summary
+
     def _initialize_hourly_exchange_take_profit_monitor(
         self,
         symbol: str,
@@ -208,6 +270,28 @@ class PositionManager:
         if opened_at_ms is None:
             raise RuntimeError(f"cannot reconstruct short opened_at for {symbol}")
         return datetime.fromtimestamp(opened_at_ms / 1000.0, tz=timezone.utc).replace(microsecond=0)
+
+    def _get_current_hour_open_and_latest_price(
+        self,
+        symbol: str,
+        risk: Dict[str, Any],
+        now_local: datetime,
+    ) -> tuple[Optional[float], Optional[float]]:
+        local_dt = now_local.astimezone(timezone.utc)
+        hour_start_utc = local_dt.replace(minute=0, second=0, microsecond=0)
+        rows = self.client.get_klines(
+            symbol=symbol,
+            interval="1h",
+            start_time=int(hour_start_utc.timestamp() * 1000),
+            end_time=int(local_dt.timestamp() * 1000),
+            limit=1,
+        )
+        row = rows[0] if rows else None
+        hour_open = self._safe_positive_float(row[1]) if row and len(row) > 1 else None
+        latest_price = self._safe_positive_float(risk.get("markPrice"))
+        if latest_price is None and row and len(row) > 4:
+            latest_price = self._safe_positive_float(row[4])
+        return hour_open, latest_price
 
     def run_daily_loss_cut(self) -> Dict[str, object]:
         if self.daily_loss_cut_scope == self.DAILY_LOSS_CUT_SCOPE_EXCHANGE:

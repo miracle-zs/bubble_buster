@@ -766,6 +766,185 @@ class PositionManagerTest(unittest.TestCase):
         self.assertEqual(monitor["lowest_price_since_open"], 79.0)
         self.assertTrue(monitor["eligible_reached"])
 
+    def test_hourly_exchange_take_profit_closes_eligible_short_on_bullish_hour(self) -> None:
+        self.store.set_lock_state(
+            PositionManager.HOURLY_EXCHANGE_TP_LOCK_NAME,
+            {
+                "symbols": {
+                    "BTCUSDT": {
+                        "symbol": "BTCUSDT",
+                        "position_amt": -1.0,
+                        "entry_price": 100.0,
+                        "opened_at_utc": datetime(2026, 3, 16, 1, 0, tzinfo=timezone.utc).isoformat(),
+                        "lowest_price_since_open": 79.0,
+                        "eligible_reached": True,
+                    }
+                }
+            },
+        )
+
+        client = MagicMock()
+        client.get_position_risk.side_effect = [
+            [
+                {
+                    "symbol": "BTCUSDT",
+                    "positionAmt": "-1",
+                    "entryPrice": "100",
+                    "markPrice": "85",
+                    "positionSide": "BOTH",
+                }
+            ],
+            [
+                {
+                    "symbol": "BTCUSDT",
+                    "positionAmt": "-1",
+                    "entryPrice": "100",
+                    "markPrice": "85",
+                    "positionSide": "BOTH",
+                }
+            ],
+        ]
+        client.get_klines.side_effect = [
+            [[0, "100", "101", "79", "80", 0]],
+            [[0, "84", "86", "83", "85", 0]],
+        ]
+        client.get_user_trades.return_value = [
+            {
+                "time": int(datetime(2026, 3, 16, 1, 0, tzinfo=timezone.utc).timestamp() * 1000),
+                "qty": "1",
+                "side": "SELL",
+            }
+        ]
+        client.format_order_qty.side_effect = lambda _symbol, qty: str(qty)
+        client.create_order.return_value = {
+            "orderId": 5001,
+            "clientOrderId": "tp-hourly",
+            "type": "MARKET",
+            "side": "BUY",
+            "origQty": "1",
+            "status": "FILLED",
+        }
+
+        notifier = MagicMock()
+        manager = PositionManager(
+            client=client,
+            store=self.store,
+            notifier=notifier,
+            sl_liq_buffer_pct=1.0,
+            trigger_price_type="CONTRACT_PRICE",
+            daily_loss_cut_scope="exchange",
+        )
+
+        result = manager.run_hourly_exchange_take_profit(
+            now_local=datetime(2026, 3, 16, 10, 59, tzinfo=timezone.utc),
+            drop_pct=20.0,
+        )
+
+        self.assertEqual(result["closed_take_profit"], 1)
+        order_kwargs = client.create_order.call_args.kwargs
+        self.assertEqual(order_kwargs["symbol"], "BTCUSDT")
+        self.assertEqual(order_kwargs["side"], "BUY")
+        self.assertTrue(order_kwargs["reduceOnly"])
+
+    def test_hourly_exchange_take_profit_skips_ineligible_or_bearish_positions(self) -> None:
+        self.store.set_lock_state(
+            PositionManager.HOURLY_EXCHANGE_TP_LOCK_NAME,
+            {
+                "symbols": {
+                    "BTCUSDT": {
+                        "symbol": "BTCUSDT",
+                        "position_amt": -1.0,
+                        "entry_price": 100.0,
+                        "opened_at_utc": datetime(2026, 3, 16, 1, 0, tzinfo=timezone.utc).isoformat(),
+                        "lowest_price_since_open": 79.0,
+                        "eligible_reached": True,
+                    },
+                    "ETHUSDT": {
+                        "symbol": "ETHUSDT",
+                        "position_amt": -2.0,
+                        "entry_price": 100.0,
+                        "opened_at_utc": datetime(2026, 3, 16, 2, 0, tzinfo=timezone.utc).isoformat(),
+                        "lowest_price_since_open": 90.0,
+                        "eligible_reached": False,
+                    },
+                }
+            },
+        )
+
+        client = MagicMock()
+        client.get_position_risk.side_effect = [
+            [
+                {
+                    "symbol": "BTCUSDT",
+                    "positionAmt": "-1",
+                    "entryPrice": "100",
+                    "markPrice": "83",
+                    "positionSide": "BOTH",
+                },
+                {
+                    "symbol": "ETHUSDT",
+                    "positionAmt": "-2",
+                    "entryPrice": "100",
+                    "markPrice": "95",
+                    "positionSide": "BOTH",
+                },
+            ],
+            [
+                {
+                    "symbol": "BTCUSDT",
+                    "positionAmt": "-1",
+                    "entryPrice": "100",
+                    "markPrice": "83",
+                    "positionSide": "BOTH",
+                },
+                {
+                    "symbol": "ETHUSDT",
+                    "positionAmt": "-2",
+                    "entryPrice": "100",
+                    "markPrice": "95",
+                    "positionSide": "BOTH",
+                },
+            ],
+        ]
+        client.get_klines.side_effect = [
+            [[0, "100", "101", "79", "80", 0]],
+            [[0, "100", "101", "90", "95", 0]],
+            [[0, "84", "85", "82", "83", 0]],
+        ]
+        client.get_user_trades.side_effect = [
+            [
+                {
+                    "time": int(datetime(2026, 3, 16, 1, 0, tzinfo=timezone.utc).timestamp() * 1000),
+                    "qty": "1",
+                    "side": "SELL",
+                }
+            ],
+            [
+                {
+                    "time": int(datetime(2026, 3, 16, 2, 0, tzinfo=timezone.utc).timestamp() * 1000),
+                    "qty": "2",
+                    "side": "SELL",
+                }
+            ],
+        ]
+
+        manager = PositionManager(
+            client=client,
+            store=self.store,
+            notifier=MagicMock(),
+            sl_liq_buffer_pct=1.0,
+            trigger_price_type="CONTRACT_PRICE",
+            daily_loss_cut_scope="exchange",
+        )
+
+        result = manager.run_hourly_exchange_take_profit(
+            now_local=datetime(2026, 3, 16, 10, 59, tzinfo=timezone.utc),
+            drop_pct=20.0,
+        )
+
+        self.assertEqual(result["closed_take_profit"], 0)
+        client.create_order.assert_not_called()
+
     def _insert_open_position(
         self,
         symbol: str,
