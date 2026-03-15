@@ -19,6 +19,7 @@ class PositionManager:
     DAILY_LOSS_CUT_SCOPE_TRACKED = "tracked"
     DAILY_LOSS_CUT_SCOPE_EXCHANGE = "exchange"
     NOON_PROTECTION_LOCK_NAME = "noon_protection_stop_caps_v1"
+    HOURLY_EXCHANGE_TP_LOCK_NAME = "hourly_exchange_take_profit_v1"
 
     def __init__(
         self,
@@ -38,6 +39,175 @@ class PositionManager:
         self.daily_loss_cut_scope = self._normalize_daily_loss_cut_scope(daily_loss_cut_scope)
         self.account_id = (account_id or "").strip() or "default"
         self._noon_protection_caps_cache: Optional[Dict[str, float]] = None
+
+    def refresh_hourly_exchange_take_profit_state(
+        self,
+        now_local: datetime,
+        drop_pct: float,
+    ) -> Dict[str, object]:
+        now_utc = now_local.astimezone(timezone.utc).replace(microsecond=0)
+        state = self.store.get_lock_state(self.HOURLY_EXCHANGE_TP_LOCK_NAME) or {}
+        raw_symbols = state.get("symbols")
+        symbols_state = dict(raw_symbols) if isinstance(raw_symbols, dict) else {}
+
+        summary = {
+            "initialized": 0,
+            "updated": 0,
+            "pruned": 0,
+        }
+        active_symbols = set()
+        risks = self.client.get_position_risk()
+        for risk in risks:
+            position_amt = self._safe_float(risk.get("positionAmt"), default=0.0)
+            if position_amt >= 0:
+                continue
+            symbol = str(risk.get("symbol") or "").strip()
+            if not symbol:
+                continue
+            active_symbols.add(symbol)
+            entry_price = self._safe_positive_float(risk.get("entryPrice"))
+            if not entry_price:
+                continue
+
+            existing = symbols_state.get(symbol)
+            if not isinstance(existing, dict):
+                symbols_state[symbol] = self._initialize_hourly_exchange_take_profit_monitor(
+                    symbol=symbol,
+                    risk=risk,
+                    now_utc=now_utc,
+                    drop_pct=drop_pct,
+                )
+                summary["initialized"] += 1
+                continue
+
+            refreshed = self._refresh_existing_hourly_exchange_take_profit_monitor(
+                symbol=symbol,
+                risk=risk,
+                existing=existing,
+                now_utc=now_utc,
+                drop_pct=drop_pct,
+            )
+            symbols_state[symbol] = refreshed
+            summary["updated"] += 1
+
+        stale_symbols = [symbol for symbol in list(symbols_state.keys()) if symbol not in active_symbols]
+        for symbol in stale_symbols:
+            symbols_state.pop(symbol, None)
+            summary["pruned"] += 1
+
+        self.store.set_lock_state(
+            self.HOURLY_EXCHANGE_TP_LOCK_NAME,
+            {
+                "symbols": symbols_state,
+                "updated_at_utc": self._utc_now_iso(),
+            },
+        )
+        return summary
+
+    def _initialize_hourly_exchange_take_profit_monitor(
+        self,
+        symbol: str,
+        risk: Dict[str, Any],
+        now_utc: datetime,
+        drop_pct: float,
+    ) -> Dict[str, object]:
+        entry_price = self._safe_positive_float(risk.get("entryPrice"))
+        if not entry_price:
+            raise RuntimeError(f"missing entry price for {symbol}")
+        position_amt = self._safe_float(risk.get("positionAmt"), default=0.0)
+        opened_at_utc = self._reconstruct_short_opened_at_from_trades(
+            symbol=symbol,
+            current_short_qty=abs(position_amt),
+        )
+        _high_price, low_price = self._fetch_symbol_extremes_between(
+            symbol=symbol,
+            start_utc=opened_at_utc,
+            end_utc=now_utc,
+        )
+        lowest_price = low_price if low_price is not None else entry_price
+        favorable_drop_pct = max(0.0, (entry_price - lowest_price) / entry_price)
+        eligible_reached = favorable_drop_pct >= (float(drop_pct) / 100.0)
+        return {
+            "symbol": symbol,
+            "position_amt": position_amt,
+            "entry_price": entry_price,
+            "opened_at_utc": opened_at_utc.isoformat(),
+            "lowest_price_since_open": float(lowest_price),
+            "eligible_reached": eligible_reached,
+            "eligible_reached_at_utc": now_utc.isoformat() if eligible_reached else None,
+            "last_seen_at_utc": now_utc.isoformat(),
+        }
+
+    def _refresh_existing_hourly_exchange_take_profit_monitor(
+        self,
+        symbol: str,
+        risk: Dict[str, Any],
+        existing: Dict[str, Any],
+        now_utc: datetime,
+        drop_pct: float,
+    ) -> Dict[str, object]:
+        entry_price = self._safe_positive_float(risk.get("entryPrice"))
+        if not entry_price:
+            raise RuntimeError(f"missing entry price for {symbol}")
+        position_amt = self._safe_float(risk.get("positionAmt"), default=0.0)
+        opened_at_raw = str(existing.get("opened_at_utc") or "").strip()
+        opened_at_utc = self._parse_iso_utc(opened_at_raw) if opened_at_raw else self._reconstruct_short_opened_at_from_trades(
+            symbol=symbol,
+            current_short_qty=abs(position_amt),
+        )
+        _high_price, low_price = self._fetch_symbol_extremes_between(
+            symbol=symbol,
+            start_utc=opened_at_utc,
+            end_utc=now_utc,
+        )
+        existing_low = self._safe_positive_float(existing.get("lowest_price_since_open"))
+        candidates = [price for price in [existing_low, low_price, entry_price] if price is not None]
+        lowest_price = min(candidates) if candidates else entry_price
+
+        refreshed = dict(existing)
+        refreshed["symbol"] = symbol
+        refreshed["position_amt"] = position_amt
+        refreshed["entry_price"] = entry_price
+        refreshed["opened_at_utc"] = opened_at_utc.isoformat()
+        refreshed["lowest_price_since_open"] = float(lowest_price)
+        refreshed["last_seen_at_utc"] = now_utc.isoformat()
+
+        favorable_drop_pct = max(0.0, (entry_price - lowest_price) / entry_price)
+        if favorable_drop_pct >= (float(drop_pct) / 100.0):
+            refreshed["eligible_reached"] = True
+            refreshed.setdefault("eligible_reached_at_utc", now_utc.isoformat())
+            if not refreshed.get("eligible_reached_at_utc"):
+                refreshed["eligible_reached_at_utc"] = now_utc.isoformat()
+        else:
+            refreshed["eligible_reached"] = bool(existing.get("eligible_reached"))
+        return refreshed
+
+    def _reconstruct_short_opened_at_from_trades(
+        self,
+        symbol: str,
+        current_short_qty: float,
+    ) -> datetime:
+        trades = self.client.get_user_trades(symbol=symbol, limit=1000)
+        remaining_qty = max(0.0, float(current_short_qty))
+        opened_at_ms: Optional[int] = None
+        for trade in reversed(trades or []):
+            qty = self._safe_float(trade.get("qty"), default=0.0)
+            side = str(trade.get("side") or "").strip().upper()
+            if qty <= 0 or side not in {"BUY", "SELL"}:
+                continue
+            if side != "SELL":
+                continue
+            remaining_qty -= qty
+            trade_time = trade.get("time")
+            try:
+                opened_at_ms = int(trade_time)
+            except (TypeError, ValueError):
+                continue
+            if remaining_qty <= 1e-12:
+                break
+        if opened_at_ms is None:
+            raise RuntimeError(f"cannot reconstruct short opened_at for {symbol}")
+        return datetime.fromtimestamp(opened_at_ms / 1000.0, tz=timezone.utc).replace(microsecond=0)
 
     def run_daily_loss_cut(self) -> Dict[str, object]:
         if self.daily_loss_cut_scope == self.DAILY_LOSS_CUT_SCOPE_EXCHANGE:

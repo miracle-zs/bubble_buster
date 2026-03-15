@@ -652,6 +652,120 @@ class PositionManagerTest(unittest.TestCase):
         self.assertEqual(summary["skipped"], 0)
         client.create_order.assert_called_once()
 
+    def test_hourly_exchange_take_profit_initializes_state_from_true_open_time(self) -> None:
+        opened_at_utc = datetime(2026, 3, 16, 1, 0, tzinfo=timezone.utc)
+        now_local = datetime(2026, 3, 16, 10, 18, tzinfo=timezone.utc)
+
+        client = MagicMock()
+        client.get_position_risk.return_value = [
+            {
+                "symbol": "BTCUSDT",
+                "positionAmt": "-1",
+                "entryPrice": "100",
+                "positionSide": "BOTH",
+            }
+        ]
+        client.get_user_trades.return_value = [
+            {
+                "time": int(opened_at_utc.timestamp() * 1000),
+                "qty": "1",
+                "side": "SELL",
+            }
+        ]
+        client.get_klines.return_value = [
+            [int(opened_at_utc.timestamp() * 1000), "100", "101", "79", "80", 0],
+        ]
+
+        manager = PositionManager(
+            client=client,
+            store=self.store,
+            notifier=MagicMock(),
+            sl_liq_buffer_pct=1.0,
+            trigger_price_type="CONTRACT_PRICE",
+            daily_loss_cut_scope="exchange",
+        )
+
+        summary = manager.refresh_hourly_exchange_take_profit_state(
+            now_local=now_local,
+            drop_pct=20.0,
+        )
+
+        self.assertEqual(summary["initialized"], 1)
+        self.assertEqual(summary["updated"], 0)
+        self.assertEqual(summary["pruned"], 0)
+
+        lock_state = self.store.get_lock_state(PositionManager.HOURLY_EXCHANGE_TP_LOCK_NAME)
+        self.assertIsNotNone(lock_state)
+        assert lock_state is not None
+        monitor = lock_state["symbols"]["BTCUSDT"]
+        self.assertEqual(monitor["opened_at_utc"], opened_at_utc.isoformat())
+        self.assertEqual(monitor["entry_price"], 100.0)
+        self.assertEqual(monitor["lowest_price_since_open"], 79.0)
+        self.assertTrue(monitor["eligible_reached"])
+
+    def test_hourly_exchange_take_profit_keeps_eligibility_after_retrace(self) -> None:
+        first_seen_local = datetime(2026, 3, 16, 10, 18, tzinfo=timezone.utc)
+        second_seen_local = datetime(2026, 3, 16, 10, 19, tzinfo=timezone.utc)
+        opened_at_utc = datetime(2026, 3, 16, 1, 0, tzinfo=timezone.utc)
+
+        client = MagicMock()
+        client.get_position_risk.side_effect = [
+            [
+                {
+                    "symbol": "BTCUSDT",
+                    "positionAmt": "-1",
+                    "entryPrice": "100",
+                    "positionSide": "BOTH",
+                }
+            ],
+            [
+                {
+                    "symbol": "BTCUSDT",
+                    "positionAmt": "-1",
+                    "entryPrice": "100",
+                    "positionSide": "BOTH",
+                }
+            ],
+        ]
+        client.get_user_trades.return_value = [
+            {
+                "time": int(opened_at_utc.timestamp() * 1000),
+                "qty": "1",
+                "side": "SELL",
+            }
+        ]
+        client.get_klines.side_effect = [
+            [[int(opened_at_utc.timestamp() * 1000), "100", "101", "79", "80", 0]],
+            [[int(opened_at_utc.timestamp() * 1000), "100", "101", "92", "95", 0]],
+        ]
+
+        manager = PositionManager(
+            client=client,
+            store=self.store,
+            notifier=MagicMock(),
+            sl_liq_buffer_pct=1.0,
+            trigger_price_type="CONTRACT_PRICE",
+            daily_loss_cut_scope="exchange",
+        )
+
+        manager.refresh_hourly_exchange_take_profit_state(
+            now_local=first_seen_local,
+            drop_pct=20.0,
+        )
+        summary = manager.refresh_hourly_exchange_take_profit_state(
+            now_local=second_seen_local,
+            drop_pct=20.0,
+        )
+
+        self.assertEqual(summary["initialized"], 0)
+        self.assertEqual(summary["updated"], 1)
+        lock_state = self.store.get_lock_state(PositionManager.HOURLY_EXCHANGE_TP_LOCK_NAME)
+        self.assertIsNotNone(lock_state)
+        assert lock_state is not None
+        monitor = lock_state["symbols"]["BTCUSDT"]
+        self.assertEqual(monitor["lowest_price_since_open"], 79.0)
+        self.assertTrue(monitor["eligible_reached"])
+
     def _insert_open_position(
         self,
         symbol: str,
