@@ -1077,6 +1077,86 @@ class PositionManagerTest(unittest.TestCase):
         self.assertEqual(order_kwargs["side"], "BUY")
         self.assertTrue(order_kwargs["reduceOnly"])
 
+    def test_hourly_exchange_take_profit_closes_hedge_mode_short_with_position_side(self) -> None:
+        self.store.set_lock_state(
+            PositionManager.HOURLY_EXCHANGE_TP_LOCK_NAME,
+            {
+                "symbols": {
+                    "MYXUSDT": {
+                        "symbol": "MYXUSDT",
+                        "position_amt": -7371.0,
+                        "entry_price": 0.407,
+                        "opened_at_utc": datetime(2026, 3, 15, 23, 50, 44, tzinfo=timezone.utc).isoformat(),
+                        "lowest_price_since_open": 0.3231,
+                        "eligible_reached": True,
+                    }
+                }
+            },
+        )
+
+        client = MagicMock()
+        client.get_position_risk.side_effect = [
+            [
+                {
+                    "symbol": "MYXUSDT",
+                    "positionAmt": "-7371",
+                    "entryPrice": "0.407",
+                    "markPrice": "0.3395",
+                    "positionSide": "SHORT",
+                }
+            ],
+            [
+                {
+                    "symbol": "MYXUSDT",
+                    "positionAmt": "-7371",
+                    "entryPrice": "0.407",
+                    "markPrice": "0.3395",
+                    "positionSide": "SHORT",
+                }
+            ],
+        ]
+        client.get_klines.side_effect = [
+            [[0, "0.407", "0.410", "0.3231", "0.3300", 0]],
+            [[0, "0.3385", "0.3400", "0.3300", "0.3395", 0]],
+        ]
+        client.get_user_trades.return_value = [
+            {
+                "time": int(datetime(2026, 3, 15, 23, 50, 44, tzinfo=timezone.utc).timestamp() * 1000),
+                "qty": "7371",
+                "side": "SELL",
+            }
+        ]
+        client.format_order_qty.return_value = "7371"
+        client.create_order.return_value = {
+            "orderId": 9988,
+            "clientOrderId": "tp-close-short",
+            "type": "MARKET",
+            "side": "BUY",
+            "origQty": "7371",
+            "status": "FILLED",
+            "positionSide": "SHORT",
+        }
+
+        manager = PositionManager(
+            client=client,
+            store=self.store,
+            notifier=MagicMock(),
+            sl_liq_buffer_pct=1.0,
+            trigger_price_type="CONTRACT_PRICE",
+            daily_loss_cut_scope="exchange",
+        )
+
+        result = manager.run_hourly_exchange_take_profit(
+            now_local=datetime(2026, 3, 17, 0, 59, tzinfo=timezone.utc),
+            drop_pct=20.0,
+        )
+
+        self.assertEqual(result["closed_take_profit"], 1)
+        order_kwargs = client.create_order.call_args.kwargs
+        self.assertEqual(order_kwargs["side"], "BUY")
+        self.assertEqual(order_kwargs["positionSide"], "SHORT")
+        self.assertNotIn("reduceOnly", order_kwargs)
+
     def test_hourly_exchange_take_profit_skips_ineligible_or_bearish_positions(self) -> None:
         self.store.set_lock_state(
             PositionManager.HOURLY_EXCHANGE_TP_LOCK_NAME,

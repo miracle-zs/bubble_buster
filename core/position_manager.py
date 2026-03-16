@@ -148,12 +148,19 @@ class PositionManager:
                     summary["skipped"] += 1
                     continue
 
+                position_side = str(risk.get("positionSide") or "BOTH").strip().upper() or "BOTH"
+                close_side, use_reduce_only = self._resolve_close_side_for_exchange_position(
+                    position_amt=position_amt,
+                    position_side=position_side,
+                )
                 close_info = self._close_daily_loss_cut(
                     symbol=symbol,
                     qty=abs(position_amt),
-                    side="BUY",
+                    side=close_side,
                     position_id=None,
                     cancel_pos=None,
+                    position_side=position_side if position_side in {"LONG", "SHORT"} else None,
+                    use_reduce_only=use_reduce_only,
                 )
                 summary["closed_take_profit"] += 1
                 monitor["last_triggered_hour_key"] = now_local.strftime("%Y-%m-%dT%H")
