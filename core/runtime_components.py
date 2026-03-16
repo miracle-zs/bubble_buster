@@ -203,6 +203,12 @@ def _build_single_account_components(
         "cooling_off_retry_count": max(0, runtime_cfg.getint("cooling_off_retry_count", fallback=0)),
         "cooling_off_retry_delay_sec": max(0, runtime_cfg.getint("cooling_off_retry_delay_sec", fallback=0)),
         "daily_loss_cut_enabled": runtime_cfg.getboolean("daily_loss_cut_enabled", fallback=True),
+        "morning_protection_enabled": runtime_cfg.getboolean("morning_protection_enabled", fallback=False),
+        "morning_protection_hour": runtime_cfg.getint("morning_protection_hour", fallback=7),
+        "morning_protection_minute": runtime_cfg.getint("morning_protection_minute", fallback=55),
+        "morning_protection_min_hold_hours": runtime_cfg.getfloat(
+            "morning_protection_min_hold_hours", fallback=6.0
+        ),
         "hourly_exchange_take_profit_enabled": runtime_cfg.getboolean(
             "hourly_exchange_take_profit_enabled", fallback=False
         ),
@@ -285,6 +291,12 @@ def create_components(
         noon_protection_enabled=runtime_cfg_selected.getboolean("noon_protection_enabled", fallback=True),
         noon_protection_hour=runtime_cfg_selected.getint("noon_protection_hour", fallback=12),
         noon_protection_minute=runtime_cfg_selected.getint("noon_protection_minute", fallback=0),
+        morning_protection_enabled=runtime_cfg_selected.getboolean("morning_protection_enabled", fallback=False),
+        morning_protection_hour=runtime_cfg_selected.getint("morning_protection_hour", fallback=7),
+        morning_protection_minute=runtime_cfg_selected.getint("morning_protection_minute", fallback=55),
+        morning_protection_min_hold_hours=runtime_cfg_selected.getfloat(
+            "morning_protection_min_hold_hours", fallback=6.0
+        ),
         hourly_exchange_take_profit_enabled=runtime_cfg_selected.getboolean(
             "hourly_exchange_take_profit_enabled", fallback=False
         ),

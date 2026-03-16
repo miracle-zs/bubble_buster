@@ -33,6 +33,10 @@ class ServiceRuntimeConfig:
     noon_protection_enabled: bool = True
     noon_protection_hour: int = 12
     noon_protection_minute: int = 0
+    morning_protection_enabled: bool = False
+    morning_protection_hour: int = 7
+    morning_protection_minute: int = 55
+    morning_protection_min_hold_hours: float = 6.0
     hourly_exchange_take_profit_enabled: bool = False
     hourly_exchange_take_profit_minute: int = 59
     hourly_exchange_take_profit_drop_pct: float = 20.0
