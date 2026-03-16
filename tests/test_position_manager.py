@@ -5,7 +5,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Dict
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 if importlib.util.find_spec("requests") is None:
     raise unittest.SkipTest("requests is not installed")
@@ -944,6 +944,78 @@ class PositionManagerTest(unittest.TestCase):
 
         self.assertEqual(result["closed_take_profit"], 0)
         client.create_order.assert_not_called()
+
+    def test_hourly_exchange_take_profit_logs_symbol_when_close_fails(self) -> None:
+        self.store.set_lock_state(
+            PositionManager.HOURLY_EXCHANGE_TP_LOCK_NAME,
+            {
+                "symbols": {
+                    "COSUSDT": {
+                        "symbol": "COSUSDT",
+                        "position_amt": -10.0,
+                        "entry_price": 0.0023,
+                        "opened_at_utc": datetime(2026, 3, 15, 0, 0, tzinfo=timezone.utc).isoformat(),
+                        "lowest_price_since_open": 0.001755,
+                        "eligible_reached": True,
+                    }
+                }
+            },
+        )
+
+        client = MagicMock()
+        client.get_position_risk.side_effect = [
+            [
+                {
+                    "symbol": "COSUSDT",
+                    "positionAmt": "-10",
+                    "entryPrice": "0.0023",
+                    "markPrice": "0.0021",
+                    "positionSide": "BOTH",
+                }
+            ],
+            [
+                {
+                    "symbol": "COSUSDT",
+                    "positionAmt": "-10",
+                    "entryPrice": "0.0023",
+                    "markPrice": "0.0021",
+                    "positionSide": "BOTH",
+                }
+            ],
+        ]
+        client.get_klines.side_effect = [
+            [[0, "0.0023", "0.0023", "0.001755", "0.0019", 0]],
+            [[0, "0.0020", "0.0022", "0.0019", "0.0021", 0]],
+        ]
+        client.get_user_trades.return_value = [
+            {
+                "time": int(datetime(2026, 3, 15, 0, 0, tzinfo=timezone.utc).timestamp() * 1000),
+                "qty": "10",
+                "side": "SELL",
+            }
+        ]
+        client.format_order_qty.side_effect = lambda _symbol, qty: str(qty)
+        client.create_order.side_effect = RuntimeError("close rejected")
+
+        manager = PositionManager(
+            client=client,
+            store=self.store,
+            notifier=MagicMock(),
+            sl_liq_buffer_pct=1.0,
+            trigger_price_type="CONTRACT_PRICE",
+            daily_loss_cut_scope="exchange",
+        )
+
+        with patch("core.position_manager.LOGGER.exception") as log_exception:
+            result = manager.run_hourly_exchange_take_profit(
+                now_local=datetime(2026, 3, 16, 7, 59, tzinfo=timezone.utc),
+                drop_pct=20.0,
+            )
+
+        self.assertEqual(result["errors"], 1)
+        log_args = log_exception.call_args.args
+        self.assertIn("Hourly exchange take-profit failed", log_args[0])
+        self.assertEqual(log_args[1], "COSUSDT")
 
     def _insert_open_position(
         self,

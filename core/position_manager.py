@@ -135,6 +135,8 @@ class PositionManager:
                 continue
 
             try:
+                hour_open = None
+                latest_price = None
                 hour_open, latest_price = self._get_current_hour_open_and_latest_price(
                     symbol=symbol,
                     risk=risk,
@@ -154,8 +156,16 @@ class PositionManager:
                 summary["closed_take_profit"] += 1
                 monitor["last_triggered_hour_key"] = now_local.strftime("%Y-%m-%dT%H")
                 monitor["last_close_order_id"] = close_info.get("close_order_id")
-            except Exception:  # noqa: BLE001
+            except Exception as exc:  # noqa: BLE001
                 summary["errors"] += 1
+                LOGGER.exception(
+                    "Hourly exchange take-profit failed symbol=%s hour_open=%s latest_price=%s position_amt=%s: %s",
+                    symbol,
+                    hour_open,
+                    latest_price,
+                    position_amt,
+                    exc,
+                )
 
         self.store.set_lock_state(
             self.HOURLY_EXCHANGE_TP_LOCK_NAME,
