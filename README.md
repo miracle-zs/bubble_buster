@@ -4,6 +4,7 @@
 - 每日固定时间做一次 Top N 涨幅做空入场；
 - 持仓巡检（止盈/止损/超时/动态止损）；
 - 每日定时浮亏砍仓；
+- 早盘保护止损（07:55 对持有超 6 小时仓位按当前小时高低点收紧止损）；
 - 中午保护止损（12:00 以 0 点/入场后到 12 点最高价收紧止损）；
 - 本地 Dashboard 可视化；
 - SQLite 落库，便于回放和排障。
@@ -20,11 +21,11 @@
 - `core/runtime_components.py`
   - 统一装配 `BinanceFuturesClient / StateStore / Strategy / PositionManager / WalletSnapshotSampler`。
 - `core/runtime_service.py`
-  - 内置调度器（替代 cron），按时驱动 `entry + daily loss-cut + noon protection + manage`。
+  - 内置调度器（替代 cron），按时驱动 `entry + daily loss-cut + morning protection + noon protection + hourly take-profit + manage`。
 - `core/strategy_top10_short.py`
   - 日内入场主逻辑（TopN 选币、按余额分配、做空、挂 TP/SL、失败缩量重试、风险兜底平仓）。
 - `core/position_manager.py`
-  - 持仓巡检与管理（TP/SL 成交处理、超时平仓、动态止损、每日浮亏砍仓、中午保护止损）。
+  - 持仓巡检与管理（TP/SL 成交处理、超时平仓、动态止损、每日浮亏砍仓、早盘保护止损、中午保护止损）。
   - 浮亏砍仓支持两种范围：
     - `tracked`：只处理策略数据库中 OPEN 仓位；
     - `exchange`：扫描交易所账户当前全部持仓并对浮亏仓位平仓。
@@ -205,6 +206,13 @@ CRON_TZ=Asia/Shanghai
 - `daily_loss_cut_scope`：
   - `tracked`：只看策略跟踪仓位；
   - `exchange`：看账户全仓位（账户 B 建议）。
+- `morning_protection_enabled` / `morning_protection_hour` / `morning_protection_minute` / `morning_protection_min_hold_hours`：
+  - 早盘保护止损开关、时间和最小持仓时长，默认 `07:55` / `6h`。
+  - 同时支持策略跟踪仓位和交易所实际持仓。
+  - 规则：到触发时，对持有时间不少于 `min_hold_hours` 的仓位按方向收紧保护止损。
+    - 空仓：止损参考当前小时截至检查时刻的最高价；
+    - 多仓：止损参考当前小时截至检查时刻的最低价。
+  - morning cap 会持久化到锁状态，后续动态止损不会把它放宽回去。
 - `hourly_exchange_take_profit_enabled` / `hourly_exchange_take_profit_minute` / `hourly_exchange_take_profit_drop_pct`：
   - 账户级“整点前保护止盈”任务，默认关闭。
   - 只对交易所当前空头仓位生效，适合 `loss_cut_only + exchange` 类账户（例如账号 `55`）。

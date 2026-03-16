@@ -55,6 +55,8 @@ class PositionManagerTest(unittest.TestCase):
             "BTCUSDT": SimpleNamespace(tick_size=0.1)
         }
         client.normalize_trigger_price.return_value = 60390.0
+        client.format_trigger_price.return_value = "60390.0"
+        client.format_order_qty.return_value = "0.01"
         client.create_order.return_value = {
             "orderId": 333,
             "clientOrderId": "sl-new",
@@ -651,6 +653,235 @@ class PositionManagerTest(unittest.TestCase):
         self.assertEqual(summary["updated_sl"], 1)
         self.assertEqual(summary["skipped"], 0)
         client.create_order.assert_called_once()
+
+    def test_morning_protection_tightens_tracked_short_older_than_min_hold_to_current_hour_high(self) -> None:
+        opened_at = datetime(2026, 3, 16, 23, 0, tzinfo=timezone.utc)
+        check_time = datetime(2026, 3, 17, 7, 55, tzinfo=timezone.utc)
+        position_id = self.store.insert_position(
+            run_id=self.run_id,
+            symbol="DENTUSDT",
+            side="SHORT",
+            qty=1000.0,
+            entry_price=0.001,
+            liq_price_open=0.01,
+            tp_price=0.0008,
+            sl_price=0.0025,
+            tp_order_id=100,
+            sl_order_id=200,
+            tp_client_order_id="tp-old",
+            sl_client_order_id="sl-old",
+            opened_at_utc=opened_at.isoformat(),
+            expire_at_utc=(opened_at + timedelta(hours=12)).isoformat(),
+            status="OPEN",
+        )
+
+        client = MagicMock()
+        client.get_position_risk.return_value = [
+            {
+                "symbol": "DENTUSDT",
+                "positionAmt": "-1000",
+                "positionSide": "BOTH",
+                "liquidationPrice": "0.01",
+            }
+        ]
+        client.get_klines.return_value = [
+            [0, "0", "0.0021", "0.0019", "0", 0],
+        ]
+        client.get_symbol_rules.return_value = {
+            "DENTUSDT": SimpleNamespace(tick_size=0.0001),
+        }
+        client.normalize_trigger_price.side_effect = lambda _symbol, price, round_up=False: float(price)
+        client.format_trigger_price.side_effect = lambda _symbol, price, round_up=False: str(price)
+        client.format_order_qty.side_effect = lambda _symbol, qty: str(qty)
+        client.create_order.return_value = {
+            "orderId": 5001,
+            "clientOrderId": "sl-morning",
+            "type": "STOP_MARKET",
+            "side": "BUY",
+            "origQty": "1000",
+            "status": "NEW",
+        }
+
+        manager = PositionManager(
+            client=client,
+            store=self.store,
+            notifier=MagicMock(),
+            sl_liq_buffer_pct=1.0,
+            trigger_price_type="CONTRACT_PRICE",
+        )
+
+        summary = manager.run_morning_protection_stop(
+            check_time_utc=check_time,
+            min_hold_hours=6.0,
+        )
+
+        self.assertEqual(summary["total"], 1)
+        self.assertEqual(summary["updated_sl"], 1)
+        self.assertEqual(summary["errors"], 0)
+        row = self._get_position(position_id)
+        self.assertAlmostEqual(float(row["sl_price"]), 0.0021, places=10)
+
+    def test_morning_protection_applies_to_exchange_short_positions(self) -> None:
+        check_time = datetime(2026, 3, 17, 7, 55, tzinfo=timezone.utc)
+
+        client = MagicMock()
+        client.get_position_risk.return_value = [
+            {
+                "symbol": "XRPUSDT",
+                "positionAmt": "-1500",
+                "positionSide": "BOTH",
+                "entryPrice": "0.7",
+                "liquidationPrice": "5.0",
+            }
+        ]
+        client.get_user_trades.return_value = [
+            {
+                "time": int(datetime(2026, 3, 16, 22, 0, tzinfo=timezone.utc).timestamp() * 1000),
+                "qty": "1500",
+                "side": "SELL",
+            }
+        ]
+        client.get_klines.return_value = [
+            [0, "0", "0.62", "0.51", "0", 0],
+        ]
+        client.get_symbol_rules.return_value = {
+            "XRPUSDT": SimpleNamespace(tick_size=0.0001),
+        }
+        client.normalize_trigger_price.side_effect = lambda _symbol, price, round_up=False: float(price)
+        client.format_trigger_price.side_effect = lambda _symbol, price, round_up=False: str(price)
+        client.format_order_qty.side_effect = lambda _symbol, qty: str(qty)
+        client.create_order.return_value = {
+            "orderId": 5002,
+            "clientOrderId": "sl-xrp-morning",
+            "type": "STOP_MARKET",
+            "side": "BUY",
+            "origQty": "1500",
+            "status": "NEW",
+        }
+
+        manager = PositionManager(
+            client=client,
+            store=self.store,
+            notifier=MagicMock(),
+            sl_liq_buffer_pct=1.0,
+            trigger_price_type="CONTRACT_PRICE",
+            daily_loss_cut_scope="exchange",
+        )
+
+        summary = manager.run_morning_protection_stop(
+            check_time_utc=check_time,
+            min_hold_hours=6.0,
+        )
+
+        self.assertEqual(summary["total"], 1)
+        self.assertEqual(summary["updated_sl"], 1)
+        self.assertEqual(summary["errors"], 0)
+        order_kwargs = client.create_order.call_args.kwargs
+        self.assertEqual(order_kwargs["symbol"], "XRPUSDT")
+        self.assertEqual(order_kwargs["side"], "BUY")
+        self.assertTrue(order_kwargs["reduceOnly"])
+
+    def test_morning_protection_uses_current_hour_low_for_long_positions(self) -> None:
+        check_time = datetime(2026, 3, 17, 7, 55, tzinfo=timezone.utc)
+
+        client = MagicMock()
+        client.get_position_risk.return_value = [
+            {
+                "symbol": "SOLUSDT",
+                "positionAmt": "3",
+                "positionSide": "LONG",
+                "entryPrice": "120",
+                "liquidationPrice": "80",
+            }
+        ]
+        client.get_user_trades.return_value = [
+            {
+                "time": int(datetime(2026, 3, 16, 22, 0, tzinfo=timezone.utc).timestamp() * 1000),
+                "qty": "3",
+                "side": "BUY",
+            }
+        ]
+        client.get_klines.return_value = [
+            [0, "0", "122", "118", "0", 0],
+        ]
+        client.get_symbol_rules.return_value = {
+            "SOLUSDT": SimpleNamespace(tick_size=0.1),
+        }
+        client.normalize_trigger_price.side_effect = lambda _symbol, price, round_up=False: float(price)
+        client.format_trigger_price.side_effect = lambda _symbol, price, round_up=False: str(price)
+        client.format_order_qty.side_effect = lambda _symbol, qty: str(qty)
+        client.create_order.return_value = {
+            "orderId": 5003,
+            "clientOrderId": "sl-sol-morning",
+            "type": "STOP_MARKET",
+            "side": "SELL",
+            "origQty": "3",
+            "status": "NEW",
+        }
+
+        manager = PositionManager(
+            client=client,
+            store=self.store,
+            notifier=MagicMock(),
+            sl_liq_buffer_pct=1.0,
+            trigger_price_type="CONTRACT_PRICE",
+            daily_loss_cut_scope="exchange",
+        )
+
+        summary = manager.run_morning_protection_stop(
+            check_time_utc=check_time,
+            min_hold_hours=6.0,
+        )
+
+        self.assertEqual(summary["updated_sl"], 1)
+        order_kwargs = client.create_order.call_args.kwargs
+        self.assertEqual(order_kwargs["side"], "SELL")
+        self.assertEqual(order_kwargs["positionSide"], "LONG")
+        self.assertEqual(order_kwargs["stopPrice"], "118.0")
+
+    def test_dynamic_stop_respects_tighter_morning_protection_cap(self) -> None:
+        position_id = self._insert_open_position(
+            symbol="BTCUSDT",
+            qty=0.01,
+            tp_order_id=11,
+            sl_order_id=22,
+            tp_price=40000.0,
+            sl_price=59000.0,
+            expire_in_hours=24,
+        )
+        self.store.set_lock_state(
+            PositionManager.MORNING_PROTECTION_LOCK_NAME,
+            {"caps": {str(position_id): 59000.0}},
+        )
+
+        client = MagicMock()
+        client.get_order.side_effect = [{"status": "NEW"}, {"status": "NEW"}]
+        client.get_position_risk.return_value = [
+            {
+                "symbol": "BTCUSDT",
+                "positionAmt": "-0.01",
+                "liquidationPrice": "61000",
+            }
+        ]
+        client.get_symbol_rules.return_value = {
+            "BTCUSDT": SimpleNamespace(tick_size=0.1)
+        }
+        client.normalize_trigger_price.return_value = 60390.0
+
+        manager = PositionManager(
+            client=client,
+            store=self.store,
+            notifier=MagicMock(),
+            sl_liq_buffer_pct=1.0,
+            trigger_price_type="CONTRACT_PRICE",
+        )
+
+        summary = manager.run_once()
+
+        self.assertEqual(summary["updated_sl"], 0)
+        client.create_order.assert_not_called()
+        row = self._get_position(position_id)
+        self.assertAlmostEqual(float(row["sl_price"]), 59000.0)
 
     def test_hourly_exchange_take_profit_initializes_state_from_true_open_time(self) -> None:
         opened_at_utc = datetime(2026, 3, 16, 1, 0, tzinfo=timezone.utc)

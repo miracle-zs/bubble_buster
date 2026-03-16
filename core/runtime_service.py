@@ -100,6 +100,7 @@ class StrategyRuntimeService:
         self._last_loss_cut_local_date: Optional[date] = None
         self._last_loss_cut_skipped_date: Optional[date] = None
         self._last_noon_protection_local_date: Optional[date] = None
+        self._last_morning_protection_local_date_by_account: Dict[str, date] = {}
         self._last_hourly_exchange_take_profit_hour_by_account: Dict[str, str] = {}
         self._shared_ranking_cache: Optional[List[Dict[str, Any]]] = None
         self._shared_ranking_cache_day: Optional[date] = None
@@ -559,6 +560,69 @@ class StrategyRuntimeService:
                         results[aid].setdefault("slow", True)
         LOGGER.info("service noon protection result: %s", results)
 
+    def _morning_protection_schedule_for_day(self, day: date, account_id: Optional[str] = None) -> datetime:
+        account_ctx = self.account_runtimes.get(account_id or "", {})
+        morning_hour = int(account_ctx.get("morning_protection_hour", self.cfg.morning_protection_hour))
+        morning_minute = int(account_ctx.get("morning_protection_minute", self.cfg.morning_protection_minute))
+        return datetime(
+            year=day.year,
+            month=day.month,
+            day=day.day,
+            hour=morning_hour % 24,
+            minute=morning_minute % 60,
+            second=0,
+            microsecond=0,
+            tzinfo=self.timezone,
+        )
+
+    def _run_morning_protection_if_due(self, now_local: datetime) -> None:
+        results: Dict[str, object] = {}
+
+        for aid, ctx in self.account_runtimes.items():
+            mode = str(ctx.get("mode", "full")).strip().lower()
+            if mode not in {"full", "loss_cut_only"}:
+                continue
+
+            enabled_raw = ctx.get("morning_protection_enabled", self.cfg.morning_protection_enabled)
+            if isinstance(enabled_raw, str):
+                enabled = enabled_raw.strip().lower() in {"1", "true", "yes", "on"}
+            else:
+                enabled = bool(enabled_raw)
+            if not enabled:
+                continue
+
+            today = now_local.date()
+            if self._last_morning_protection_local_date_by_account.get(aid) == today:
+                continue
+
+            target = self._morning_protection_schedule_for_day(today, account_id=aid)
+            if now_local < target:
+                continue
+
+            manager = ctx.get("manager")
+            if manager is None or not hasattr(manager, "run_morning_protection_stop"):
+                results[aid] = {"error": "manager_missing"}
+                self._last_morning_protection_local_date_by_account[aid] = today
+                continue
+
+            min_hold_hours = float(
+                ctx.get(
+                    "morning_protection_min_hold_hours",
+                    self.cfg.morning_protection_min_hold_hours,
+                )
+            )
+            try:
+                results[aid] = manager.run_morning_protection_stop(  # type: ignore[attr-defined]
+                    check_time_utc=target.astimezone(timezone.utc),
+                    min_hold_hours=min_hold_hours,
+                )
+            except Exception as exc:  # noqa: BLE001
+                results[aid] = {"error": str(exc)}
+            self._last_morning_protection_local_date_by_account[aid] = today
+
+        if results:
+            LOGGER.info("service morning protection result: %s", results)
+
     def _run_hourly_exchange_take_profit_if_due(self, now_local: datetime) -> None:
         results: Dict[str, object] = {}
         hour_key = now_local.strftime("%Y-%m-%dT%H")
@@ -763,6 +827,7 @@ class StrategyRuntimeService:
         self._run_entry_if_due(local_dt)
         self._run_daily_loss_cut_if_due(local_dt)
         self._run_noon_protection_if_due(local_dt)
+        self._run_morning_protection_if_due(local_dt)
         self._run_hourly_exchange_take_profit_if_due(local_dt)
         self._run_manage_if_due(mono)
 
