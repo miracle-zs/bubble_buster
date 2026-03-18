@@ -13,6 +13,7 @@ leverage = 2
 top_n = 10
 volume_threshold = 0
 tp_price_drop_pct = 20
+fixed_take_profit_enabled = true
 sl_liq_buffer_pct = 1
 max_hold_hours = 47.5
 trigger_price_type = CONTRACT_PRICE
@@ -132,6 +133,9 @@ equity_recovery_reduce_ratio = 1.0
 equity_recovery_take_profit_enabled = false
 equity_recovery_trigger_pct = 0.09
 equity_recovery_reduce_ratio = 0.50
+
+[account.55.strategy]
+fixed_take_profit_enabled = false
 
 [account.acc03.runtime]
 daily_loss_cut_enabled = false

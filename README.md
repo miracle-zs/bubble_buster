@@ -182,6 +182,7 @@ CRON_TZ=Asia/Shanghai
 - `entry_fee_buffer_pct`：入场前预留手续费缓冲。
 - `entry_shrink_retry_count` / `entry_shrink_step_pct`：保证金不足时缩量重试。
 - `tp_price_drop_pct`：止盈触发跌幅（做空方向）。
+- `fixed_take_profit_enabled`：是否挂固定单仓止盈单；关闭后只挂止损，止盈主要交给小时级保护止盈/组合止盈等主动退出逻辑。
 - `sl_liq_buffer_pct`：止损参考清算价缓冲。
 - `max_hold_hours`：超时平仓阈值。
 - `equity_recovery_take_profit_enabled`：是否启用“24h 低点反弹后组合止盈减仓”。

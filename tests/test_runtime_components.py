@@ -367,6 +367,64 @@ serverchan_sendkey =
     assert account_runtimes["55"]["morning_protection_min_hold_hours"] == 8.0
 
 
+def test_create_components_applies_per_account_fixed_take_profit_override(tmp_path) -> None:
+    cfg_path = tmp_path / "config.ini"
+    db_path = tmp_path / "state.db"
+    cfg_path.write_text(
+        f"""
+[accounts]
+enabled = acc01,55
+mode.acc01 = full
+mode.55 = full
+
+[binance]
+api_key = key1
+api_secret = sec1
+
+[account.acc01.binance]
+api_key = key1
+api_secret = sec1
+
+[account.55.binance]
+api_key = key55
+api_secret = sec55
+
+[strategy]
+leverage = 2
+top_n = 10
+fixed_take_profit_enabled = true
+
+[runtime]
+db_path = {db_path}
+default_account_id = acc01
+timezone = UTC
+entry_hour = 7
+entry_minute = 40
+manager_interval_sec = 60
+
+[account.55.strategy]
+fixed_take_profit_enabled = false
+
+[notify]
+enabled = false
+serverchan_sendkey =
+""",
+        encoding="utf-8",
+    )
+
+    cfg = configparser.ConfigParser()
+    assert cfg.read(str(cfg_path))
+
+    strategy, _, _, _, _, account_runtimes = create_components(
+        cfg,
+        base_dir=str(tmp_path),
+    )
+
+    assert strategy.fixed_take_profit_enabled is True
+    assert account_runtimes["acc01"]["strategy"].fixed_take_profit_enabled is True
+    assert account_runtimes["55"]["strategy"].fixed_take_profit_enabled is False
+
+
 class RuntimeComponentsEntryPacingTest(unittest.TestCase):
     def test_create_components_passes_runtime_timezone_into_strategy(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:

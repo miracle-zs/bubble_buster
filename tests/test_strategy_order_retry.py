@@ -37,7 +37,7 @@ from core.strategy_top10_short import Top10ShortStrategy
 
 
 class StrategyOrderRetryTest(unittest.TestCase):
-    def _build_strategy(self, client: MagicMock) -> Top10ShortStrategy:
+    def _build_strategy(self, client: MagicMock, **overrides) -> Top10ShortStrategy:
         return Top10ShortStrategy(
             client=client,
             store=MagicMock(),
@@ -57,6 +57,7 @@ class StrategyOrderRetryTest(unittest.TestCase):
             ranker_max_workers=4,
             ranker_weight_limit_per_minute=1000,
             ranker_min_request_interval_ms=20,
+            fixed_take_profit_enabled=overrides.get("fixed_take_profit_enabled", True),
         )
 
     def test_shrink_retry_on_insufficient_margin(self) -> None:
@@ -135,6 +136,63 @@ class StrategyOrderRetryTest(unittest.TestCase):
             self.assertEqual(args[1], "entry")
             self.assertEqual(args[2], "ABCUSDT")
             self.assertEqual(args[3], "SELL")
+
+    def test_place_exit_orders_skips_tp_when_fixed_take_profit_disabled(self) -> None:
+        client = MagicMock()
+        client.get_position_risk.return_value = [
+            {
+                "symbol": "ABCUSDT",
+                "entryPrice": "100",
+                "liquidationPrice": "120",
+                "positionAmt": "-2",
+            }
+        ]
+        client.normalize_trigger_price.side_effect = [118.8]
+        client.format_trigger_price.return_value = "118.8"
+        client.format_order_qty.return_value = "2"
+        client.create_order.return_value = {
+            "orderId": 222,
+            "clientOrderId": "sl-only",
+            "type": "STOP_MARKET",
+            "side": "BUY",
+            "origQty": "2",
+            "status": "NEW",
+        }
+
+        store = MagicMock()
+        strategy = Top10ShortStrategy(
+            client=client,
+            store=store,
+            notifier=MagicMock(),
+            leverage=2,
+            top_n=10,
+            volume_threshold=0.0,
+            tp_price_drop_pct=20.0,
+            sl_liq_buffer_pct=1.0,
+            max_hold_hours=47.5,
+            trigger_price_type="CONTRACT_PRICE",
+            allocation_splits=10,
+            entry_fee_buffer_pct=1.0,
+            entry_shrink_retry_count=3,
+            entry_shrink_step_pct=10.0,
+            entry_rank_fetch_multiplier=3,
+            ranker_max_workers=4,
+            ranker_weight_limit_per_minute=1000,
+            ranker_min_request_interval_ms=20,
+            fixed_take_profit_enabled=False,
+        )
+
+        strategy._place_exit_orders(position_id=123, symbol="ABCUSDT")
+
+        client.create_order.assert_called_once()
+        create_kwargs = client.create_order.call_args.kwargs
+        self.assertEqual(create_kwargs["type"], "STOP_MARKET")
+        self.assertEqual(create_kwargs["stopPrice"], "118.8")
+        update_kwargs = store.update_position_orders.call_args.kwargs
+        self.assertIsNone(update_kwargs["tp_order_id"])
+        self.assertIsNone(update_kwargs["tp_client_order_id"])
+        self.assertIsNone(update_kwargs["tp_price"])
+        self.assertEqual(update_kwargs["sl_order_id"], 222)
 
 
 if __name__ == "__main__":

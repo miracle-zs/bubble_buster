@@ -80,6 +80,7 @@ class Top10ShortStrategy:
         ranker_max_workers: int,
         ranker_weight_limit_per_minute: int,
         ranker_min_request_interval_ms: int,
+        fixed_take_profit_enabled: bool = True,
         rebalance_enabled: bool = False,
         rebalance_pre_entry_reduce: bool = True,
         rebalance_after_entry: bool = True,
@@ -119,6 +120,7 @@ class Top10ShortStrategy:
         self.ranker_max_workers = max(1, int(ranker_max_workers))
         self.ranker_weight_limit_per_minute = max(100, int(ranker_weight_limit_per_minute))
         self.ranker_min_request_interval_ms = max(0, int(ranker_min_request_interval_ms))
+        self.fixed_take_profit_enabled = bool(fixed_take_profit_enabled)
         self.rebalance_enabled = bool(rebalance_enabled)
         self.rebalance_pre_entry_reduce = bool(rebalance_pre_entry_reduce)
         self.rebalance_after_entry = bool(rebalance_after_entry)
@@ -932,9 +934,12 @@ class Top10ShortStrategy:
         if not entry_price or position_amt <= 0:
             raise RuntimeError(f"Invalid position snapshot for {symbol}")
 
-        tp_raw = entry_price * (1 - self.tp_price_drop_pct / 100.0)
-        tp_price = self.client.normalize_trigger_price(symbol, tp_raw, round_up=False)
-        tp_stop_price = self.client.format_trigger_price(symbol, tp_price, round_up=False)
+        tp_order = None
+        tp_price = None
+        if self.fixed_take_profit_enabled:
+            tp_raw = entry_price * (1 - self.tp_price_drop_pct / 100.0)
+            tp_price = self.client.normalize_trigger_price(symbol, tp_raw, round_up=False)
+            tp_stop_price = self.client.format_trigger_price(symbol, tp_price, round_up=False)
 
         if not liq_price:
             raise RuntimeError(f"No liquidation price available for {symbol}; cannot place stop loss")
@@ -942,13 +947,14 @@ class Top10ShortStrategy:
         sl_price = self.client.normalize_trigger_price(symbol, sl_raw, round_up=True)
         sl_stop_price = self.client.format_trigger_price(symbol, sl_price, round_up=True)
 
-        tp_order = self._create_exit_order_with_fallback(
-            symbol=symbol,
-            order_type="TAKE_PROFIT_MARKET",
-            stop_price=tp_stop_price,
-            qty=position_amt,
-            client_order_id=self._new_client_id("tp", symbol),
-        )
+        if self.fixed_take_profit_enabled:
+            tp_order = self._create_exit_order_with_fallback(
+                symbol=symbol,
+                order_type="TAKE_PROFIT_MARKET",
+                stop_price=tp_stop_price,
+                qty=position_amt,
+                client_order_id=self._new_client_id("tp", symbol),
+            )
 
         if sl_price <= 0:
             raise RuntimeError(f"Invalid stop loss price computed for {symbol}: {sl_price}")
@@ -962,9 +968,9 @@ class Top10ShortStrategy:
 
         self.store.update_position_orders(
             position_id=position_id,
-            tp_order_id=tp_order.get("orderId"),
+            tp_order_id=tp_order.get("orderId") if tp_order else None,
             sl_order_id=sl_order.get("orderId"),
-            tp_client_order_id=tp_order.get("clientOrderId"),
+            tp_client_order_id=tp_order.get("clientOrderId") if tp_order else None,
             sl_client_order_id=sl_order.get("clientOrderId"),
             tp_price=tp_price,
             sl_price=sl_price,
@@ -972,12 +978,13 @@ class Top10ShortStrategy:
         )
         self.store.set_position_qty(position_id, position_amt, entry_price)
 
-        self.store.add_order_event(
-            symbol=symbol,
-            position_id=position_id,
-            event_time_utc=self._utc_now_iso(),
-            order_payload=tp_order,
-        )
+        if tp_order is not None:
+            self.store.add_order_event(
+                symbol=symbol,
+                position_id=position_id,
+                event_time_utc=self._utc_now_iso(),
+                order_payload=tp_order,
+            )
         self.store.add_order_event(
             symbol=symbol,
             position_id=position_id,

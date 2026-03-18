@@ -137,6 +137,7 @@ def _build_single_account_components(
         top_n=strategy_cfg.getint("top_n", fallback=10),
         volume_threshold=strategy_cfg.getfloat("volume_threshold", fallback=0.0),
         tp_price_drop_pct=strategy_cfg.getfloat("tp_price_drop_pct", fallback=20.0),
+        fixed_take_profit_enabled=strategy_cfg.getboolean("fixed_take_profit_enabled", fallback=True),
         sl_liq_buffer_pct=strategy_cfg.getfloat("sl_liq_buffer_pct", fallback=1.0),
         max_hold_hours=strategy_cfg.getfloat("max_hold_hours", fallback=47.5),
         trigger_price_type=strategy_cfg.get("trigger_price_type", fallback="CONTRACT_PRICE").strip(),
