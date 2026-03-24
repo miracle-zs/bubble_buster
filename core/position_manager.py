@@ -1297,24 +1297,43 @@ class PositionManager:
             return None, None
         start_ms = int(start_utc.timestamp() * 1000)
         end_ms = int(end_utc.timestamp() * 1000)
-        rows = self.client.get_klines(
-            symbol=symbol,
-            interval="1m",
-            start_time=start_ms,
-            end_time=end_ms,
-            limit=1000,
-        )
         highs: List[float] = []
         lows: List[float] = []
-        for row in rows or []:
-            if len(row) < 4:
-                continue
-            high = self._safe_positive_float(row[2])
-            low = self._safe_positive_float(row[3])
-            if high:
-                highs.append(high)
-            if low:
-                lows.append(low)
+
+        cursor_ms = start_ms
+        while cursor_ms < end_ms:
+            rows = self.client.get_klines(
+                symbol=symbol,
+                interval="1m",
+                start_time=cursor_ms,
+                end_time=end_ms,
+                limit=1000,
+            )
+            if not rows:
+                break
+
+            for row in rows:
+                if len(row) < 4:
+                    continue
+                high = self._safe_positive_float(row[2])
+                low = self._safe_positive_float(row[3])
+                if high:
+                    highs.append(high)
+                if low:
+                    lows.append(low)
+
+            if len(rows) < 1000:
+                break
+
+            try:
+                last_open_ms = int(rows[-1][0])
+            except (TypeError, ValueError, IndexError):
+                break
+            next_cursor_ms = last_open_ms + 60_000
+            if next_cursor_ms <= cursor_ms:
+                break
+            cursor_ms = next_cursor_ms
+
         return (max(highs) if highs else None, min(lows) if lows else None)
 
     def _load_noon_protection_caps(self) -> Dict[str, float]:

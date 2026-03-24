@@ -934,6 +934,40 @@ class PositionManagerTest(unittest.TestCase):
         self.assertEqual(monitor["lowest_price_since_open"], 79.0)
         self.assertTrue(monitor["eligible_reached"])
 
+    def test_fetch_symbol_extremes_between_paginates_beyond_1000_bars(self) -> None:
+        start_utc = datetime(2026, 3, 16, 0, 0, tzinfo=timezone.utc)
+        end_utc = start_utc + timedelta(minutes=1002)
+        first_open_ms = int(start_utc.timestamp() * 1000)
+        second_open_ms = int((start_utc + timedelta(minutes=1000)).timestamp() * 1000)
+        first_batch = [
+            [first_open_ms + idx * 60_000, "100", "110", "79", "90", 0]
+            for idx in range(1000)
+        ]
+
+        client = MagicMock()
+        client.get_klines.side_effect = [
+            first_batch,
+            [[second_open_ms, "90", "95", "70", "75", 0]],
+        ]
+
+        manager = PositionManager(
+            client=client,
+            store=self.store,
+            notifier=MagicMock(),
+            sl_liq_buffer_pct=1.0,
+            trigger_price_type="CONTRACT_PRICE",
+        )
+
+        high_price, low_price = manager._fetch_symbol_extremes_between(
+            symbol="BTCUSDT",
+            start_utc=start_utc,
+            end_utc=end_utc,
+        )
+
+        self.assertEqual(high_price, 110.0)
+        self.assertEqual(low_price, 70.0)
+        self.assertEqual(client.get_klines.call_count, 2)
+
     def test_hourly_exchange_take_profit_keeps_eligibility_after_retrace(self) -> None:
         first_seen_local = datetime(2026, 3, 16, 10, 18, tzinfo=timezone.utc)
         second_seen_local = datetime(2026, 3, 16, 10, 19, tzinfo=timezone.utc)
