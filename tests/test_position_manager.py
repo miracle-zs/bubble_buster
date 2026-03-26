@@ -847,6 +847,9 @@ class PositionManagerTest(unittest.TestCase):
             PositionManager.MORNING_PROTECTION_LOCK_NAME,
             {
                 "caps": {"EX:BTCUSDT:BOTH_SHORT": 70800.0},
+                "cap_updated_at_utc_by_key": {
+                    "EX:BTCUSDT:BOTH_SHORT": "2026-03-16T23:55:03+00:00",
+                },
                 "updated_at_utc": "2026-03-16T23:55:03+00:00",
             },
         )
@@ -890,6 +893,90 @@ class PositionManagerTest(unittest.TestCase):
         client.create_order.return_value = {
             "orderId": 5004,
             "clientOrderId": "sl-btc-morning",
+            "type": "STOP_MARKET",
+            "side": "BUY",
+            "origQty": "0.042",
+            "status": "NEW",
+        }
+
+        manager = PositionManager(
+            client=client,
+            store=self.store,
+            notifier=MagicMock(),
+            sl_liq_buffer_pct=1.0,
+            trigger_price_type="CONTRACT_PRICE",
+            daily_loss_cut_scope="exchange",
+        )
+
+        summary = manager.run_morning_protection_stop(
+            check_time_utc=check_time,
+            min_hold_hours=6.0,
+        )
+
+        self.assertEqual(summary["total"], 1)
+        self.assertEqual(summary["updated_sl"], 1)
+        self.assertEqual(summary["skipped"], 0)
+        self.assertEqual(summary["errors"], 0)
+        order_kwargs = client.create_order.call_args.kwargs
+        self.assertEqual(order_kwargs["symbol"], "BTCUSDT")
+        self.assertEqual(order_kwargs["stopPrice"], "70900.0")
+
+    def test_morning_protection_does_not_reuse_btc_cap_when_other_symbol_updates_lock_later(self) -> None:
+        check_time = datetime(2026, 3, 17, 7, 55, tzinfo=timezone.utc)
+        self.store.set_lock_state(
+            PositionManager.MORNING_PROTECTION_LOCK_NAME,
+            {
+                "caps": {
+                    "EX:BTCUSDT:BOTH_SHORT": 70800.0,
+                    "EX:ETHUSDT:BOTH_SHORT": 2100.0,
+                },
+                "cap_updated_at_utc_by_key": {
+                    "EX:BTCUSDT:BOTH_SHORT": "2026-03-16T23:55:03+00:00",
+                    "EX:ETHUSDT:BOTH_SHORT": "2026-03-17T03:00:00+00:00",
+                },
+                "updated_at_utc": "2026-03-17T03:00:00+00:00",
+            },
+        )
+
+        client = MagicMock()
+        client.get_position_risk.return_value = [
+            {
+                "symbol": "BTCUSDT",
+                "positionAmt": "-0.042",
+                "positionSide": "BOTH",
+                "entryPrice": "70641.1",
+                "liquidationPrice": "90000",
+            }
+        ]
+        client.get_user_trades.return_value = [
+            {
+                "time": int(datetime(2026, 3, 16, 23, 0, tzinfo=timezone.utc).timestamp() * 1000),
+                "qty": "0.042",
+                "side": "SELL",
+            },
+            {
+                "time": int(datetime(2026, 3, 17, 1, 0, tzinfo=timezone.utc).timestamp() * 1000),
+                "qty": "0.042",
+                "side": "BUY",
+            },
+            {
+                "time": int(datetime(2026, 3, 17, 1, 36, 35, tzinfo=timezone.utc).timestamp() * 1000),
+                "qty": "0.042",
+                "side": "SELL",
+            },
+        ]
+        client.get_klines.return_value = [
+            [0, "0", "70900", "70500", "0", 0],
+        ]
+        client.get_symbol_rules.return_value = {
+            "BTCUSDT": SimpleNamespace(tick_size=0.1),
+        }
+        client.normalize_trigger_price.side_effect = lambda _symbol, price, round_up=False: float(price)
+        client.format_trigger_price.side_effect = lambda _symbol, price, round_up=False: str(price)
+        client.format_order_qty.side_effect = lambda _symbol, qty: str(qty)
+        client.create_order.return_value = {
+            "orderId": 5005,
+            "clientOrderId": "sl-btc-morning-2",
             "type": "STOP_MARKET",
             "side": "BUY",
             "origQty": "0.042",

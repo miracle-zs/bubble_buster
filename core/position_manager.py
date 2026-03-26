@@ -592,7 +592,7 @@ class PositionManager:
         }
         failed_symbols: List[str] = []
         caps = self._load_morning_protection_caps()
-        caps_updated_at = self._load_morning_protection_updated_at()
+        caps_updated_at_by_key = self._load_morning_protection_updated_at_by_key()
         active_cap_keys = set()
         min_hold_seconds = max(0.0, float(min_hold_hours)) * 3600.0
 
@@ -652,7 +652,8 @@ class PositionManager:
                         old_sl_price = cap_price
                     elif cap_price is not None:
                         # Ignore stale exchange cap state from a previous position lifecycle.
-                        if caps_updated_at is None or opened_at_utc <= caps_updated_at:
+                        cap_updated_at = caps_updated_at_by_key.get(cap_key)
+                        if cap_updated_at is None or opened_at_utc <= cap_updated_at:
                             old_sl_price = cap_price
 
                 round_up = close_side == "BUY"
@@ -662,6 +663,7 @@ class PositionManager:
                 else:
                     merged_sl_price = morning_sl_price
                 caps[cap_key] = merged_sl_price
+                caps_updated_at_by_key[cap_key] = self._utc_now_datetime()
 
                 rules = self.client.get_symbol_rules().get(symbol)
                 min_delta = rules.tick_size if rules else 0.0
@@ -723,7 +725,12 @@ class PositionManager:
             for cap_key, cap_price in caps.items()
             if cap_key in active_cap_keys
         }
-        self._persist_morning_protection_caps(pruned_caps)
+        pruned_updated_at_by_key = {
+            cap_key: updated_at
+            for cap_key, updated_at in caps_updated_at_by_key.items()
+            if cap_key in active_cap_keys
+        }
+        self._persist_morning_protection_caps(pruned_caps, pruned_updated_at_by_key)
         self._morning_protection_caps_cache = pruned_caps
 
         if summary["updated_sl"] > 0 or summary["errors"] > 0:
@@ -1426,20 +1433,52 @@ class PositionManager:
             parsed[cap_key] = cap_price
         return parsed
 
-    def _load_morning_protection_updated_at(self) -> Optional[datetime]:
+    def _load_morning_protection_updated_at_by_key(self) -> Dict[str, datetime]:
         state = self.store.get_lock_state(self.MORNING_PROTECTION_LOCK_NAME) or {}
+        raw_by_key = state.get("cap_updated_at_utc_by_key")
+        parsed: Dict[str, datetime] = {}
+        if isinstance(raw_by_key, dict):
+            for key, value in raw_by_key.items():
+                cap_key = str(key).strip()
+                raw_updated_at = str(value or "").strip()
+                if not cap_key or not raw_updated_at:
+                    continue
+                try:
+                    parsed[cap_key] = self._parse_iso_utc(raw_updated_at)
+                except ValueError:
+                    continue
+        if parsed:
+            return parsed
+
         raw_updated_at = str(state.get("updated_at_utc") or "").strip()
         if not raw_updated_at:
-            return None
+            return {}
         try:
-            return self._parse_iso_utc(raw_updated_at)
+            fallback_updated_at = self._parse_iso_utc(raw_updated_at)
         except ValueError:
-            return None
+            return {}
+        caps = self._load_morning_protection_caps()
+        return {cap_key: fallback_updated_at for cap_key in caps}
 
-    def _persist_morning_protection_caps(self, caps: Dict[str, float]) -> None:
+    def _persist_morning_protection_caps(
+        self,
+        caps: Dict[str, float],
+        updated_at_by_key: Optional[Dict[str, datetime]] = None,
+    ) -> None:
+        now_iso = self._utc_now_iso()
+        serialized_updated_at_by_key: Dict[str, str] = {}
+        for cap_key in caps:
+            updated_at = None if updated_at_by_key is None else updated_at_by_key.get(cap_key)
+            if updated_at is None:
+                serialized_updated_at_by_key[str(cap_key)] = now_iso
+            else:
+                serialized_updated_at_by_key[str(cap_key)] = updated_at.astimezone(timezone.utc).replace(
+                    microsecond=0
+                ).isoformat()
         payload = {
             "caps": {str(cap_key): float(price) for cap_key, price in caps.items() if price > 0},
-            "updated_at_utc": self._utc_now_iso(),
+            "cap_updated_at_utc_by_key": serialized_updated_at_by_key,
+            "updated_at_utc": now_iso,
         }
         self.store.set_lock_state(self.MORNING_PROTECTION_LOCK_NAME, payload)
 
