@@ -376,7 +376,8 @@ class Top10ShortStrategy:
             for idx, entry in enumerate(candidates):
                 try:
                     self.client.ensure_isolated_and_leverage(entry.symbol, self.leverage)
-                    qty = self.client.normalize_order_qty(entry.symbol, target_notional, entry.last_price)
+                    qty_diagnostic = self.client.diagnose_order_qty(entry.symbol, target_notional, entry.last_price)
+                    qty = float(qty_diagnostic["normalized_qty"])
                     plan = PlannedOrder(
                         symbol=entry.symbol,
                         base_margin_usdt=base_margin,
@@ -389,7 +390,23 @@ class Top10ShortStrategy:
                         entry_failure_details.append(
                             f"{entry.symbol}: qty归一化后为0(不满足最小下单规则)"
                         )
-                        LOGGER.warning("Skip %s due to invalid qty after filter normalization", entry.symbol)
+                        LOGGER.warning(
+                            "Skip %s due to invalid qty after filter normalization: "
+                            "target_notional=%.6f price=%.10f has_rules=%s raw_qty=%.10f "
+                            "normalized_qty=%.10f normalized_notional=%.10f step_size=%s "
+                            "min_qty=%s min_notional=%s reject_reason=%s",
+                            entry.symbol,
+                            target_notional,
+                            entry.last_price,
+                            qty_diagnostic["has_rules"],
+                            float(qty_diagnostic["raw_qty"]),
+                            float(qty_diagnostic["normalized_qty"]),
+                            float(qty_diagnostic["normalized_notional"]),
+                            qty_diagnostic["step_size"],
+                            qty_diagnostic["min_qty"],
+                            qty_diagnostic["min_notional"],
+                            qty_diagnostic["reject_reason"],
+                        )
                         continue
 
                     open_order, retry_count_used = self._place_market_short_with_shrink_retry(

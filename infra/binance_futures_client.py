@@ -581,18 +581,47 @@ class BinanceFuturesClient:
         self.set_margin_type(symbol, "ISOLATED")
         self.set_leverage(symbol, leverage)
 
-    def normalize_order_qty(self, symbol: str, notional: float, price: float) -> float:
+    def diagnose_order_qty(self, symbol: str, notional: float, price: float) -> Dict[str, Any]:
         rules = self.get_symbol_rules().get(symbol)
-        if not rules or price <= 0:
-            return 0.0
+        diagnostic: Dict[str, Any] = {
+            "symbol": symbol,
+            "notional": float(notional),
+            "price": float(price),
+            "has_rules": rules is not None,
+            "step_size": float(rules.step_size) if rules else None,
+            "min_qty": float(rules.min_qty) if rules else None,
+            "min_notional": float(rules.min_notional) if rules else None,
+            "raw_qty": 0.0,
+            "normalized_qty": 0.0,
+            "normalized_notional": 0.0,
+            "reject_reason": None,
+        }
+        if not rules:
+            diagnostic["reject_reason"] = "missing_symbol_rules"
+            return diagnostic
+        if price <= 0:
+            diagnostic["reject_reason"] = "non_positive_price"
+            return diagnostic
 
         raw_qty = notional / price
         qty = floor_to_step(raw_qty, rules.step_size)
+        normalized_notional = qty * price
+        diagnostic["raw_qty"] = float(raw_qty)
+        diagnostic["normalized_qty"] = float(qty)
+        diagnostic["normalized_notional"] = float(normalized_notional)
         if qty < rules.min_qty:
+            diagnostic["reject_reason"] = "qty_below_min_qty"
+            return diagnostic
+        if rules.min_notional > 0 and normalized_notional < rules.min_notional:
+            diagnostic["reject_reason"] = "notional_below_min_notional"
+            return diagnostic
+        return diagnostic
+
+    def normalize_order_qty(self, symbol: str, notional: float, price: float) -> float:
+        diagnostic = self.diagnose_order_qty(symbol, notional, price)
+        if diagnostic["reject_reason"] is not None:
             return 0.0
-        if rules.min_notional > 0 and qty * price < rules.min_notional:
-            return 0.0
-        return qty
+        return float(diagnostic["normalized_qty"])
 
     def normalize_trigger_price(self, symbol: str, price: float, round_up: bool = False) -> float:
         rules = self.get_symbol_rules().get(symbol)

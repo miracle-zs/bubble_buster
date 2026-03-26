@@ -1,5 +1,6 @@
 import logging
 import hashlib
+from collections import deque
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 from uuid import uuid4
@@ -281,26 +282,59 @@ class PositionManager:
         entry_side: str,
     ) -> datetime:
         trades = self.client.get_user_trades(symbol=symbol, limit=1000)
-        remaining_qty = max(0.0, float(current_qty))
-        opened_at_ms: Optional[int] = None
+        target_qty = max(0.0, float(current_qty))
+        if target_qty <= 1e-12:
+            raise RuntimeError(f"cannot reconstruct opened_at for {symbol}: current_qty is zero")
         normalized_entry_side = str(entry_side or "").strip().upper()
-        for trade in reversed(trades or []):
+        if normalized_entry_side not in {"BUY", "SELL"}:
+            raise RuntimeError(f"cannot reconstruct opened_at for {symbol}: invalid entry_side={entry_side}")
+
+        closing_side = "BUY" if normalized_entry_side == "SELL" else "SELL"
+        open_lots: deque[tuple[int, float]] = deque()
+        tolerance = max(target_qty * 1e-6, 1e-12)
+
+        ordered_trades: List[tuple[int, float, str]] = []
+        for trade in trades or []:
+            trade_time = trade.get("time")
+            try:
+                trade_time_ms = int(trade_time)
+            except (TypeError, ValueError):
+                continue
             qty = self._safe_float(trade.get("qty"), default=0.0)
             side = str(trade.get("side") or "").strip().upper()
             if qty <= 0 or side not in {"BUY", "SELL"}:
                 continue
-            if side != normalized_entry_side:
+            ordered_trades.append((trade_time_ms, qty, side))
+
+        for trade_time_ms, qty, side in sorted(ordered_trades, key=lambda item: item[0]):
+
+            if side == normalized_entry_side:
+                open_lots.append((trade_time_ms, qty))
                 continue
-            remaining_qty -= qty
-            trade_time = trade.get("time")
-            try:
-                opened_at_ms = int(trade_time)
-            except (TypeError, ValueError):
+
+            if side != closing_side or not open_lots:
                 continue
-            if remaining_qty <= 1e-12:
-                break
-        if opened_at_ms is None:
+
+            remaining_close = qty
+            while remaining_close > tolerance and open_lots:
+                lot_time_ms, lot_qty = open_lots[0]
+                if lot_qty <= remaining_close + tolerance:
+                    remaining_close -= lot_qty
+                    open_lots.popleft()
+                    continue
+                open_lots[0] = (lot_time_ms, lot_qty - remaining_close)
+                remaining_close = 0.0
+
+        if not open_lots:
             raise RuntimeError(f"cannot reconstruct opened_at for {symbol}")
+
+        remaining_open_qty = sum(qty for _time_ms, qty in open_lots)
+        if remaining_open_qty + tolerance < target_qty:
+            raise RuntimeError(
+                f"cannot reconstruct opened_at for {symbol}: matched_qty={remaining_open_qty} target_qty={target_qty}"
+            )
+
+        opened_at_ms = open_lots[0][0]
         return datetime.fromtimestamp(opened_at_ms / 1000.0, tz=timezone.utc).replace(microsecond=0)
 
     def _get_current_hour_open_and_latest_price(
@@ -558,6 +592,7 @@ class PositionManager:
         }
         failed_symbols: List[str] = []
         caps = self._load_morning_protection_caps()
+        caps_updated_at = self._load_morning_protection_updated_at()
         active_cap_keys = set()
         min_hold_seconds = max(0.0, float(min_hold_hours)) * 3600.0
 
@@ -612,7 +647,13 @@ class PositionManager:
 
                 old_sl_price = self._safe_positive_float(tracked_pos.get("sl_price")) if tracked_pos is not None else None
                 if old_sl_price is None:
-                    old_sl_price = self._safe_positive_float(caps.get(cap_key))
+                    cap_price = self._safe_positive_float(caps.get(cap_key))
+                    if tracked_pos is not None:
+                        old_sl_price = cap_price
+                    elif cap_price is not None:
+                        # Ignore stale exchange cap state from a previous position lifecycle.
+                        if caps_updated_at is None or opened_at_utc <= caps_updated_at:
+                            old_sl_price = cap_price
 
                 round_up = close_side == "BUY"
                 morning_sl_price = self.client.normalize_trigger_price(symbol, morning_ref_price, round_up=round_up)
@@ -1384,6 +1425,16 @@ class PositionManager:
                 continue
             parsed[cap_key] = cap_price
         return parsed
+
+    def _load_morning_protection_updated_at(self) -> Optional[datetime]:
+        state = self.store.get_lock_state(self.MORNING_PROTECTION_LOCK_NAME) or {}
+        raw_updated_at = str(state.get("updated_at_utc") or "").strip()
+        if not raw_updated_at:
+            return None
+        try:
+            return self._parse_iso_utc(raw_updated_at)
+        except ValueError:
+            return None
 
     def _persist_morning_protection_caps(self, caps: Dict[str, float]) -> None:
         payload = {

@@ -39,6 +39,36 @@ class ClientUtilsTest(unittest.TestCase):
         self.assertAlmostEqual(sl_price, 59000.1)
         self.assertAlmostEqual(tp_price, 40000.0)
 
+    def test_diagnose_order_qty_reports_reject_reason(self) -> None:
+        client = BinanceFuturesClient(api_key="k", api_secret="s")
+        client._symbol_rules_cache = {
+            "ALTUSDT": SymbolRules(
+                symbol="ALTUSDT",
+                tick_size=0.0001,
+                step_size=1.0,
+                min_qty=1000.0,
+                min_notional=5.0,
+            )
+        }
+
+        diagnostic = client.diagnose_order_qty("ALTUSDT", notional=92.0, price=0.16834)
+
+        self.assertTrue(diagnostic["has_rules"])
+        self.assertEqual(diagnostic["reject_reason"], "qty_below_min_qty")
+        self.assertAlmostEqual(diagnostic["raw_qty"], 546.5130093858)
+        self.assertAlmostEqual(diagnostic["normalized_qty"], 546.0)
+        self.assertAlmostEqual(diagnostic["normalized_notional"], 91.91364)
+        self.assertEqual(client.normalize_order_qty("ALTUSDT", notional=92.0, price=0.16834), 0.0)
+
+    def test_diagnose_order_qty_reports_missing_symbol_rules(self) -> None:
+        client = BinanceFuturesClient(api_key="k", api_secret="s")
+
+        diagnostic = client.diagnose_order_qty("UNKNOWNUSDT", notional=92.0, price=0.16834)
+
+        self.assertFalse(diagnostic["has_rules"])
+        self.assertEqual(diagnostic["reject_reason"], "missing_symbol_rules")
+        self.assertEqual(client.normalize_order_qty("UNKNOWNUSDT", notional=92.0, price=0.16834), 0.0)
+
     def test_format_order_params(self) -> None:
         client = BinanceFuturesClient(api_key="k", api_secret="s")
         client._symbol_rules_cache = {
