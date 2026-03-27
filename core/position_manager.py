@@ -1569,6 +1569,10 @@ class PositionManager:
         return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
 
     @staticmethod
+    def _utc_now_datetime() -> datetime:
+        return datetime.now(timezone.utc).replace(microsecond=0)
+
+    @staticmethod
     def _parse_iso_utc(text: str) -> datetime:
         parsed = datetime.fromisoformat(text)
         if parsed.tzinfo is None:
