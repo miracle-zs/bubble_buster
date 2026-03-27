@@ -471,7 +471,6 @@ class PositionManager:
                     merged_sl_price = min(old_sl_price, noon_sl_price) if close_side == "BUY" else max(old_sl_price, noon_sl_price)
                 else:
                     merged_sl_price = noon_sl_price
-                caps[cap_key] = merged_sl_price
 
                 rules = self.client.get_symbol_rules().get(symbol)
                 min_delta = rules.tick_size if rules else 0.0
@@ -503,6 +502,7 @@ class PositionManager:
                     event_time_utc=self._utc_now_iso(),
                     order_payload=sl_order,
                 )
+                caps[cap_key] = merged_sl_price
                 if tracked_position_id is not None:
                     self.store.update_stop_loss(
                         position_id=tracked_position_id,
@@ -662,8 +662,6 @@ class PositionManager:
                     merged_sl_price = min(old_sl_price, morning_sl_price) if close_side == "BUY" else max(old_sl_price, morning_sl_price)
                 else:
                     merged_sl_price = morning_sl_price
-                caps[cap_key] = merged_sl_price
-                caps_updated_at_by_key[cap_key] = self._utc_now_datetime()
 
                 rules = self.client.get_symbol_rules().get(symbol)
                 min_delta = rules.tick_size if rules else 0.0
@@ -695,6 +693,8 @@ class PositionManager:
                     event_time_utc=self._utc_now_iso(),
                     order_payload=sl_order,
                 )
+                caps[cap_key] = merged_sl_price
+                caps_updated_at_by_key[cap_key] = self._utc_now_datetime()
                 if tracked_position_id is not None:
                     self.store.update_stop_loss(
                         position_id=tracked_position_id,

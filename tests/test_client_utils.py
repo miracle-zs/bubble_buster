@@ -62,6 +62,7 @@ class ClientUtilsTest(unittest.TestCase):
 
     def test_diagnose_order_qty_reports_missing_symbol_rules(self) -> None:
         client = BinanceFuturesClient(api_key="k", api_secret="s")
+        client.get_symbol_rules = MagicMock(return_value={})  # type: ignore[method-assign]
 
         diagnostic = client.diagnose_order_qty("UNKNOWNUSDT", notional=92.0, price=0.16834)
 

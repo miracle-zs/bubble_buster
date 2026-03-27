@@ -654,6 +654,59 @@ class PositionManagerTest(unittest.TestCase):
         self.assertEqual(summary["skipped"], 0)
         client.create_order.assert_called_once()
 
+    def test_noon_protection_does_not_persist_new_cap_when_order_creation_fails(self) -> None:
+        noon_utc = datetime(2026, 2, 13, 12, 0, tzinfo=timezone.utc)
+        day_start_utc = datetime(2026, 2, 13, 0, 0, tzinfo=timezone.utc)
+
+        client = MagicMock()
+        client.get_position_risk.return_value = [
+            {
+                "symbol": "SKYAIUSDT",
+                "positionAmt": "-1500",
+                "positionSide": "SHORT",
+                "liquidationPrice": "5.0",
+            }
+        ]
+        client.get_klines.return_value = [
+            [0, "0", "0.0550", "0.0510", "0", 0],
+            [0, "0", "0.0549", "0.0520", "0", 0],
+        ]
+        client.get_symbol_rules.return_value = {
+            "SKYAIUSDT": SimpleNamespace(tick_size=0.0001),
+        }
+        client.normalize_trigger_price.side_effect = lambda _symbol, price, round_up=False: float(price)
+        client.format_trigger_price.side_effect = lambda _symbol, price, round_up=False: str(price)
+        client.format_order_qty.side_effect = lambda _symbol, qty: str(qty)
+        client.create_order.side_effect = RuntimeError("create noon stop failed")
+
+        self.store.set_lock_state(
+            PositionManager.NOON_PROTECTION_LOCK_NAME,
+            {"caps": {"EX:SKYAIUSDT:SHORT": 0.0548}},
+        )
+
+        manager = PositionManager(
+            client=client,
+            store=self.store,
+            notifier=MagicMock(),
+            sl_liq_buffer_pct=1.0,
+            trigger_price_type="CONTRACT_PRICE",
+        )
+
+        summary = manager.run_noon_protection_stop(
+            day_start_utc=day_start_utc,
+            noon_time_utc=noon_utc,
+        )
+
+        self.assertEqual(summary["total"], 1)
+        self.assertEqual(summary["updated_sl"], 0)
+        self.assertEqual(summary["skipped"], 0)
+        self.assertEqual(summary["errors"], 1)
+
+        lock_state = self.store.get_lock_state(PositionManager.NOON_PROTECTION_LOCK_NAME)
+        self.assertIsNotNone(lock_state)
+        assert lock_state is not None
+        self.assertAlmostEqual(float(lock_state["caps"]["EX:SKYAIUSDT:SHORT"]), 0.0548, places=10)
+
     def test_morning_protection_tightens_tracked_short_older_than_min_hold_to_current_hour_high(self) -> None:
         opened_at = datetime(2026, 3, 16, 23, 0, tzinfo=timezone.utc)
         check_time = datetime(2026, 3, 17, 7, 55, tzinfo=timezone.utc)
@@ -1004,6 +1057,81 @@ class PositionManagerTest(unittest.TestCase):
         order_kwargs = client.create_order.call_args.kwargs
         self.assertEqual(order_kwargs["symbol"], "BTCUSDT")
         self.assertEqual(order_kwargs["stopPrice"], "70900.0")
+
+    def test_morning_protection_does_not_persist_new_cap_when_order_creation_fails(self) -> None:
+        check_time = datetime(2026, 3, 17, 7, 55, tzinfo=timezone.utc)
+        self.store.set_lock_state(
+            PositionManager.MORNING_PROTECTION_LOCK_NAME,
+            {
+                "caps": {"EX:BTCUSDT:BOTH_SHORT": 70800.0},
+                "cap_updated_at_utc_by_key": {
+                    "EX:BTCUSDT:BOTH_SHORT": "2026-03-16T23:55:03+00:00",
+                },
+                "updated_at_utc": "2026-03-16T23:55:03+00:00",
+            },
+        )
+
+        client = MagicMock()
+        client.get_position_risk.return_value = [
+            {
+                "symbol": "BTCUSDT",
+                "positionAmt": "-0.042",
+                "positionSide": "BOTH",
+                "entryPrice": "70641.1",
+                "liquidationPrice": "90000",
+            }
+        ]
+        client.get_user_trades.return_value = [
+            {
+                "time": int(datetime(2026, 3, 16, 23, 0, tzinfo=timezone.utc).timestamp() * 1000),
+                "qty": "0.042",
+                "side": "SELL",
+            },
+            {
+                "time": int(datetime(2026, 3, 17, 1, 0, tzinfo=timezone.utc).timestamp() * 1000),
+                "qty": "0.042",
+                "side": "BUY",
+            },
+            {
+                "time": int(datetime(2026, 3, 17, 1, 36, 35, tzinfo=timezone.utc).timestamp() * 1000),
+                "qty": "0.042",
+                "side": "SELL",
+            },
+        ]
+        client.get_klines.return_value = [
+            [0, "0", "70900", "70500", "0", 0],
+        ]
+        client.get_symbol_rules.return_value = {
+            "BTCUSDT": SimpleNamespace(tick_size=0.1),
+        }
+        client.normalize_trigger_price.side_effect = lambda _symbol, price, round_up=False: float(price)
+        client.format_trigger_price.side_effect = lambda _symbol, price, round_up=False: str(price)
+        client.format_order_qty.side_effect = lambda _symbol, qty: str(qty)
+        client.create_order.side_effect = RuntimeError("create stop failed")
+
+        manager = PositionManager(
+            client=client,
+            store=self.store,
+            notifier=MagicMock(),
+            sl_liq_buffer_pct=1.0,
+            trigger_price_type="CONTRACT_PRICE",
+            daily_loss_cut_scope="exchange",
+        )
+
+        summary = manager.run_morning_protection_stop(
+            check_time_utc=check_time,
+            min_hold_hours=6.0,
+        )
+
+        self.assertEqual(summary["total"], 1)
+        self.assertEqual(summary["updated_sl"], 0)
+        self.assertEqual(summary["skipped"], 0)
+        self.assertEqual(summary["errors"], 1)
+
+        state = self.store.get_lock_state(PositionManager.MORNING_PROTECTION_LOCK_NAME) or {}
+        holder_caps = state.get("caps") if isinstance(state, dict) else None
+        self.assertIsInstance(holder_caps, dict)
+        self.assertEqual(float(holder_caps["EX:BTCUSDT:BOTH_SHORT"]), 70800.0)
 
     def test_morning_protection_uses_current_hour_low_for_long_positions(self) -> None:
         check_time = datetime(2026, 3, 17, 7, 55, tzinfo=timezone.utc)
