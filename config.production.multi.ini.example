@@ -91,7 +91,7 @@ strategy_note.acc01 = TP 9% / 减仓50% / 中午保护止损ON / 早盘保护止
 strategy_note.acc02 = TP 9% / 清仓100% / 中午保护止损ON / 早盘保护止损ON / 盈利20%回撤止盈保护
 strategy_note.acc03 = TP 9% / 清仓100% / 中午保护止损ON / 早盘保护止损ON / 盈利20%回撤止盈保护
 strategy_note.acc04 = 组合止盈OFF / 中午保护止损ON / 早盘保护止损ON / 盈利20%回撤止盈保护
-strategy_note.55 = loss_cut_only / 中午保护止损ON / 早盘保护止损ON / 盈利20%回撤止盈保护
+strategy_note.55 = loss_cut_only / 中午保护止损ON / 盈利20%回撤止盈保护
 
 [account.acc01.binance]
 api_key = REPLACE_WITH_ACC01_API_KEY
