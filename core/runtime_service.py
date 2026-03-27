@@ -10,6 +10,7 @@ from zoneinfo import ZoneInfo
 
 
 LOGGER = logging.getLogger(__name__)
+PROTECTION_RESTART_GRACE = timedelta(hours=2)
 
 
 @dataclass(frozen=True)
@@ -481,6 +482,14 @@ class StrategyRuntimeService:
         target = self._noon_protection_schedule_for_day(today)
         if now_local < target:
             return
+        if now_local - target > PROTECTION_RESTART_GRACE:
+            LOGGER.warning(
+                "Noon protection missed beyond restart grace, skip for today: now=%s target=%s grace_hours=2",
+                now_local.isoformat(timespec="seconds"),
+                target.isoformat(timespec="seconds"),
+            )
+            self._last_noon_protection_local_date = today
+            return
 
         day_start_local = target.replace(hour=0, minute=0, second=0, microsecond=0)
         day_start_utc = day_start_local.astimezone(timezone.utc)
@@ -597,6 +606,15 @@ class StrategyRuntimeService:
 
             target = self._morning_protection_schedule_for_day(today, account_id=aid)
             if now_local < target:
+                continue
+            if now_local - target > PROTECTION_RESTART_GRACE:
+                LOGGER.warning(
+                    "Morning protection missed beyond restart grace, skip for today: account=%s now=%s target=%s grace_hours=2",
+                    aid,
+                    now_local.isoformat(timespec="seconds"),
+                    target.isoformat(timespec="seconds"),
+                )
+                self._last_morning_protection_local_date_by_account[aid] = today
                 continue
 
             manager = ctx.get("manager")

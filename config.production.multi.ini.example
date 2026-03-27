@@ -152,7 +152,7 @@ cooling_off_retry_delay_sec = 30
 [account.55.runtime]
 daily_loss_cut_enabled = false
 daily_loss_cut_scope = exchange
-morning_protection_enabled = true
+morning_protection_enabled = false
 morning_protection_hour = 7
 morning_protection_minute = 55
 morning_protection_min_hold_hours = 6
