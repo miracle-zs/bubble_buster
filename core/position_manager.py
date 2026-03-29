@@ -233,10 +233,18 @@ class PositionManager:
             raise RuntimeError(f"missing entry price for {symbol}")
         position_amt = self._safe_float(risk.get("positionAmt"), default=0.0)
         opened_at_raw = str(existing.get("opened_at_utc") or "").strip()
-        opened_at_utc = self._parse_iso_utc(opened_at_raw) if opened_at_raw else self._reconstruct_short_opened_at_from_trades(
+        existing_opened_at_utc = self._parse_iso_utc(opened_at_raw) if opened_at_raw else None
+        opened_at_utc = self._reconstruct_short_opened_at_from_trades(
             symbol=symbol,
             current_short_qty=abs(position_amt),
         )
+        if existing_opened_at_utc is not None and opened_at_utc > existing_opened_at_utc:
+            return self._initialize_hourly_exchange_take_profit_monitor(
+                symbol=symbol,
+                risk=risk,
+                now_utc=now_utc,
+                drop_pct=drop_pct,
+            )
         _high_price, low_price = self._fetch_symbol_extremes_between(
             symbol=symbol,
             start_utc=opened_at_utc,
