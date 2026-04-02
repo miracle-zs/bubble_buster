@@ -214,7 +214,7 @@ def _build_single_account_components(
             "hourly_exchange_take_profit_enabled", fallback=False
         ),
         "hourly_exchange_take_profit_minute": runtime_cfg.getint(
-            "hourly_exchange_take_profit_minute", fallback=59
+            "hourly_exchange_take_profit_minute", fallback=0
         ),
         "hourly_exchange_take_profit_drop_pct": runtime_cfg.getfloat(
             "hourly_exchange_take_profit_drop_pct", fallback=20.0
@@ -302,7 +302,7 @@ def create_components(
             "hourly_exchange_take_profit_enabled", fallback=False
         ),
         hourly_exchange_take_profit_minute=runtime_cfg_selected.getint(
-            "hourly_exchange_take_profit_minute", fallback=59
+            "hourly_exchange_take_profit_minute", fallback=0
         ),
         hourly_exchange_take_profit_drop_pct=runtime_cfg_selected.getfloat(
             "hourly_exchange_take_profit_drop_pct", fallback=20.0

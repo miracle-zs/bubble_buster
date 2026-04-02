@@ -1,7 +1,7 @@
 import logging
 import hashlib
 from collections import deque
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 from uuid import uuid4
 
@@ -139,13 +139,12 @@ class PositionManager:
 
             try:
                 hour_open = None
-                latest_price = None
-                hour_open, latest_price = self._get_current_hour_open_and_latest_price(
+                hour_close = None
+                hour_open, hour_close = self._get_previous_closed_hour_open_and_close(
                     symbol=symbol,
-                    risk=risk,
                     now_local=now_local,
                 )
-                if hour_open is None or latest_price is None or latest_price <= hour_open:
+                if hour_open is None or hour_close is None or hour_close <= hour_open:
                     summary["skipped"] += 1
                     continue
 
@@ -169,10 +168,10 @@ class PositionManager:
             except Exception as exc:  # noqa: BLE001
                 summary["errors"] += 1
                 LOGGER.exception(
-                    "Hourly exchange take-profit failed symbol=%s hour_open=%s latest_price=%s position_amt=%s: %s",
+                    "Hourly exchange take-profit failed symbol=%s hour_open=%s hour_close=%s position_amt=%s: %s",
                     symbol,
                     hour_open,
-                    latest_price,
+                    hour_close,
                     position_amt,
                     exc,
                 )
@@ -345,27 +344,25 @@ class PositionManager:
         opened_at_ms = open_lots[0][0]
         return datetime.fromtimestamp(opened_at_ms / 1000.0, tz=timezone.utc).replace(microsecond=0)
 
-    def _get_current_hour_open_and_latest_price(
+    def _get_previous_closed_hour_open_and_close(
         self,
         symbol: str,
-        risk: Dict[str, Any],
         now_local: datetime,
     ) -> tuple[Optional[float], Optional[float]]:
         local_dt = now_local.astimezone(timezone.utc)
-        hour_start_utc = local_dt.replace(minute=0, second=0, microsecond=0)
+        current_hour_start_utc = local_dt.replace(minute=0, second=0, microsecond=0)
+        previous_hour_start_utc = current_hour_start_utc.replace(minute=0, second=0, microsecond=0) - timedelta(hours=1)
         rows = self.client.get_klines(
             symbol=symbol,
             interval="1h",
-            start_time=int(hour_start_utc.timestamp() * 1000),
-            end_time=int(local_dt.timestamp() * 1000),
+            start_time=int(previous_hour_start_utc.timestamp() * 1000),
+            end_time=int(current_hour_start_utc.timestamp() * 1000),
             limit=1,
         )
         row = rows[0] if rows else None
         hour_open = self._safe_positive_float(row[1]) if row and len(row) > 1 else None
-        latest_price = self._safe_positive_float(risk.get("markPrice"))
-        if latest_price is None and row and len(row) > 4:
-            latest_price = self._safe_positive_float(row[4])
-        return hour_open, latest_price
+        hour_close = self._safe_positive_float(row[4]) if row and len(row) > 4 else None
+        return hour_open, hour_close
 
     def run_daily_loss_cut(self) -> Dict[str, object]:
         if self.daily_loss_cut_scope == self.DAILY_LOSS_CUT_SCOPE_EXCHANGE:

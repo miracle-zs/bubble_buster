@@ -1460,7 +1460,7 @@ class PositionManagerTest(unittest.TestCase):
         self.assertFalse(monitor["eligible_reached"])
         self.assertIsNone(monitor["eligible_reached_at_utc"])
 
-    def test_hourly_exchange_take_profit_closes_eligible_short_on_bullish_hour(self) -> None:
+    def test_hourly_exchange_take_profit_closes_eligible_short_on_previous_closed_bullish_hour(self) -> None:
         self.store.set_lock_state(
             PositionManager.HOURLY_EXCHANGE_TP_LOCK_NAME,
             {
@@ -1484,7 +1484,7 @@ class PositionManagerTest(unittest.TestCase):
                     "symbol": "BTCUSDT",
                     "positionAmt": "-1",
                     "entryPrice": "100",
-                    "markPrice": "85",
+                    "markPrice": "83",
                     "positionSide": "BOTH",
                 }
             ],
@@ -1493,7 +1493,7 @@ class PositionManagerTest(unittest.TestCase):
                     "symbol": "BTCUSDT",
                     "positionAmt": "-1",
                     "entryPrice": "100",
-                    "markPrice": "85",
+                    "markPrice": "83",
                     "positionSide": "BOTH",
                 }
             ],
@@ -1530,7 +1530,7 @@ class PositionManagerTest(unittest.TestCase):
         )
 
         result = manager.run_hourly_exchange_take_profit(
-            now_local=datetime(2026, 3, 16, 10, 59, tzinfo=timezone.utc),
+            now_local=datetime(2026, 3, 16, 10, 0, tzinfo=timezone.utc),
             drop_pct=20.0,
         )
 
@@ -1539,6 +1539,73 @@ class PositionManagerTest(unittest.TestCase):
         self.assertEqual(order_kwargs["symbol"], "BTCUSDT")
         self.assertEqual(order_kwargs["side"], "BUY")
         self.assertTrue(order_kwargs["reduceOnly"])
+
+    def test_hourly_exchange_take_profit_skips_when_previous_closed_hour_is_bearish_even_if_current_hour_is_green(self) -> None:
+        self.store.set_lock_state(
+            PositionManager.HOURLY_EXCHANGE_TP_LOCK_NAME,
+            {
+                "symbols": {
+                    "BTCUSDT": {
+                        "symbol": "BTCUSDT",
+                        "position_amt": -1.0,
+                        "entry_price": 100.0,
+                        "opened_at_utc": datetime(2026, 3, 16, 1, 0, tzinfo=timezone.utc).isoformat(),
+                        "lowest_price_since_open": 79.0,
+                        "eligible_reached": True,
+                    }
+                }
+            },
+        )
+
+        client = MagicMock()
+        client.get_position_risk.side_effect = [
+            [
+                {
+                    "symbol": "BTCUSDT",
+                    "positionAmt": "-1",
+                    "entryPrice": "100",
+                    "markPrice": "91",
+                    "positionSide": "BOTH",
+                }
+            ],
+            [
+                {
+                    "symbol": "BTCUSDT",
+                    "positionAmt": "-1",
+                    "entryPrice": "100",
+                    "markPrice": "91",
+                    "positionSide": "BOTH",
+                }
+            ],
+        ]
+        client.get_klines.side_effect = [
+            [[0, "100", "101", "79", "80", 0]],
+            [[0, "90", "92", "83", "84", 0]],
+        ]
+        client.get_user_trades.return_value = [
+            {
+                "time": int(datetime(2026, 3, 16, 1, 0, tzinfo=timezone.utc).timestamp() * 1000),
+                "qty": "1",
+                "side": "SELL",
+            }
+        ]
+
+        manager = PositionManager(
+            client=client,
+            store=self.store,
+            notifier=MagicMock(),
+            sl_liq_buffer_pct=1.0,
+            trigger_price_type="CONTRACT_PRICE",
+            daily_loss_cut_scope="exchange",
+        )
+
+        result = manager.run_hourly_exchange_take_profit(
+            now_local=datetime(2026, 3, 16, 10, 0, tzinfo=timezone.utc),
+            drop_pct=20.0,
+        )
+
+        self.assertEqual(result["closed_take_profit"], 0)
+        client.create_order.assert_not_called()
 
     def test_hourly_exchange_take_profit_closes_hedge_mode_short_with_position_side(self) -> None:
         self.store.set_lock_state(

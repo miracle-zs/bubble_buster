@@ -55,7 +55,7 @@ morning_protection_hour = 7
 morning_protection_minute = 55
 morning_protection_min_hold_hours = 6
 hourly_exchange_take_profit_enabled = true
-hourly_exchange_take_profit_minute = 59
+hourly_exchange_take_profit_minute = 0
 hourly_exchange_take_profit_drop_pct = 20
 manager_interval_sec = 60
 manager_max_catch_up_runs = 3
@@ -157,7 +157,7 @@ morning_protection_hour = 7
 morning_protection_minute = 55
 morning_protection_min_hold_hours = 6
 hourly_exchange_take_profit_enabled = true
-hourly_exchange_take_profit_minute = 59
+hourly_exchange_take_profit_minute = 0
 hourly_exchange_take_profit_drop_pct = 20
 
 [notify]

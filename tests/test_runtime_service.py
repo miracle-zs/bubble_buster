@@ -1227,7 +1227,7 @@ def test_hourly_exchange_take_profit_runs_for_loss_cut_only_account_at_configure
                 "manager": manager,
                 "balance_sampler": None,
                 "hourly_exchange_take_profit_enabled": True,
-                "hourly_exchange_take_profit_minute": 59,
+                "hourly_exchange_take_profit_minute": 0,
                 "hourly_exchange_take_profit_drop_pct": 20.0,
             },
         },
@@ -1235,11 +1235,11 @@ def test_hourly_exchange_take_profit_runs_for_loss_cut_only_account_at_configure
     )
 
     service._run_hourly_exchange_take_profit_if_due(
-        datetime(2026, 2, 13, 10, 59, tzinfo=ZoneInfo("UTC"))
+        datetime(2026, 2, 13, 10, 0, tzinfo=ZoneInfo("UTC"))
     )
 
     assert manager.hourly_take_profit_calls == 1
-    assert manager.last_now_local == datetime(2026, 2, 13, 10, 59, tzinfo=ZoneInfo("UTC"))
+    assert manager.last_now_local == datetime(2026, 2, 13, 10, 0, tzinfo=ZoneInfo("UTC"))
     assert manager.last_drop_pct == 20.0
 
 
@@ -1289,7 +1289,7 @@ def test_hourly_exchange_take_profit_runs_only_once_per_local_hour() -> None:
                 "manager": manager,
                 "balance_sampler": None,
                 "hourly_exchange_take_profit_enabled": True,
-                "hourly_exchange_take_profit_minute": 59,
+                "hourly_exchange_take_profit_minute": 0,
                 "hourly_exchange_take_profit_drop_pct": 20.0,
             },
         },
@@ -1297,13 +1297,13 @@ def test_hourly_exchange_take_profit_runs_only_once_per_local_hour() -> None:
     )
 
     service._run_hourly_exchange_take_profit_if_due(
-        datetime(2026, 2, 13, 10, 59, tzinfo=ZoneInfo("UTC"))
+        datetime(2026, 2, 13, 10, 0, tzinfo=ZoneInfo("UTC"))
     )
     service._run_hourly_exchange_take_profit_if_due(
-        datetime(2026, 2, 13, 10, 59, 30, tzinfo=ZoneInfo("UTC"))
+        datetime(2026, 2, 13, 10, 0, 30, tzinfo=ZoneInfo("UTC"))
     )
     service._run_hourly_exchange_take_profit_if_due(
-        datetime(2026, 2, 13, 11, 59, tzinfo=ZoneInfo("UTC"))
+        datetime(2026, 2, 13, 11, 0, tzinfo=ZoneInfo("UTC"))
     )
 
     assert manager.hourly_take_profit_calls == 2
