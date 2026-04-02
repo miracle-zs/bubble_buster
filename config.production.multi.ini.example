@@ -159,6 +159,10 @@ morning_protection_min_hold_hours = 6
 hourly_exchange_take_profit_enabled = true
 hourly_exchange_take_profit_minute = 0
 hourly_exchange_take_profit_drop_pct = 20
+# 账户级保护白名单。
+# 仅支持精确 symbol 匹配，程序内部会自动转成大写。
+# 单个 symbol 示例：protection_exempt_symbols = XAUUSDT
+# 多个 symbol 示例：protection_exempt_symbols = XAUUSDT,BTCUSDT,ETHUSDT
 protection_exempt_symbols =
 
 [notify]
