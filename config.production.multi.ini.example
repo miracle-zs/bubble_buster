@@ -159,6 +159,7 @@ morning_protection_min_hold_hours = 6
 hourly_exchange_take_profit_enabled = true
 hourly_exchange_take_profit_minute = 0
 hourly_exchange_take_profit_drop_pct = 20
+protection_exempt_symbols =
 
 [notify]
 enabled = true

@@ -3,7 +3,7 @@ import io
 import logging
 import os
 from pathlib import Path
-from typing import Dict, Optional, Tuple
+from typing import Dict, Optional, Set, Tuple
 
 from core.account_config import parse_account_settings
 from core.balance_sampler import WalletSnapshotSampler
@@ -85,6 +85,10 @@ def _normalize_items(section: configparser.SectionProxy) -> Dict[str, str]:
     return {k: str(v).strip() for k, v in section.items()}
 
 
+def _parse_symbol_set(raw: str) -> Set[str]:
+    return {part.strip().upper() for part in str(raw or "").split(",") if part.strip()}
+
+
 def _merged_section(cfg: configparser.ConfigParser, account_id: str, section_name: str) -> MergedSection:
     values: Dict[str, str] = {}
     if cfg.has_section(section_name):
@@ -128,6 +132,7 @@ def _build_single_account_components(
         proxies=proxies,
         timeout_sec=10,
     )
+    protection_exempt_symbols = _parse_symbol_set(runtime_cfg.get("protection_exempt_symbols", fallback=""))
 
     strategy = Top10ShortStrategy(
         client=client,
@@ -169,6 +174,7 @@ def _build_single_account_components(
         cooling_off_retry_delay_sec=max(0, runtime_cfg.getint("cooling_off_retry_delay_sec", fallback=0)),
         runtime_timezone=runtime_cfg.get("timezone", fallback="Asia/Shanghai").strip(),
         account_id=account_id,
+        protection_exempt_symbols=protection_exempt_symbols,
     )
 
     manager = PositionManager(
@@ -179,6 +185,7 @@ def _build_single_account_components(
         trigger_price_type=strategy_cfg.get("trigger_price_type", fallback="CONTRACT_PRICE").strip(),
         daily_loss_cut_scope=runtime_cfg.get("daily_loss_cut_scope", fallback="tracked").strip(),
         account_id=account_id,
+        protection_exempt_symbols=protection_exempt_symbols,
     )
 
     wallet_sampler = WalletSnapshotSampler(
@@ -219,6 +226,7 @@ def _build_single_account_components(
         "hourly_exchange_take_profit_drop_pct": runtime_cfg.getfloat(
             "hourly_exchange_take_profit_drop_pct", fallback=20.0
         ),
+        "protection_exempt_symbols": protection_exempt_symbols,
         "strategy": strategy,
         "manager": manager,
         "balance_sampler": wallet_sampler,

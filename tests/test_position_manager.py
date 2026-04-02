@@ -1235,6 +1235,191 @@ class PositionManagerTest(unittest.TestCase):
         row = self._get_position(position_id)
         self.assertAlmostEqual(float(row["sl_price"]), 59000.0)
 
+    def test_run_once_skips_timeout_and_dynamic_stop_for_exempt_symbol(self) -> None:
+        position_id = self._insert_open_position(
+            symbol="XAUUSDT",
+            qty=0.01,
+            tp_order_id=11,
+            sl_order_id=22,
+            tp_price=40000.0,
+            sl_price=59000.0,
+            expire_in_hours=-1,
+        )
+
+        client = MagicMock()
+        client.get_position_risk.return_value = [
+            {
+                "symbol": "XAUUSDT",
+                "positionAmt": "-0.01",
+                "liquidationPrice": "61000",
+            }
+        ]
+
+        manager = PositionManager(
+            client=client,
+            store=self.store,
+            notifier=MagicMock(),
+            sl_liq_buffer_pct=1.0,
+            trigger_price_type="CONTRACT_PRICE",
+            protection_exempt_symbols={"XAUUSDT"},
+        )
+
+        summary = manager.run_once()
+
+        self.assertEqual(summary["closed_timeout"], 0)
+        self.assertEqual(summary["updated_sl"], 0)
+        client.get_order.assert_not_called()
+        client.create_order.assert_not_called()
+        row = self._get_position(position_id)
+        self.assertEqual(row["status"], "OPEN")
+
+    def test_daily_loss_cut_skips_exempt_symbol(self) -> None:
+        position_id = self._insert_open_position(
+            symbol="XAUUSDT",
+            qty=0.02,
+            tp_order_id=101,
+            sl_order_id=202,
+            tp_price=40000.0,
+            sl_price=59000.0,
+            expire_in_hours=24,
+        )
+
+        client = MagicMock()
+        client.get_position_risk.return_value = [
+            {"symbol": "XAUUSDT", "positionAmt": "-0.02", "unRealizedProfit": "-1.2"}
+        ]
+
+        manager = PositionManager(
+            client=client,
+            store=self.store,
+            notifier=MagicMock(),
+            sl_liq_buffer_pct=1.0,
+            trigger_price_type="CONTRACT_PRICE",
+            protection_exempt_symbols={"XAUUSDT"},
+        )
+
+        summary = manager.run_daily_loss_cut()
+
+        self.assertEqual(summary["closed_loss_cut"], 0)
+        client.create_order.assert_not_called()
+        row = self._get_position(position_id)
+        self.assertEqual(row["status"], "OPEN")
+
+    def test_morning_and_noon_protection_skip_exempt_symbol(self) -> None:
+        opened_at = datetime(2026, 3, 17, 0, 30, tzinfo=timezone.utc)
+        position_id = self.store.insert_position(
+            run_id=self.run_id,
+            symbol="XAUUSDT",
+            side="SHORT",
+            qty=1.0,
+            entry_price=100.0,
+            liq_price_open=120.0,
+            tp_price=80.0,
+            sl_price=118.0,
+            tp_order_id=11,
+            sl_order_id=22,
+            tp_client_order_id="tp-old",
+            sl_client_order_id="sl-old",
+            status="OPEN",
+            opened_at_utc=opened_at.isoformat(),
+            expire_at_utc=(opened_at + timedelta(hours=24)).isoformat(),
+        )
+
+        client = MagicMock()
+        client.get_position_risk.return_value = [
+            {
+                "symbol": "XAUUSDT",
+                "positionAmt": "-1",
+                "entryPrice": "100",
+                "liquidationPrice": "120",
+                "positionSide": "BOTH",
+            }
+        ]
+
+        manager = PositionManager(
+            client=client,
+            store=self.store,
+            notifier=MagicMock(),
+            sl_liq_buffer_pct=1.0,
+            trigger_price_type="CONTRACT_PRICE",
+            daily_loss_cut_scope="exchange",
+            protection_exempt_symbols={"XAUUSDT"},
+        )
+
+        morning = manager.run_morning_protection_stop(
+            check_time_utc=datetime(2026, 3, 17, 7, 55, tzinfo=timezone.utc),
+            min_hold_hours=6.0,
+        )
+        noon = manager.run_noon_protection_stop(
+            day_start_utc=datetime(2026, 3, 17, 0, 0, tzinfo=timezone.utc),
+            noon_time_utc=datetime(2026, 3, 17, 12, 0, tzinfo=timezone.utc),
+        )
+
+        self.assertEqual(morning["updated_sl"], 0)
+        self.assertEqual(noon["updated_sl"], 0)
+        client.get_klines.assert_not_called()
+        client.create_order.assert_not_called()
+        row = self._get_position(position_id)
+        self.assertEqual(row["status"], "OPEN")
+
+    def test_hourly_exchange_take_profit_skips_exempt_symbol(self) -> None:
+        self.store.set_lock_state(
+            PositionManager.HOURLY_EXCHANGE_TP_LOCK_NAME,
+            {
+                "symbols": {
+                    "XAUUSDT": {
+                        "symbol": "XAUUSDT",
+                        "position_amt": -1.0,
+                        "entry_price": 100.0,
+                        "opened_at_utc": datetime(2026, 3, 16, 1, 0, tzinfo=timezone.utc).isoformat(),
+                        "lowest_price_since_open": 79.0,
+                        "eligible_reached": True,
+                    }
+                }
+            },
+        )
+
+        client = MagicMock()
+        client.get_position_risk.side_effect = [
+            [
+                {
+                    "symbol": "XAUUSDT",
+                    "positionAmt": "-1",
+                    "entryPrice": "100",
+                    "markPrice": "83",
+                    "positionSide": "BOTH",
+                }
+            ],
+            [
+                {
+                    "symbol": "XAUUSDT",
+                    "positionAmt": "-1",
+                    "entryPrice": "100",
+                    "markPrice": "83",
+                    "positionSide": "BOTH",
+                }
+            ],
+        ]
+
+        manager = PositionManager(
+            client=client,
+            store=self.store,
+            notifier=MagicMock(),
+            sl_liq_buffer_pct=1.0,
+            trigger_price_type="CONTRACT_PRICE",
+            daily_loss_cut_scope="exchange",
+            protection_exempt_symbols={"XAUUSDT"},
+        )
+
+        summary = manager.run_hourly_exchange_take_profit(
+            now_local=datetime(2026, 3, 16, 10, 0, tzinfo=timezone.utc),
+            drop_pct=20.0,
+        )
+
+        self.assertEqual(summary["closed_take_profit"], 0)
+        client.get_klines.assert_not_called()
+        client.create_order.assert_not_called()
+
     def test_hourly_exchange_take_profit_initializes_state_from_true_open_time(self) -> None:
         opened_at_utc = datetime(2026, 3, 16, 1, 0, tzinfo=timezone.utc)
         now_local = datetime(2026, 3, 16, 10, 18, tzinfo=timezone.utc)

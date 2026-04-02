@@ -101,6 +101,7 @@ class Top10ShortStrategy:
         cooling_off_retry_delay_sec: int = 0,
         runtime_timezone: str = "Asia/Shanghai",
         account_id: str = "default",
+        protection_exempt_symbols: Optional[Set[str]] = None,
     ):
         self.client = client
         self.store = store
@@ -147,6 +148,12 @@ class Top10ShortStrategy:
             self.runtime_timezone_name = "UTC"
             self.runtime_timezone = ZoneInfo("UTC")
         self.account_id = (account_id or "").strip() or "default"
+        self.protection_exempt_symbols = {
+            str(symbol or "").strip().upper() for symbol in (protection_exempt_symbols or set()) if str(symbol or "").strip()
+        }
+
+    def _is_protection_exempt(self, symbol: str) -> bool:
+        return str(symbol or "").strip().upper() in self.protection_exempt_symbols
 
     def run_entry(
         self,
@@ -714,6 +721,9 @@ class Top10ShortStrategy:
         for pos in open_positions:
             position_id = int(pos["id"])
             symbol = str(pos["symbol"])
+            if self._is_protection_exempt(symbol):
+                detail_rows.append({"symbol": symbol, "position_id": position_id, "status": "SKIPPED_EXEMPT"})
+                continue
             try:
                 risk = risk_map.get(symbol)
                 if not risk:
@@ -941,6 +951,9 @@ class Top10ShortStrategy:
                 self.store.set_position_error(position_id, f"redistribute: {exc}")
 
     def _place_exit_orders(self, position_id: int, symbol: str) -> None:
+        if self._is_protection_exempt(symbol):
+            LOGGER.info("Skip initial exit orders for exempt symbol account=%s symbol=%s", self.account_id, symbol)
+            return
         position_risk = self._load_short_position(symbol)
         if not position_risk:
             raise RuntimeError(f"Cannot place exits, no position risk for {symbol}")

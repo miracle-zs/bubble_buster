@@ -245,6 +245,64 @@ class StrategyEquityRecoveryTest(unittest.TestCase):
         self.assertFalse(last_lock["triggered"])
         self.assertEqual(last_lock["window_start_utc"], "2026-02-22T07:40:00+00:00")
 
+    def test_equity_recovery_skips_exempt_symbols(self) -> None:
+        client = MagicMock()
+        client.format_order_qty.side_effect = lambda _s, qty: str(qty)
+        client.create_order.side_effect = self._mock_order_factory()
+
+        store = MagicMock()
+        store.get_latest_wallet_snapshot.return_value = {
+            "captured_at_utc": "2026-02-23T07:40:00+00:00",
+            "balance_usdt": 990.0,
+        }
+        store.get_wallet_snapshot_min_since.return_value = {
+            "captured_at_utc": "2026-02-23T01:00:00+00:00",
+            "balance_usdt": 900.0,
+        }
+        store.get_lock_state.return_value = None
+        store.list_open_positions.return_value = [
+            {"id": 1, "symbol": "XAUUSDT", "entry_price": 10.0},
+            {"id": 2, "symbol": "BTCUSDT", "entry_price": 20.0},
+        ]
+
+        strategy = Top10ShortStrategy(
+            client=client,
+            store=store,
+            notifier=MagicMock(),
+            leverage=2,
+            top_n=10,
+            volume_threshold=0.0,
+            tp_price_drop_pct=20.0,
+            sl_liq_buffer_pct=1.0,
+            max_hold_hours=47.5,
+            trigger_price_type="CONTRACT_PRICE",
+            allocation_splits=10,
+            entry_fee_buffer_pct=1.0,
+            entry_shrink_retry_count=3,
+            entry_shrink_step_pct=10.0,
+            entry_rank_fetch_multiplier=3,
+            ranker_max_workers=4,
+            ranker_weight_limit_per_minute=1000,
+            ranker_min_request_interval_ms=20,
+            equity_recovery_take_profit_enabled=True,
+            equity_recovery_lookback_hours=24.0,
+            equity_recovery_trigger_pct=0.10,
+            equity_recovery_reduce_ratio=0.5,
+            protection_exempt_symbols={"XAUUSDT"},
+        )
+        strategy._refresh_exit_orders_for_positions = MagicMock()
+        strategy._sync_positions_after_adjustment_bulk = MagicMock(return_value={2})
+        strategy._load_short_position = MagicMock(
+            return_value={"symbol": "BTCUSDT", "positionAmt": "-5", "markPrice": "20", "entryPrice": "20"}
+        )
+
+        result = strategy.run_equity_recovery_take_profit()
+
+        self.assertEqual(result["status"], "TRIGGERED")
+        self.assertEqual(result["adjusted"], 1)
+        self.assertEqual(client.create_order.call_count, 1)
+        self.assertEqual(client.create_order.call_args.kwargs["symbol"], "BTCUSDT")
+
     def test_equity_recovery_updates_anchor_when_no_open_positions(self) -> None:
         client = MagicMock()
         store = MagicMock()

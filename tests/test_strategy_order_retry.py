@@ -194,6 +194,37 @@ class StrategyOrderRetryTest(unittest.TestCase):
         self.assertIsNone(update_kwargs["tp_price"])
         self.assertEqual(update_kwargs["sl_order_id"], 222)
 
+    def test_place_exit_orders_skips_all_initial_exit_orders_for_exempt_symbol(self) -> None:
+        client = MagicMock()
+        store = MagicMock()
+        strategy = Top10ShortStrategy(
+            client=client,
+            store=store,
+            notifier=MagicMock(),
+            leverage=2,
+            top_n=10,
+            volume_threshold=0.0,
+            tp_price_drop_pct=20.0,
+            sl_liq_buffer_pct=1.0,
+            max_hold_hours=47.5,
+            trigger_price_type="CONTRACT_PRICE",
+            allocation_splits=10,
+            entry_fee_buffer_pct=1.0,
+            entry_shrink_retry_count=3,
+            entry_shrink_step_pct=10.0,
+            entry_rank_fetch_multiplier=3,
+            ranker_max_workers=4,
+            ranker_weight_limit_per_minute=1000,
+            ranker_min_request_interval_ms=20,
+            protection_exempt_symbols={"XAUUSDT"},
+        )
+
+        strategy._place_exit_orders(position_id=123, symbol="XAUUSDT")
+
+        client.get_position_risk.assert_not_called()
+        client.create_order.assert_not_called()
+        store.update_position_orders.assert_not_called()
+
 
 if __name__ == "__main__":
     unittest.main()

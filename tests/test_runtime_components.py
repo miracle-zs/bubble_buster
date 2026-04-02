@@ -367,6 +367,72 @@ serverchan_sendkey =
     assert account_runtimes["55"]["morning_protection_min_hold_hours"] == 8.0
 
 
+def test_create_components_parses_account_protection_exempt_symbols(tmp_path) -> None:
+    cfg_path = tmp_path / "config.ini"
+    db_path = tmp_path / "state.db"
+    cfg_path.write_text(
+        f"""
+[accounts]
+enabled = acc01,55
+mode.acc01 = full
+mode.55 = loss_cut_only
+
+[binance]
+api_key =
+api_secret =
+base_url = https://fapi.binance.com
+timeout_sec = 10
+retry_count = 3
+retry_delay_sec = 1
+recv_window = 5000
+http_pool_maxsize = 64
+
+[account.acc01.binance]
+api_key = key1
+api_secret = sec1
+
+[account.55.binance]
+api_key = key55
+api_secret = sec55
+
+[strategy]
+leverage = 2
+top_n = 10
+
+[runtime]
+db_path = {db_path}
+default_account_id = acc01
+timezone = UTC
+entry_hour = 7
+entry_minute = 40
+manager_interval_sec = 60
+
+[account.55.runtime]
+protection_exempt_symbols = xauusdt, btcusdt , ,ethusdt
+
+[notify]
+enabled = false
+serverchan_sendkey =
+""",
+        encoding="utf-8",
+    )
+
+    cfg = configparser.ConfigParser()
+    assert cfg.read(str(cfg_path))
+
+    strategy, manager, _, _, _, account_runtimes = create_components(
+        cfg,
+        base_dir=str(tmp_path),
+    )
+
+    assert account_runtimes["acc01"]["protection_exempt_symbols"] == set()
+    assert account_runtimes["55"]["protection_exempt_symbols"] == {"XAUUSDT", "BTCUSDT", "ETHUSDT"}
+    assert strategy.protection_exempt_symbols == set()
+    assert manager.protection_exempt_symbols == set()
+    assert account_runtimes["55"]["strategy"].protection_exempt_symbols == {"XAUUSDT", "BTCUSDT", "ETHUSDT"}
+    assert account_runtimes["55"]["manager"].protection_exempt_symbols == {"XAUUSDT", "BTCUSDT", "ETHUSDT"}
+
+
 def test_create_components_applies_per_account_fixed_take_profit_override(tmp_path) -> None:
     cfg_path = tmp_path / "config.ini"
     db_path = tmp_path / "state.db"

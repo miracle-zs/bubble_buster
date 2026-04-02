@@ -218,6 +218,17 @@ CRON_TZ=Asia/Shanghai
   - 账户级“整点前保护止盈”任务，默认关闭。
   - 只对交易所当前空头仓位生效，适合 `loss_cut_only + exchange` 类账户（例如账号 `55`）。
   - 系统会从该仓位真实开仓时间开始回溯；只要历史上曾达到配置跌幅，且到本地 `59` 分检查时当前 `1h` 正在形成的K线为阳线，就会直接市价平仓。
+- `protection_exempt_symbols`：
+  - 账户级保护白名单，写在 `[account.<id>.runtime]` 下，逗号分隔，按精确 symbol 匹配，内部会标准化为大写。
+  - 命中白名单的 symbol 会跳过所有自动止盈止损保护，包括初始 TP/SL 挂单、动态止损、浮亏砍仓、早盘保护、中午保护、小时级保护止盈、组合权益恢复止盈。
+  - 白名单 symbol 仍会出现在 Dashboard 和持仓同步里，只是不再由自动保护逻辑接管。
+  - 适合大资金账户保留人工管理的长期仓位，例如：
+
+```ini
+[account.55.runtime]
+protection_exempt_symbols = XAUUSDT
+```
+
 - `noon_protection_enabled` / `noon_protection_hour` / `noon_protection_minute`：
   - 中午保护止损开关与时间（默认 12:00）。
   - 规则：对账户当前持仓按方向设置保护止损；空仓取 `max(当日0点, 入场时间)` 到中午窗口最高价并收紧，非策略仓位以当日 0 点为起点。

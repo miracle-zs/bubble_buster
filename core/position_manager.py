@@ -2,7 +2,7 @@ import logging
 import hashlib
 from collections import deque
 from datetime import datetime, timedelta, timezone
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Set
 from uuid import uuid4
 
 from core.state_store import StateStore
@@ -32,6 +32,7 @@ class PositionManager:
         trigger_price_type: str,
         daily_loss_cut_scope: str = DAILY_LOSS_CUT_SCOPE_TRACKED,
         account_id: str = "default",
+        protection_exempt_symbols: Optional[Set[str]] = None,
     ):
         self.client = client
         self.store = store
@@ -40,8 +41,14 @@ class PositionManager:
         self.trigger_price_type = trigger_price_type
         self.daily_loss_cut_scope = self._normalize_daily_loss_cut_scope(daily_loss_cut_scope)
         self.account_id = (account_id or "").strip() or "default"
+        self.protection_exempt_symbols = {
+            str(symbol or "").strip().upper() for symbol in (protection_exempt_symbols or set()) if str(symbol or "").strip()
+        }
         self._noon_protection_caps_cache: Optional[Dict[str, float]] = None
         self._morning_protection_caps_cache: Optional[Dict[str, float]] = None
+
+    def _is_protection_exempt(self, symbol: str) -> bool:
+        return str(symbol or "").strip().upper() in self.protection_exempt_symbols
 
     def refresh_hourly_exchange_take_profit_state(
         self,
@@ -66,6 +73,8 @@ class PositionManager:
                 continue
             symbol = str(risk.get("symbol") or "").strip()
             if not symbol:
+                continue
+            if self._is_protection_exempt(symbol):
                 continue
             active_symbols.add(symbol)
             entry_price = self._safe_positive_float(risk.get("entryPrice"))
@@ -130,6 +139,8 @@ class PositionManager:
                 continue
             symbol = str(risk.get("symbol") or "").strip()
             if not symbol:
+                continue
+            if self._is_protection_exempt(symbol):
                 continue
             summary["total"] += 1
             monitor = symbols_state.get(symbol)
@@ -402,6 +413,8 @@ class PositionManager:
             symbol = str(risk.get("symbol") or "").strip()
             if not symbol:
                 continue
+            if self._is_protection_exempt(symbol):
+                continue
             candidate_risks.append(risk)
 
         summary = {
@@ -582,6 +595,8 @@ class PositionManager:
                 continue
             symbol = str(risk.get("symbol") or "").strip()
             if not symbol:
+                continue
+            if self._is_protection_exempt(symbol):
                 continue
             candidate_risks.append(risk)
 
@@ -768,6 +783,8 @@ class PositionManager:
                 if risk is None:
                     self.store.set_position_error(position_id, "position risk not found")
                     continue
+                if self._is_protection_exempt(symbol):
+                    continue
 
                 position_amt = self._safe_float(risk.get("positionAmt"), default=0.0)
                 if position_amt >= 0:
@@ -838,6 +855,8 @@ class PositionManager:
         for risk in risks:
             symbol = str(risk.get("symbol") or "").strip()
             if not symbol:
+                continue
+            if self._is_protection_exempt(symbol):
                 continue
 
             position_amt = self._safe_float(risk.get("positionAmt"), default=0.0)
@@ -944,6 +963,27 @@ class PositionManager:
         position_id = int(pos["id"])
         symbol = str(pos["symbol"])
 
+        risk = self._get_symbol_position_risk(symbol)
+        if risk is None:
+            self.store.set_position_error(position_id, "position risk not found")
+            return None
+
+        position_amt = float(risk.get("positionAmt", "0") or 0)
+        if position_amt >= 0:
+            self._cancel_exit_orders(pos)
+            self.store.mark_position_closed(
+                position_id=position_id,
+                status="CLOSED_EXTERNAL",
+                close_reason="SHORT_POSITION_NOT_FOUND",
+            )
+            return {
+                "type": "closed_external",
+                "detail": f"{symbol}(id={position_id}, reason=SHORT_POSITION_NOT_FOUND)",
+            }
+
+        if self._is_protection_exempt(symbol):
+            return None
+
         tp_status = self._get_order_status(
             symbol,
             pos.get("tp_order_id"),
@@ -967,24 +1007,6 @@ class PositionManager:
             return {
                 "type": "closed_sl",
                 "detail": f"{symbol}(id={position_id}, order_id={close_order_id})",
-            }
-
-        risk = self._get_symbol_position_risk(symbol)
-        if risk is None:
-            self.store.set_position_error(position_id, "position risk not found")
-            return None
-
-        position_amt = float(risk.get("positionAmt", "0") or 0)
-        if position_amt >= 0:
-            self._cancel_exit_orders(pos)
-            self.store.mark_position_closed(
-                position_id=position_id,
-                status="CLOSED_EXTERNAL",
-                close_reason="SHORT_POSITION_NOT_FOUND",
-            )
-            return {
-                "type": "closed_external",
-                "detail": f"{symbol}(id={position_id}, reason=SHORT_POSITION_NOT_FOUND)",
             }
 
         if self._is_expired(str(pos["expire_at_utc"])):
@@ -1128,6 +1150,8 @@ class PositionManager:
     def _update_dynamic_stop(self, pos: Dict[str, object], risk: Dict[str, str]) -> Optional[Dict[str, object]]:
         position_id = int(pos["id"])
         symbol = str(pos["symbol"])
+        if self._is_protection_exempt(symbol):
+            return None
         position_amt = abs(float(risk.get("positionAmt", "0") or 0))
         if position_amt <= 0:
             return None
