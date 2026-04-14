@@ -231,7 +231,7 @@ protection_exempt_symbols = XAUUSDT
 
 - `noon_protection_enabled` / `noon_protection_hour` / `noon_protection_minute`：
   - 中午保护止损开关与时间（默认 12:00）。
-  - 规则：对账户当前持仓按方向设置保护止损；空仓取 `max(当日0点, 入场时间)` 到中午窗口最高价并收紧，非策略仓位以当日 0 点为起点。
+  - 规则：对账户当前持仓按方向设置保护止损；策略跟踪仓位取 `max(当日0点, 入场时间)` 到中午窗口的极值并收紧，非策略仓位以当日 `08:00` 为起点。
 - `manager_interval_sec` / `manager_max_catch_up_runs`：巡检周期与补跑上限。
 - `default_account_id`：默认账户 ID（单账户兼容场景使用）。
 - `max_account_workers`：单进程内并发账户任务 worker 数。

@@ -22,6 +22,7 @@ class PositionManager:
     NOON_PROTECTION_LOCK_NAME = "noon_protection_stop_caps_v1"
     MORNING_PROTECTION_LOCK_NAME = "morning_protection_stop_caps_v1"
     HOURLY_EXCHANGE_TP_LOCK_NAME = "hourly_exchange_take_profit_v1"
+    NOON_PROTECTION_UNTRACKED_START_OFFSET = timedelta(hours=8)
 
     def __init__(
         self,
@@ -458,9 +459,12 @@ class PositionManager:
             )
             active_cap_keys.add(cap_key)
             try:
-                opened_at_raw = str(tracked_pos.get("opened_at_utc") or "") if tracked_pos is not None else ""
-                opened_at_utc = self._parse_iso_utc(opened_at_raw) if opened_at_raw else day_start
-                start_utc = opened_at_utc if opened_at_utc > day_start else day_start
+                if tracked_pos is not None:
+                    opened_at_raw = str(tracked_pos.get("opened_at_utc") or "")
+                    opened_at_utc = self._parse_iso_utc(opened_at_raw) if opened_at_raw else day_start
+                    start_utc = opened_at_utc if opened_at_utc > day_start else day_start
+                else:
+                    start_utc = day_start + self.NOON_PROTECTION_UNTRACKED_START_OFFSET
                 if start_utc >= noon_time:
                     summary["skipped"] += 1
                     old_sl_price = self._safe_positive_float(tracked_pos.get("sl_price")) if tracked_pos is not None else None

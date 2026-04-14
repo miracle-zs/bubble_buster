@@ -599,6 +599,56 @@ class PositionManagerTest(unittest.TestCase):
         assert lock_state is not None
         self.assertIn("EX:XRPUSDT:BOTH_SHORT", lock_state["caps"])
 
+    def test_noon_protection_uses_0800_start_for_untracked_exchange_positions(self) -> None:
+        noon_utc = datetime(2026, 2, 13, 12, 0, tzinfo=timezone.utc)
+        day_start_utc = datetime(2026, 2, 13, 0, 0, tzinfo=timezone.utc)
+
+        client = MagicMock()
+        client.get_position_risk.return_value = [
+            {
+                "symbol": "XRPUSDT",
+                "positionAmt": "-1500",
+                "positionSide": "BOTH",
+                "liquidationPrice": "5.0",
+            }
+        ]
+        client.get_klines.return_value = [
+            [0, "0", "0.62", "0.51", "0", 0],
+        ]
+        client.get_symbol_rules.return_value = {
+            "XRPUSDT": SimpleNamespace(tick_size=0.0001),
+        }
+        client.normalize_trigger_price.side_effect = lambda _symbol, price, round_up=False: float(price)
+        client.format_trigger_price.side_effect = lambda _symbol, price, round_up=False: str(price)
+        client.format_order_qty.side_effect = lambda _symbol, qty: str(qty)
+        client.create_order.return_value = {
+            "orderId": 4003,
+            "clientOrderId": "sl-xrp-noon-0800",
+            "type": "STOP_MARKET",
+            "side": "BUY",
+            "origQty": "1500",
+            "status": "NEW",
+        }
+
+        manager = PositionManager(
+            client=client,
+            store=self.store,
+            notifier=MagicMock(),
+            sl_liq_buffer_pct=1.0,
+            trigger_price_type="CONTRACT_PRICE",
+        )
+
+        manager.run_noon_protection_stop(
+            day_start_utc=day_start_utc,
+            noon_time_utc=noon_utc,
+        )
+
+        klines_kwargs = client.get_klines.call_args.kwargs
+        self.assertEqual(
+            klines_kwargs["start_time"],
+            int((day_start_utc + timedelta(hours=8)).timestamp() * 1000),
+        )
+
     def test_noon_protection_does_not_skip_untracked_exchange_position_from_cached_cap(self) -> None:
         noon_utc = datetime(2026, 2, 13, 12, 0, tzinfo=timezone.utc)
         day_start_utc = datetime(2026, 2, 13, 0, 0, tzinfo=timezone.utc)
