@@ -364,16 +364,48 @@ class PositionManager:
         local_dt = now_local.astimezone(timezone.utc)
         current_hour_start_utc = local_dt.replace(minute=0, second=0, microsecond=0)
         previous_hour_start_utc = current_hour_start_utc.replace(minute=0, second=0, microsecond=0) - timedelta(hours=1)
-        rows = self.client.get_klines(
-            symbol=symbol,
-            interval="1h",
-            start_time=int(previous_hour_start_utc.timestamp() * 1000),
-            end_time=int(current_hour_start_utc.timestamp() * 1000),
-            limit=1,
-        )
+        try:
+            rows = self.client.get_klines(
+                symbol=symbol,
+                interval="1h",
+                start_time=int(previous_hour_start_utc.timestamp() * 1000),
+                end_time=int(current_hour_start_utc.timestamp() * 1000),
+                limit=1,
+            )
+        except Exception as exc:  # noqa: BLE001
+            LOGGER.warning(
+                "Failed to fetch hourly klines for symbol=%s previous_hour=%s: %s",
+                symbol,
+                previous_hour_start_utc.isoformat(),
+                exc,
+            )
+            return None, None
         row = rows[0] if rows else None
-        hour_open = self._safe_positive_float(row[1]) if row and len(row) > 1 else None
-        hour_close = self._safe_positive_float(row[4]) if row and len(row) > 4 else None
+        if row is None:
+            LOGGER.warning(
+                "No hourly kline returned for symbol=%s previous_hour=%s",
+                symbol,
+                previous_hour_start_utc.isoformat(),
+            )
+            return None, None
+        if len(row) < 5:
+            LOGGER.warning(
+                "Incomplete kline data for symbol=%s previous_hour=%s: row_length=%s",
+                symbol,
+                previous_hour_start_utc.isoformat(),
+                len(row),
+            )
+            return None, None
+        hour_open = self._safe_positive_float(row[1])
+        hour_close = self._safe_positive_float(row[4])
+        if hour_open is None or hour_close is None:
+            LOGGER.warning(
+                "Invalid kline prices for symbol=%s previous_hour=%s: open=%s close=%s",
+                symbol,
+                previous_hour_start_utc.isoformat(),
+                row[1] if len(row) > 1 else None,
+                row[4] if len(row) > 4 else None,
+            )
         return hour_open, hour_close
 
     def run_daily_loss_cut(self) -> Dict[str, object]:
@@ -1227,6 +1259,7 @@ class PositionManager:
             "stopPrice": stop_price,
             "quantity": self.client.format_order_qty(symbol, qty),
             "workingType": self.trigger_price_type,
+            "priceProtect": True,
             "newClientOrderId": client_order_id,
         }
         if use_reduce_only:
@@ -1556,6 +1589,8 @@ class PositionManager:
     @staticmethod
     def _is_expired(expire_at_utc: str) -> bool:
         expire_time = datetime.fromisoformat(expire_at_utc)
+        if expire_time.tzinfo is None:
+            expire_time = expire_time.replace(tzinfo=timezone.utc)
         now_utc = datetime.now(timezone.utc)
         return now_utc >= expire_time
 

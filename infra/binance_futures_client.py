@@ -74,7 +74,7 @@ def _format_by_step(value: float, step: float) -> str:
 
 class BinanceFuturesClient:
     RETRIABLE_HTTP_STATUS = {408, 429, 500, 502, 503, 504}
-    RETRIABLE_ERROR_CODES = {-1001, -1003, -1006, -1007, -1008, -1021}
+    RETRIABLE_ERROR_CODES = {-1001, -1003, -1006, -1007, -1008, -1021, -4117}
     CONDITIONAL_ORDER_TYPES = {
         "STOP",
         "STOP_MARKET",

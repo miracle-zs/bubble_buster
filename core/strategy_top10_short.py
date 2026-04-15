@@ -1940,8 +1940,10 @@ class Top10ShortStrategy:
         )
 
     def _load_short_position(self, symbol: str) -> Optional[Dict[str, str]]:
-        # Retry a few times for eventual consistency after market order execution.
-        for _ in range(5):
+        # Retry with exponential backoff for eventual consistency after market order execution.
+        max_retries = 8
+        base_delay = 0.2
+        for attempt in range(max_retries):
             risk_rows = self.client.get_position_risk(symbol=symbol)
             for row in risk_rows:
                 if row.get("symbol") != symbol:
@@ -1949,7 +1951,17 @@ class Top10ShortStrategy:
                 amt = float(row.get("positionAmt", "0") or 0)
                 if amt < 0:
                     return row
-            time.sleep(0.3)
+            # Exponential backoff: 0.2s, 0.4s, 0.8s, 1.6s, ...
+            delay = min(base_delay * (2 ** attempt), 5.0)
+            LOGGER.debug(
+                "Position not found yet, retrying: symbol=%s attempt=%s/%s delay=%.2fs",
+                symbol,
+                attempt + 1,
+                max_retries,
+                delay,
+            )
+            time.sleep(delay)
+        LOGGER.warning("Position not found after %s retries: symbol=%s", max_retries, symbol)
         return None
 
     def _create_exit_order_with_fallback(
@@ -1968,6 +1980,7 @@ class Top10ShortStrategy:
                 stopPrice=stop_price,
                 closePosition=True,
                 workingType=self.trigger_price_type,
+                priceProtect=True,
                 newClientOrderId=client_order_id,
             )
         except BinanceAPIError as exc:
@@ -1991,6 +2004,7 @@ class Top10ShortStrategy:
                 quantity=self.client.format_order_qty(symbol, qty),
                 reduceOnly=True,
                 workingType=self.trigger_price_type,
+                priceProtect=True,
                 newClientOrderId=client_order_id,
             )
 
