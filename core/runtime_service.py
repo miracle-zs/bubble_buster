@@ -646,6 +646,10 @@ class StrategyRuntimeService:
         hour_key = now_local.strftime("%Y-%m-%dT%H")
 
         for aid, ctx in self.account_runtimes.items():
+            mode = str(ctx.get("mode", "full")).strip().lower()
+            if mode not in {"full", "loss_cut_only"}:
+                continue
+
             enabled_raw = ctx.get(
                 "hourly_exchange_take_profit_enabled",
                 self.cfg.hourly_exchange_take_profit_enabled,
@@ -848,6 +852,30 @@ class StrategyRuntimeService:
         self._run_morning_protection_if_due(local_dt)
         self._run_hourly_exchange_take_profit_if_due(local_dt)
         self._run_manage_if_due(mono)
+        self._run_balance_snapshot_for_readonly_accounts()
+
+    def _run_balance_snapshot_for_readonly_accounts(self) -> None:
+        """为 readonly 账户执行余额快照采集。"""
+        readonly_accounts = [
+            aid
+            for aid, ctx in self.account_runtimes.items()
+            if str(ctx.get("mode", "full")).strip().lower() == "readonly"
+        ]
+        if not readonly_accounts:
+            return
+
+        for aid in readonly_accounts:
+            ctx = self.account_runtimes.get(aid)
+            if not ctx:
+                continue
+            balance_sampler = ctx.get("balance_sampler")
+            if balance_sampler is None:
+                continue
+            try:
+                wallet_summary = balance_sampler.run_once()  # type: ignore[attr-defined]
+                LOGGER.info("service readonly wallet snapshot account=%s: %s", aid, wallet_summary)
+            except Exception as exc:  # noqa: BLE001
+                LOGGER.warning("service readonly wallet snapshot failed account=%s: %s", aid, exc)
 
     def run_forever(self, stop_event: Optional[threading.Event] = None) -> None:
         stopper = stop_event or threading.Event()

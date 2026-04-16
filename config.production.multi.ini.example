@@ -81,17 +81,19 @@ log_dir = logs
 log_level = INFO
 
 [accounts]
-enabled = acc01,acc02,acc03,acc04,55
+enabled = acc01,acc02,acc03,acc04,55,readonly01
 mode.acc01 = full
 mode.acc02 = full
 mode.acc03 = full
 mode.acc04 = full
 mode.55 = loss_cut_only
+mode.readonly01 = readonly
 strategy_note.acc01 = TP 9% / 减仓50% / 中午保护止损ON / 早盘保护止损ON / 盈利20%回撤止盈保护
 strategy_note.acc02 = TP 9% / 清仓100% / 中午保护止损ON / 早盘保护止损ON / 盈利20%回撤止盈保护
 strategy_note.acc03 = TP 9% / 清仓100% / 中午保护止损ON / 早盘保护止损ON / 盈利20%回撤止盈保护
 strategy_note.acc04 = 组合止盈OFF / 中午保护止损ON / 早盘保护止损ON / 盈利20%回撤止盈保护
 strategy_note.55 = loss_cut_only / 中午保护止损ON / 盈利20%回撤止盈保护
+strategy_note.readonly01 = 只读监控账户 / 余额曲线 / 交易统计
 
 [account.acc01.binance]
 api_key = REPLACE_WITH_ACC01_API_KEY
@@ -112,6 +114,13 @@ api_secret = REPLACE_WITH_ACC04_API_SECRET
 [account.55.binance]
 api_key = REPLACE_WITH_ACC55_API_KEY
 api_secret = REPLACE_WITH_ACC55_API_SECRET
+
+# readonly 模式账户示例：只需要只读权限的 API Key
+# 功能：余额曲线展示、交易统计、Dashboard 监控
+# 不参与：建仓、仓位管理、止损保护等交易操作
+[account.readonly01.binance]
+api_key = REPLACE_WITH_READONLY_API_KEY
+api_secret = REPLACE_WITH_READONLY_API_SECRET
 
 [account.acc01.strategy]
 equity_recovery_take_profit_enabled = true

@@ -46,6 +46,7 @@ class DashboardDataProvider:
         account_equity_recovery_enabled: Optional[Dict[str, bool]] = None,
         overview_account_ids: Optional[List[str]] = None,
         live_wallet_account_id: str = "default",
+        trade_stats_fetchers: Optional[Dict[str, Any]] = None,
     ):
         self.db_path = db_path
         self.log_file = log_file
@@ -76,6 +77,7 @@ class DashboardDataProvider:
         overview_ids = [str(x).strip() for x in (overview_account_ids or []) if str(x).strip()]
         self.overview_account_ids: Optional[Set[str]] = set(overview_ids) if overview_ids else None
         self.live_wallet_account_id = (live_wallet_account_id or "").strip() or "default"
+        self.trade_stats_fetchers = trade_stats_fetchers or {}
         self._balance_cache_value: Optional[float] = None
         self._balance_cache_at: Optional[datetime] = None
         self._balance_last_attempt_at: Optional[datetime] = None
@@ -1538,6 +1540,28 @@ class DashboardDataProvider:
                 task_statuses = self._latest_task_statuses_for_accounts(list(by_account.keys()))
                 for aid, row in by_account.items():
                     row["tasks"] = task_statuses.get(aid, self._task_status_template())
+                    # 为 readonly 账户添加交易统计
+                    if self.account_modes.get(aid, "full") == "readonly":
+                        fetcher = self.trade_stats_fetchers.get(aid)
+                        if fetcher is not None:
+                            try:
+                                stats = fetcher.fetch_stats(account_id=aid, lookback_days=30)
+                                if stats is not None:
+                                    row["trade_stats"] = {
+                                        "total_realized_pnl": stats.total_realized_pnl,
+                                        "total_trades": stats.total_trades,
+                                        "win_count": stats.win_count,
+                                        "loss_count": stats.loss_count,
+                                        "win_rate_pct": stats.win_rate_pct,
+                                        "gross_profit": stats.gross_profit,
+                                        "gross_loss": stats.gross_loss,
+                                        "profit_factor": stats.profit_factor,
+                                        "avg_win": stats.avg_win,
+                                        "avg_loss": stats.avg_loss,
+                                        "last_updated_utc": stats.last_updated_utc,
+                                    }
+                            except Exception as exc:  # noqa: BLE001
+                                LOGGER.warning("Failed to fetch trade stats for account=%s: %s", aid, exc)
 
                 payload["accounts"] = [by_account[k] for k in sorted(by_account.keys())]
                 return payload
@@ -3116,6 +3140,7 @@ ACCOUNTS_OVERVIEW_HTML = """<!doctype html>
     .task-account-id { color: var(--accent); font-size:17px; font-weight:700; }
     .task-mode-badge, .task-feature-badge { display:inline-flex; align-items:center; border:1px solid #294e62; border-radius:999px; padding:2px 8px; font-size:11px; font-weight:700; letter-spacing:0.02em; color:#d7ecfa; background:rgba(20,41,54,0.8); }
     .task-feature-badge { border-color:#5b6e29; color:#eff5cf; background:rgba(65,83,17,0.26); }
+    .task-mode-badge.mode-readonly { border-color:#5b4e62; color:#f0d7fa; background:rgba(65,41,54,0.4); }
     .task-last-run { font-size:12px; }
     .task-table { border:1px solid #1f3f53; border-radius:10px; overflow:hidden; background:linear-gradient(180deg,rgba(8,24,35,0.72) 0%, rgba(6,17,26,0.92) 100%); }
     .task-head, .task-row-main { display:grid; grid-template-columns: minmax(170px,1.1fr) 120px 180px minmax(260px,1.6fr); align-items:start; column-gap:10px; }
@@ -3420,6 +3445,33 @@ ACCOUNTS_OVERVIEW_HTML = """<!doctype html>
     var mode = String((row && row.mode) || "full").toLowerCase();
     var tasks = (row && row.tasks) || {};
     var rows = [];
+    if (mode === "readonly") {
+      // readonly 模式显示交易统计
+      var stats = row && row.trade_stats;
+      if (stats) {
+        var profitFactor = stats.profit_factor != null ? stats.profit_factor.toFixed(2) : "--";
+        var statsHtml = '<div class="task-row">'
+          + '<div class="task-row-main" style="grid-template-columns: minmax(170px,1.1fr) 120px 180px minmax(260px,1.6fr);">'
+          + '<div class="task-name-wrap"><span class="task-name">交易统计(近30日)</span>'
+          + '<span class="task-task-tag">只读监控</span></div>'
+          + '<span class="task-meta"><span class="task-badge status-ok">READONLY</span></span>'
+          + '<span class="task-time">' + escapeHtml(String(stats.last_updated_utc || "").slice(0, 16)) + '</span>'
+          + '<div class="task-result-lines">'
+          + '<div class="task-stat-line">总盈亏=' + fmt(stats.total_realized_pnl, 4) + ' | 胜率=' + fmt(stats.win_rate_pct, 1) + '% | 盈亏比=' + profitFactor + '</div>'
+          + '<div class="task-stat-line">胜=' + stats.win_count + ' 负=' + stats.loss_count + ' | 平均盈利=' + fmt(stats.avg_win, 4) + ' | 平均亏损=' + fmt(stats.avg_loss, 4) + '</div>'
+          + '</div></div></div>';
+        return statsHtml;
+      }
+      // 没有统计数据时显示简化信息
+      return '<div class="task-row">'
+        + '<div class="task-row-main" style="grid-template-columns: minmax(170px,1.1fr) 120px 180px minmax(260px,1.6fr);">'
+        + '<div class="task-name-wrap"><span class="task-name">账户监控</span>'
+        + '<span class="task-task-tag">只读监控</span></div>'
+        + '<span class="task-meta"><span class="task-badge status-warn">READONLY</span></span>'
+        + '<span class="task-time">--</span>'
+        + '<div class="task-result-lines"><div class="task-stat-line">暂无交易统计数据</div></div>'
+        + '</div></div>';
+    }
     if (mode === "full") {
       rows.push({ key: "entry", name: "开仓(entry)", task: tasks.entry });
     }
@@ -3643,12 +3695,14 @@ ACCOUNTS_OVERVIEW_HTML = """<!doctype html>
       var safeAid = escapeHtml(aid);
       var st = r.last_run_status || "--";
       var mode = String(r.mode || "full").toLowerCase();
+      var modeLabel = mode === "full" ? "完整策略" : (mode === "loss_cut_only" ? "止损保护" : "只读监控");
+      var modeBadgeClass = "task-mode-badge" + (mode === "readonly" ? " mode-readonly" : "");
       var accountCls = hasAnomalyTask(r) ? "task-account-card task-account-anomaly" : "task-account-card";
       html += '<article class="' + accountCls + '">'
         + '<div class="task-account-head">'
         + '<div class="task-account-title">'
         + '<span class="task-account-id">' + safeAid + "</span>"
-        + '<span class="task-mode-badge">' + escapeHtml(mode) + "</span>"
+        + '<span class="' + modeBadgeClass + '">' + escapeHtml(modeLabel) + "</span>"
         + (r && r.equity_recovery_take_profit_enabled ? '<span class="task-feature-badge">组合止盈监控</span>' : "")
         + "</div>"
         + '<span class="task-last-run ' + statusCls(st) + '">' + escapeHtml(st) + "</span>"

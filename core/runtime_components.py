@@ -125,6 +125,24 @@ def _build_single_account_components(
     )
 
     scoped_store = root_store.scoped(account_id)
+    protection_exempt_symbols = _parse_symbol_set(runtime_cfg.get("protection_exempt_symbols", fallback=""))
+
+    # readonly 模式：只需要 client 和 wallet_sampler，不需要 strategy 和 manager
+    if mode == "readonly":
+        wallet_sampler = WalletSnapshotSampler(
+            client=client,
+            store=scoped_store,
+            asset=runtime_cfg.get("wallet_snapshot_asset", fallback="USDT").strip() or "USDT",
+            sync_cashflows=False,  # readonly 模式不同步资金流水
+            cashflow_income_types=[],
+            account_id=account_id,
+        )
+        return {
+            "account_id": account_id,
+            "mode": mode,
+            "client": client,
+            "balance_sampler": wallet_sampler,
+        }
 
     notifier = ServerChanNotifier(
         enabled=notify_cfg.getboolean("enabled", fallback=True),
@@ -132,7 +150,6 @@ def _build_single_account_components(
         proxies=proxies,
         timeout_sec=10,
     )
-    protection_exempt_symbols = _parse_symbol_set(runtime_cfg.get("protection_exempt_symbols", fallback=""))
 
     strategy = Top10ShortStrategy(
         client=client,

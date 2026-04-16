@@ -3,7 +3,7 @@ from dataclasses import dataclass
 from typing import Dict
 
 
-VALID_ACCOUNT_MODES = {"full", "loss_cut_only"}
+VALID_ACCOUNT_MODES = {"full", "loss_cut_only", "readonly"}
 
 
 @dataclass(frozen=True)

@@ -24,6 +24,7 @@ from dashboard_server import (
     render_accounts_overview_html,
 )
 from infra.binance_futures_client import BinanceFuturesClient
+from infra.trade_stats_fetcher import TradeStatsFetcher
 
 try:
     import fcntl
@@ -239,6 +240,51 @@ def create_dashboard_context(config_path: str) -> DashboardRuntimeContext:
 
             close_price_fetcher = _fetch_close_price
 
+    # 为 readonly 账户创建 TradeStatsFetcher
+    trade_stats_fetchers = {}
+    for aid in overview_account_ids:
+        if account_modes.get(aid, "full") != "readonly":
+            continue
+        # 获取账户特定的 Binance 配置
+        binance_section = f"account.{aid}.binance"
+        if cfg.has_section(binance_section):
+            api_key = cfg.get(binance_section, "api_key", fallback="").strip()
+            api_secret = cfg.get(binance_section, "api_secret", fallback="").strip()
+        else:
+            api_key = ""
+            api_secret = ""
+        if not api_key or not api_secret:
+            continue
+        try:
+            readonly_client = BinanceFuturesClient(
+                api_key=api_key,
+                api_secret=api_secret,
+                base_url=cfg.get(binance_section, "base_url", fallback="https://fapi.binance.com").strip()
+                if cfg.has_section(binance_section)
+                else "https://fapi.binance.com",
+                timeout_sec=cfg.getint(binance_section, "timeout_sec", fallback=10)
+                if cfg.has_section(binance_section)
+                else 10,
+                retry_count=cfg.getint(binance_section, "retry_count", fallback=3)
+                if cfg.has_section(binance_section)
+                else 3,
+                retry_delay_sec=cfg.getfloat(binance_section, "retry_delay_sec", fallback=1.0)
+                if cfg.has_section(binance_section)
+                else 1.0,
+                recv_window=cfg.getint(binance_section, "recv_window", fallback=5000)
+                if cfg.has_section(binance_section)
+                else 5000,
+                http_pool_maxsize=32,
+                proxies=build_proxies(cfg),
+            )
+            trade_stats_fetchers[aid] = TradeStatsFetcher(client=readonly_client, cache_ttl_sec=300)
+        except Exception as exc:  # noqa: BLE001
+            logging.getLogger(__name__).warning(
+                "Failed to create TradeStatsFetcher for readonly account=%s: %s",
+                aid,
+                exc,
+            )
+
     schema_path = str((Path(__file__).parent / "schema.sql").resolve())
     StateStore(db_path=db_path, schema_path=schema_path).init_schema()
 
@@ -257,6 +303,7 @@ def create_dashboard_context(config_path: str) -> DashboardRuntimeContext:
         account_equity_recovery_enabled=account_equity_recovery_enabled,
         overview_account_ids=overview_account_ids,
         live_wallet_account_id=default_account_id,
+        trade_stats_fetchers=trade_stats_fetchers,
     )
 
     echarts_src = _ensure_local_echarts_asset()
