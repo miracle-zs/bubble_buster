@@ -3643,24 +3643,45 @@ ACCOUNTS_OVERVIEW_HTML = """<!doctype html>
     for (var i = 0; i < rows.length; i += 1) {
       var r = rows[i] || {};
       var mode = String(r.mode || "full").toLowerCase();
-      if (mode !== "full") continue;
+      if (mode === "loss_cut_only") continue;  // loss_cut_only 不在上卡片区显示
       var aid = String(r.account_id || "");
       var safeAid = escapeHtml(aid);
       var base = pathPrefix + "/account/" + encodeURIComponent(aid) + "/";
       var st = r.last_run_status || "--";
       var note = String(r.strategy_note || "");
-      html += '<article class="card">'
-        + '<div class="aid">' + safeAid + '</div>'
-        + '<div class="row"><span class="label">余额(USDT)</span><span class="val">' + fmt(r.wallet_balance_usdt, 4) + '</span></div>'
-        + '<div class="row"><span class="label">持仓数</span><span class="val">' + fmt(r.open_positions, 0) + '</span></div>'
-        + '<div class="row"><span class="label">最近状态</span><span class="val ' + statusCls(st) + '">' + escapeHtml(st) + "</span></div>"
-        + '<div class="row note"><span class="label">策略说明</span><span class="val text">' + formatStrategyNote(note) + "</span></div>"
-        + '<div class="spark-block">'
-        + '<div class="spark-title"><span class="label">1D 策略权益曲线</span><span class="val spark-delta" data-account-id="' + safeAid + '">--</span></div>'
-        + '<div class="spark-box" data-account-id="' + safeAid + '"><div class="spark-empty">加载中...</div></div>'
-        + "</div>"
-        + '<div class="actions"><a class="btn" href="' + base + '">详情</a></div>'
-        + "</article>";
+
+      if (mode === "readonly") {
+        // readonly 模式卡片
+        var stats = r.trade_stats || {};
+        var pnlText = stats.total_realized_pnl != null ? fmt(stats.total_realized_pnl, 4) : "--";
+        var winRateText = stats.win_rate_pct != null ? fmt(stats.win_rate_pct, 1) + "%" : "--";
+        html += '<article class="card" style="border-color:#5b4e62;">'
+          + '<div class="aid" style="color:#d7a0f0;">' + safeAid + ' <span style="font-size:11px;color:#b88ed8;">[只读]</span></div>'
+          + '<div class="row"><span class="label">余额(USDT)</span><span class="val">' + fmt(r.wallet_balance_usdt, 4) + '</span></div>'
+          + '<div class="row"><span class="label">近30日盈亏</span><span class="val ' + (stats.total_realized_pnl >= 0 ? 'status-ok' : 'status-bad') + '">' + pnlText + '</span></div>'
+          + '<div class="row"><span class="label">胜率</span><span class="val">' + winRateText + '</span></div>'
+          + '<div class="row note"><span class="label">说明</span><span class="val text">' + formatStrategyNote(note) + "</span></div>"
+          + '<div class="spark-block">'
+          + '<div class="spark-title"><span class="label">1D 权益曲线</span><span class="val spark-delta" data-account-id="' + safeAid + '">--</span></div>'
+          + '<div class="spark-box" data-account-id="' + safeAid + '"><div class="spark-empty">加载中...</div></div>'
+          + "</div>"
+          + '<div class="actions"><a class="btn" href="' + base + '">详情</a></div>'
+          + "</article>";
+      } else {
+        // full 模式卡片
+        html += '<article class="card">'
+          + '<div class="aid">' + safeAid + '</div>'
+          + '<div class="row"><span class="label">余额(USDT)</span><span class="val">' + fmt(r.wallet_balance_usdt, 4) + '</span></div>'
+          + '<div class="row"><span class="label">持仓数</span><span class="val">' + fmt(r.open_positions, 0) + '</span></div>'
+          + '<div class="row"><span class="label">最近状态</span><span class="val ' + statusCls(st) + '">' + escapeHtml(st) + "</span></div>"
+          + '<div class="row note"><span class="label">策略说明</span><span class="val text">' + formatStrategyNote(note) + "</span></div>"
+          + '<div class="spark-block">'
+          + '<div class="spark-title"><span class="label">1D 策略权益曲线</span><span class="val spark-delta" data-account-id="' + safeAid + '">--</span></div>'
+          + '<div class="spark-box" data-account-id="' + safeAid + '"><div class="spark-empty">加载中...</div></div>'
+          + "</div>"
+          + '<div class="actions"><a class="btn" href="' + base + '">详情</a></div>'
+          + "</article>";
+      }
     }
     cards.innerHTML = html || '<article class="card">暂无账户数据</article>';
     primeCurveLoad();
