@@ -302,6 +302,7 @@ class BinanceFuturesClient:
         income_type: Optional[str] = None,
         start_time: Optional[int] = None,
         end_time: Optional[int] = None,
+        page: Optional[int] = None,
         limit: int = 1000,
     ) -> List[Dict[str, Any]]:
         params: Dict[str, Any] = {"limit": max(1, min(1000, int(limit)))}
@@ -313,6 +314,8 @@ class BinanceFuturesClient:
             params["startTime"] = int(start_time)
         if end_time is not None:
             params["endTime"] = int(end_time)
+        if page is not None:
+            params["page"] = max(1, int(page))
         data = self._request("GET", "/fapi/v1/income", params=params, signed=True)
         if isinstance(data, list):
             return data
