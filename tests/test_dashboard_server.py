@@ -124,6 +124,20 @@ class DashboardServerTest(unittest.TestCase):
         with self.assertRaises(sqlite3.ProgrammingError):
             conn.execute("SELECT 1").fetchone()  # type: ignore[union-attr]
 
+    def test_window_picker_refreshes_curve_without_core_request(self) -> None:
+        html = render_account_dashboard_html(
+            refresh_sec=5,
+            account_id="acc01",
+            echarts_src="/static/vendor/echarts.min.js",
+        )
+
+        handler = html.split('el.windowRow.addEventListener("click"', 1)[1].split(
+            "setInterval(function ()",
+            1,
+        )[0]
+        self.assertIn("refreshCurveFast();", handler)
+        self.assertNotIn("refreshCore", handler)
+
     def test_accounts_summary_returns_grouped_metrics(self) -> None:
         run1, _ = self.store.create_run("2026-02-13", account_id="acc01")
         run2, _ = self.store.create_run("2026-02-13", account_id="acc02")

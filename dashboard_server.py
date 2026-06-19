@@ -1199,6 +1199,7 @@ class DashboardDataProvider:
             "events": [],
             "cashflow_events": [],
             "unpriced_closed_details": [],
+            "trade_outcome_stats": None,
             "strategy_equity_curve": [],
             "balance_curve": [],
             "equity_curve": [],
@@ -1412,6 +1413,13 @@ class DashboardDataProvider:
                         account_id=scoped_account,
                     )
 
+                if include_trade_stats and not include_curves:
+                    data["trade_outcome_stats"] = self._load_trade_outcome_stats(
+                        conn,
+                        now_utc,
+                        account_id=scoped_account,
+                    )
+
                 if include_curves:
                     strategy_curve, strategy_stats = self._build_strategy_equity_curve(
                         conn=conn,
@@ -1608,6 +1616,22 @@ def _json_bytes(payload: Dict[str, Any]) -> bytes:
     return json.dumps(payload, ensure_ascii=False).encode("utf-8")
 
 
+_CURVE_PAYLOAD_KEYS = {
+    "strategy_equity_curve",
+    "balance_curve",
+    "equity_curve",
+    "drawdown_stats_strategy",
+    "drawdown_stats_balance",
+    "drawdown_stats",
+}
+
+
+def _strip_curve_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
+    for key in _CURVE_PAYLOAD_KEYS:
+        payload.pop(key, None)
+    return payload
+
+
 def _safe_query_int(
     raw_value: Optional[str],
     default: int,
@@ -1698,17 +1722,23 @@ def _make_handler(provider: DashboardDataProvider, cfg: DashboardServerConfig):
                 include_details = True
                 include_log = True
                 include_curves = True
+                endpoint_kind = ""
                 account_id = ""
                 if account_suffix.endswith("/snapshot"):
+                    endpoint_kind = "snapshot"
                     account_id = account_suffix[: -len("/snapshot")].strip().strip("/")
                 elif account_suffix.endswith("/core"):
+                    endpoint_kind = "core"
                     account_id = account_suffix[: -len("/core")].strip().strip("/")
                     include_details = False
                     include_log = False
+                    include_curves = False
                 elif account_suffix.endswith("/details"):
+                    endpoint_kind = "details"
                     account_id = account_suffix[: -len("/details")].strip().strip("/")
                     include_curves = False
                 elif account_suffix.endswith("/curve"):
+                    endpoint_kind = "curve"
                     account_id = account_suffix[: -len("/curve")].strip().strip("/")
                     include_details = False
                     include_log = False
@@ -1739,19 +1769,20 @@ def _make_handler(provider: DashboardDataProvider, cfg: DashboardServerConfig):
                         curve_points = int(curve_points_raw)
                 except ValueError:
                     curve_points = None
-                body = _json_bytes(
-                    provider.snapshot(
-                        log_lines=min(lines, 300),
-                        window_hours=window_hours,
-                        curve_points=curve_points,
-                        account_id=account_id or None,
-                        include_details=include_details,
-                        include_log=include_log,
-                        include_curves=include_curves,
-                        include_balance_curve=include_curves,
-                        include_trade_stats=(account_suffix.endswith("/curve") is False and include_curves),
-                    )
+                payload = provider.snapshot(
+                    log_lines=min(lines, 300),
+                    window_hours=window_hours,
+                    curve_points=curve_points,
+                    account_id=account_id or None,
+                    include_details=include_details,
+                    include_log=include_log,
+                    include_curves=include_curves,
+                    include_balance_curve=include_curves,
+                    include_trade_stats=endpoint_kind in {"snapshot", "core"},
                 )
+                if endpoint_kind == "core":
+                    payload = _strip_curve_payload(payload)
+                body = _json_bytes(payload)
                 self.send_response(200)
                 self.send_header("Content-Type", "application/json; charset=utf-8")
                 self.send_header("Cache-Control", "no-store")
@@ -2561,6 +2592,38 @@ DASHBOARD_HTML = """<!doctype html>
     for (var i = 0; i < keys.length; i += 1) {
       latestData[keys[i]] = partial[keys[i]];
     }
+    applyTradeOutcomeStats();
+  }
+
+  function mergeObjectFields(base, extra) {
+    var merged = {};
+    var k;
+    if (base && typeof base === "object") {
+      var baseKeys = Object.keys(base);
+      for (var i = 0; i < baseKeys.length; i += 1) {
+        k = baseKeys[i];
+        merged[k] = base[k];
+      }
+    }
+    if (extra && typeof extra === "object") {
+      var extraKeys = Object.keys(extra);
+      for (var j = 0; j < extraKeys.length; j += 1) {
+        k = extraKeys[j];
+        merged[k] = extra[k];
+      }
+    }
+    return merged;
+  }
+
+  function applyTradeOutcomeStats() {
+    if (!latestData || !latestData.trade_outcome_stats || typeof latestData.trade_outcome_stats !== "object") return;
+    latestData.drawdown_stats_strategy = mergeObjectFields(
+      latestData.drawdown_stats_strategy || {},
+      latestData.trade_outcome_stats
+    );
+    if (currentCurveTab === "strategy") {
+      latestData.drawdown_stats = latestData.drawdown_stats_strategy;
+    }
   }
 
   function mergeCurveOnly(curvePayload) {
@@ -2573,6 +2636,16 @@ DASHBOARD_HTML = """<!doctype html>
     latestData.strategy_equity_curve = curvePayload.strategy_equity_curve || [];
     latestData.balance_curve = curvePayload.balance_curve || [];
     latestData.equity_curve = curvePayload.equity_curve || latestData.strategy_equity_curve || [];
+    if (curvePayload.drawdown_stats_strategy) {
+      latestData.drawdown_stats_strategy = curvePayload.drawdown_stats_strategy;
+    }
+    if (curvePayload.drawdown_stats_balance) {
+      latestData.drawdown_stats_balance = curvePayload.drawdown_stats_balance;
+    }
+    if (curvePayload.drawdown_stats) {
+      latestData.drawdown_stats = curvePayload.drawdown_stats;
+    }
+    applyTradeOutcomeStats();
   }
 
   function renderEquityChart(curve) {
@@ -3065,7 +3138,6 @@ DASHBOARD_HTML = """<!doctype html>
       currentWindowHours = parsed;
       renderCurveTabState();
       refreshCurveFast();
-      refreshCore({ lite: true });
     });
   }
   setInterval(function () {

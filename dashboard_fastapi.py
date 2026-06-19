@@ -20,6 +20,7 @@ from core.runtime_service import StrategyRuntimeService
 from core.state_store import StateStore
 from dashboard_server import (
     DashboardDataProvider,
+    _strip_curve_payload,
     render_account_dashboard_html,
     render_accounts_overview_html,
 )
@@ -618,10 +619,11 @@ def create_app(config_path: Optional[str] = None) -> FastAPI:
                 account_id=account_id,
                 include_details=False,
                 include_log=False,
-                include_curves=True,
-                include_balance_curve=True,
+                include_curves=False,
+                include_balance_curve=False,
                 include_trade_stats=True,
             )
+            payload = _strip_curve_payload(payload)
             payload["config_path"] = ctx.config_path
             payload["db_path"] = ctx.db_path
             payload["account_id"] = account_id

@@ -179,13 +179,12 @@ class BinanceFuturesClient:
         signed: bool = False,
     ) -> Any:
         method = method.upper()
-        payload = self._normalize_params(params)
-        if signed:
-            payload = self._sign_params(payload)
+        base_payload = self._normalize_params(params)
 
         url = f"{self.base_url}{path}"
 
         for attempt in range(1, self.retry_count + 1):
+            payload = self._sign_params(base_payload) if signed else dict(base_payload)
             try:
                 if method in {"GET", "DELETE"}:
                     response = self.session.request(
@@ -302,6 +301,7 @@ class BinanceFuturesClient:
         income_type: Optional[str] = None,
         start_time: Optional[int] = None,
         end_time: Optional[int] = None,
+        page: Optional[int] = None,
         limit: int = 1000,
     ) -> List[Dict[str, Any]]:
         params: Dict[str, Any] = {"limit": max(1, min(1000, int(limit)))}
@@ -313,6 +313,8 @@ class BinanceFuturesClient:
             params["startTime"] = int(start_time)
         if end_time is not None:
             params["endTime"] = int(end_time)
+        if page is not None:
+            params["page"] = max(1, int(page))
         data = self._request("GET", "/fapi/v1/income", params=params, signed=True)
         if isinstance(data, list):
             return data
@@ -354,7 +356,7 @@ class BinanceFuturesClient:
                 signed=True,
             )
         except BinanceAPIError as exc:
-            if int(exc.code) in {-4046, -4048}:  # Already set / unchanged
+            if self._safe_error_code(exc) in {-4046, -4048}:  # Already set / unchanged
                 return {"code": exc.code, "msg": exc.message}
             raise
 

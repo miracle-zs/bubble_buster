@@ -73,17 +73,67 @@ class TradeStatsFetcher:
             LOGGER.warning("Failed to fetch trade stats for account=%s: %s", account_id, exc)
             return None
 
+    def _fetch_income_records(
+        self,
+        *,
+        income_type: str,
+        start_time_ms: int,
+        end_time_ms: int,
+        limit: int = 1000,
+        max_pages: int = 100,
+    ) -> List[Dict[str, Any]]:
+        records: List[Dict[str, Any]] = []
+        seen_keys = set()
+        page_limit = max(1, min(1000, int(limit)))
+        page_count = max(1, int(max_pages))
+        for page in range(1, page_count + 1):
+            page_records = self.client.get_income_history(
+                symbol=None,
+                income_type=income_type,
+                start_time=start_time_ms,
+                end_time=end_time_ms,
+                page=page,
+                limit=page_limit,
+            )
+            if not page_records:
+                break
+
+            for record in page_records:
+                key = (
+                    record.get("incomeType"),
+                    record.get("tranId"),
+                    record.get("tradeId"),
+                    record.get("symbol"),
+                    record.get("time"),
+                    record.get("income"),
+                )
+                if key in seen_keys:
+                    continue
+                seen_keys.add(key)
+                records.append(record)
+
+            if len(page_records) < page_limit:
+                break
+            if page == page_count:
+                LOGGER.warning(
+                    "Income history pagination reached max_pages=%s for income_type=%s; stats may be partial",
+                    page_count,
+                    income_type,
+                )
+        return records
+
     def _fetch_stats_from_api(self, lookback_days: int) -> Optional[TradeStats]:
         """从 API 获取统计数据。"""
         end_time = datetime.now(timezone.utc)
         start_time = end_time - timedelta(days=max(1, lookback_days))
+        start_time_ms = int(start_time.timestamp() * 1000)
+        end_time_ms = int(end_time.timestamp() * 1000)
 
         # 获取 REALIZED_PNL 收益记录
-        income_records = self.client.get_income_history(
-            symbol=None,
+        income_records = self._fetch_income_records(
             income_type="REALIZED_PNL",
-            start_time=int(start_time.timestamp() * 1000),
-            end_time=int(end_time.timestamp() * 1000),
+            start_time_ms=start_time_ms,
+            end_time_ms=end_time_ms,
             limit=1000,
         )
 
