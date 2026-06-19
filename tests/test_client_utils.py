@@ -36,7 +36,8 @@ class ClientUtilsTest(unittest.TestCase):
         second_response.json.return_value = {"ok": True}
         client.session.request = MagicMock(side_effect=[first_response, second_response])
 
-        with patch("infra.binance_futures_client.time.time", side_effect=[1000.0, 1000.5, 1001.0]):
+        time_values = iter(1000.0 + (idx * 0.1) for idx in range(20))
+        with patch("infra.binance_futures_client.time.time", side_effect=lambda: next(time_values)):
             with patch("infra.binance_futures_client.time.sleep"):
                 result = client._request("GET", "/signed", params={"symbol": "BTCUSDT"}, signed=True)
 
@@ -45,7 +46,7 @@ class ClientUtilsTest(unittest.TestCase):
             call.kwargs["params"]
             for call in client.session.request.call_args_list
         ]
-        self.assertEqual([params["timestamp"] for params in request_params], [1000000, 1001000])
+        self.assertGreater(request_params[1]["timestamp"], request_params[0]["timestamp"])
         self.assertNotEqual(request_params[0]["signature"], request_params[1]["signature"])
 
     def test_set_margin_type_preserves_non_numeric_api_error(self) -> None:

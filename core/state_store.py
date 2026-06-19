@@ -45,6 +45,14 @@ def utc_now_iso() -> str:
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
 
 
+ACCOUNT_ID_MIGRATION_TABLES = {
+    "runs",
+    "wallet_snapshots",
+    "cashflow_events",
+    "equity_recovery_events",
+}
+
+
 class StateStore:
     def __init__(self, db_path: str, schema_path: Optional[str] = None, account_id: str = "default"):
         self.db_path = db_path
@@ -200,6 +208,8 @@ class StateStore:
         table_name: str,
         default_account_id: str,
     ) -> None:
+        if table_name not in ACCOUNT_ID_MIGRATION_TABLES:
+            raise ValueError(f"Unexpected account_id migration table: {table_name}")
         row = conn.execute(
             "SELECT name FROM sqlite_master WHERE type='table' AND name=?",
             (table_name,),

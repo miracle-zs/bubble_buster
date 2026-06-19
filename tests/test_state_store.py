@@ -68,6 +68,16 @@ class StateStoreTest(unittest.TestCase):
         self.assertAlmostEqual(float(latest["balance_usdt"]), 123.456)
         self.assertEqual(latest["source"], "API")
 
+    def test_account_id_migration_rejects_unexpected_table_name(self) -> None:
+        with sqlite3.connect(self.db_path) as conn:
+            conn.row_factory = sqlite3.Row
+            with self.assertRaises(ValueError):
+                self.store._ensure_account_id_column(
+                    conn=conn,
+                    table_name="runs; DROP TABLE positions; --",
+                    default_account_id="default",
+                )
+
     def test_lock_state_roundtrip(self) -> None:
         self.assertIsNone(self.store.get_lock_state("equity_recovery_tp"))
 

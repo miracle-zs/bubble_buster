@@ -389,13 +389,11 @@ def _runtime_entry_catchup_state(app: FastAPI) -> dict:
             "entry_catchup_enabled": bool(getattr(service.cfg, "entry_catchup_enabled", True)),
             "source": "RUNTIME",
             "mutable": True,
-            "config_path": config_path,
         }
     return {
         "entry_catchup_enabled": _read_entry_catchup_from_config(config_path),
         "source": "CONFIG",
         "mutable": True,
-        "config_path": config_path,
     }
 
 
@@ -550,8 +548,6 @@ def create_app(config_path: Optional[str] = None) -> FastAPI:
                 window_hours=window_hours,
                 curve_points=curve_points,
             )
-            payload["config_path"] = ctx.config_path
-            payload["db_path"] = ctx.db_path
 
             service_state = getattr(request.app.state, "service_state", {}) or {}
             thread = service_state.get("thread")
@@ -589,8 +585,6 @@ def create_app(config_path: Optional[str] = None) -> FastAPI:
                 curve_points=curve_points,
                 account_id=account_id,
             )
-            payload["config_path"] = ctx.config_path
-            payload["db_path"] = ctx.db_path
             payload["account_id"] = account_id
             service_state = getattr(request.app.state, "service_state", {}) or {}
             thread = service_state.get("thread")
@@ -624,8 +618,6 @@ def create_app(config_path: Optional[str] = None) -> FastAPI:
                 include_trade_stats=True,
             )
             payload = _strip_curve_payload(payload)
-            payload["config_path"] = ctx.config_path
-            payload["db_path"] = ctx.db_path
             payload["account_id"] = account_id
             service_state = getattr(request.app.state, "service_state", {}) or {}
             thread = service_state.get("thread")
@@ -658,8 +650,6 @@ def create_app(config_path: Optional[str] = None) -> FastAPI:
                 include_balance_curve=True,
                 include_trade_stats=False,
             )
-            payload["config_path"] = ctx.config_path
-            payload["db_path"] = ctx.db_path
             payload["account_id"] = account_id
             return JSONResponse(payload)
         except Exception as exc:  # noqa: BLE001
@@ -682,8 +672,6 @@ def create_app(config_path: Optional[str] = None) -> FastAPI:
                 include_log=True,
                 include_curves=False,
             )
-            payload["config_path"] = ctx.config_path
-            payload["db_path"] = ctx.db_path
             payload["account_id"] = account_id
             return JSONResponse(payload)
         except Exception as exc:  # noqa: BLE001
