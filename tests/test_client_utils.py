@@ -1,6 +1,6 @@
 import importlib.util
 import unittest
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 if importlib.util.find_spec("requests") is None:
     raise unittest.SkipTest("requests is not installed")
@@ -15,6 +15,49 @@ from infra.binance_futures_client import (
 
 
 class ClientUtilsTest(unittest.TestCase):
+    def test_signed_request_refreshes_timestamp_and_signature_on_retry(self) -> None:
+        client = BinanceFuturesClient(
+            api_key="k",
+            api_secret="s",
+            retry_count=2,
+            retry_delay_sec=0.1,
+        )
+
+        first_response = MagicMock()
+        first_response.status_code = 400
+        first_response.text = '{"code": -1021, "msg": "Timestamp outside recvWindow"}'
+        first_response.json.return_value = {
+            "code": -1021,
+            "msg": "Timestamp outside recvWindow",
+        }
+        second_response = MagicMock()
+        second_response.status_code = 200
+        second_response.text = '{"ok": true}'
+        second_response.json.return_value = {"ok": True}
+        client.session.request = MagicMock(side_effect=[first_response, second_response])
+
+        with patch("infra.binance_futures_client.time.time", side_effect=[1000.0, 1000.5, 1001.0]):
+            with patch("infra.binance_futures_client.time.sleep"):
+                result = client._request("GET", "/signed", params={"symbol": "BTCUSDT"}, signed=True)
+
+        self.assertEqual(result, {"ok": True})
+        request_params = [
+            call.kwargs["params"]
+            for call in client.session.request.call_args_list
+        ]
+        self.assertEqual([params["timestamp"] for params in request_params], [1000000, 1001000])
+        self.assertNotEqual(request_params[0]["signature"], request_params[1]["signature"])
+
+    def test_set_margin_type_preserves_non_numeric_api_error(self) -> None:
+        client = BinanceFuturesClient(api_key="k", api_secret="s")
+        network_error = BinanceAPIError("NETWORK", "connection reset")
+        client._request = MagicMock(side_effect=network_error)  # type: ignore[method-assign]
+
+        with self.assertRaises(BinanceAPIError) as caught:
+            client.set_margin_type("BTCUSDT")
+
+        self.assertIs(caught.exception, network_error)
+
     def test_floor_and_ceil_step(self) -> None:
         self.assertAlmostEqual(floor_to_step(1.2345, 0.01), 1.23)
         self.assertAlmostEqual(ceil_to_step(1.2345, 0.01), 1.24)

@@ -420,7 +420,20 @@ class StrategyRebalanceTest(unittest.TestCase):
     def test_entry_paces_each_processed_symbol_when_configured(self) -> None:
         client = MagicMock()
         client.get_available_balance.return_value = 500.0
-        client.normalize_order_qty.side_effect = [1.0, 1.0, 0.0]
+        client.diagnose_order_qty.side_effect = [
+            {"normalized_qty": 1.0},
+            {"normalized_qty": 1.0},
+            {
+                "normalized_qty": 0.0,
+                "has_rules": True,
+                "raw_qty": 0.5,
+                "normalized_notional": 0.0,
+                "step_size": 1.0,
+                "min_qty": 1.0,
+                "min_notional": 5.0,
+                "reject_reason": "qty_below_min_qty",
+            },
+        ]
 
         store = MagicMock()
         store.create_run.return_value = ("run-1", True)
@@ -456,6 +469,7 @@ class StrategyRebalanceTest(unittest.TestCase):
             ]
         )
         strategy._place_exit_orders = MagicMock()
+        strategy._redistribute_failed_notional = MagicMock()
 
         candidates = [
             {"symbol": "AAAUSDT", "change": "15", "current_price": "10", "volume": "100"},
