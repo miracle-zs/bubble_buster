@@ -2,6 +2,7 @@ import importlib.util
 import sys
 import types
 import unittest
+from datetime import datetime
 from unittest.mock import MagicMock, patch
 
 if importlib.util.find_spec("requests") is None:
@@ -57,7 +58,7 @@ class StrategyRebalanceTest(unittest.TestCase):
             ranker_max_workers=4,
             ranker_weight_limit_per_minute=1000,
             ranker_min_request_interval_ms=20,
-            rebalance_enabled=True,
+            rebalance_enabled=overrides.get("rebalance_enabled", True),
             rebalance_pre_entry_reduce=True,
             rebalance_after_entry=True,
             rebalance_utilization=overrides.get("rebalance_utilization", 0.9),
@@ -71,6 +72,9 @@ class StrategyRebalanceTest(unittest.TestCase):
             entry_symbol_interval_sec=overrides.get("entry_symbol_interval_sec", 0),
             cooling_off_retry_count=overrides.get("cooling_off_retry_count", 0),
             cooling_off_retry_delay_sec=overrides.get("cooling_off_retry_delay_sec", 0),
+            entry_wait_bearish_hour_enabled=overrides.get("entry_wait_bearish_hour_enabled", False),
+            entry_wait_poll_sec=overrides.get("entry_wait_poll_sec", 30),
+            entry_wait_close_grace_sec=overrides.get("entry_wait_close_grace_sec", 5),
         )
 
     @staticmethod
@@ -488,6 +492,80 @@ class StrategyRebalanceTest(unittest.TestCase):
         self.assertEqual(result["entry_failed"], 2)
         self.assertEqual(strategy._place_market_short_with_shrink_retry.call_count, 2)
         self.assertEqual(sleep_mock.call_args_list, [unittest.mock.call(30), unittest.mock.call(30)])
+
+    def test_entry_waits_for_each_symbol_first_bearish_closed_hour_from_signal_time(self) -> None:
+        client = MagicMock()
+        client.get_available_balance.return_value = 500.0
+        client.diagnose_order_qty.side_effect = [{"normalized_qty": 1.0}, {"normalized_qty": 1.0}]
+        client.get_klines.side_effect = [
+            [[1764547200000, "100", "105", "99", "101", "0", 1764550799999]],  # AAA 00:00 bullish
+            [[1764550800000, "101", "102", "90", "95", "0", 1764554399999]],  # AAA 01:00 bearish
+            [[1764547200000, "200", "201", "180", "190", "0", 1764550799999]],  # BBB 00:00 bearish
+        ]
+
+        store = MagicMock()
+        store.create_run.return_value = ("run-1", True)
+        store.list_open_symbols.return_value = set()
+        store.insert_position.side_effect = [1001, 1002]
+        store.list_open_positions.return_value = [
+            {"id": 1001, "symbol": "AAAUSDT"},
+            {"id": 1002, "symbol": "BBBUSDT"},
+        ]
+
+        strategy = self._build_strategy(
+            client,
+            store,
+            rebalance_enabled=False,
+            entry_wait_bearish_hour_enabled=True,
+            entry_symbol_interval_sec=30,
+        )
+        strategy.top_n = 2
+        strategy._load_short_position = MagicMock(
+            side_effect=[
+                {"symbol": "BBBUSDT", "entryPrice": "190", "liquidationPrice": "220", "positionAmt": "-1"},
+                {"symbol": "AAAUSDT", "entryPrice": "95", "liquidationPrice": "120", "positionAmt": "-1"},
+            ]
+        )
+        strategy._place_market_short_with_shrink_retry = MagicMock(
+            side_effect=[
+                ({"orderId": 2001, "status": "FILLED", "origQty": "1", "side": "SELL", "type": "MARKET", "symbol": "BBBUSDT"}, 0),
+                ({"orderId": 2002, "status": "FILLED", "origQty": "1", "side": "SELL", "type": "MARKET", "symbol": "AAAUSDT"}, 0),
+            ]
+        )
+        strategy._place_exit_orders = MagicMock()
+        strategy._utc_now_datetime = MagicMock(
+            side_effect=[
+                datetime.fromisoformat("2025-12-01T00:10:00+00:00"),
+                datetime.fromisoformat("2025-12-01T03:00:10+00:00"),
+                datetime.fromisoformat("2025-12-01T03:00:11+00:00"),
+                datetime.fromisoformat("2025-12-01T03:00:12+00:00"),
+            ]
+        )
+
+        result = strategy.run_entry(
+            trade_day_utc="2025-12-01-test-bearish-hour-entry",
+            shared_top_gainers=[
+                {"symbol": "AAAUSDT", "change": "15", "current_price": "100", "volume": "100"},
+                {"symbol": "BBBUSDT", "change": "14", "current_price": "200", "volume": "100"},
+            ],
+        )
+
+        self.assertEqual(result["status"], "SUCCESS")
+        self.assertEqual(result["opened"], 2)
+        self.assertEqual(
+            [
+                call.kwargs["symbol"]
+                for call in strategy._place_market_short_with_shrink_retry.call_args_list
+            ],
+            ["BBBUSDT", "AAAUSDT"],
+        )
+        self.assertEqual(
+            [
+                call.kwargs["reference_price"]
+                for call in strategy._place_market_short_with_shrink_retry.call_args_list
+            ],
+            [190.0, 95.0],
+        )
 
     def test_entry_waits_before_first_symbol_when_initial_delay_configured(self) -> None:
         client = MagicMock()

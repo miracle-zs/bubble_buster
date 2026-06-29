@@ -5,7 +5,7 @@ import hashlib
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
 from datetime import datetime, time as dt_time, timedelta, timezone
-from typing import Any, Callable, Dict, List, Optional, Set, Tuple
+from typing import Any, Callable, Dict, Iterator, List, Optional, Set, Tuple
 from uuid import uuid4
 from zoneinfo import ZoneInfo
 
@@ -35,6 +35,14 @@ class PlannedOrder:
     base_margin_usdt: float
     target_notional_usdt: float
     qty: float
+
+
+@dataclass(frozen=True)
+class ReadyEntry:
+    entry: RankEntry
+    reference_price: float
+    signal_time_utc: datetime
+    bearish_close_time_utc: Optional[datetime]
 
 
 @dataclass(frozen=True)
@@ -97,6 +105,9 @@ class Top10ShortStrategy:
         equity_recovery_reduce_ratio: float = 0.50,
         entry_initial_delay_sec: int = 0,
         entry_symbol_interval_sec: int = 0,
+        entry_wait_bearish_hour_enabled: bool = False,
+        entry_wait_poll_sec: int = 30,
+        entry_wait_close_grace_sec: int = 5,
         cooling_off_retry_count: int = 0,
         cooling_off_retry_delay_sec: int = 0,
         runtime_timezone: str = "Asia/Shanghai",
@@ -138,6 +149,9 @@ class Top10ShortStrategy:
         self.equity_recovery_reduce_ratio = min(1.0, max(0.05, float(equity_recovery_reduce_ratio)))
         self.entry_initial_delay_sec = max(0, int(entry_initial_delay_sec))
         self.entry_symbol_interval_sec = max(0, int(entry_symbol_interval_sec))
+        self.entry_wait_bearish_hour_enabled = bool(entry_wait_bearish_hour_enabled)
+        self.entry_wait_poll_sec = max(1, int(entry_wait_poll_sec))
+        self.entry_wait_close_grace_sec = max(0, int(entry_wait_close_grace_sec))
         self.cooling_off_retry_count = max(0, int(cooling_off_retry_count))
         self.cooling_off_retry_delay_sec = max(0, int(cooling_off_retry_delay_sec))
         self.runtime_timezone_name = (runtime_timezone or "").strip() or "UTC"
@@ -380,10 +394,17 @@ class Top10ShortStrategy:
                 )
                 time.sleep(self.entry_initial_delay_sec)
 
-            for idx, entry in enumerate(candidates):
+            entry_signal_base_time = self._utc_now_datetime()
+            ready_entries = self._iter_ready_entries_after_bearish_hour(
+                candidates=candidates,
+                signal_base_time_utc=entry_signal_base_time,
+            )
+            for idx, ready_entry in enumerate(ready_entries):
+                entry = ready_entry.entry
+                reference_price = ready_entry.reference_price
                 try:
                     self.client.ensure_isolated_and_leverage(entry.symbol, self.leverage)
-                    qty_diagnostic = self.client.diagnose_order_qty(entry.symbol, target_notional, entry.last_price)
+                    qty_diagnostic = self.client.diagnose_order_qty(entry.symbol, target_notional, reference_price)
                     qty = float(qty_diagnostic["normalized_qty"])
                     plan = PlannedOrder(
                         symbol=entry.symbol,
@@ -404,7 +425,7 @@ class Top10ShortStrategy:
                             "min_qty=%s min_notional=%s reject_reason=%s",
                             entry.symbol,
                             target_notional,
-                            entry.last_price,
+                            reference_price,
                             qty_diagnostic["has_rules"],
                             float(qty_diagnostic["raw_qty"]),
                             float(qty_diagnostic["normalized_qty"]),
@@ -419,7 +440,7 @@ class Top10ShortStrategy:
                     open_order, retry_count_used = self._place_market_short_with_shrink_retry(
                         symbol=plan.symbol,
                         target_notional=plan.target_notional_usdt,
-                        reference_price=entry.last_price,
+                        reference_price=reference_price,
                         client_id_tag="ent",
                     )
                     if retry_count_used > 0:
@@ -435,7 +456,7 @@ class Top10ShortStrategy:
                     if position_risk is None:
                         raise RuntimeError(f"No short position returned after entry order for {plan.symbol}")
 
-                    entry_price = float(position_risk.get("entryPrice") or entry.last_price)
+                    entry_price = float(position_risk.get("entryPrice") or reference_price)
                     liq_price = self._safe_positive_float(position_risk.get("liquidationPrice"))
                     qty_now = abs(float(position_risk.get("positionAmt", plan.qty)))
                     opened_at = self._utc_now_datetime()
@@ -474,7 +495,11 @@ class Top10ShortStrategy:
                     entry_failure_details.append(f"{entry.symbol}: {exc}")
                     LOGGER.exception("Initial entry failed for %s: %s", entry.symbol, exc)
 
-                if self.entry_symbol_interval_sec > 0 and idx < len(candidates) - 1:
+                if (
+                    not self.entry_wait_bearish_hour_enabled
+                    and self.entry_symbol_interval_sec > 0
+                    and idx < len(candidates) - 1
+                ):
                     LOGGER.info(
                         "Entry pacing sleep: account=%s symbol=%s next_wait_sec=%s",
                         self.account_id,
@@ -612,6 +637,156 @@ class Top10ShortStrategy:
             if symbol not in symbols:
                 symbols.append(symbol)
         return symbols
+
+    def _iter_ready_entries_after_bearish_hour(
+        self,
+        candidates: List[RankEntry],
+        signal_base_time_utc: datetime,
+    ) -> Iterator[ReadyEntry]:
+        if not self.entry_wait_bearish_hour_enabled:
+            for idx, entry in enumerate(candidates):
+                yield ReadyEntry(
+                    entry=entry,
+                    reference_price=entry.last_price,
+                    signal_time_utc=signal_base_time_utc + timedelta(seconds=idx * self.entry_symbol_interval_sec),
+                    bearish_close_time_utc=None,
+                )
+            return
+
+        pending: Dict[int, Dict[str, object]] = {}
+        for idx, entry in enumerate(candidates):
+            signal_time = signal_base_time_utc + timedelta(seconds=idx * self.entry_symbol_interval_sec)
+            pending[idx] = {
+                "entry": entry,
+                "signal_time": signal_time,
+                "hour_open": self._floor_to_utc_hour(signal_time),
+            }
+
+        while pending:
+            now = self._utc_now_datetime()
+            ready_this_round: List[Tuple[int, ReadyEntry]] = []
+            next_check_times: List[datetime] = []
+
+            for idx, state in list(pending.items()):
+                entry = state["entry"]
+                if not isinstance(entry, RankEntry):
+                    continue
+                hour_open = state["hour_open"]
+                if not isinstance(hour_open, datetime):
+                    continue
+
+                while True:
+                    hour_close = hour_open + timedelta(hours=1)
+                    available_at = hour_close + timedelta(seconds=self.entry_wait_close_grace_sec)
+                    if now < available_at:
+                        next_check_times.append(available_at)
+                        state["hour_open"] = hour_open
+                        break
+
+                    candle = self._fetch_hour_candle(entry.symbol, hour_open)
+                    if candle is None:
+                        LOGGER.warning(
+                            "Entry bearish-hour wait missing kline: account=%s symbol=%s hour_open=%s",
+                            self.account_id,
+                            entry.symbol,
+                            hour_open.isoformat(timespec="seconds"),
+                        )
+                        hour_open += timedelta(hours=1)
+                        continue
+
+                    open_price, close_price, close_time = candle
+                    if close_price < open_price:
+                        ready_entry = ReadyEntry(
+                            entry=entry,
+                            reference_price=close_price,
+                            signal_time_utc=state["signal_time"] if isinstance(state["signal_time"], datetime) else signal_base_time_utc,
+                            bearish_close_time_utc=close_time,
+                        )
+                        ready_this_round.append((idx, ready_entry))
+                        pending.pop(idx, None)
+                        LOGGER.info(
+                            "Entry bearish-hour ready: account=%s symbol=%s signal=%s close=%s open=%.10f close_price=%.10f",
+                            self.account_id,
+                            entry.symbol,
+                            ready_entry.signal_time_utc.isoformat(timespec="seconds"),
+                            close_time.isoformat(timespec="seconds"),
+                            open_price,
+                            close_price,
+                        )
+                        break
+
+                    LOGGER.info(
+                        "Entry bearish-hour still waiting: account=%s symbol=%s hour_open=%s open=%.10f close=%.10f",
+                        self.account_id,
+                        entry.symbol,
+                        hour_open.isoformat(timespec="seconds"),
+                        open_price,
+                        close_price,
+                    )
+                    hour_open += timedelta(hours=1)
+
+            if ready_this_round:
+                for _idx, item in sorted(
+                    ready_this_round,
+                    key=lambda pair: (
+                        pair[1].bearish_close_time_utc or pair[1].signal_time_utc,
+                        pair[0],
+                    ),
+                ):
+                    yield item
+                continue
+
+            if not pending:
+                break
+            sleep_sec = self.entry_wait_poll_sec
+            if next_check_times:
+                wait_until = min(next_check_times)
+                sleep_sec = max(1, min(self.entry_wait_poll_sec, int((wait_until - now).total_seconds())))
+            LOGGER.info(
+                "Entry bearish-hour wait sleep: account=%s pending=%s wait_sec=%s",
+                self.account_id,
+                len(pending),
+                sleep_sec,
+            )
+            time.sleep(sleep_sec)
+
+        return
+
+    def _fetch_hour_candle(self, symbol: str, hour_open_utc: datetime) -> Optional[Tuple[float, float, datetime]]:
+        hour_open_utc = self._floor_to_utc_hour(hour_open_utc)
+        start_ms = int(hour_open_utc.timestamp() * 1000)
+        end_ms = int((hour_open_utc + timedelta(hours=1)).timestamp() * 1000) - 1
+        rows = self.client.get_klines(
+            symbol=symbol,
+            interval="1h",
+            start_time=start_ms,
+            end_time=end_ms,
+            limit=1,
+        )
+        for row in rows or []:
+            if len(row) < 7:
+                continue
+            try:
+                row_open_ms = int(row[0])
+            except (TypeError, ValueError):
+                continue
+            if row_open_ms != start_ms:
+                continue
+            open_price = self._safe_positive_float(row[1])
+            close_price = self._safe_positive_float(row[4])
+            if open_price is None or close_price is None:
+                continue
+            try:
+                close_time_ms = int(row[6])
+            except (TypeError, ValueError):
+                close_time_ms = end_ms
+            close_time = datetime.fromtimestamp(close_time_ms / 1000, tz=timezone.utc)
+            return open_price, close_price, close_time
+        return None
+
+    @staticmethod
+    def _floor_to_utc_hour(value: datetime) -> datetime:
+        return value.astimezone(timezone.utc).replace(minute=0, second=0, microsecond=0)
 
     def run_equity_recovery_take_profit(self) -> Dict[str, object]:
         if not self.equity_recovery_take_profit_enabled:

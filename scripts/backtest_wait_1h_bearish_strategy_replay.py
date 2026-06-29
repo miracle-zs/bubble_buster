@@ -20,6 +20,10 @@ from zoneinfo import ZoneInfo
 BINANCE_FAPI_KLINES = "https://fapi.binance.com/fapi/v1/klines"
 BINANCE_VISION = "https://data.binance.vision/data/futures/um/monthly/klines"
 LOCAL_TZ = ZoneInfo("Asia/Shanghai")
+INTERVAL_MS = {
+    "15m": 15 * 60 * 1000,
+    "1h": 60 * 60 * 1000,
+}
 
 
 @dataclass(frozen=True)
@@ -68,10 +72,14 @@ class ReplayResult:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Replay delayed short entry: wait until first bearish closed 1h candle, then simulate exits by 1h OHLC."
+        description="Replay delayed short entry: wait until first bearish entry candle, then simulate exits by OHLC."
     )
     parser.add_argument("--db", required=True)
-    parser.add_argument("--cache-dir", default="remote_artifacts/market_data_cache/binance_um_1h_replay")
+    parser.add_argument("--cache-dir", default=None, help="Legacy cache dir used for both entry and exit candles.")
+    parser.add_argument("--entry-cache-dir", default=None)
+    parser.add_argument("--exit-cache-dir", default=None)
+    parser.add_argument("--entry-interval", choices=sorted(INTERVAL_MS), default="1h")
+    parser.add_argument("--exit-interval", choices=sorted(INTERVAL_MS), default="1h")
     parser.add_argument("--output-csv", default="reports/wait_1h_bearish_strategy_replay.csv")
     parser.add_argument("--output-summary", default="reports/wait_1h_bearish_strategy_replay_summary.json")
     parser.add_argument("--account", action="append", help="Limit to one or more accounts.")
@@ -93,8 +101,10 @@ def short_pnl(entry_price: float, exit_price: float, qty: float) -> float:
     return (entry_price - exit_price) * qty
 
 
-def hour_floor(value: datetime) -> datetime:
-    return value.astimezone(timezone.utc).replace(minute=0, second=0, microsecond=0)
+def floor_to_interval(value: datetime, interval: str) -> datetime:
+    interval_ms = INTERVAL_MS[interval]
+    timestamp_ms = int(value.astimezone(timezone.utc).timestamp() * 1000)
+    return datetime.fromtimestamp((timestamp_ms // interval_ms) * interval_ms / 1000, tz=timezone.utc)
 
 
 def month_keys(start: datetime, end: datetime) -> Iterable[Tuple[int, int]]:
@@ -250,14 +260,15 @@ def load_account_equity_pnl(conn: sqlite3.Connection, accounts: Optional[set[str
     return out
 
 
-def fetch_api_klines(symbol: str, start_ms: int, end_ms: int) -> List[List[object]]:
+def fetch_api_klines(symbol: str, start_ms: int, end_ms: int, interval: str) -> List[List[object]]:
     rows: List[List[object]] = []
     cursor = start_ms
+    interval_ms = INTERVAL_MS[interval]
     while cursor <= end_ms:
         params = urllib.parse.urlencode(
             {
                 "symbol": symbol,
-                "interval": "1h",
+                "interval": interval,
                 "startTime": cursor,
                 "endTime": end_ms,
                 "limit": 1500,
@@ -278,7 +289,7 @@ def fetch_api_klines(symbol: str, start_ms: int, end_ms: int) -> List[List[objec
         if not payload:
             break
         rows.extend(payload)
-        next_cursor = int(payload[-1][0]) + 3600_000
+        next_cursor = int(payload[-1][0]) + interval_ms
         if next_cursor <= cursor:
             break
         cursor = next_cursor
@@ -287,14 +298,14 @@ def fetch_api_klines(symbol: str, start_ms: int, end_ms: int) -> List[List[objec
     return rows
 
 
-def download_month_zip(symbol: str, year: int, month: int, cache_dir: Path) -> Optional[Path]:
+def download_month_zip(symbol: str, year: int, month: int, cache_dir: Path, interval: str) -> Optional[Path]:
     cache_dir.mkdir(parents=True, exist_ok=True)
-    name = f"{symbol}-1h-{year:04d}-{month:02d}.zip"
+    name = f"{symbol}-{interval}-{year:04d}-{month:02d}.zip"
     path = cache_dir / symbol / name
     if path.exists() and path.stat().st_size > 0:
         return path
     path.parent.mkdir(parents=True, exist_ok=True)
-    url = f"{BINANCE_VISION}/{symbol}/1h/{name}"
+    url = f"{BINANCE_VISION}/{symbol}/{interval}/{name}"
     tmp = path.with_suffix(path.suffix + ".tmp")
     last_exc: Optional[Exception] = None
     for attempt in range(3):
@@ -320,10 +331,10 @@ def download_month_zip(symbol: str, year: int, month: int, cache_dir: Path) -> O
     return None
 
 
-def load_monthly_klines(symbol: str, start: datetime, end: datetime, cache_dir: Path) -> List[List[object]]:
+def load_monthly_klines(symbol: str, start: datetime, end: datetime, cache_dir: Path, interval: str) -> List[List[object]]:
     rows: List[List[object]] = []
     for year, month in month_keys(start, end):
-        zip_path = download_month_zip(symbol, year, month, cache_dir)
+        zip_path = download_month_zip(symbol, year, month, cache_dir, interval)
         if zip_path is None:
             continue
         with zipfile.ZipFile(zip_path) as zf:
@@ -342,24 +353,24 @@ def load_monthly_klines(symbol: str, start: datetime, end: datetime, cache_dir: 
     return [row for row in rows if start_ms <= int(row[0]) <= end_ms]
 
 
-def load_symbol_candles(symbol: str, start: datetime, end: datetime, cache_dir: Path) -> List[Candle]:
+def load_symbol_candles(symbol: str, start: datetime, end: datetime, cache_dir: Path, interval: str) -> List[Candle]:
     cache_dir.mkdir(parents=True, exist_ok=True)
-    start_h = hour_floor(start)
-    end_h = hour_floor(end + timedelta(hours=1))
-    start_ms = int(start_h.timestamp() * 1000)
-    end_ms = int(end_h.timestamp() * 1000)
-    cache_path = cache_dir / "api_ranges" / f"{symbol}-{start_ms}-{end_ms}.json"
+    start_floor = floor_to_interval(start, interval)
+    end_floor = floor_to_interval(end + timedelta(milliseconds=INTERVAL_MS[interval]), interval)
+    start_ms = int(start_floor.timestamp() * 1000)
+    end_ms = int(end_floor.timestamp() * 1000)
+    cache_path = cache_dir / "api_ranges" / f"{symbol}-{interval}-{start_ms}-{end_ms}.json"
     cache_path.parent.mkdir(parents=True, exist_ok=True)
     raw_rows: List[List[object]]
     if cache_path.exists() and cache_path.stat().st_size > 0:
         raw_rows = json.loads(cache_path.read_text(encoding="utf-8"))
     else:
         try:
-            raw_rows = fetch_api_klines(symbol, start_ms, end_ms)
+            raw_rows = fetch_api_klines(symbol, start_ms, end_ms, interval)
             cache_path.write_text(json.dumps(raw_rows), encoding="utf-8")
         except Exception as exc:  # noqa: BLE001
             print(f"api fallback {symbol}: {exc}", flush=True)
-            raw_rows = load_monthly_klines(symbol, start_h, end_h, cache_dir / "monthly_zip")
+            raw_rows = load_monthly_klines(symbol, start_floor, end_floor, cache_dir / "monthly_zip", interval)
             if raw_rows:
                 cache_path.write_text(json.dumps(raw_rows), encoding="utf-8")
     candles = [parse_kline(row) for row in raw_rows]
@@ -367,7 +378,7 @@ def load_symbol_candles(symbol: str, start: datetime, end: datetime, cache_dir: 
     return candles
 
 
-def build_candle_cache(samples: List[PositionSample], cache_dir: Path, lookahead_hours: float) -> Dict[str, List[Candle]]:
+def build_candle_cache(samples: List[PositionSample], cache_dir: Path, lookahead_hours: float, interval: str) -> Dict[str, List[Candle]]:
     ranges: Dict[str, Tuple[datetime, datetime]] = {}
     for sample in samples:
         start = sample.opened_at_utc - timedelta(hours=1)
@@ -380,9 +391,9 @@ def build_candle_cache(samples: List[PositionSample], cache_dir: Path, lookahead
     out: Dict[str, List[Candle]] = {}
     total = len(ranges)
     for idx, (symbol, (start, end)) in enumerate(sorted(ranges.items()), start=1):
-        out[symbol] = load_symbol_candles(symbol, start, end, cache_dir)
+        out[symbol] = load_symbol_candles(symbol, start, end, cache_dir, interval)
         if idx % 50 == 0 or idx == total:
-            print(f"loaded symbols {idx}/{total}", flush=True)
+            print(f"loaded {interval} symbols {idx}/{total}", flush=True)
     return out
 
 
@@ -444,11 +455,12 @@ def high_between(candles: List[Candle], start: datetime, end: datetime) -> Optio
 
 def replay_delayed(
     sample: PositionSample,
-    candles: List[Candle],
+    entry_candles: List[Candle],
+    exit_candles: List[Candle],
     tp_drop_pct: float,
     max_hold_hours: float,
 ) -> ReplayResult:
-    entry_time, entry_price = find_delayed_entry(sample, candles)
+    entry_time, entry_price = find_delayed_entry(sample, entry_candles)
     if entry_time is None or entry_price is None:
         return ReplayResult(False, None, None, None, None, "NO_BEARISH_ENTRY", None, None, None)
 
@@ -459,7 +471,7 @@ def replay_delayed(
     next_noons = list(local_noon_between(entry_time, max_hold_time + timedelta(hours=24)))
     noon_idx = 0
 
-    for candle in candles:
+    for candle in exit_candles:
         if candle.close_dt <= entry_time:
             continue
 
@@ -467,7 +479,7 @@ def replay_delayed(
             noon_time = next_noons[noon_idx]
             local_day_start = noon_time.astimezone(LOCAL_TZ).replace(hour=0, minute=0, second=0, microsecond=0).astimezone(timezone.utc)
             ref_start = max(local_day_start, entry_time)
-            ref_high = high_between(candles, ref_start, noon_time)
+            ref_high = high_between(exit_candles, ref_start, noon_time)
             if ref_high is not None:
                 stop_price = ref_high if stop_price is None else min(stop_price, ref_high)
             noon_idx += 1
@@ -572,6 +584,17 @@ def summarize(rows: List[Dict[str, object]], account_equity_pnl: Dict[str, Dict[
 def main() -> None:
     args = parse_args()
     accounts = {a.strip() for a in args.account if a.strip()} if args.account else None
+    legacy_cache_dir = Path(args.cache_dir) if args.cache_dir else None
+    entry_cache_dir = Path(
+        args.entry_cache_dir
+        or legacy_cache_dir
+        or f"remote_artifacts/market_data_cache/binance_um_{args.entry_interval}_replay"
+    )
+    exit_cache_dir = Path(
+        args.exit_cache_dir
+        or legacy_cache_dir
+        or f"remote_artifacts/market_data_cache/binance_um_{args.exit_interval}_replay"
+    )
     conn = sqlite3.connect(args.db)
     try:
         samples = load_positions(conn, accounts)
@@ -580,19 +603,27 @@ def main() -> None:
     finally:
         conn.close()
     print(f"loaded positions={len(samples)}", flush=True)
-    candle_cache = build_candle_cache(samples, Path(args.cache_dir), args.lookahead_hours)
+    entry_candle_cache = build_candle_cache(samples, entry_cache_dir, args.lookahead_hours, args.entry_interval)
+    if args.exit_interval == args.entry_interval and exit_cache_dir == entry_cache_dir:
+        exit_candle_cache = entry_candle_cache
+    else:
+        exit_candle_cache = build_candle_cache(samples, exit_cache_dir, args.lookahead_hours, args.exit_interval)
 
     rows: List[Dict[str, object]] = []
     for sample in samples:
-        candles = candle_cache.get(sample.symbol, [])
-        actual_exit_price = sample.actual_exit_fill_price or candle_close_at_or_after(candles, sample.closed_at_utc)
+        entry_candles = entry_candle_cache.get(sample.symbol, [])
+        exit_candles = exit_candle_cache.get(sample.symbol, [])
+        actual_exit_price = sample.actual_exit_fill_price or candle_close_at_or_after(exit_candles, sample.closed_at_utc)
         actual_position_pnl_est = ""
         actual_return = ""
         if actual_exit_price is not None:
             actual_position_pnl_est = short_pnl(sample.actual_entry_price, actual_exit_price, sample.qty)
             actual_return = short_return_pct(sample.actual_entry_price, actual_exit_price)
 
-        replay = replay_delayed(sample, candles, args.tp_drop_pct, args.max_hold_hours) if candles else ReplayResult(False, None, None, None, None, "NO_KLINES", None, None, None)
+        if entry_candles and exit_candles:
+            replay = replay_delayed(sample, entry_candles, exit_candles, args.tp_drop_pct, args.max_hold_hours)
+        else:
+            replay = ReplayResult(False, None, None, None, None, "NO_KLINES", None, None, None)
         delta_pnl = ""
         delta_return = ""
         if actual_position_pnl_est != "" and replay.pnl_usdt is not None and actual_return != "" and replay.return_pct is not None:
@@ -624,6 +655,8 @@ def main() -> None:
                 "replay_return_pct": replay.return_pct if replay.return_pct is not None else "",
                 "delta_position_est_pnl_usdt": delta_pnl,
                 "delta_return_pct": delta_return,
+                "replay_entry_interval": args.entry_interval,
+                "replay_exit_interval": args.exit_interval,
             }
         )
 
@@ -635,6 +668,10 @@ def main() -> None:
         writer.writerows(rows)
 
     summary = summarize(rows, account_equity_pnl)
+    summary["entry_interval"] = args.entry_interval
+    summary["exit_interval"] = args.exit_interval
+    summary["entry_cache_dir"] = str(entry_cache_dir)
+    summary["exit_cache_dir"] = str(exit_cache_dir)
     output_summary = Path(args.output_summary)
     output_summary.parent.mkdir(parents=True, exist_ok=True)
     output_summary.write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8")
