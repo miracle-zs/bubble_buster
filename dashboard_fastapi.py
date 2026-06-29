@@ -101,7 +101,7 @@ def create_dashboard_context(config_path: str) -> DashboardRuntimeContext:
     timezone_name = runtime_cfg.get("timezone", "Asia/Shanghai").strip()
     entry_hour = int(runtime_cfg.get("entry_hour", 7))
     entry_minute = int(runtime_cfg.get("entry_minute", 40))
-    refresh_sec = max(2, int(runtime_cfg.get("dashboard_refresh_sec", 5)))
+    refresh_sec = max(15, int(runtime_cfg.get("dashboard_refresh_sec", 15)))
     curve_points = max(100, int(runtime_cfg.get("dashboard_curve_points", 600)))
     balance_refresh_sec = max(5, int(runtime_cfg.get("manager_interval_sec", 60)))
     run_with_dashboard = runtime_cfg.get("run_service_with_dashboard", "true").strip().lower() in {

@@ -51,6 +51,7 @@ ACCOUNT_ID_MIGRATION_TABLES = {
     "cashflow_events",
     "equity_recovery_events",
 }
+SQLITE_BUSY_TIMEOUT_MS = 30000
 
 
 class StateStore:
@@ -68,7 +69,10 @@ class StateStore:
         )
 
     def _connect(self) -> sqlite3.Connection:
-        conn = sqlite3.connect(self.db_path)
+        conn = sqlite3.connect(self.db_path, timeout=SQLITE_BUSY_TIMEOUT_MS / 1000)
+        conn.execute(f"PRAGMA busy_timeout = {SQLITE_BUSY_TIMEOUT_MS}")
+        conn.execute("PRAGMA journal_mode = WAL")
+        conn.execute("PRAGMA synchronous = NORMAL")
         conn.row_factory = sqlite3.Row
         return conn
 

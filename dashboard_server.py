@@ -13,6 +13,8 @@ from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 from urllib.parse import parse_qs, urlparse
 from zoneinfo import ZoneInfo
 
+from core.state_store import SQLITE_BUSY_TIMEOUT_MS
+
 LOGGER = logging.getLogger(__name__)
 
 
@@ -89,7 +91,10 @@ class DashboardDataProvider:
             self.local_tz = timezone.utc
 
     def _connect(self) -> sqlite3.Connection:
-        conn = sqlite3.connect(self.db_path)
+        conn = sqlite3.connect(self.db_path, timeout=SQLITE_BUSY_TIMEOUT_MS / 1000)
+        conn.execute(f"PRAGMA busy_timeout = {SQLITE_BUSY_TIMEOUT_MS}")
+        conn.execute("PRAGMA journal_mode = WAL")
+        conn.execute("PRAGMA synchronous = NORMAL")
         conn.row_factory = sqlite3.Row
         return conn
 
@@ -295,6 +300,20 @@ class DashboardDataProvider:
         except OSError:
             return []
 
+    @staticmethod
+    def _read_task_log_lines(path: str, markers: Tuple[str, ...]) -> List[str]:
+        if not os.path.exists(path):
+            return []
+        lines: List[str] = []
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                for line in f:
+                    if any(marker in line for marker in markers):
+                        lines.append(line.rstrip("\n"))
+        except OSError:
+            return []
+        return lines
+
     def _task_log_files(self) -> List[str]:
         files: List[str] = []
         rotated = sorted(glob.glob(f"{self.log_file}.*"))
@@ -333,8 +352,9 @@ class DashboardDataProvider:
             "noon_protection": "service noon protection result:",
             "manage": "service manage summary:",
         }
+        log_markers = tuple(markers.values()) + ("service equity recovery take-profit ",)
         for path in file_paths:
-            for line in self._read_log_lines(path):
+            for line in self._read_task_log_lines(path, log_markers):
                 if "service equity recovery take-profit " in line:
                     time_local = self._log_time_from_line(line)
                     matched_result = re.search(
@@ -1464,53 +1484,56 @@ class DashboardDataProvider:
 
         try:
             with self._connect_ctx() as conn:
-                rows = self._query_rows(
-                    conn,
-                    """
-                    WITH accounts AS (
-                        SELECT DISTINCT account_id FROM runs
-                        UNION
-                        SELECT DISTINCT account_id FROM wallet_snapshots
-                        UNION
-                        SELECT DISTINCT account_id FROM cashflow_events
-                    ),
-                    latest_runs AS (
-                        SELECT r.account_id, r.status, r.started_at_utc
-                        FROM runs r
-                        INNER JOIN (
-                            SELECT account_id, MAX(started_at_utc) AS max_started
-                            FROM runs
-                            GROUP BY account_id
-                        ) x ON x.account_id = r.account_id AND x.max_started = r.started_at_utc
-                    ),
-                    open_pos AS (
-                        SELECT r.account_id, COUNT(*) AS open_positions
-                        FROM positions p
-                        INNER JOIN runs r ON r.run_id = p.run_id
-                        WHERE p.status = 'OPEN'
-                        GROUP BY r.account_id
-                    ),
-                    latest_wallet AS (
-                        SELECT ws.account_id, ws.balance_usdt
-                        FROM wallet_snapshots ws
-                        INNER JOIN (
-                            SELECT account_id, MAX(id) AS max_id
-                            FROM wallet_snapshots
-                            GROUP BY account_id
-                        ) x ON x.account_id = ws.account_id AND x.max_id = ws.id
+                if self.overview_account_ids is not None:
+                    rows = self._configured_accounts_summary_rows(conn, sorted(self.overview_account_ids))
+                else:
+                    rows = self._query_rows(
+                        conn,
+                        """
+                        WITH accounts AS (
+                            SELECT DISTINCT account_id FROM runs
+                            UNION
+                            SELECT DISTINCT account_id FROM wallet_snapshots
+                            UNION
+                            SELECT DISTINCT account_id FROM cashflow_events
+                        ),
+                        latest_runs AS (
+                            SELECT r.account_id, r.status, r.started_at_utc
+                            FROM runs r
+                            INNER JOIN (
+                                SELECT account_id, MAX(started_at_utc) AS max_started
+                                FROM runs
+                                GROUP BY account_id
+                            ) x ON x.account_id = r.account_id AND x.max_started = r.started_at_utc
+                        ),
+                        open_pos AS (
+                            SELECT r.account_id, COUNT(*) AS open_positions
+                            FROM positions p
+                            INNER JOIN runs r ON r.run_id = p.run_id
+                            WHERE p.status = 'OPEN'
+                            GROUP BY r.account_id
+                        ),
+                        latest_wallet AS (
+                            SELECT ws.account_id, ws.balance_usdt
+                            FROM wallet_snapshots ws
+                            INNER JOIN (
+                                SELECT account_id, MAX(id) AS max_id
+                                FROM wallet_snapshots
+                                GROUP BY account_id
+                            ) x ON x.account_id = ws.account_id AND x.max_id = ws.id
+                        )
+                        SELECT
+                            a.account_id,
+                            COALESCE(op.open_positions, 0) AS open_positions,
+                            lr.status AS last_run_status,
+                            lw.balance_usdt AS wallet_balance_usdt
+                        FROM accounts a
+                        LEFT JOIN open_pos op ON op.account_id = a.account_id
+                        LEFT JOIN latest_runs lr ON lr.account_id = a.account_id
+                        LEFT JOIN latest_wallet lw ON lw.account_id = a.account_id
+                        ORDER BY a.account_id ASC
+                        """
                     )
-                    SELECT
-                        a.account_id,
-                        COALESCE(op.open_positions, 0) AS open_positions,
-                        lr.status AS last_run_status,
-                        lw.balance_usdt AS wallet_balance_usdt
-                    FROM accounts a
-                    LEFT JOIN open_pos op ON op.account_id = a.account_id
-                    LEFT JOIN latest_runs lr ON lr.account_id = a.account_id
-                    LEFT JOIN latest_wallet lw ON lw.account_id = a.account_id
-                    ORDER BY a.account_id ASC
-                    """
-                )
                 by_account: Dict[str, Dict[str, Any]] = {}
                 for row in rows:
                     aid = str(row.get("account_id") or "").strip()
@@ -1577,6 +1600,73 @@ class DashboardDataProvider:
             payload["db_error"] = str(exc)
             return payload
 
+    def _configured_accounts_summary_rows(
+        self,
+        conn: sqlite3.Connection,
+        account_ids: List[str],
+    ) -> List[Dict[str, Any]]:
+        account_ids = [str(aid).strip() for aid in account_ids if str(aid).strip()]
+        if not account_ids:
+            return []
+        placeholders = ",".join("?" for _ in account_ids)
+        open_rows = self._query_rows(
+            conn,
+            f"""
+            SELECT r.account_id, COUNT(*) AS open_positions
+            FROM positions p
+            INNER JOIN runs r ON r.run_id = p.run_id
+            WHERE p.status = 'OPEN' AND r.account_id IN ({placeholders})
+            GROUP BY r.account_id
+            """,
+            tuple(account_ids),
+        )
+        latest_run_rows = self._query_rows(
+            conn,
+            f"""
+            SELECT r.account_id, r.status, r.started_at_utc
+            FROM runs r
+            INNER JOIN (
+                SELECT account_id, MAX(started_at_utc) AS max_started
+                FROM runs
+                WHERE account_id IN ({placeholders})
+                GROUP BY account_id
+            ) x ON x.account_id = r.account_id AND x.max_started = r.started_at_utc
+            """,
+            tuple(account_ids),
+        )
+        open_by_account = {
+            str(row.get("account_id") or ""): self._safe_int(row.get("open_positions"), 0)
+            for row in open_rows
+        }
+        run_by_account = {
+            str(row.get("account_id") or ""): row
+            for row in latest_run_rows
+        }
+        rows: List[Dict[str, Any]] = []
+        for aid in account_ids:
+            wallet_rows = self._query_rows(
+                conn,
+                """
+                SELECT balance_usdt
+                FROM wallet_snapshots
+                WHERE account_id = ?
+                ORDER BY id DESC
+                LIMIT 1
+                """,
+                (aid,),
+            )
+            latest_run = run_by_account.get(aid, {})
+            latest_wallet = wallet_rows[0] if wallet_rows else {}
+            rows.append(
+                {
+                    "account_id": aid,
+                    "open_positions": open_by_account.get(aid, 0),
+                    "last_run_status": latest_run.get("status"),
+                    "wallet_balance_usdt": latest_wallet.get("balance_usdt"),
+                }
+            )
+        return rows
+
 
 def render_dashboard_html(
     refresh_sec: int,
@@ -1609,7 +1699,7 @@ def render_account_dashboard_html(
 
 
 def render_accounts_overview_html(refresh_sec: int) -> str:
-    return ACCOUNTS_OVERVIEW_HTML.replace("__REFRESH_SEC__", str(max(2, refresh_sec)))
+    return ACCOUNTS_OVERVIEW_HTML.replace("__REFRESH_SEC__", str(max(15, refresh_sec)))
 
 
 def _json_bytes(payload: Dict[str, Any]) -> bytes:
@@ -3290,7 +3380,7 @@ ACCOUNTS_OVERVIEW_HTML = """<!doctype html>
   var curveObserver = null;
   var summaryRows = [];
   var taskFilter = "all";
-  var curveTtlMs = Math.max(30000, Math.max(2, refreshSec) * 3000);
+  var curveTtlMs = Math.max(60000, Math.max(15, refreshSec) * 3000);
 
   function escapeHtml(text) {
     return String(text || "")
@@ -3663,7 +3753,7 @@ ACCOUNTS_OVERVIEW_HTML = """<!doctype html>
     }
     curveInFlight[aid] = true;
     var url = pathPrefix + "/api/account/" + encodeURIComponent(aid) + "/snapshot"
-      + "?window_hours=24&curve_points=180&log_lines=0&_=" + now;
+      + "?window_hours=24&curve_points=100&log_lines=0&_=" + now;
     var xhr = new XMLHttpRequest();
     xhr.open("GET", url, true);
     xhr.onreadystatechange = function () {
@@ -3683,7 +3773,7 @@ ACCOUNTS_OVERVIEW_HTML = """<!doctype html>
           if (Number.isFinite(n)) values.push(n);
         }
         if (values.length >= 2) {
-          curveCache[aid] = { values: values.slice(-180), ts: Date.now() };
+          curveCache[aid] = { values: values.slice(-100), ts: Date.now() };
         }
       } catch (e) {}
       renderCurve(aid);
@@ -3837,7 +3927,7 @@ ACCOUNTS_OVERVIEW_HTML = """<!doctype html>
   if (filterAll) filterAll.addEventListener("click", function () { toggleTaskFilter("all"); });
   if (filterAnomaly) filterAnomaly.addEventListener("click", function () { toggleTaskFilter("anomaly"); });
   if (filterSymbols) filterSymbols.addEventListener("click", function () { toggleTaskFilter("symbols"); });
-  setInterval(fetchSummary, Math.max(2, refreshSec) * 1000);
+  setInterval(fetchSummary, Math.max(15, refreshSec) * 1000);
 })();
 </script>
 </body>

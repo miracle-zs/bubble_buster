@@ -1006,6 +1006,29 @@ class PositionManager:
 
         position_amt = float(risk.get("positionAmt", "0") or 0)
         if position_amt >= 0:
+            tp_status = self._get_order_status(
+                symbol,
+                pos.get("tp_order_id"),
+                pos.get("tp_client_order_id"),
+            )
+            sl_status = self._get_order_status(
+                symbol,
+                pos.get("sl_order_id"),
+                pos.get("sl_client_order_id"),
+            )
+            if tp_status == "FILLED":
+                close_order_id = self._close_on_trigger(pos, close_status="CLOSED_TP", close_reason="TAKE_PROFIT_FILLED")
+                return {
+                    "type": "closed_tp",
+                    "detail": f"{symbol}(id={position_id}, order_id={close_order_id})",
+                }
+            if sl_status == "FILLED":
+                close_order_id = self._close_on_trigger(pos, close_status="CLOSED_SL", close_reason="STOP_LOSS_FILLED")
+                return {
+                    "type": "closed_sl",
+                    "detail": f"{symbol}(id={position_id}, order_id={close_order_id})",
+                }
+
             self._cancel_exit_orders(pos)
             self.store.mark_position_closed(
                 position_id=position_id,
@@ -1082,6 +1105,12 @@ class PositionManager:
             self._cancel_order_if_exists(symbol, tp_order_id, tp_client_order_id)
             close_order_id = sl_order_id
 
+        self._record_close_fill_from_exchange(
+            symbol=symbol,
+            position_id=position_id,
+            order_id=close_order_id,
+            client_order_id=tp_client_order_id if close_status == "CLOSED_TP" else sl_client_order_id,
+        )
         self.store.mark_position_closed(
             position_id=position_id,
             status=close_status,
@@ -1268,27 +1297,117 @@ class PositionManager:
             create_order_params["positionSide"] = position_side
         return self.client.create_order(**create_order_params)
 
+    def _get_order(
+        self,
+        symbol: str,
+        order_id: object,
+        client_order_id: object,
+    ) -> Optional[Dict[str, Any]]:
+        if not order_id and not client_order_id:
+            return None
+        try:
+            parsed_order_id = int(order_id) if order_id else None
+            parsed_client_order_id = str(client_order_id) if client_order_id else None
+            return self.client.get_order(
+                symbol=symbol,
+                order_id=parsed_order_id,
+                orig_client_order_id=parsed_client_order_id,
+            )
+        except BinanceAPIError as exc:
+            # Order may already be gone due to auto-cancel, ignore and continue with position state.
+            LOGGER.debug("get_order failed for %s/%s/%s: %s", symbol, order_id, client_order_id, exc)
+            return None
+
     def _get_order_status(
         self,
         symbol: str,
         order_id: object,
         client_order_id: object,
     ) -> Optional[str]:
-        if not order_id and not client_order_id:
+        order = self._get_order(symbol=symbol, order_id=order_id, client_order_id=client_order_id)
+        return str(order.get("status") or "").upper() if order else None
+
+    def _record_close_fill_from_exchange(
+        self,
+        symbol: str,
+        position_id: int,
+        order_id: object,
+        client_order_id: object,
+    ) -> None:
+        order = self._get_order(symbol=symbol, order_id=order_id, client_order_id=client_order_id)
+        if not order or str(order.get("status") or "").upper() != "FILLED":
+            return
+
+        event_time_utc = self._utc_now_iso()
+        fill_payload = self._build_close_fill_payload_from_user_trades(symbol=symbol, order=order)
+        if fill_payload is None:
+            fill_payload = dict(order)
+        self.store.add_order_event(
+            symbol=symbol,
+            position_id=position_id,
+            event_time_utc=event_time_utc,
+            order_payload=fill_payload,
+        )
+
+    def _build_close_fill_payload_from_user_trades(
+        self,
+        symbol: str,
+        order: Dict[str, Any],
+    ) -> Optional[Dict[str, Any]]:
+        order_id = self._safe_optional_int(order.get("actualOrderId")) or self._safe_optional_int(order.get("orderId"))
+        if order_id is None:
             return None
         try:
-            parsed_order_id = int(order_id) if order_id else None
-            parsed_client_order_id = str(client_order_id) if client_order_id else None
-            order = self.client.get_order(
-                symbol=symbol,
-                order_id=parsed_order_id,
-                orig_client_order_id=parsed_client_order_id,
-            )
-            return order.get("status")
-        except BinanceAPIError as exc:
-            # Order may already be gone due to auto-cancel, ignore and continue with position state.
-            LOGGER.debug("get_order failed for %s/%s/%s: %s", symbol, order_id, client_order_id, exc)
+            trades = self.client.get_user_trades(symbol=symbol, order_id=order_id, limit=1000)
+        except Exception as exc:  # noqa: BLE001
+            LOGGER.debug("get_user_trades failed for %s/%s: %s", symbol, order_id, exc)
             return None
+
+        buy_trades = [
+            trade for trade in trades
+            if str(trade.get("side") or "").strip().upper() == "BUY"
+            and self._safe_float(trade.get("qty"), default=0.0) > 0
+        ]
+        if not buy_trades:
+            return None
+
+        executed_qty = sum(self._safe_float(trade.get("qty"), default=0.0) for trade in buy_trades)
+        quote_qty = sum(self._safe_float(trade.get("quoteQty"), default=0.0) for trade in buy_trades)
+        if executed_qty <= 0:
+            return None
+        avg_price = quote_qty / executed_qty if quote_qty > 0 else None
+        if avg_price is None:
+            weighted = sum(
+                self._safe_float(trade.get("qty"), default=0.0) * self._safe_float(trade.get("price"), default=0.0)
+                for trade in buy_trades
+            )
+            avg_price = weighted / executed_qty if weighted > 0 else None
+        if avg_price is None or avg_price <= 0:
+            return None
+
+        event_time_ms = max(int(self._safe_float(trade.get("time"), default=0.0)) for trade in buy_trades)
+        event_time_utc = datetime.fromtimestamp(event_time_ms / 1000.0, tz=timezone.utc).replace(microsecond=0).isoformat()
+        return {
+            "orderId": order_id,
+            "clientOrderId": order.get("clientOrderId") or order.get("clientAlgoId"),
+            "type": order.get("type") or order.get("orderType") or "MARKET",
+            "side": "BUY",
+            "price": str(avg_price),
+            "origQty": str(executed_qty),
+            "executedQty": str(executed_qty),
+            "cumQuote": str(quote_qty) if quote_qty > 0 else None,
+            "avgPrice": str(avg_price),
+            "status": "FILLED",
+            "reduceOnly": order.get("reduceOnly", True),
+            "realizedPnl": str(sum(self._safe_float(trade.get("realizedPnl"), default=0.0) for trade in buy_trades)),
+            "commission": str(sum(self._safe_float(trade.get("commission"), default=0.0) for trade in buy_trades)),
+            "commissionAsset": str(buy_trades[-1].get("commissionAsset") or "").upper() or None,
+            "time": event_time_ms,
+            "eventTime": event_time_utc,
+            "source": "userTrades",
+            "rawOrder": order,
+            "trades": buy_trades,
+        }
 
     def _cancel_exit_orders(self, pos: Dict[str, object]) -> None:
         symbol = str(pos["symbol"])
@@ -1614,6 +1733,18 @@ class PositionManager:
             return float(value)
         except (TypeError, ValueError):
             return default
+
+    @staticmethod
+    def _safe_optional_int(value: Any) -> Optional[int]:
+        if value is None:
+            return None
+        text = str(value).strip()
+        if not text:
+            return None
+        try:
+            return int(float(text))
+        except (TypeError, ValueError):
+            return None
 
     @staticmethod
     def _sanitize_client_id_part(value: str, fallback: str, max_len: int) -> str:

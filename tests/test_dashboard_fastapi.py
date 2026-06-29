@@ -47,7 +47,7 @@ strategy_note.acc02 = TP 9% / 清仓100% / 浮亏砍仓ON
     def test_create_dashboard_context(self) -> None:
         ctx = create_dashboard_context(str(self.config_path))
         self.assertEqual(ctx.timezone_name, "UTC")
-        self.assertEqual(ctx.refresh_sec, 9)
+        self.assertEqual(ctx.refresh_sec, 15)
         self.assertTrue(ctx.db_path.endswith("data/state.db"))
         self.assertTrue(ctx.log_file.endswith("logs/strategy.log"))
         self.assertTrue(Path(ctx.db_path).exists())

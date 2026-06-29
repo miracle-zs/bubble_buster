@@ -24,6 +24,17 @@ class StateStoreTest(unittest.TestCase):
         self.assertFalse(created2)
         self.assertEqual(run1, run2)
 
+    def test_connections_enable_wal_and_busy_timeout(self) -> None:
+        conn = self.store._connect()
+        try:
+            busy_timeout = conn.execute("PRAGMA busy_timeout").fetchone()[0]
+            journal_mode = conn.execute("PRAGMA journal_mode").fetchone()[0]
+        finally:
+            conn.close()
+
+        self.assertGreaterEqual(int(busy_timeout), 30000)
+        self.assertEqual(str(journal_mode).lower(), "wal")
+
     def test_insert_and_close_position(self) -> None:
         run_id, _ = self.store.create_run("2026-02-13")
         position_id = self.store.insert_position(

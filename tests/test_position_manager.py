@@ -172,6 +172,155 @@ class PositionManagerTest(unittest.TestCase):
         self.assertIn("超时平仓明细", content)
         self.assertIn("BTCUSDT", content)
 
+    def test_zero_position_checks_filled_tp_before_marking_external_and_records_fill(self) -> None:
+        position_id = self._insert_open_position(
+            symbol="BTCUSDT",
+            qty=0.02,
+            tp_order_id=101,
+            sl_order_id=202,
+            tp_price=40000.0,
+            sl_price=59000.0,
+            expire_in_hours=24,
+        )
+
+        client = MagicMock()
+        filled_tp_order = {
+            "orderId": 101,
+            "clientOrderId": "tp-old",
+            "type": "TAKE_PROFIT_MARKET",
+            "side": "BUY",
+            "status": "FILLED",
+            "reduceOnly": True,
+        }
+        client.get_order.side_effect = [
+            filled_tp_order,
+            {"orderId": 202, "clientOrderId": "sl-old", "status": "NEW"},
+            filled_tp_order,
+        ]
+        client.get_position_risk.return_value = [
+            {
+                "symbol": "BTCUSDT",
+                "positionAmt": "0",
+                "liquidationPrice": "0",
+            }
+        ]
+        client.get_user_trades.return_value = [
+            {
+                "symbol": "BTCUSDT",
+                "orderId": 101,
+                "side": "BUY",
+                "qty": "0.01",
+                "quoteQty": "400",
+                "price": "40000",
+                "commission": "0.1",
+                "commissionAsset": "USDT",
+                "realizedPnl": "10",
+                "time": 1771000000000,
+            },
+            {
+                "symbol": "BTCUSDT",
+                "orderId": 101,
+                "side": "BUY",
+                "qty": "0.01",
+                "quoteQty": "398",
+                "price": "39800",
+                "commission": "0.1",
+                "commissionAsset": "USDT",
+                "realizedPnl": "12",
+                "time": 1771000001000,
+            },
+        ]
+
+        manager = PositionManager(
+            client=client,
+            store=self.store,
+            notifier=MagicMock(),
+            sl_liq_buffer_pct=1.0,
+            trigger_price_type="CONTRACT_PRICE",
+        )
+
+        summary = manager.run_once()
+
+        self.assertEqual(summary["closed_tp"], 1)
+        self.assertEqual(summary["closed_external"], 0)
+        row = self._get_position(position_id)
+        self.assertEqual(row["status"], "CLOSED_TP")
+        self.assertEqual(row["close_reason"], "TAKE_PROFIT_FILLED")
+
+        fill = self._get_buy_fill(position_id)
+        self.assertIsNotNone(fill)
+        assert fill is not None
+        self.assertEqual(fill["order_id"], 101)
+        self.assertAlmostEqual(float(fill["executed_qty"]), 0.02)
+        self.assertAlmostEqual(float(fill["avg_price"]), 798 / 0.02)
+        self.assertAlmostEqual(float(fill["realized_pnl"]), 22.0)
+
+    def test_filled_sl_on_open_position_records_close_fill(self) -> None:
+        position_id = self._insert_open_position(
+            symbol="ETHUSDT",
+            qty=0.5,
+            tp_order_id=303,
+            sl_order_id=404,
+            tp_price=2000.0,
+            sl_price=3000.0,
+            expire_in_hours=24,
+        )
+
+        client = MagicMock()
+        filled_sl_order = {
+            "orderId": 404,
+            "clientOrderId": "sl-old",
+            "type": "STOP_MARKET",
+            "side": "BUY",
+            "status": "FILLED",
+            "reduceOnly": True,
+        }
+        client.get_order.side_effect = [
+            {"orderId": 303, "clientOrderId": "tp-old", "status": "NEW"},
+            filled_sl_order,
+            filled_sl_order,
+        ]
+        client.get_position_risk.return_value = [
+            {
+                "symbol": "ETHUSDT",
+                "positionAmt": "-0.5",
+                "liquidationPrice": "3500",
+            }
+        ]
+        client.get_user_trades.return_value = [
+            {
+                "symbol": "ETHUSDT",
+                "orderId": 404,
+                "side": "BUY",
+                "qty": "0.5",
+                "quoteQty": "1500",
+                "price": "3000",
+                "commission": "0.6",
+                "commissionAsset": "USDT",
+                "realizedPnl": "-25",
+                "time": 1771000000000,
+            }
+        ]
+
+        manager = PositionManager(
+            client=client,
+            store=self.store,
+            notifier=MagicMock(),
+            sl_liq_buffer_pct=1.0,
+            trigger_price_type="CONTRACT_PRICE",
+        )
+
+        summary = manager.run_once()
+
+        self.assertEqual(summary["closed_sl"], 1)
+        row = self._get_position(position_id)
+        self.assertEqual(row["status"], "CLOSED_SL")
+        fill = self._get_buy_fill(position_id)
+        self.assertIsNotNone(fill)
+        assert fill is not None
+        self.assertEqual(fill["order_id"], 404)
+        self.assertAlmostEqual(float(fill["avg_price"]), 3000.0)
+
     def test_stale_error_is_cleared_after_successful_manage(self) -> None:
         position_id = self._insert_open_position(
             symbol="BTCUSDT",
@@ -2132,6 +2281,14 @@ class PositionManagerTest(unittest.TestCase):
             if row is None:
                 raise AssertionError(f"Position not found: id={position_id}")
             return dict(row)
+
+    def _get_buy_fill(self, position_id: int) -> Dict[str, Any] | None:
+        with self.store._connect() as conn:  # pylint: disable=protected-access
+            row = conn.execute(
+                "SELECT * FROM fills WHERE position_id = ? AND side = 'BUY'",
+                (position_id,),
+            ).fetchone()
+            return dict(row) if row is not None else None
 
 
 if __name__ == "__main__":

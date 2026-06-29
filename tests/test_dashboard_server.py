@@ -124,6 +124,24 @@ class DashboardServerTest(unittest.TestCase):
         with self.assertRaises(sqlite3.ProgrammingError):
             conn.execute("SELECT 1").fetchone()  # type: ignore[union-attr]
 
+    def test_connections_enable_wal_and_busy_timeout(self) -> None:
+        provider = DashboardDataProvider(
+            db_path=self.db_path,
+            log_file=self.log_file,
+            timezone_name="UTC",
+            entry_hour=7,
+            entry_minute=40,
+        )
+        conn = provider._connect()
+        try:
+            busy_timeout = conn.execute("PRAGMA busy_timeout").fetchone()[0]
+            journal_mode = conn.execute("PRAGMA journal_mode").fetchone()[0]
+        finally:
+            conn.close()
+
+        self.assertGreaterEqual(int(busy_timeout), 30000)
+        self.assertEqual(str(journal_mode).lower(), "wal")
+
     def test_window_picker_refreshes_curve_without_core_request(self) -> None:
         html = render_account_dashboard_html(
             refresh_sec=5,
@@ -191,6 +209,56 @@ class DashboardServerTest(unittest.TestCase):
         self.assertIn("acc01", account_ids)
         self.assertIn("acc02", account_ids)
 
+    def test_accounts_summary_uses_configured_accounts_without_wallet_account_scan(self) -> None:
+        run1, _ = self.store.create_run("2026-02-13", account_id="acc01")
+        now = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+        self.store.insert_position(
+            run_id=run1,
+            symbol="AUSDT",
+            side="SHORT",
+            qty=1.0,
+            entry_price=100.0,
+            liq_price_open=150.0,
+            tp_price=90.0,
+            sl_price=120.0,
+            tp_order_id=None,
+            sl_order_id=None,
+            tp_client_order_id=None,
+            sl_client_order_id=None,
+            opened_at_utc=now,
+            expire_at_utc=now,
+            status="OPEN",
+        )
+        self.store.scoped("acc01").add_wallet_snapshot(now, 1000.0, source="API")
+        self.store.scoped("acc02").add_wallet_snapshot(now, 2000.0, source="API")
+
+        provider = DashboardDataProvider(
+            db_path=self.db_path,
+            log_file=self.log_file,
+            timezone_name="UTC",
+            entry_hour=7,
+            entry_minute=40,
+            overview_account_ids=["acc01", "acc02"],
+        )
+        seen_sql = []
+        original_query_rows = provider._query_rows
+
+        def recording_query_rows(conn, sql, params=()):
+            seen_sql.append(" ".join(str(sql).split()))
+            return original_query_rows(conn, sql, params)
+
+        provider._query_rows = recording_query_rows  # type: ignore[method-assign]
+
+        payload = provider.accounts_summary()
+        rows = {row["account_id"]: row for row in payload["accounts"]}
+
+        self.assertEqual(set(rows), {"acc01", "acc02"})
+        self.assertAlmostEqual(float(rows["acc01"]["wallet_balance_usdt"]), 1000.0)
+        self.assertAlmostEqual(float(rows["acc02"]["wallet_balance_usdt"]), 2000.0)
+        combined_sql = "\n".join(seen_sql)
+        self.assertNotIn("SELECT DISTINCT account_id FROM wallet_snapshots", combined_sql)
+        self.assertNotIn("MAX(id) AS max_id FROM wallet_snapshots GROUP BY account_id", combined_sql)
+
     def test_accounts_summary_includes_task_status_from_service_logs(self) -> None:
         self.store.create_run("2026-02-13", account_id="acc01")
         self.store.create_run("2026-02-13", account_id="acc02")
@@ -227,6 +295,35 @@ class DashboardServerTest(unittest.TestCase):
         self.assertEqual(rows["acc02"]["tasks"]["manage"]["status"], "FAILED")
         self.assertEqual(rows["acc01"]["tasks"]["equity_recovery_take_profit"]["status"], "SUCCESS")
         self.assertEqual(rows["acc03"]["tasks"]["entry"]["status"], "UNKNOWN")
+
+    def test_accounts_summary_finds_morning_entry_result_in_large_current_log(self) -> None:
+        self.store.create_run("2026-06-29", account_id="acc01")
+        with open(self.log_file, "w", encoding="utf-8") as f:
+            f.write(
+                "2026-06-29 07:40:14,932 - INFO - core.runtime_service - "
+                "service entry result: {'acc01': {'status': 'SUCCESS', 'opened': 9, "
+                "'failed': 1, 'skipped': 0, 'entry_failed_symbols': ['OUSDT']}}\n"
+            )
+            for i in range(25001):
+                f.write(
+                    f"2026-06-29 15:00:{i % 60:02d},000 - INFO - core.runtime_service - "
+                    f"service wallet snapshot account=acc01: {{'snapshot_id': {i}}}\n"
+                )
+
+        provider = DashboardDataProvider(
+            db_path=self.db_path,
+            log_file=self.log_file,
+            timezone_name="UTC",
+            entry_hour=7,
+            entry_minute=40,
+        )
+        payload = provider.accounts_summary()
+        row = payload["accounts"][0]
+
+        self.assertEqual(row["tasks"]["entry"]["status"], "SUCCESS")
+        self.assertEqual(row["tasks"]["entry"]["time_local"], "2026-06-29 07:40:14")
+        self.assertIn("opened=9", row["tasks"]["entry"]["summary"])
+        self.assertIn("failed_symbols=OUSDT", row["tasks"]["entry"]["summary"])
 
     def test_accounts_summary_keeps_full_symbol_lists_for_task_details(self) -> None:
         self.store.create_run("2026-02-13", account_id="acc01")
@@ -730,6 +827,12 @@ class DashboardServerTest(unittest.TestCase):
         self.assertNotIn("toggleSymbolDetail", html)
         self.assertNotIn(".task-symbol-toggle", html)
         self.assertNotIn('title="', html)
+
+    def test_render_overview_throttles_refresh_and_uses_lightweight_curve_points(self) -> None:
+        html = render_accounts_overview_html(refresh_sec=5)
+        self.assertIn('<span id="refresh">15</span>', html)
+        self.assertIn("setInterval(fetchSummary, Math.max(15, refreshSec) * 1000)", html)
+        self.assertIn("?window_hours=24&curve_points=100&log_lines=0", html)
 
     def test_safe_query_int_handles_invalid_values(self) -> None:
         self.assertEqual(_safe_query_int("abc", default=80, min_value=0, max_value=300), 80)

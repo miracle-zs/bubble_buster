@@ -336,10 +336,14 @@ def create_components(
         manager_max_catch_up_runs=max(1, runtime_cfg_selected.getint("manager_max_catch_up_runs", fallback=3)),
         loop_sleep_sec=max(0.2, runtime_cfg_selected.getfloat("service_loop_sleep_sec", fallback=1.0)),
         run_manage_on_startup=runtime_cfg_selected.getboolean("run_manage_on_startup", fallback=True),
-        max_account_workers=max(1, runtime_cfg_selected.getint("max_account_workers", fallback=min(len(account_runtimes), 4))),
+        max_account_workers=max(1, runtime_cfg_selected.getint("max_account_workers", fallback=1)),
         account_failure_threshold=max(1, runtime_cfg_selected.getint("account_failure_threshold", fallback=3)),
         account_cooldown_cycles=max(1, runtime_cfg_selected.getint("account_cooldown_cycles", fallback=2)),
         account_task_timeout_sec=max(0.1, runtime_cfg_selected.getfloat("account_task_timeout_sec", fallback=30.0)),
+        readonly_wallet_snapshot_interval_sec=max(
+            1.0,
+            runtime_cfg_selected.getfloat("readonly_wallet_snapshot_interval_sec", fallback=60.0),
+        ),
     )
 
     return (

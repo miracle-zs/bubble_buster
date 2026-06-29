@@ -23,6 +23,7 @@ class RuntimeServiceTest(unittest.TestCase):
             manager_max_catch_up_runs=overrides.get("manager_max_catch_up_runs", 3),
             loop_sleep_sec=overrides.get("loop_sleep_sec", 1.0),
             run_manage_on_startup=overrides.get("run_manage_on_startup", False),
+            readonly_wallet_snapshot_interval_sec=overrides.get("readonly_wallet_snapshot_interval_sec", 60.0),
         )
 
         class StrategyStub:
@@ -83,6 +84,27 @@ class RuntimeServiceTest(unittest.TestCase):
         service.run_cycle(now_local=now_local, now_monotonic=120.0)
 
         self.assertEqual(strategy.calls, 1)
+
+    def test_readonly_wallet_snapshot_is_throttled(self):
+        service, _, _, sampler = self._create_service(
+            with_sampler=True,
+            readonly_wallet_snapshot_interval_sec=60.0,
+        )
+        assert sampler is not None
+        service.account_runtimes = {
+            "readonly01": {
+                "mode": "readonly",
+                "balance_sampler": sampler,
+            }
+        }
+
+        now_local = datetime(2026, 2, 13, 0, 0, tzinfo=ZoneInfo("UTC"))
+        for mono in [0.0, 1.0, 2.0, 30.0, 59.0]:
+            service.run_cycle(now_local=now_local, now_monotonic=mono)
+        self.assertEqual(sampler.calls, 1)
+
+        service.run_cycle(now_local=now_local, now_monotonic=60.0)
+        self.assertEqual(sampler.calls, 2)
 
     def test_entry_skips_when_missed_beyond_grace(self):
         service, strategy, _, _ = self._create_service(
@@ -462,6 +484,144 @@ class RuntimeServiceTest(unittest.TestCase):
         self.assertIs(acc01.shared_payloads[0], ranking)
         self.assertIs(acc03.shared_payloads[0], ranking)
         self.assertIs(acc02.shared_payloads[0], ranking)
+
+    def test_entry_failure_remains_due_within_grace_window(self):
+        class StrategyStub:
+            def __init__(self, results):
+                self.results = list(results)
+                self.entry_calls = 0
+
+            def run_entry(self, shared_top_gainers=None):
+                self.entry_calls += 1
+                result = self.results.pop(0)
+                if isinstance(result, Exception):
+                    raise result
+                return result
+
+        class ManagerStub:
+            def run_once(self):
+                return {"total": 0}
+
+            def run_daily_loss_cut(self):
+                return {"total": 0, "closed_loss_cut": 0, "errors": 0}
+
+        acc01 = StrategyStub([{"status": "SUCCESS"}])
+        acc03 = StrategyStub([RuntimeError("database is locked"), {"status": "SUCCESS"}])
+        manager = ManagerStub()
+        cfg = ServiceRuntimeConfig(
+            timezone_name="UTC",
+            entry_hour=7,
+            entry_minute=40,
+            entry_misfire_grace_min=20,
+            entry_catchup_enabled=True,
+            daily_loss_cut_enabled=False,
+            daily_loss_cut_hour=23,
+            daily_loss_cut_minute=59,
+            manager_interval_sec=3600,
+            manager_max_catch_up_runs=1,
+            loop_sleep_sec=1.0,
+            run_manage_on_startup=False,
+            max_account_workers=2,
+        )
+        service = StrategyRuntimeService(
+            strategy=acc01,
+            manager=manager,
+            cfg=cfg,
+            now_monotonic=0.0,
+            account_runtimes={
+                "acc01": {
+                    "mode": "full",
+                    "strategy": acc01,
+                    "manager": manager,
+                    "balance_sampler": None,
+                },
+                "acc03": {
+                    "mode": "full",
+                    "strategy": acc03,
+                    "manager": manager,
+                    "balance_sampler": None,
+                },
+            },
+            max_account_workers=2,
+        )
+        service._build_shared_top_gainers = lambda _account_ids: None  # type: ignore[method-assign]
+
+        service.run_cycle(
+            now_local=datetime(2026, 2, 13, 7, 40, tzinfo=ZoneInfo("UTC")),
+            now_monotonic=10.0,
+        )
+        service.run_cycle(
+            now_local=datetime(2026, 2, 13, 7, 41, tzinfo=ZoneInfo("UTC")),
+            now_monotonic=70.0,
+        )
+
+        self.assertEqual(acc01.entry_calls, 1)
+        self.assertEqual(acc03.entry_calls, 2)
+
+    def test_entry_success_and_skip_are_marked_done_for_the_day(self):
+        class StrategyStub:
+            def __init__(self, status: str):
+                self.status = status
+                self.entry_calls = 0
+
+            def run_entry(self, shared_top_gainers=None):
+                self.entry_calls += 1
+                return {"status": self.status}
+
+        class ManagerStub:
+            def run_once(self):
+                return {"total": 0}
+
+            def run_daily_loss_cut(self):
+                return {"total": 0, "closed_loss_cut": 0, "errors": 0}
+
+        acc01 = StrategyStub("SUCCESS")
+        acc02 = StrategyStub("SKIPPED")
+        manager = ManagerStub()
+        cfg = ServiceRuntimeConfig(
+            timezone_name="UTC",
+            entry_hour=7,
+            entry_minute=40,
+            entry_misfire_grace_min=20,
+            entry_catchup_enabled=True,
+            daily_loss_cut_enabled=False,
+            daily_loss_cut_hour=23,
+            daily_loss_cut_minute=59,
+            manager_interval_sec=3600,
+            manager_max_catch_up_runs=1,
+            loop_sleep_sec=1.0,
+            run_manage_on_startup=False,
+            max_account_workers=2,
+        )
+        service = StrategyRuntimeService(
+            strategy=acc01,
+            manager=manager,
+            cfg=cfg,
+            now_monotonic=0.0,
+            account_runtimes={
+                "acc01": {
+                    "mode": "full",
+                    "strategy": acc01,
+                    "manager": manager,
+                    "balance_sampler": None,
+                },
+                "acc02": {
+                    "mode": "full",
+                    "strategy": acc02,
+                    "manager": manager,
+                    "balance_sampler": None,
+                },
+            },
+            max_account_workers=2,
+        )
+        service._build_shared_top_gainers = lambda _account_ids: None  # type: ignore[method-assign]
+
+        now_local = datetime(2026, 2, 13, 7, 40, tzinfo=ZoneInfo("UTC"))
+        service.run_cycle(now_local=now_local, now_monotonic=10.0)
+        service.run_cycle(now_local=now_local, now_monotonic=70.0)
+
+        self.assertEqual(acc01.entry_calls, 1)
+        self.assertEqual(acc02.entry_calls, 1)
 
 
 if __name__ == "__main__":

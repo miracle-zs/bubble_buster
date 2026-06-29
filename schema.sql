@@ -70,6 +70,7 @@ CREATE TABLE IF NOT EXISTS wallet_snapshots (
 
 CREATE INDEX IF NOT EXISTS idx_wallet_snapshots_captured_at ON wallet_snapshots(captured_at_utc);
 CREATE INDEX IF NOT EXISTS idx_wallet_snapshots_account_captured_at ON wallet_snapshots(account_id, captured_at_utc);
+CREATE INDEX IF NOT EXISTS idx_wallet_snapshots_account_id_id ON wallet_snapshots(account_id, id);
 
 CREATE TABLE IF NOT EXISTS cashflow_events (
     id INTEGER PRIMARY KEY AUTOINCREMENT,

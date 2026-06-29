@@ -41,6 +41,7 @@ class ServiceRuntimeConfig:
     hourly_exchange_take_profit_enabled: bool = False
     hourly_exchange_take_profit_minute: int = 0
     hourly_exchange_take_profit_drop_pct: float = 20.0
+    readonly_wallet_snapshot_interval_sec: float = 60.0
 
 
 @dataclass
@@ -103,6 +104,7 @@ class StrategyRuntimeService:
         self._last_noon_protection_local_date: Optional[date] = None
         self._last_morning_protection_local_date_by_account: Dict[str, date] = {}
         self._last_hourly_exchange_take_profit_hour_by_account: Dict[str, str] = {}
+        self._next_readonly_wallet_snapshot_monotonic_by_account: Dict[str, float] = {}
         self._shared_ranking_cache: Optional[List[Dict[str, Any]]] = None
         self._shared_ranking_cache_day: Optional[date] = None
         self._shared_ranking_cache_expires_at: Optional[datetime] = None
@@ -158,6 +160,13 @@ class StrategyRuntimeService:
             return False
 
         return True
+
+    @staticmethod
+    def _is_entry_result_complete(result: object) -> bool:
+        if not isinstance(result, dict):
+            return False
+        status = str(result.get("status", "")).strip().upper()
+        return status in {"SUCCESS", "SKIPPED", "DISABLED"}
 
     def _run_entry_if_due(self, now_local: datetime) -> None:
         account_ids = [
@@ -235,7 +244,8 @@ class StrategyRuntimeService:
                         results[aid].setdefault("slow", True)
 
         for aid in due_account_ids:
-            self._last_entry_local_date_by_account[aid] = now_local.date()
+            if self._is_entry_result_complete(results.get(aid)):
+                self._last_entry_local_date_by_account[aid] = now_local.date()
         LOGGER.info("service entry result: %s", results)
 
     def _get_entry_ranking(
@@ -852,9 +862,9 @@ class StrategyRuntimeService:
         self._run_morning_protection_if_due(local_dt)
         self._run_hourly_exchange_take_profit_if_due(local_dt)
         self._run_manage_if_due(mono)
-        self._run_balance_snapshot_for_readonly_accounts()
+        self._run_balance_snapshot_for_readonly_accounts(mono)
 
-    def _run_balance_snapshot_for_readonly_accounts(self) -> None:
+    def _run_balance_snapshot_for_readonly_accounts(self, now_monotonic: float) -> None:
         """为 readonly 账户执行余额快照采集。"""
         readonly_accounts = [
             aid
@@ -871,9 +881,14 @@ class StrategyRuntimeService:
             balance_sampler = ctx.get("balance_sampler")
             if balance_sampler is None:
                 continue
+            next_due = self._next_readonly_wallet_snapshot_monotonic_by_account.get(aid, 0.0)
+            if now_monotonic < next_due:
+                continue
             try:
                 wallet_summary = balance_sampler.run_once()  # type: ignore[attr-defined]
                 LOGGER.info("service readonly wallet snapshot account=%s: %s", aid, wallet_summary)
+                interval = max(1.0, float(self.cfg.readonly_wallet_snapshot_interval_sec))
+                self._next_readonly_wallet_snapshot_monotonic_by_account[aid] = now_monotonic + interval
             except Exception as exc:  # noqa: BLE001
                 LOGGER.warning("service readonly wallet snapshot failed account=%s: %s", aid, exc)
 
