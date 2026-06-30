@@ -114,6 +114,27 @@ class ClientUtilsTest(unittest.TestCase):
         self.assertEqual(diagnostic["reject_reason"], "missing_symbol_rules")
         self.assertEqual(client.normalize_order_qty("UNKNOWNUSDT", notional=92.0, price=0.16834), 0.0)
 
+    def test_diagnose_order_qty_refreshes_when_symbol_missing_from_cache(self) -> None:
+        client = BinanceFuturesClient(api_key="k", api_secret="s")
+        rules = {
+            "NEWUSDT": SymbolRules(
+                symbol="NEWUSDT",
+                tick_size=0.0001,
+                step_size=1.0,
+                min_qty=1.0,
+                min_notional=5.0,
+            )
+        }
+        client.get_symbol_rules = MagicMock(side_effect=[{}, rules])  # type: ignore[method-assign]
+
+        diagnostic = client.diagnose_order_qty("NEWUSDT", notional=92.0, price=0.16834)
+
+        self.assertTrue(diagnostic["has_rules"])
+        self.assertIsNone(diagnostic["reject_reason"])
+        self.assertAlmostEqual(diagnostic["normalized_qty"], 546.0)
+        client.get_symbol_rules.assert_any_call()
+        client.get_symbol_rules.assert_any_call(refresh=True)
+
     def test_format_order_params(self) -> None:
         client = BinanceFuturesClient(api_key="k", api_secret="s")
         client._symbol_rules_cache = {

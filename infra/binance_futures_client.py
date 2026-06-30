@@ -585,6 +585,8 @@ class BinanceFuturesClient:
 
     def diagnose_order_qty(self, symbol: str, notional: float, price: float) -> Dict[str, Any]:
         rules = self.get_symbol_rules().get(symbol)
+        if not rules:
+            rules = self.get_symbol_rules(refresh=True).get(symbol)
         diagnostic: Dict[str, Any] = {
             "symbol": symbol,
             "notional": float(notional),
