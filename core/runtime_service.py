@@ -1,7 +1,7 @@
 import logging
 import threading
 import time
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import Future, ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 from concurrent.futures import TimeoutError as FutureTimeoutError
@@ -108,6 +108,13 @@ class StrategyRuntimeService:
         self._shared_ranking_cache: Optional[List[Dict[str, Any]]] = None
         self._shared_ranking_cache_day: Optional[date] = None
         self._shared_ranking_cache_expires_at: Optional[datetime] = None
+        self._entry_executor = ThreadPoolExecutor(
+            max_workers=self.max_account_workers,
+            thread_name_prefix="entry",
+        )
+        self._entry_futures: Dict[Future, str] = {}
+        self._entry_future_started_at_by_account: Dict[str, float] = {}
+        self._entry_future_warned_by_account: Dict[str, bool] = {}
 
     def _entry_schedule_for_day(self, day: date, account_id: Optional[str] = None) -> datetime:
         account_ctx = self.account_runtimes.get(account_id or "", {})
@@ -168,7 +175,38 @@ class StrategyRuntimeService:
         status = str(result.get("status", "")).strip().upper()
         return status in {"SUCCESS", "SKIPPED", "DISABLED"}
 
+    def _collect_entry_futures(self, now_local: datetime) -> None:
+        timeout_sec = max(0.1, float(self.cfg.account_task_timeout_sec))
+        for future, aid in list(self._entry_futures.items()):
+            if not future.done():
+                started_at = self._entry_future_started_at_by_account.get(aid)
+                if (
+                    started_at is not None
+                    and time.monotonic() - started_at >= timeout_sec
+                    and not self._entry_future_warned_by_account.get(aid, False)
+                ):
+                    self._entry_future_warned_by_account[aid] = True
+                    LOGGER.warning(
+                        "service entry account exceeded soft-timeout %.2fs, keep running in background account=%s",
+                        timeout_sec,
+                        aid,
+                    )
+                continue
+
+            self._entry_futures.pop(future, None)
+            self._entry_future_started_at_by_account.pop(aid, None)
+            self._entry_future_warned_by_account.pop(aid, None)
+            try:
+                result = future.result()
+            except Exception as exc:  # noqa: BLE001
+                LOGGER.warning("service entry background failed account=%s: %s", aid, exc)
+                continue
+            if self._is_entry_result_complete(result):
+                self._last_entry_local_date_by_account[aid] = now_local.date()
+            LOGGER.info("service entry background result account=%s: %s", aid, result)
+
     def _run_entry_if_due(self, now_local: datetime) -> None:
+        self._collect_entry_futures(now_local)
         account_ids = [
             aid
             for aid, ctx in self.account_runtimes.items()
@@ -178,75 +216,30 @@ class StrategyRuntimeService:
             LOGGER.warning("service entry skipped: no account is enabled for full mode")
             return
 
-        due_account_ids = [aid for aid in account_ids if self._should_run_entry(aid, now_local)]
+        running_account_ids = set(self._entry_futures.values())
+        due_account_ids = [
+            aid
+            for aid in account_ids
+            if aid not in running_account_ids and self._should_run_entry(aid, now_local)
+        ]
         if not due_account_ids:
             return
 
         shared_top_gainers = self._get_entry_ranking(now_local, due_account_ids)
-        results: Dict[str, object] = {}
-        if len(due_account_ids) == 1:
-            aid = due_account_ids[0]
-            ctx = self.account_runtimes[aid]
-            strategy = ctx.get("strategy")
-            if strategy is not None:
-                try:
-                    results[aid] = self._run_entry_with_shared(
-                        strategy=strategy,
-                        shared_top_gainers=shared_top_gainers,
-                    )
-                except Exception as exc:  # noqa: BLE001
-                    results[aid] = {"error": str(exc)}
-            else:
-                results[aid] = {"error": "strategy_missing"}
-        else:
-            timeout_sec = max(0.1, float(self.cfg.account_task_timeout_sec))
-            done_futures = set()
-            slow_accounts = set()
-            with ThreadPoolExecutor(max_workers=min(self.max_account_workers, len(due_account_ids))) as ex:
-                futures = {}
-                for aid in due_account_ids:
-                    strategy = self.account_runtimes[aid].get("strategy")
-                    if strategy is None:
-                        results[aid] = {"error": "strategy_missing"}
-                        continue
-                    futures[ex.submit(self._run_entry_with_shared, strategy, shared_top_gainers)] = aid
-
-                try:
-                    for future in as_completed(futures, timeout=timeout_sec):
-                        done_futures.add(future)
-                        aid = futures[future]
-                        try:
-                            results[aid] = future.result()
-                        except Exception as exc:  # noqa: BLE001
-                            results[aid] = {"error": str(exc)}
-                except FutureTimeoutError:
-                    pass
-
-                for future, aid in futures.items():
-                    if future in done_futures:
-                        continue
-                    slow_accounts.add(aid)
-                    LOGGER.warning(
-                        "service entry account exceeded soft-timeout %.2fs, waiting completion account=%s",
-                        timeout_sec,
-                        aid,
-                    )
-                    try:
-                        result = future.result()
-                        if isinstance(result, dict):
-                            result.setdefault("slow", True)
-                        results[aid] = result
-                    except Exception as exc:  # noqa: BLE001
-                        results[aid] = {"error": str(exc)}
-
-                for aid in slow_accounts:
-                    if isinstance(results.get(aid), dict):
-                        results[aid].setdefault("slow", True)
-
+        submitted: List[str] = []
         for aid in due_account_ids:
-            if self._is_entry_result_complete(results.get(aid)):
-                self._last_entry_local_date_by_account[aid] = now_local.date()
-        LOGGER.info("service entry result: %s", results)
+            strategy = self.account_runtimes[aid].get("strategy")
+            if strategy is None:
+                LOGGER.warning("service entry skipped account=%s: strategy_missing", aid)
+                continue
+            future = self._entry_executor.submit(self._run_entry_with_shared, strategy, shared_top_gainers)
+            self._entry_futures[future] = aid
+            self._entry_future_started_at_by_account[aid] = time.monotonic()
+            self._entry_future_warned_by_account[aid] = False
+            submitted.append(aid)
+        if submitted:
+            LOGGER.info("service entry submitted background accounts=%s", submitted)
+            self._collect_entry_futures(now_local)
 
     def _get_entry_ranking(
         self,
@@ -909,4 +902,5 @@ class StrategyRuntimeService:
             except Exception as exc:  # noqa: BLE001
                 LOGGER.exception("runtime service cycle failed: %s", exc)
             stopper.wait(timeout=max(0.2, self.cfg.loop_sleep_sec))
+        self._entry_executor.shutdown(wait=False, cancel_futures=True)
         LOGGER.info("runtime service stopped")

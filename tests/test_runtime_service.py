@@ -1,11 +1,21 @@
 import unittest
 from datetime import datetime, timezone
 from threading import Event, Thread
+from unittest.mock import MagicMock
 import time
 from unittest.mock import patch
 from zoneinfo import ZoneInfo
 
 from core.runtime_service import ServiceRuntimeConfig, StrategyRuntimeService
+
+
+def _wait_until(predicate, timeout: float = 1.0) -> bool:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if predicate():
+            return True
+        time.sleep(0.01)
+    return predicate()
 
 
 class RuntimeServiceTest(unittest.TestCase):
@@ -390,6 +400,7 @@ class RuntimeServiceTest(unittest.TestCase):
             now_local=datetime(2026, 2, 13, 7, 45, tzinfo=ZoneInfo("UTC")),
             now_monotonic=20.0,
         )
+        self.assertTrue(_wait_until(lambda: acc02.entry_calls == 1))
         self.assertEqual(acc01.entry_calls, 1)
         self.assertEqual(acc02.entry_calls, 1)
 
@@ -550,10 +561,12 @@ class RuntimeServiceTest(unittest.TestCase):
             now_local=datetime(2026, 2, 13, 7, 40, tzinfo=ZoneInfo("UTC")),
             now_monotonic=10.0,
         )
+        self.assertTrue(_wait_until(lambda: acc03.entry_calls == 1))
         service.run_cycle(
             now_local=datetime(2026, 2, 13, 7, 41, tzinfo=ZoneInfo("UTC")),
             now_monotonic=70.0,
         )
+        self.assertTrue(_wait_until(lambda: acc03.entry_calls == 2))
 
         self.assertEqual(acc01.entry_calls, 1)
         self.assertEqual(acc03.entry_calls, 2)
@@ -619,6 +632,7 @@ class RuntimeServiceTest(unittest.TestCase):
         now_local = datetime(2026, 2, 13, 7, 40, tzinfo=ZoneInfo("UTC"))
         service.run_cycle(now_local=now_local, now_monotonic=10.0)
         service.run_cycle(now_local=now_local, now_monotonic=70.0)
+        self.assertTrue(_wait_until(lambda: acc02.entry_calls == 1))
 
         self.assertEqual(acc01.entry_calls, 1)
         self.assertEqual(acc02.entry_calls, 1)
@@ -808,6 +822,7 @@ def test_entry_dispatches_to_full_accounts_only() -> None:
     )
     now_local = datetime(2026, 2, 13, 11, 0, tzinfo=ZoneInfo("UTC"))
     service.run_cycle(now_local=now_local, now_monotonic=10.0)
+    assert _wait_until(lambda: s2.entry_calls == 1)
     assert s1.entry_calls == 1
     assert s2.entry_calls == 1
     assert s3.entry_calls == 0
@@ -980,9 +995,78 @@ def test_entry_uses_shared_ranking_once_for_multi_accounts() -> None:
     with patch.object(service, "_build_shared_top_gainers", return_value=shared) as mocked_ranker:
         service.run_cycle(now_local=datetime(2026, 2, 13, 11, 0, tzinfo=ZoneInfo("UTC")), now_monotonic=1.0)
 
+    assert _wait_until(lambda: s2.received == shared)
     assert mocked_ranker.call_count == 1
     assert s1.received == shared
     assert s2.received == shared
+
+
+def test_entry_runs_in_background_and_does_not_block_manage_cycle() -> None:
+    started = Event()
+    release = Event()
+
+    class BlockingStrategy:
+        def __init__(self):
+            self.calls = 0
+
+        def run_entry(self, shared_top_gainers=None):
+            self.calls += 1
+            started.set()
+            release.wait(timeout=5)
+            return {"status": "SUCCESS"}
+
+    class ManagerStub:
+        def __init__(self):
+            self.calls = 0
+
+        def run_once(self):
+            self.calls += 1
+            return {"total": 0}
+
+        def run_daily_loss_cut(self):
+            return {"total": 0, "closed_loss_cut": 0, "errors": 0}
+
+    strategy = BlockingStrategy()
+    manager = ManagerStub()
+    cfg = ServiceRuntimeConfig(
+        timezone_name="UTC",
+        entry_hour=7,
+        entry_minute=40,
+        entry_misfire_grace_min=120,
+        entry_catchup_enabled=True,
+        daily_loss_cut_enabled=False,
+        daily_loss_cut_hour=23,
+        daily_loss_cut_minute=59,
+        manager_interval_sec=1,
+        manager_max_catch_up_runs=1,
+        loop_sleep_sec=1.0,
+        run_manage_on_startup=True,
+        account_task_timeout_sec=0.1,
+    )
+    service = StrategyRuntimeService(
+        strategy=strategy,
+        manager=manager,
+        cfg=cfg,
+        now_monotonic=0.0,
+        account_runtimes={
+            "acc01": {"mode": "full", "strategy": strategy, "manager": manager, "balance_sampler": None},
+        },
+        max_account_workers=1,
+    )
+    service._get_entry_ranking = MagicMock(return_value=None)
+    now_local = datetime(2026, 2, 13, 7, 40, tzinfo=ZoneInfo("UTC"))
+
+    start = time.monotonic()
+    service.run_cycle(now_local=now_local, now_monotonic=1.0)
+    elapsed = time.monotonic() - start
+
+    assert elapsed < 1.0
+    assert started.wait(timeout=1)
+    service.run_cycle(now_local=now_local, now_monotonic=2.0)
+    assert manager.calls >= 1
+    assert strategy.calls == 1
+
+    release.set()
 
 
 def test_noon_protection_runs_once_for_full_and_loss_cut_only_accounts() -> None:
