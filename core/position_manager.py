@@ -587,7 +587,11 @@ class PositionManager:
             for cap_key, cap_price in caps.items()
             if cap_key in active_cap_keys
         }
-        self._persist_noon_protection_caps(pruned_caps)
+        self._persist_noon_protection_caps(
+            pruned_caps,
+            day_start_utc=day_start_utc,
+            noon_time_utc=noon_time_utc,
+        )
         self._noon_protection_caps_cache = pruned_caps
 
         if summary["updated_sl"] > 0 or summary["errors"] > 0:
@@ -1001,33 +1005,17 @@ class PositionManager:
 
         risk = self._get_symbol_position_risk(symbol)
         if risk is None:
+            close_result = self._close_if_recorded_exit_filled(pos)
+            if close_result:
+                return close_result
             self.store.set_position_error(position_id, "position risk not found")
             return None
 
         position_amt = float(risk.get("positionAmt", "0") or 0)
         if position_amt >= 0:
-            tp_status = self._get_order_status(
-                symbol,
-                pos.get("tp_order_id"),
-                pos.get("tp_client_order_id"),
-            )
-            sl_status = self._get_order_status(
-                symbol,
-                pos.get("sl_order_id"),
-                pos.get("sl_client_order_id"),
-            )
-            if tp_status == "FILLED":
-                close_order_id = self._close_on_trigger(pos, close_status="CLOSED_TP", close_reason="TAKE_PROFIT_FILLED")
-                return {
-                    "type": "closed_tp",
-                    "detail": f"{symbol}(id={position_id}, order_id={close_order_id})",
-                }
-            if sl_status == "FILLED":
-                close_order_id = self._close_on_trigger(pos, close_status="CLOSED_SL", close_reason="STOP_LOSS_FILLED")
-                return {
-                    "type": "closed_sl",
-                    "detail": f"{symbol}(id={position_id}, order_id={close_order_id})",
-                }
+            close_result = self._close_if_recorded_exit_filled(pos)
+            if close_result:
+                return close_result
 
             self._cancel_exit_orders(pos)
             self.store.mark_position_closed(
@@ -1043,6 +1031,35 @@ class PositionManager:
         if self._is_protection_exempt(symbol):
             return None
 
+        close_result = self._close_if_recorded_exit_filled(pos)
+        if close_result:
+            return close_result
+
+        if self._is_expired(str(pos["expire_at_utc"])):
+            timeout_info = self._close_timeout(pos, abs(position_amt))
+            return {
+                "type": "closed_timeout",
+                "detail": (
+                    f"{symbol}(id={position_id}, qty={timeout_info['qty']}, "
+                    f"close_order_id={timeout_info['close_order_id']})"
+                ),
+            }
+
+        update_info = self._update_dynamic_stop(pos, risk)
+        if update_info:
+            return {
+                "type": "updated_sl",
+                "detail": (
+                    f"{symbol}(id={position_id}, old_sl={update_info['old_sl_price']}, "
+                    f"new_sl={update_info['new_sl_price']}, liq={update_info['liq_price']})"
+                ),
+            }
+
+        return None
+
+    def _close_if_recorded_exit_filled(self, pos: Dict[str, object]) -> Optional[Dict[str, object]]:
+        position_id = int(pos["id"])
+        symbol = str(pos["symbol"])
         tp_status = self._get_order_status(
             symbol,
             pos.get("tp_order_id"),
@@ -1066,26 +1083,6 @@ class PositionManager:
             return {
                 "type": "closed_sl",
                 "detail": f"{symbol}(id={position_id}, order_id={close_order_id})",
-            }
-
-        if self._is_expired(str(pos["expire_at_utc"])):
-            timeout_info = self._close_timeout(pos, abs(position_amt))
-            return {
-                "type": "closed_timeout",
-                "detail": (
-                    f"{symbol}(id={position_id}, qty={timeout_info['qty']}, "
-                    f"close_order_id={timeout_info['close_order_id']})"
-                ),
-            }
-
-        update_info = self._update_dynamic_stop(pos, risk)
-        if update_info:
-            return {
-                "type": "updated_sl",
-                "detail": (
-                    f"{symbol}(id={position_id}, old_sl={update_info['old_sl_price']}, "
-                    f"new_sl={update_info['new_sl_price']}, liq={update_info['liq_price']})"
-                ),
             }
 
         return None
@@ -1229,7 +1226,7 @@ class PositionManager:
         new_sl_raw = liq_price * (1 - self.sl_liq_buffer_pct / 100.0)
         new_sl_price = self.client.normalize_trigger_price(symbol, new_sl_raw, round_up=True)
 
-        noon_cap_price = self._get_noon_protection_cap(position_id)
+        noon_cap_price = self._get_or_backfill_noon_protection_cap(pos, risk)
         if noon_cap_price:
             new_sl_price = min(new_sl_price, noon_cap_price)
         morning_cap_price = self._get_morning_protection_cap(position_id)
@@ -1586,11 +1583,25 @@ class PositionManager:
             parsed[cap_key] = cap_price
         return parsed
 
-    def _persist_noon_protection_caps(self, caps: Dict[str, float]) -> None:
+    def _persist_noon_protection_caps(
+        self,
+        caps: Dict[str, float],
+        day_start_utc: Optional[datetime] = None,
+        noon_time_utc: Optional[datetime] = None,
+    ) -> None:
+        existing = self.store.get_lock_state(self.NOON_PROTECTION_LOCK_NAME) or {}
         payload = {
             "caps": {str(cap_key): float(price) for cap_key, price in caps.items() if price > 0},
             "updated_at_utc": self._utc_now_iso(),
         }
+        if day_start_utc is not None:
+            payload["day_start_utc"] = day_start_utc.astimezone(timezone.utc).isoformat()
+        elif existing.get("day_start_utc"):
+            payload["day_start_utc"] = existing.get("day_start_utc")
+        if noon_time_utc is not None:
+            payload["noon_time_utc"] = noon_time_utc.astimezone(timezone.utc).isoformat()
+        elif existing.get("noon_time_utc"):
+            payload["noon_time_utc"] = existing.get("noon_time_utc")
         self.store.set_lock_state(self.NOON_PROTECTION_LOCK_NAME, payload)
 
     def _get_noon_protection_cap(self, position_id: int) -> Optional[float]:
@@ -1600,6 +1611,90 @@ class PositionManager:
         if value is None or value <= 0:
             return None
         return float(value)
+
+    def _get_noon_protection_window(self) -> Optional[tuple[datetime, datetime]]:
+        state = self.store.get_lock_state(self.NOON_PROTECTION_LOCK_NAME) or {}
+        day_start_raw = str(state.get("day_start_utc") or "").strip()
+        noon_raw = str(state.get("noon_time_utc") or "").strip()
+        if not day_start_raw or not noon_raw:
+            return None
+        try:
+            day_start = self._parse_iso_utc(day_start_raw)
+            noon_time = self._parse_iso_utc(noon_raw)
+        except (TypeError, ValueError):
+            return None
+        if noon_time <= day_start:
+            return None
+        return day_start, noon_time
+
+    def _get_or_backfill_noon_protection_cap(
+        self,
+        pos: Dict[str, object],
+        risk: Dict[str, str],
+    ) -> Optional[float]:
+        position_id = int(pos["id"])
+        existing_cap = self._get_noon_protection_cap(position_id)
+        if existing_cap:
+            return existing_cap
+
+        window = self._get_noon_protection_window()
+        if window is None:
+            return None
+        day_start, noon_time = window
+        opened_at_raw = str(pos.get("opened_at_utc") or "")
+        if not opened_at_raw:
+            return None
+        opened_at = self._parse_iso_utc(opened_at_raw)
+        if opened_at < noon_time or self._utc_now_datetime() < noon_time:
+            return None
+
+        symbol = str(pos["symbol"])
+        position_amt = float(risk.get("positionAmt", "0") or 0)
+        close_side, _ = self._resolve_close_side_for_exchange_position(
+            position_amt=position_amt,
+            position_side=str(risk.get("positionSide") or "BOTH"),
+        )
+        highest_price, lowest_price = self._fetch_symbol_extremes_between(
+            symbol=symbol,
+            start_utc=day_start,
+            end_utc=noon_time,
+        )
+        noon_ref_price = highest_price if close_side == "BUY" else lowest_price
+        if not noon_ref_price:
+            return None
+
+        round_up = close_side == "BUY"
+        cap_price = self.client.normalize_trigger_price(symbol, noon_ref_price, round_up=round_up)
+        if cap_price <= 0:
+            return None
+
+        mark_price = self._safe_positive_float(risk.get("markPrice"))
+        if not mark_price:
+            mark_price = self.client.get_symbol_price(symbol)
+        cap_already_breached = (
+            mark_price >= cap_price if close_side == "BUY" else mark_price <= cap_price
+        ) if mark_price else False
+        if cap_already_breached and opened_at > noon_time:
+            post_noon_high, post_noon_low = self._fetch_symbol_extremes_between(
+                symbol=symbol,
+                start_utc=noon_time,
+                end_utc=opened_at,
+            )
+            post_noon_ref_price = post_noon_high if close_side == "BUY" else post_noon_low
+            if post_noon_ref_price:
+                cap_price = self.client.normalize_trigger_price(
+                    symbol,
+                    post_noon_ref_price,
+                    round_up=round_up,
+                )
+                if cap_price <= 0:
+                    return None
+
+        if self._noon_protection_caps_cache is None:
+            self._noon_protection_caps_cache = self._load_noon_protection_caps()
+        self._noon_protection_caps_cache[str(position_id)] = cap_price
+        self._persist_noon_protection_caps(self._noon_protection_caps_cache)
+        return cap_price
 
     def _load_morning_protection_caps(self) -> Dict[str, float]:
         state = self.store.get_lock_state(self.MORNING_PROTECTION_LOCK_NAME) or {}
