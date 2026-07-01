@@ -12,6 +12,7 @@ if importlib.util.find_spec("requests") is None:
 
 from core.position_manager import PositionManager
 from core.state_store import StateStore
+from infra.binance_futures_client import BinanceAPIError
 
 
 class PositionManagerTest(unittest.TestCase):
@@ -1129,6 +1130,90 @@ class PositionManagerTest(unittest.TestCase):
         self.assertIsNotNone(lock_state)
         assert lock_state is not None
         self.assertAlmostEqual(float(lock_state["caps"]["EX:SKYAIUSDT:SHORT"]), 0.0548, places=10)
+
+    def test_noon_protection_market_closes_when_stop_would_immediately_trigger(self) -> None:
+        noon_utc = datetime(2026, 2, 13, 12, 0, tzinfo=timezone.utc)
+        day_start_utc = datetime(2026, 2, 13, 0, 0, tzinfo=timezone.utc)
+        position_id = self.store.insert_position(
+            run_id=self.run_id,
+            symbol="DYDXUSDT",
+            side="SHORT",
+            qty=12.0,
+            entry_price=0.80,
+            liq_price_open=1.20,
+            tp_price=None,
+            sl_price=1.10,
+            tp_order_id=None,
+            sl_order_id=22,
+            tp_client_order_id=None,
+            sl_client_order_id="sl-old",
+            opened_at_utc=datetime(2026, 2, 13, 1, 0, tzinfo=timezone.utc).isoformat(),
+            expire_at_utc=datetime(2026, 2, 14, 1, 0, tzinfo=timezone.utc).isoformat(),
+            status="OPEN",
+        )
+
+        client = MagicMock()
+        client.get_position_risk.return_value = [
+            {
+                "symbol": "DYDXUSDT",
+                "positionAmt": "-12",
+                "positionSide": "BOTH",
+                "liquidationPrice": "1.20",
+            }
+        ]
+        client.get_klines.return_value = [
+            [0, "0", "0.92", "0.70", "0", 0],
+        ]
+        client.get_symbol_rules.return_value = {
+            "DYDXUSDT": SimpleNamespace(tick_size=0.0001),
+        }
+        client.normalize_trigger_price.side_effect = lambda _symbol, price, round_up=False: float(price)
+        client.format_trigger_price.side_effect = lambda _symbol, price, round_up=False: str(price)
+        client.format_order_qty.side_effect = lambda _symbol, qty: str(qty)
+        client.create_order.side_effect = [
+            BinanceAPIError(-2021, "Order would immediately trigger."),
+            {
+                "orderId": 999,
+                "clientOrderId": "nsl-close",
+                "type": "MARKET",
+                "side": "BUY",
+                "origQty": "12",
+                "status": "FILLED",
+            },
+        ]
+
+        manager = PositionManager(
+            client=client,
+            store=self.store,
+            notifier=MagicMock(),
+            sl_liq_buffer_pct=1.0,
+            trigger_price_type="CONTRACT_PRICE",
+        )
+
+        summary = manager.run_noon_protection_stop(
+            day_start_utc=day_start_utc,
+            noon_time_utc=noon_utc,
+        )
+
+        self.assertEqual(summary["total"], 1)
+        self.assertEqual(summary["updated_sl"], 0)
+        self.assertEqual(summary["closed_immediate"], 1)
+        self.assertEqual(summary["errors"], 0)
+        self.assertEqual(client.create_order.call_count, 2)
+        stop_kwargs = client.create_order.call_args_list[0].kwargs
+        self.assertEqual(stop_kwargs["type"], "STOP_MARKET")
+        close_kwargs = client.create_order.call_args_list[1].kwargs
+        self.assertEqual(close_kwargs["symbol"], "DYDXUSDT")
+        self.assertEqual(close_kwargs["side"], "BUY")
+        self.assertEqual(close_kwargs["type"], "MARKET")
+        self.assertEqual(close_kwargs["quantity"], "12.0")
+        self.assertTrue(close_kwargs["reduceOnly"])
+
+        row = self._get_position(position_id)
+        self.assertEqual(row["status"], "CLOSED_NOON_PROTECTION")
+        self.assertEqual(row["close_reason"], "NOON_PROTECTION_IMMEDIATE_TRIGGER")
+        self.assertEqual(row["close_order_id"], 999)
+        self.assertIsNone(row["last_error"])
 
     def test_morning_protection_tightens_tracked_short_older_than_min_hold_to_current_hour_high(self) -> None:
         opened_at = datetime(2026, 3, 16, 23, 0, tzinfo=timezone.utc)

@@ -453,11 +453,13 @@ class PositionManager:
         summary = {
             "total": len(candidate_risks),
             "updated_sl": 0,
+            "closed_immediate": 0,
             "skipped": 0,
             "errors": 0,
         }
         details: Dict[str, List[str]] = {
             "updated_sl": [],
+            "closed_immediate": [],
             "errors": [],
         }
         failed_symbols: List[str] = []
@@ -540,15 +542,39 @@ class PositionManager:
                     self._cancel_order_if_exists(symbol, tracked_pos.get("sl_order_id"), tracked_pos.get("sl_client_order_id"))
 
                 sl_stop_price = self.client.format_trigger_price(symbol, merged_sl_price, round_up=round_up)
-                sl_order = self._create_stop_order_with_fallback(
-                    symbol=symbol,
-                    side=close_side,
-                    stop_price=sl_stop_price,
-                    qty=qty,
-                    client_order_id=self._new_client_id("nsl", symbol),
-                    position_side=position_side if position_side in {"LONG", "SHORT"} else None,
-                    use_reduce_only=use_reduce_only,
-                )
+                try:
+                    sl_order = self._create_stop_order_with_fallback(
+                        symbol=symbol,
+                        side=close_side,
+                        stop_price=sl_stop_price,
+                        qty=qty,
+                        client_order_id=self._new_client_id("nsl", symbol),
+                        position_side=position_side if position_side in {"LONG", "SHORT"} else None,
+                        use_reduce_only=use_reduce_only,
+                    )
+                except BinanceAPIError as exc:
+                    if not self._is_immediate_trigger_error(exc):
+                        raise
+                    close_info = self._close_noon_protection_immediate(
+                        symbol=symbol,
+                        qty=qty,
+                        side=close_side,
+                        position_id=tracked_position_id,
+                        position_side=position_side if position_side in {"LONG", "SHORT"} else None,
+                        use_reduce_only=use_reduce_only,
+                    )
+                    caps.pop(cap_key, None)
+                    active_cap_keys.discard(cap_key)
+                    if tracked_position_id is not None:
+                        self.store.clear_position_error(tracked_position_id)
+                    summary["closed_immediate"] += 1
+                    details["closed_immediate"].append(
+                        (
+                            f"{symbol}(cap={cap_key}, stop_price={sl_stop_price}, "
+                            f"qty={qty}, close_order_id={close_info.get('close_order_id')})"
+                        )
+                    )
+                    continue
 
                 self.store.add_order_event(
                     symbol=symbol,
@@ -1194,6 +1220,47 @@ class PositionManager:
             "close_order_id": close_order.get("orderId"),
         }
 
+    def _close_noon_protection_immediate(
+        self,
+        symbol: str,
+        qty: float,
+        side: str,
+        position_id: Optional[int],
+        position_side: Optional[str] = None,
+        use_reduce_only: bool = True,
+    ) -> Dict[str, object]:
+        create_order_params: Dict[str, object] = {
+            "symbol": symbol,
+            "side": side,
+            "type": "MARKET",
+            "quantity": self.client.format_order_qty(symbol, qty),
+            "newClientOrderId": self._new_client_id("nsi", symbol),
+            "newOrderRespType": "RESULT",
+        }
+        if use_reduce_only:
+            create_order_params["reduceOnly"] = True
+        if position_side in {"LONG", "SHORT"}:
+            create_order_params["positionSide"] = position_side
+
+        close_order = self.client.create_order(**create_order_params)
+        self.store.add_order_event(
+            symbol=symbol,
+            position_id=position_id,
+            event_time_utc=self._utc_now_iso(),
+            order_payload=close_order,
+        )
+        if position_id is not None:
+            self.store.mark_position_closed(
+                position_id=position_id,
+                status="CLOSED_NOON_PROTECTION",
+                close_reason="NOON_PROTECTION_IMMEDIATE_TRIGGER",
+                close_order_id=close_order.get("orderId"),
+            )
+        return {
+            "qty": qty,
+            "close_order_id": close_order.get("orderId"),
+        }
+
     @staticmethod
     def _resolve_close_side_for_exchange_position(
         position_amt: float,
@@ -1208,6 +1275,11 @@ class PositionManager:
             return "BUY", False
         # One-way mode (BOTH).
         return ("BUY" if position_amt < 0 else "SELL"), True
+
+    @staticmethod
+    def _is_immediate_trigger_error(exc: BinanceAPIError) -> bool:
+        message = str(getattr(exc, "message", "") or exc).lower()
+        return getattr(exc, "code", None) == -2021 or "immediately trigger" in message
 
     def _update_dynamic_stop(self, pos: Dict[str, object], risk: Dict[str, str]) -> Optional[Dict[str, object]]:
         position_id = int(pos["id"])
@@ -1494,6 +1566,7 @@ class PositionManager:
         rows = [
             ("open_positions", summary["total"]),
             ("updated_sl", summary["updated_sl"]),
+            ("closed_immediate", summary.get("closed_immediate", 0)),
             ("skipped", summary["skipped"]),
             ("errors", summary["errors"]),
         ]
@@ -1509,6 +1582,7 @@ class PositionManager:
 
         for key, title in [
             ("updated_sl", "保护止损更新明细"),
+            ("closed_immediate", "保护线已触发市价平仓明细"),
             ("errors", "错误明细"),
         ]:
             values = [item for item in details.get(key, []) if item]
