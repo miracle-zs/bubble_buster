@@ -225,23 +225,14 @@ class StrategyRuntimeService:
         if not due_account_ids:
             return
 
-        shared_top_gainers = self._get_entry_ranking(now_local, account_ids)
-        shared_top_gainers_by_account = self._partition_shared_top_gainers(
-            shared_top_gainers=shared_top_gainers,
-            account_ids=account_ids,
-        )
+        shared_top_gainers = self._get_entry_ranking(now_local, due_account_ids)
         submitted: List[str] = []
         for aid in due_account_ids:
             strategy = self.account_runtimes[aid].get("strategy")
             if strategy is None:
                 LOGGER.warning("service entry skipped account=%s: strategy_missing", aid)
                 continue
-            account_top_gainers = (
-                shared_top_gainers_by_account.get(aid, shared_top_gainers)
-                if shared_top_gainers_by_account is not None
-                else shared_top_gainers
-            )
-            future = self._entry_executor.submit(self._run_entry_with_shared, strategy, account_top_gainers)
+            future = self._entry_executor.submit(self._run_entry_with_shared, strategy, shared_top_gainers)
             self._entry_futures[future] = aid
             self._entry_future_started_at_by_account[aid] = time.monotonic()
             self._entry_future_warned_by_account[aid] = False
@@ -272,63 +263,6 @@ class StrategyRuntimeService:
         self._shared_ranking_cache_day = today
         self._shared_ranking_cache_expires_at = now_local + timedelta(minutes=10)
         return shared_top_gainers
-
-    def _partition_shared_top_gainers(
-        self,
-        shared_top_gainers: Optional[List[Dict[str, Any]]],
-        account_ids: List[str],
-    ) -> Optional[Dict[str, List[Dict[str, Any]]]]:
-        if shared_top_gainers is None or len(account_ids) <= 1:
-            return None
-
-        target_count_by_account: Dict[str, int] = {}
-        reserved_symbols: set[str] = set()
-        for aid in account_ids:
-            strategy = self.account_runtimes.get(aid, {}).get("strategy")
-            if strategy is None or not hasattr(strategy, "top_n"):
-                return None
-            try:
-                target_count_by_account[aid] = max(0, int(getattr(strategy, "top_n")))
-            except (TypeError, ValueError):
-                return None
-
-            store = getattr(strategy, "store", None)
-            list_open_symbols = getattr(store, "list_open_symbols", None)
-            if list_open_symbols is None:
-                continue
-            try:
-                reserved_symbols.update(
-                    str(symbol).strip().upper()
-                    for symbol in list_open_symbols()
-                    if str(symbol).strip()
-                )
-            except Exception:  # noqa: BLE001
-                LOGGER.debug("service shared ranking cannot read open symbols for account=%s", aid)
-
-        assignments: Dict[str, List[Dict[str, Any]]] = {aid: [] for aid in account_ids}
-        for aid in account_ids:
-            target_count = target_count_by_account.get(aid, 0)
-            if target_count <= 0:
-                continue
-            for row in shared_top_gainers:
-                symbol = self._ranking_symbol(row)
-                if not symbol or symbol in reserved_symbols:
-                    continue
-                assignments[aid].append(row)
-                reserved_symbols.add(symbol)
-                if len(assignments[aid]) >= target_count:
-                    break
-
-        LOGGER.info(
-            "service shared ranking partitioned accounts=%s assigned=%s",
-            account_ids,
-            {aid: [self._ranking_symbol(row) for row in rows] for aid, rows in assignments.items()},
-        )
-        return assignments
-
-    @staticmethod
-    def _ranking_symbol(row: Dict[str, Any]) -> str:
-        return str(row.get("symbol") or "").strip().upper()
 
     def _run_entry_with_shared(
         self,
@@ -371,8 +305,6 @@ class StrategyRuntimeService:
             strategies.append(strategy)
 
         fetch_top_n = 0
-        total_target_count = 0
-        global_open_symbols: set[str] = set()
         min_volume_threshold = float("inf")
         max_workers = 1
         weight_limit_per_minute = float("inf")
@@ -381,16 +313,10 @@ class StrategyRuntimeService:
         for strategy in strategies:
             try:
                 open_symbols = strategy.store.list_open_symbols()
-                global_open_symbols.update(
-                    str(symbol).strip().upper()
-                    for symbol in open_symbols
-                    if str(symbol).strip()
-                )
                 open_count = len(open_symbols)
             except Exception:  # noqa: BLE001
                 open_count = 0
             strategy_top_n = int(strategy.top_n)
-            total_target_count += max(0, strategy_top_n)
             strategy_fetch_top_n = max(
                 strategy_top_n,
                 strategy_top_n * int(strategy.entry_rank_fetch_multiplier),
@@ -407,7 +333,6 @@ class StrategyRuntimeService:
                 min_request_interval_ms,
                 int(strategy.ranker_min_request_interval_ms),
             )
-        fetch_top_n = max(fetch_top_n, total_target_count + len(global_open_symbols))
 
         reference_strategy = strategies[0]
         try:
