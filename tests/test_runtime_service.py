@@ -491,10 +491,111 @@ class RuntimeServiceTest(unittest.TestCase):
             now_monotonic=20.0,
         )
 
-        self.assertEqual(build_calls, [("acc01", "acc03")])
+        self.assertEqual(build_calls, [("acc01", "acc02", "acc03")])
         self.assertIs(acc01.shared_payloads[0], ranking)
         self.assertIs(acc03.shared_payloads[0], ranking)
         self.assertIs(acc02.shared_payloads[0], ranking)
+
+    def test_shared_entry_ranking_is_partitioned_by_account_to_avoid_duplicate_symbols(self):
+        class StoreStub:
+            def list_open_symbols(self):
+                return set()
+
+        class StrategyStub:
+            def __init__(self, name: str) -> None:
+                self.name = name
+                self.top_n = 2
+                self.store = StoreStub()
+                self.shared_payloads = []
+
+            def run_entry(self, shared_top_gainers=None):
+                self.shared_payloads.append(shared_top_gainers)
+                return {"status": "SUCCESS"}
+
+        class ManagerStub:
+            def run_once(self):
+                return {"total": 0}
+
+            def run_daily_loss_cut(self):
+                return {"total": 0, "closed_loss_cut": 0, "errors": 0}
+
+        ranking = [
+            {"symbol": f"S{i}USDT", "change": str(20 - i), "current_price": "1", "volume": "100"}
+            for i in range(1, 7)
+        ]
+        acc01 = StrategyStub("acc01")
+        acc03 = StrategyStub("acc03")
+        acc02 = StrategyStub("acc02")
+        manager = ManagerStub()
+        cfg = ServiceRuntimeConfig(
+            timezone_name="UTC",
+            entry_hour=7,
+            entry_minute=40,
+            entry_misfire_grace_min=120,
+            entry_catchup_enabled=True,
+            daily_loss_cut_enabled=False,
+            daily_loss_cut_hour=23,
+            daily_loss_cut_minute=59,
+            manager_interval_sec=3600,
+            manager_max_catch_up_runs=1,
+            loop_sleep_sec=1.0,
+            run_manage_on_startup=False,
+            max_account_workers=3,
+        )
+        service = StrategyRuntimeService(
+            strategy=acc01,
+            manager=manager,
+            cfg=cfg,
+            now_monotonic=0.0,
+            account_runtimes={
+                "acc01": {
+                    "mode": "full",
+                    "strategy": acc01,
+                    "manager": manager,
+                    "balance_sampler": None,
+                    "entry_hour": 7,
+                    "entry_minute": 40,
+                },
+                "acc03": {
+                    "mode": "full",
+                    "strategy": acc03,
+                    "manager": manager,
+                    "balance_sampler": None,
+                    "entry_hour": 7,
+                    "entry_minute": 40,
+                },
+                "acc02": {
+                    "mode": "full",
+                    "strategy": acc02,
+                    "manager": manager,
+                    "balance_sampler": None,
+                    "entry_hour": 7,
+                    "entry_minute": 45,
+                },
+            },
+            max_account_workers=3,
+        )
+        service._build_shared_top_gainers = lambda _account_ids: ranking  # type: ignore[method-assign]
+
+        service.run_cycle(
+            now_local=datetime(2026, 2, 13, 7, 40, tzinfo=ZoneInfo("UTC")),
+            now_monotonic=10.0,
+        )
+        service.run_cycle(
+            now_local=datetime(2026, 2, 13, 7, 45, tzinfo=ZoneInfo("UTC")),
+            now_monotonic=20.0,
+        )
+
+        self.assertTrue(_wait_until(lambda: len(acc02.shared_payloads) == 1))
+        self.assertEqual([row["symbol"] for row in acc01.shared_payloads[0]], ["S1USDT", "S2USDT"])
+        self.assertEqual([row["symbol"] for row in acc03.shared_payloads[0]], ["S3USDT", "S4USDT"])
+        self.assertEqual([row["symbol"] for row in acc02.shared_payloads[0]], ["S5USDT", "S6USDT"])
+        assigned_symbols = [
+            row["symbol"]
+            for payload in [acc01.shared_payloads[0], acc03.shared_payloads[0], acc02.shared_payloads[0]]
+            for row in payload
+        ]
+        self.assertEqual(len(assigned_symbols), len(set(assigned_symbols)))
 
     def test_entry_failure_remains_due_within_grace_window(self):
         class StrategyStub:
@@ -991,14 +1092,17 @@ def test_entry_uses_shared_ranking_once_for_multi_accounts() -> None:
         },
         max_account_workers=2,
     )
-    shared = [{"symbol": "AAAUSDT", "change": 1.23, "current_price": 2.0, "volume": 1000.0}]
+    shared = [
+        {"symbol": f"S{i}USDT", "change": 30 - i, "current_price": 2.0, "volume": 1000.0}
+        for i in range(1, 21)
+    ]
     with patch.object(service, "_build_shared_top_gainers", return_value=shared) as mocked_ranker:
         service.run_cycle(now_local=datetime(2026, 2, 13, 11, 0, tzinfo=ZoneInfo("UTC")), now_monotonic=1.0)
 
-    assert _wait_until(lambda: s2.received == shared)
+    assert _wait_until(lambda: s2.received is not None)
     assert mocked_ranker.call_count == 1
-    assert s1.received == shared
-    assert s2.received == shared
+    assert [row["symbol"] for row in s1.received] == [f"S{i}USDT" for i in range(1, 11)]
+    assert [row["symbol"] for row in s2.received] == [f"S{i}USDT" for i in range(11, 21)]
 
 
 def test_entry_runs_in_background_and_does_not_block_manage_cycle() -> None:

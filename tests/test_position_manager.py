@@ -648,7 +648,7 @@ class PositionManagerTest(unittest.TestCase):
             tp_client_order_id="tp-old",
             sl_client_order_id="sl-old",
             opened_at_utc=opened_at.isoformat(),
-            expire_at_utc=(opened_at + timedelta(hours=12)).isoformat(),
+            expire_at_utc=(opened_at + timedelta(days=7)).isoformat(),
             status="OPEN",
         )
 
@@ -771,7 +771,7 @@ class PositionManagerTest(unittest.TestCase):
             tp_client_order_id=None,
             sl_client_order_id="sl-old",
             opened_at_utc=opened_at.isoformat(),
-            expire_at_utc=(opened_at + timedelta(hours=12)).isoformat(),
+            expire_at_utc=(opened_at + timedelta(days=7)).isoformat(),
             status="OPEN",
         )
         self.store.set_lock_state(
@@ -846,7 +846,7 @@ class PositionManagerTest(unittest.TestCase):
             tp_client_order_id=None,
             sl_client_order_id="sl-old",
             opened_at_utc=opened_at.isoformat(),
-            expire_at_utc=(opened_at + timedelta(hours=12)).isoformat(),
+            expire_at_utc=(opened_at + timedelta(days=7)).isoformat(),
             status="OPEN",
         )
         self.store.set_lock_state(
