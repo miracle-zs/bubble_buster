@@ -420,6 +420,9 @@ class StrategyRebalanceTest(unittest.TestCase):
         self.assertAlmostEqual(target_notional_used, expected_target_notional, places=6)
         old_available_formula_notional = 500.0 * 0.99 / 10.0 * 2.0
         self.assertGreater(target_notional_used, old_available_formula_notional)
+        self.assertEqual(strategy._rebalance_to_target.call_count, 1)
+        self.assertEqual(strategy._rebalance_to_target.call_args.kwargs["reason_tag"], "pre")
+        self.assertTrue(strategy._rebalance_to_target.call_args.kwargs["reduce_only"])
 
     def test_entry_paces_each_processed_symbol_when_configured(self) -> None:
         client = MagicMock()

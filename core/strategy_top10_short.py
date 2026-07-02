@@ -264,16 +264,6 @@ class Top10ShortStrategy:
                 )
 
             if not candidates:
-                if self.rebalance_enabled and self.rebalance_after_entry:
-                    try:
-                        post_rebalance_summary = self._rebalance_to_target(
-                            target_count=max(1, len(open_symbols)),
-                            reduce_only=False,
-                            reason_tag="post",
-                            run_id=run_id,
-                        )
-                    except Exception as exc:  # noqa: BLE001
-                        LOGGER.exception("Post-entry rebalance failed when no new candidates: %s", exc)
                 self.store.finalize_run(run_id, "SUCCESS", "All symbols already have open strategy positions")
                 self.notifier.send(
                     "【Top10做空】本次未开仓",
@@ -363,7 +353,7 @@ class Top10ShortStrategy:
             base_margin = effective_balance / float(self.allocation_splits)
             target_notional = base_margin * float(self.leverage)
             entry_target_mode = "available_balance"
-            if self.rebalance_enabled and self.rebalance_after_entry and expected_total_positions > 0:
+            if self.rebalance_enabled and expected_total_positions > 0:
                 try:
                     risk_rows_for_entry_sizing = self.client.get_position_risk()
                     equity_for_entry_sizing = self._compute_account_equity_usdt(
@@ -535,19 +525,6 @@ class Top10ShortStrategy:
                             f"qty={risk_off_result['qty']}, reason={risk_off_result['reason']}"
                         )
                     )
-
-            if self.rebalance_enabled and self.rebalance_after_entry:
-                open_positions_after_entry = self.store.list_open_positions()
-                if open_positions_after_entry:
-                    try:
-                        post_rebalance_summary = self._rebalance_to_target(
-                            target_count=len(open_positions_after_entry),
-                            reduce_only=False,
-                            reason_tag="post",
-                            run_id=run_id,
-                        )
-                    except Exception as exc:  # noqa: BLE001
-                        LOGGER.exception("Post-entry rebalance failed: %s", exc)
 
             failed_count = entry_failed_count + exit_setup_failed_count
             summary = (
