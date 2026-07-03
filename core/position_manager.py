@@ -65,7 +65,9 @@ class PositionManager:
             "initialized": 0,
             "updated": 0,
             "pruned": 0,
+            "errors": 0,
         }
+        error_symbols: List[str] = []
         active_symbols = set()
         risks = self.client.get_position_risk()
         for risk in risks:
@@ -83,30 +85,43 @@ class PositionManager:
                 continue
 
             existing = symbols_state.get(symbol)
-            if not isinstance(existing, dict):
-                symbols_state[symbol] = self._initialize_hourly_exchange_take_profit_monitor(
+            try:
+                if not isinstance(existing, dict):
+                    symbols_state[symbol] = self._initialize_hourly_exchange_take_profit_monitor(
+                        symbol=symbol,
+                        risk=risk,
+                        now_utc=now_utc,
+                        drop_pct=drop_pct,
+                    )
+                    summary["initialized"] += 1
+                    continue
+
+                refreshed = self._refresh_existing_hourly_exchange_take_profit_monitor(
                     symbol=symbol,
                     risk=risk,
+                    existing=existing,
                     now_utc=now_utc,
                     drop_pct=drop_pct,
                 )
-                summary["initialized"] += 1
+                symbols_state[symbol] = refreshed
+                summary["updated"] += 1
+            except Exception as exc:  # noqa: BLE001
+                summary["errors"] += 1
+                error_symbols.append(symbol)
+                LOGGER.warning(
+                    "Hourly exchange take-profit monitor refresh failed account=%s symbol=%s: %s",
+                    self.account_id,
+                    symbol,
+                    exc,
+                )
                 continue
-
-            refreshed = self._refresh_existing_hourly_exchange_take_profit_monitor(
-                symbol=symbol,
-                risk=risk,
-                existing=existing,
-                now_utc=now_utc,
-                drop_pct=drop_pct,
-            )
-            symbols_state[symbol] = refreshed
-            summary["updated"] += 1
 
         stale_symbols = [symbol for symbol in list(symbols_state.keys()) if symbol not in active_symbols]
         for symbol in stale_symbols:
             symbols_state.pop(symbol, None)
             summary["pruned"] += 1
+        if error_symbols:
+            summary["error_symbols"] = error_symbols
 
         self.store.set_lock_state(
             self.HOURLY_EXCHANGE_TP_LOCK_NAME,
@@ -165,14 +180,17 @@ class PositionManager:
                     position_amt=position_amt,
                     position_side=position_side,
                 )
+                tracked_position = self._find_open_position_for_exchange_symbol(symbol)
                 close_info = self._close_daily_loss_cut(
                     symbol=symbol,
                     qty=abs(position_amt),
                     side=close_side,
-                    position_id=None,
-                    cancel_pos=None,
+                    position_id=int(tracked_position["id"]) if tracked_position is not None else None,
+                    cancel_pos=tracked_position,
                     position_side=position_side if position_side in {"LONG", "SHORT"} else None,
                     use_reduce_only=use_reduce_only,
+                    close_status="CLOSED_HOURLY_TAKE_PROFIT",
+                    close_reason="HOURLY_EXCHANGE_TAKE_PROFIT",
                 )
                 summary["closed_take_profit"] += 1
                 monitor["last_triggered_hour_key"] = now_local.strftime("%Y-%m-%dT%H")
@@ -282,6 +300,15 @@ class PositionManager:
         else:
             refreshed["eligible_reached"] = bool(existing.get("eligible_reached"))
         return refreshed
+
+    def _find_open_position_for_exchange_symbol(self, symbol: str) -> Optional[Dict[str, Any]]:
+        normalized_symbol = str(symbol or "").strip()
+        if not normalized_symbol:
+            return None
+        for pos in self.store.list_open_positions():
+            if str(pos.get("symbol") or "").strip() == normalized_symbol:
+                return pos
+        return None
 
     def _reconstruct_short_opened_at_from_trades(
         self,
@@ -1181,6 +1208,8 @@ class PositionManager:
         cancel_pos: Optional[Dict[str, object]] = None,
         position_side: Optional[str] = None,
         use_reduce_only: bool = True,
+        close_status: str = "CLOSED_DAILY_LOSS_CUT",
+        close_reason: str = "DAILY_FLOATING_LOSS_CHECK",
     ) -> Dict[str, object]:
         if cancel_pos is not None:
             self._cancel_exit_orders(cancel_pos)
@@ -1211,8 +1240,8 @@ class PositionManager:
         if position_id is not None:
             self.store.mark_position_closed(
                 position_id=position_id,
-                status="CLOSED_DAILY_LOSS_CUT",
-                close_reason="DAILY_FLOATING_LOSS_CHECK",
+                status=close_status,
+                close_reason=close_reason,
                 close_order_id=close_order.get("orderId"),
             )
         return {

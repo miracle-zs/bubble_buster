@@ -1979,6 +1979,79 @@ class PositionManagerTest(unittest.TestCase):
         self.assertEqual(monitor["lowest_price_since_open"], 79.0)
         self.assertTrue(monitor["eligible_reached"])
 
+    def test_hourly_exchange_take_profit_refresh_keeps_other_symbols_when_one_symbol_fails(self) -> None:
+        opened_at_utc = datetime(2026, 3, 16, 1, 0, tzinfo=timezone.utc)
+        now_local = datetime(2026, 3, 16, 12, 0, tzinfo=timezone.utc)
+
+        client = MagicMock()
+        client.get_position_risk.return_value = [
+            {
+                "symbol": "NFPUSDT",
+                "positionAmt": "-10",
+                "entryPrice": "100",
+                "positionSide": "BOTH",
+            },
+            {
+                "symbol": "TAIKOUSDT",
+                "positionAmt": "-1",
+                "entryPrice": "100",
+                "positionSide": "BOTH",
+            },
+        ]
+
+        def get_user_trades(symbol: str, limit: int) -> list[dict[str, object]]:
+            del limit
+            if symbol == "NFPUSDT":
+                return [
+                    {
+                        "time": int(opened_at_utc.timestamp() * 1000),
+                        "qty": "5",
+                        "side": "SELL",
+                    }
+                ]
+            if symbol == "TAIKOUSDT":
+                return [
+                    {
+                        "time": int(opened_at_utc.timestamp() * 1000),
+                        "qty": "1",
+                        "side": "SELL",
+                    }
+                ]
+            return []
+
+        client.get_user_trades.side_effect = get_user_trades
+        client.get_klines.return_value = [
+            [int(opened_at_utc.timestamp() * 1000), "100", "101", "79", "80", 0],
+        ]
+
+        manager = PositionManager(
+            client=client,
+            store=self.store,
+            notifier=MagicMock(),
+            sl_liq_buffer_pct=1.0,
+            trigger_price_type="CONTRACT_PRICE",
+            daily_loss_cut_scope="exchange",
+        )
+
+        summary = manager.refresh_hourly_exchange_take_profit_state(
+            now_local=now_local,
+            drop_pct=20.0,
+        )
+
+        self.assertEqual(summary["initialized"], 1)
+        self.assertEqual(summary["updated"], 0)
+        self.assertEqual(summary["errors"], 1)
+        self.assertEqual(summary["error_symbols"], ["NFPUSDT"])
+
+        lock_state = self.store.get_lock_state(PositionManager.HOURLY_EXCHANGE_TP_LOCK_NAME)
+        self.assertIsNotNone(lock_state)
+        assert lock_state is not None
+        self.assertNotIn("NFPUSDT", lock_state["symbols"])
+        monitor = lock_state["symbols"]["TAIKOUSDT"]
+        self.assertEqual(monitor["opened_at_utc"], opened_at_utc.isoformat())
+        self.assertEqual(monitor["lowest_price_since_open"], 79.0)
+        self.assertTrue(monitor["eligible_reached"])
+
     def test_fetch_symbol_extremes_between_paginates_beyond_1000_bars(self) -> None:
         start_utc = datetime(2026, 3, 16, 0, 0, tzinfo=timezone.utc)
         end_utc = start_utc + timedelta(minutes=1002)
@@ -2154,6 +2227,23 @@ class PositionManagerTest(unittest.TestCase):
         self.assertIsNone(monitor["eligible_reached_at_utc"])
 
     def test_hourly_exchange_take_profit_closes_eligible_short_on_previous_closed_bullish_hour(self) -> None:
+        position_id = self.store.insert_position(
+            run_id=self.run_id,
+            symbol="BTCUSDT",
+            side="SHORT",
+            qty=1.0,
+            entry_price=100.0,
+            liq_price_open=160.0,
+            tp_price=None,
+            sl_price=150.0,
+            tp_order_id=None,
+            sl_order_id=222,
+            tp_client_order_id=None,
+            sl_client_order_id="sl-old",
+            opened_at_utc=datetime(2026, 3, 16, 1, 0, tzinfo=timezone.utc).isoformat(),
+            expire_at_utc=(datetime(2026, 3, 16, 1, 0, tzinfo=timezone.utc) + timedelta(days=7)).isoformat(),
+            status="OPEN",
+        )
         self.store.set_lock_state(
             PositionManager.HOURLY_EXCHANGE_TP_LOCK_NAME,
             {
@@ -2232,6 +2322,22 @@ class PositionManagerTest(unittest.TestCase):
         self.assertEqual(order_kwargs["symbol"], "BTCUSDT")
         self.assertEqual(order_kwargs["side"], "BUY")
         self.assertTrue(order_kwargs["reduceOnly"])
+        client.cancel_order.assert_called_once_with(
+            symbol="BTCUSDT",
+            order_id=222,
+            orig_client_order_id="sl-old",
+        )
+
+        row = self._get_position(position_id)
+        self.assertEqual(row["status"], "CLOSED_HOURLY_TAKE_PROFIT")
+        self.assertEqual(row["close_reason"], "HOURLY_EXCHANGE_TAKE_PROFIT")
+        self.assertEqual(row["close_order_id"], 5001)
+
+        buy_fill = self._get_buy_fill(position_id)
+        self.assertIsNotNone(buy_fill)
+        assert buy_fill is not None
+        self.assertEqual(buy_fill["order_id"], 5001)
+        self.assertEqual(buy_fill["client_order_id"], "tp-hourly")
 
     def test_hourly_exchange_take_profit_skips_when_previous_closed_hour_is_bearish_even_if_current_hour_is_green(self) -> None:
         self.store.set_lock_state(
