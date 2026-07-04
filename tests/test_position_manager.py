@@ -302,7 +302,7 @@ class PositionManagerTest(unittest.TestCase):
         self.assertEqual(row["close_reason"], "SHORT_POSITION_NOT_FOUND")
         self.assertIsNone(row["last_error"])
 
-    def test_run_once_cancels_orphan_exit_orders_without_exchange_short(self) -> None:
+    def test_cleanup_orphan_exit_orders_once_per_day_cancels_without_exchange_short(self) -> None:
         client = MagicMock()
         client.get_position_risk.return_value = [
             {
@@ -348,16 +348,33 @@ class PositionManagerTest(unittest.TestCase):
             trigger_price_type="CONTRACT_PRICE",
         )
 
-        summary = manager.run_once()
+        summary = manager.cleanup_orphan_exit_orders_once_per_day()
 
-        self.assertEqual(summary["orphan_exit_orders"], 1)
+        self.assertEqual(summary["canceled"], 1)
         client.cancel_order.assert_called_once_with(
             symbol="BASUSDT",
             order_id=301,
             orig_client_order_id="old-bas-sl",
         )
 
-    def test_run_once_skips_orphan_exit_order_cleanup_after_daily_run(self) -> None:
+    def test_run_once_does_not_scan_orphan_exit_orders(self) -> None:
+        client = MagicMock()
+        client.get_position_risk.return_value = []
+
+        manager = PositionManager(
+            client=client,
+            store=self.store,
+            notifier=MagicMock(),
+            sl_liq_buffer_pct=1.0,
+            trigger_price_type="CONTRACT_PRICE",
+        )
+
+        summary = manager.run_once()
+
+        self.assertNotIn("orphan_exit_orders", summary)
+        client.get_open_orders.assert_not_called()
+
+    def test_cleanup_orphan_exit_orders_once_per_day_skips_after_daily_run(self) -> None:
         today_key = datetime.now().astimezone().date().isoformat()
         self.store.set_lock_state(
             "orphan_exit_order_cleanup_v1",
@@ -379,9 +396,10 @@ class PositionManagerTest(unittest.TestCase):
             trigger_price_type="CONTRACT_PRICE",
         )
 
-        summary = manager.run_once()
+        summary = manager.cleanup_orphan_exit_orders_once_per_day()
 
-        self.assertEqual(summary["orphan_exit_orders"], 0)
+        self.assertEqual(summary["canceled"], 0)
+        self.assertTrue(summary["skipped"])
         client.get_open_orders.assert_not_called()
 
     def test_filled_sl_on_open_position_records_close_fill(self) -> None:

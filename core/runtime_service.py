@@ -11,6 +11,7 @@ from zoneinfo import ZoneInfo
 
 LOGGER = logging.getLogger(__name__)
 PROTECTION_RESTART_GRACE = timedelta(hours=2)
+ORPHAN_EXIT_ORDER_CLEANUP_WINDOW = timedelta(minutes=5)
 
 
 @dataclass(frozen=True)
@@ -41,6 +42,9 @@ class ServiceRuntimeConfig:
     hourly_exchange_take_profit_enabled: bool = False
     hourly_exchange_take_profit_minute: int = 0
     hourly_exchange_take_profit_drop_pct: float = 20.0
+    orphan_exit_order_cleanup_enabled: bool = True
+    orphan_exit_order_cleanup_hour: int = 3
+    orphan_exit_order_cleanup_minute: int = 30
     readonly_wallet_snapshot_interval_sec: float = 60.0
 
 
@@ -104,6 +108,8 @@ class StrategyRuntimeService:
         self._last_noon_protection_local_date: Optional[date] = None
         self._last_morning_protection_local_date_by_account: Dict[str, date] = {}
         self._last_hourly_exchange_take_profit_hour_by_account: Dict[str, str] = {}
+        self._last_orphan_exit_order_cleanup_local_date: Optional[date] = None
+        self._last_orphan_exit_order_cleanup_skipped_date: Optional[date] = None
         self._next_readonly_wallet_snapshot_monotonic_by_account: Dict[str, float] = {}
         self._shared_ranking_cache: Optional[List[Dict[str, Any]]] = None
         self._shared_ranking_cache_day: Optional[date] = None
@@ -842,6 +848,56 @@ class StrategyRuntimeService:
                     output["slow"] = True
         return outputs
 
+    def _orphan_exit_order_cleanup_schedule_for_day(self, day: date) -> datetime:
+        return datetime(
+            year=day.year,
+            month=day.month,
+            day=day.day,
+            hour=self.cfg.orphan_exit_order_cleanup_hour % 24,
+            minute=self.cfg.orphan_exit_order_cleanup_minute % 60,
+            second=0,
+            microsecond=0,
+            tzinfo=self.timezone,
+        )
+
+    def _run_orphan_exit_order_cleanup_if_due(self, now_local: datetime) -> None:
+        if not self.cfg.orphan_exit_order_cleanup_enabled:
+            return
+        today = now_local.date()
+        if self._last_orphan_exit_order_cleanup_local_date == today:
+            return
+        if self._last_orphan_exit_order_cleanup_skipped_date == today:
+            return
+
+        target = self._orphan_exit_order_cleanup_schedule_for_day(today)
+        if now_local < target:
+            return
+        if now_local > target + ORPHAN_EXIT_ORDER_CLEANUP_WINDOW:
+            self._last_orphan_exit_order_cleanup_skipped_date = today
+            LOGGER.warning(
+                "Orphan exit order cleanup missed fixed window, skip for today: now=%s target=%s window_min=%s",
+                now_local.isoformat(),
+                target.isoformat(),
+                int(ORPHAN_EXIT_ORDER_CLEANUP_WINDOW.total_seconds() // 60),
+            )
+            return
+
+        self._last_orphan_exit_order_cleanup_local_date = today
+        results: Dict[str, Dict[str, object]] = {}
+        for aid, ctx in self.account_runtimes.items():
+            if str(ctx.get("mode", "full")).strip().lower() != "full":
+                continue
+            manager = ctx.get("manager")
+            if manager is None or not hasattr(manager, "cleanup_orphan_exit_orders_once_per_day"):
+                results[aid] = {"account_id": aid, "error": "MANAGER_UNAVAILABLE"}
+                continue
+            try:
+                results[aid] = manager.cleanup_orphan_exit_orders_once_per_day()  # type: ignore[attr-defined]
+            except Exception as exc:  # noqa: BLE001
+                LOGGER.exception("service orphan exit order cleanup failed account=%s: %s", aid, exc)
+                results[aid] = {"account_id": aid, "error": str(exc)}
+        LOGGER.info("service orphan exit order cleanup summary: %s", results)
+
     def run_cycle(
         self,
         now_local: Optional[datetime] = None,
@@ -854,6 +910,7 @@ class StrategyRuntimeService:
         self._run_noon_protection_if_due(local_dt)
         self._run_morning_protection_if_due(local_dt)
         self._run_hourly_exchange_take_profit_if_due(local_dt)
+        self._run_orphan_exit_order_cleanup_if_due(local_dt)
         self._run_manage_if_due(mono)
         self._run_balance_snapshot_for_readonly_accounts(mono)
 

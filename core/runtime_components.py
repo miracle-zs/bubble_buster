@@ -335,6 +335,15 @@ def create_components(
         hourly_exchange_take_profit_drop_pct=runtime_cfg_selected.getfloat(
             "hourly_exchange_take_profit_drop_pct", fallback=20.0
         ),
+        orphan_exit_order_cleanup_enabled=runtime_cfg_selected.getboolean(
+            "orphan_exit_order_cleanup_enabled", fallback=True
+        ),
+        orphan_exit_order_cleanup_hour=runtime_cfg_selected.getint(
+            "orphan_exit_order_cleanup_hour", fallback=3
+        ),
+        orphan_exit_order_cleanup_minute=runtime_cfg_selected.getint(
+            "orphan_exit_order_cleanup_minute", fallback=30
+        ),
         manager_interval_sec=max(1, runtime_cfg_selected.getint("manager_interval_sec", fallback=60)),
         manager_max_catch_up_runs=max(1, runtime_cfg_selected.getint("manager_max_catch_up_runs", fallback=3)),
         loop_sleep_sec=max(0.2, runtime_cfg_selected.getfloat("service_loop_sleep_sec", fallback=1.0)),

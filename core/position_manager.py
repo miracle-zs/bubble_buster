@@ -1016,7 +1016,6 @@ class PositionManager:
             "closed_timeout": 0,
             "closed_external": 0,
             "updated_sl": 0,
-            "orphan_exit_orders": 0,
             "errors": 0,
         }
         event_details: Dict[str, List[str]] = {
@@ -1025,7 +1024,6 @@ class PositionManager:
             "closed_timeout": [],
             "closed_external": [],
             "updated_sl": [],
-            "orphan_exit_orders": [],
             "errors": [],
         }
 
@@ -1045,15 +1043,6 @@ class PositionManager:
                 self.store.set_position_error(int(pos["id"]), str(exc))
                 event_details["errors"].append(f"{symbol}(id={position_id}): {exc}")
 
-        try:
-            orphan_cleanup = self._cleanup_orphan_exit_orders_once_per_day()
-            summary["orphan_exit_orders"] += int(orphan_cleanup["canceled"])
-            event_details["orphan_exit_orders"].extend(str(item) for item in orphan_cleanup["details"])
-        except Exception as exc:  # noqa: BLE001
-            summary["errors"] += 1
-            LOGGER.exception("Failed to cleanup orphan exit orders account=%s: %s", self.account_id, exc)
-            event_details["errors"].append(f"orphan_exit_orders: {exc}")
-
         if any(value > 0 for key, value in summary.items() if key != "total"):
             self.notifier.send(
                 "【Top10做空】巡检动作汇总",
@@ -1064,7 +1053,7 @@ class PositionManager:
         self._morning_protection_caps_cache = None
         return summary
 
-    def _cleanup_orphan_exit_orders_once_per_day(self) -> Dict[str, object]:
+    def cleanup_orphan_exit_orders_once_per_day(self) -> Dict[str, object]:
         day_key = self._local_day_key()
         state = self.store.get_lock_state(self.ORPHAN_EXIT_ORDER_CLEANUP_LOCK_NAME) or {}
         if str(state.get("day_key") or "") == day_key:
@@ -1628,7 +1617,6 @@ class PositionManager:
             ("closed_timeout", summary["closed_timeout"]),
             ("closed_external", summary["closed_external"]),
             ("updated_sl", summary["updated_sl"]),
-            ("orphan_exit_orders", summary["orphan_exit_orders"]),
             ("errors", summary["errors"]),
         ]
         lines = [
@@ -1647,7 +1635,6 @@ class PositionManager:
             ("closed_timeout", "超时平仓明细"),
             ("closed_external", "外部平仓明细"),
             ("updated_sl", "止损更新明细"),
-            ("orphan_exit_orders", "孤儿退出挂单清理明细"),
             ("errors", "错误明细"),
         ]:
             values = [item for item in details.get(key, []) if item]

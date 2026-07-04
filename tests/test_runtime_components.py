@@ -97,6 +97,53 @@ serverchan_sendkey =
     assert service_cfg.max_account_workers >= 1
 
 
+def test_create_components_applies_orphan_exit_order_cleanup_schedule(tmp_path) -> None:
+    cfg_path = tmp_path / "config.ini"
+    db_path = tmp_path / "state.db"
+    cfg_path.write_text(
+        f"""
+[accounts]
+enabled = acc01
+
+[binance]
+api_key = k
+api_secret = s
+
+[strategy]
+leverage = 2
+top_n = 10
+
+[runtime]
+db_path = {db_path}
+default_account_id = acc01
+timezone = UTC
+entry_hour = 7
+entry_minute = 40
+manager_interval_sec = 60
+orphan_exit_order_cleanup_enabled = false
+orphan_exit_order_cleanup_hour = 4
+orphan_exit_order_cleanup_minute = 15
+
+[notify]
+enabled = false
+serverchan_sendkey =
+""",
+        encoding="utf-8",
+    )
+
+    cfg = configparser.ConfigParser()
+    assert cfg.read(str(cfg_path))
+
+    _, _, _, _, service_cfg, _ = create_components(
+        cfg,
+        base_dir=str(tmp_path),
+    )
+
+    assert service_cfg.orphan_exit_order_cleanup_enabled is False
+    assert service_cfg.orphan_exit_order_cleanup_hour == 4
+    assert service_cfg.orphan_exit_order_cleanup_minute == 15
+
+
 def test_create_components_applies_per_account_daily_loss_cut_enabled_override(tmp_path) -> None:
     cfg_path = tmp_path / "config.ini"
     db_path = tmp_path / "state.db"

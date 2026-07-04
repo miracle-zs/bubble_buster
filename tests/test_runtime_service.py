@@ -33,6 +33,9 @@ class RuntimeServiceTest(unittest.TestCase):
             manager_max_catch_up_runs=overrides.get("manager_max_catch_up_runs", 3),
             loop_sleep_sec=overrides.get("loop_sleep_sec", 1.0),
             run_manage_on_startup=overrides.get("run_manage_on_startup", False),
+            orphan_exit_order_cleanup_enabled=overrides.get("orphan_exit_order_cleanup_enabled", True),
+            orphan_exit_order_cleanup_hour=overrides.get("orphan_exit_order_cleanup_hour", 3),
+            orphan_exit_order_cleanup_minute=overrides.get("orphan_exit_order_cleanup_minute", 30),
             readonly_wallet_snapshot_interval_sec=overrides.get("readonly_wallet_snapshot_interval_sec", 60.0),
         )
 
@@ -53,6 +56,7 @@ class RuntimeServiceTest(unittest.TestCase):
             def __init__(self):
                 self.calls = 0
                 self.daily_loss_calls = 0
+                self.orphan_cleanup_calls = 0
 
             def run_once(self):
                 self.calls += 1
@@ -61,6 +65,10 @@ class RuntimeServiceTest(unittest.TestCase):
             def run_daily_loss_cut(self):
                 self.daily_loss_calls += 1
                 return {"total": 0, "closed_loss_cut": 0, "errors": 0}
+
+            def cleanup_orphan_exit_orders_once_per_day(self):
+                self.orphan_cleanup_calls += 1
+                return {"canceled": 0, "details": [], "day_key": "2026-02-13"}
 
         class WalletSamplerStub:
             def __init__(self):
@@ -161,6 +169,7 @@ class RuntimeServiceTest(unittest.TestCase):
         # First run triggers startup manage.
         service.run_cycle(now_local=now_local, now_monotonic=10.0)
         self.assertEqual(manager.calls, 1)
+        self.assertEqual(manager.orphan_cleanup_calls, 0)
 
         # Not due yet.
         service.run_cycle(now_local=now_local, now_monotonic=30.0)
@@ -173,6 +182,57 @@ class RuntimeServiceTest(unittest.TestCase):
         # Far behind: catch-up is capped at 2 runs in one cycle.
         service.run_cycle(now_local=now_local, now_monotonic=400.0)
         self.assertEqual(manager.calls, 4)
+        self.assertEqual(manager.orphan_cleanup_calls, 0)
+
+    def test_orphan_exit_order_cleanup_runs_once_at_fixed_time(self):
+        service, _, manager, _ = self._create_service(
+            run_manage_on_startup=True,
+            manager_interval_sec=60,
+            orphan_exit_order_cleanup_enabled=True,
+            orphan_exit_order_cleanup_hour=3,
+            orphan_exit_order_cleanup_minute=30,
+            entry_hour=23,
+            entry_minute=59,
+        )
+
+        before = datetime(2026, 2, 13, 3, 29, tzinfo=ZoneInfo("UTC"))
+        due = datetime(2026, 2, 13, 3, 30, tzinfo=ZoneInfo("UTC"))
+        next_day = datetime(2026, 2, 14, 3, 30, tzinfo=ZoneInfo("UTC"))
+
+        service.run_cycle(now_local=before, now_monotonic=10.0)
+        self.assertEqual(manager.orphan_cleanup_calls, 0)
+
+        service.run_cycle(now_local=due, now_monotonic=70.0)
+        self.assertEqual(manager.orphan_cleanup_calls, 1)
+
+        service.run_cycle(now_local=due, now_monotonic=130.0)
+        self.assertEqual(manager.orphan_cleanup_calls, 1)
+
+        service.run_cycle(now_local=next_day, now_monotonic=190.0)
+        self.assertEqual(manager.orphan_cleanup_calls, 2)
+
+    def test_orphan_exit_order_cleanup_does_not_catch_up_after_window_missed(self):
+        service, _, manager, _ = self._create_service(
+            run_manage_on_startup=False,
+            manager_interval_sec=3600,
+            orphan_exit_order_cleanup_enabled=True,
+            orphan_exit_order_cleanup_hour=3,
+            orphan_exit_order_cleanup_minute=30,
+            entry_hour=23,
+            entry_minute=59,
+        )
+
+        missed = datetime(2026, 2, 13, 9, 0, tzinfo=ZoneInfo("UTC"))
+        next_day_due = datetime(2026, 2, 14, 3, 30, tzinfo=ZoneInfo("UTC"))
+
+        service.run_cycle(now_local=missed, now_monotonic=10.0)
+        self.assertEqual(manager.orphan_cleanup_calls, 0)
+
+        service.run_cycle(now_local=missed, now_monotonic=70.0)
+        self.assertEqual(manager.orphan_cleanup_calls, 0)
+
+        service.run_cycle(now_local=next_day_due, now_monotonic=130.0)
+        self.assertEqual(manager.orphan_cleanup_calls, 1)
 
     def test_run_forever_can_stop_via_event(self):
         service, _, manager, _ = self._create_service(
@@ -491,6 +551,7 @@ class RuntimeServiceTest(unittest.TestCase):
             now_monotonic=20.0,
         )
 
+        self.assertTrue(_wait_until(lambda: len(acc02.shared_payloads) == 1))
         self.assertEqual(build_calls, [("acc01", "acc03")])
         self.assertIs(acc01.shared_payloads[0], ranking)
         self.assertIs(acc03.shared_payloads[0], ranking)
