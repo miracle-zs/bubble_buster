@@ -242,6 +242,49 @@ class ClientUtilsTest(unittest.TestCase):
         self.assertEqual(order["clientOrderId"], "cid-3")
         self.assertEqual(order["status"], "CANCELED")
 
+    def test_get_open_orders_combines_legacy_and_algo_orders(self) -> None:
+        client = BinanceFuturesClient(api_key="k", api_secret="s")
+
+        def _fake_request(method, path, params=None, signed=False):  # type: ignore[no-untyped-def]
+            if method == "GET" and path == "/fapi/v1/openOrders":
+                self.assertEqual(params, {})
+                self.assertTrue(signed)
+                return [
+                    {
+                        "orderId": 11,
+                        "clientOrderId": "legacy-sl",
+                        "symbol": "BTCUSDT",
+                        "type": "STOP_MARKET",
+                        "side": "BUY",
+                        "status": "NEW",
+                    }
+                ]
+            if method == "GET" and path == "/fapi/v1/openAlgoOrders":
+                self.assertEqual(params, {})
+                self.assertTrue(signed)
+                return [
+                    {
+                        "algoId": 22,
+                        "clientAlgoId": "algo-sl",
+                        "symbol": "ETHUSDT",
+                        "orderType": "STOP_MARKET",
+                        "side": "BUY",
+                        "algoStatus": "NEW",
+                    }
+                ]
+            raise AssertionError(f"Unexpected request: {method} {path} params={params} signed={signed}")
+
+        client._request = MagicMock(side_effect=_fake_request)  # type: ignore[method-assign]
+
+        orders = client.get_open_orders()
+
+        self.assertEqual(len(orders), 2)
+        self.assertEqual(orders[0]["orderId"], 11)
+        self.assertEqual(orders[1]["orderId"], 22)
+        self.assertEqual(orders[1]["clientOrderId"], "algo-sl")
+        self.assertEqual(orders[1]["type"], "STOP_MARKET")
+        self.assertEqual(orders[1]["status"], "NEW")
+
 
 if __name__ == "__main__":
     unittest.main()

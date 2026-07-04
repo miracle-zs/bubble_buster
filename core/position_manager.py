@@ -22,6 +22,7 @@ class PositionManager:
     NOON_PROTECTION_LOCK_NAME = "noon_protection_stop_caps_v1"
     MORNING_PROTECTION_LOCK_NAME = "morning_protection_stop_caps_v1"
     HOURLY_EXCHANGE_TP_LOCK_NAME = "hourly_exchange_take_profit_v1"
+    ORPHAN_EXIT_ORDER_CLEANUP_LOCK_NAME = "orphan_exit_order_cleanup_v1"
     NOON_PROTECTION_UNTRACKED_START_OFFSET = timedelta(hours=8)
 
     def __init__(
@@ -1015,6 +1016,7 @@ class PositionManager:
             "closed_timeout": 0,
             "closed_external": 0,
             "updated_sl": 0,
+            "orphan_exit_orders": 0,
             "errors": 0,
         }
         event_details: Dict[str, List[str]] = {
@@ -1023,6 +1025,7 @@ class PositionManager:
             "closed_timeout": [],
             "closed_external": [],
             "updated_sl": [],
+            "orphan_exit_orders": [],
             "errors": [],
         }
 
@@ -1042,6 +1045,15 @@ class PositionManager:
                 self.store.set_position_error(int(pos["id"]), str(exc))
                 event_details["errors"].append(f"{symbol}(id={position_id}): {exc}")
 
+        try:
+            orphan_cleanup = self._cleanup_orphan_exit_orders_once_per_day()
+            summary["orphan_exit_orders"] += int(orphan_cleanup["canceled"])
+            event_details["orphan_exit_orders"].extend(str(item) for item in orphan_cleanup["details"])
+        except Exception as exc:  # noqa: BLE001
+            summary["errors"] += 1
+            LOGGER.exception("Failed to cleanup orphan exit orders account=%s: %s", self.account_id, exc)
+            event_details["errors"].append(f"orphan_exit_orders: {exc}")
+
         if any(value > 0 for key, value in summary.items() if key != "total"):
             self.notifier.send(
                 "【Top10做空】巡检动作汇总",
@@ -1052,6 +1064,83 @@ class PositionManager:
         self._morning_protection_caps_cache = None
         return summary
 
+    def _cleanup_orphan_exit_orders_once_per_day(self) -> Dict[str, object]:
+        day_key = self._local_day_key()
+        state = self.store.get_lock_state(self.ORPHAN_EXIT_ORDER_CLEANUP_LOCK_NAME) or {}
+        if str(state.get("day_key") or "") == day_key:
+            return {"canceled": 0, "details": [], "skipped": True, "day_key": day_key}
+
+        result = self._cleanup_orphan_exit_orders()
+        self.store.set_lock_state(
+            self.ORPHAN_EXIT_ORDER_CLEANUP_LOCK_NAME,
+            {
+                "day_key": day_key,
+                "canceled": int(result["canceled"]),
+                "updated_at_utc": self._utc_now_iso(),
+            },
+        )
+        result["day_key"] = day_key
+        return result
+
+    @staticmethod
+    def _local_day_key() -> str:
+        return datetime.now().astimezone().date().isoformat()
+
+    def _cleanup_orphan_exit_orders(self) -> Dict[str, object]:
+        risks = self.client.get_position_risk()
+        active_short_symbols = {
+            str(row.get("symbol") or "").strip()
+            for row in risks
+            if str(row.get("symbol") or "").strip()
+            and self._safe_float(row.get("positionAmt"), default=0.0) < 0
+        }
+        open_orders = self.client.get_open_orders()
+        canceled = 0
+        details: List[str] = []
+        for order in open_orders:
+            symbol = str(order.get("symbol") or "").strip()
+            if not symbol or symbol in active_short_symbols:
+                continue
+            if not self._is_orphan_exit_order_candidate(order):
+                continue
+            order_id = order.get("orderId")
+            client_order_id = order.get("clientOrderId")
+            self._cancel_order_if_exists(symbol, order_id, client_order_id)
+            canceled += 1
+            details.append(f"{symbol}(order_id={order_id or '-'}, client_id={client_order_id or '-'})")
+        return {"canceled": canceled, "details": details}
+
+    @classmethod
+    def _is_orphan_exit_order_candidate(cls, order: Dict[str, object]) -> bool:
+        status = str(order.get("status") or "").strip().upper()
+        if status and status not in {"NEW", "PENDING"}:
+            return False
+        side = str(order.get("side") or "").strip().upper()
+        if side != "BUY":
+            return False
+        position_side = str(order.get("positionSide") or "").strip().upper()
+        if position_side == "LONG":
+            return False
+        order_type = str(order.get("type") or order.get("orderType") or "").strip().upper()
+        if order_type not in {
+            "STOP",
+            "STOP_MARKET",
+            "TAKE_PROFIT",
+            "TAKE_PROFIT_MARKET",
+            "TRAILING_STOP_MARKET",
+        }:
+            return False
+        if cls._truthy_order_flag(order.get("reduceOnly")) or cls._truthy_order_flag(order.get("closePosition")):
+            return True
+        client_order_id = str(order.get("clientOrderId") or "").strip()
+        return client_order_id.startswith(("t10s-sl-", "t10s-tp-", "t10s-nsl-", "t10s-msl-"))
+
+    @staticmethod
+    def _truthy_order_flag(value: object) -> bool:
+        if isinstance(value, bool):
+            return value
+        return str(value or "").strip().lower() in {"1", "true", "yes"}
+
     def _manage_position(self, pos: Dict[str, object]) -> Optional[Dict[str, object]]:
         position_id = int(pos["id"])
         symbol = str(pos["symbol"])
@@ -1061,8 +1150,7 @@ class PositionManager:
             close_result = self._close_if_recorded_exit_filled(pos)
             if close_result:
                 return close_result
-            self.store.set_position_error(position_id, "position risk not found")
-            return None
+            return self._close_external_missing_short(pos)
 
         position_amt = float(risk.get("positionAmt", "0") or 0)
         if position_amt >= 0:
@@ -1070,16 +1158,7 @@ class PositionManager:
             if close_result:
                 return close_result
 
-            self._cancel_exit_orders(pos)
-            self.store.mark_position_closed(
-                position_id=position_id,
-                status="CLOSED_EXTERNAL",
-                close_reason="SHORT_POSITION_NOT_FOUND",
-            )
-            return {
-                "type": "closed_external",
-                "detail": f"{symbol}(id={position_id}, reason=SHORT_POSITION_NOT_FOUND)",
-            }
+            return self._close_external_missing_short(pos)
 
         if self._is_protection_exempt(symbol):
             return None
@@ -1109,6 +1188,20 @@ class PositionManager:
             }
 
         return None
+
+    def _close_external_missing_short(self, pos: Dict[str, object]) -> Dict[str, object]:
+        position_id = int(pos["id"])
+        symbol = str(pos["symbol"])
+        self._cancel_exit_orders(pos)
+        self.store.mark_position_closed(
+            position_id=position_id,
+            status="CLOSED_EXTERNAL",
+            close_reason="SHORT_POSITION_NOT_FOUND",
+        )
+        return {
+            "type": "closed_external",
+            "detail": f"{symbol}(id={position_id}, reason=SHORT_POSITION_NOT_FOUND)",
+        }
 
     def _close_if_recorded_exit_filled(self, pos: Dict[str, object]) -> Optional[Dict[str, object]]:
         position_id = int(pos["id"])
@@ -1535,6 +1628,7 @@ class PositionManager:
             ("closed_timeout", summary["closed_timeout"]),
             ("closed_external", summary["closed_external"]),
             ("updated_sl", summary["updated_sl"]),
+            ("orphan_exit_orders", summary["orphan_exit_orders"]),
             ("errors", summary["errors"]),
         ]
         lines = [
@@ -1553,6 +1647,7 @@ class PositionManager:
             ("closed_timeout", "超时平仓明细"),
             ("closed_external", "外部平仓明细"),
             ("updated_sl", "止损更新明细"),
+            ("orphan_exit_orders", "孤儿退出挂单清理明细"),
             ("errors", "错误明细"),
         ]:
             values = [item for item in details.get(key, []) if item]

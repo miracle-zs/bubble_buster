@@ -256,6 +256,134 @@ class PositionManagerTest(unittest.TestCase):
         self.assertAlmostEqual(float(fill["avg_price"]), 798 / 0.02)
         self.assertAlmostEqual(float(fill["realized_pnl"]), 22.0)
 
+    def test_missing_position_risk_cancels_stale_exit_orders_and_marks_external(self) -> None:
+        position_id = self._insert_open_position(
+            symbol="BTCUSDT",
+            qty=0.02,
+            tp_order_id=101,
+            sl_order_id=202,
+            tp_price=40000.0,
+            sl_price=59000.0,
+            expire_in_hours=24,
+        )
+
+        client = MagicMock()
+        client.get_position_risk.return_value = []
+        client.get_order.side_effect = [
+            {"orderId": 101, "clientOrderId": "tp-old", "status": "NEW"},
+            {"orderId": 202, "clientOrderId": "sl-old", "status": "NEW"},
+        ]
+
+        manager = PositionManager(
+            client=client,
+            store=self.store,
+            notifier=MagicMock(),
+            sl_liq_buffer_pct=1.0,
+            trigger_price_type="CONTRACT_PRICE",
+        )
+
+        summary = manager.run_once()
+
+        self.assertEqual(summary["closed_external"], 1)
+        self.assertEqual(client.cancel_order.call_count, 2)
+        client.cancel_order.assert_any_call(
+            symbol="BTCUSDT",
+            order_id=101,
+            orig_client_order_id="tp-old",
+        )
+        client.cancel_order.assert_any_call(
+            symbol="BTCUSDT",
+            order_id=202,
+            orig_client_order_id="sl-old",
+        )
+
+        row = self._get_position(position_id)
+        self.assertEqual(row["status"], "CLOSED_EXTERNAL")
+        self.assertEqual(row["close_reason"], "SHORT_POSITION_NOT_FOUND")
+        self.assertIsNone(row["last_error"])
+
+    def test_run_once_cancels_orphan_exit_orders_without_exchange_short(self) -> None:
+        client = MagicMock()
+        client.get_position_risk.return_value = [
+            {
+                "symbol": "MAGMAUSDT",
+                "positionAmt": "-10",
+                "liquidationPrice": "1.2",
+            }
+        ]
+        client.get_open_orders.return_value = [
+            {
+                "symbol": "BASUSDT",
+                "orderId": 301,
+                "clientOrderId": "old-bas-sl",
+                "type": "STOP_MARKET",
+                "side": "BUY",
+                "status": "NEW",
+                "reduceOnly": True,
+            },
+            {
+                "symbol": "MAGMAUSDT",
+                "orderId": 302,
+                "clientOrderId": "live-magma-sl",
+                "type": "STOP_MARKET",
+                "side": "BUY",
+                "status": "NEW",
+                "reduceOnly": True,
+            },
+            {
+                "symbol": "NOUSDT",
+                "orderId": 303,
+                "clientOrderId": "entry-sell",
+                "type": "LIMIT",
+                "side": "SELL",
+                "status": "NEW",
+            },
+        ]
+
+        manager = PositionManager(
+            client=client,
+            store=self.store,
+            notifier=MagicMock(),
+            sl_liq_buffer_pct=1.0,
+            trigger_price_type="CONTRACT_PRICE",
+        )
+
+        summary = manager.run_once()
+
+        self.assertEqual(summary["orphan_exit_orders"], 1)
+        client.cancel_order.assert_called_once_with(
+            symbol="BASUSDT",
+            order_id=301,
+            orig_client_order_id="old-bas-sl",
+        )
+
+    def test_run_once_skips_orphan_exit_order_cleanup_after_daily_run(self) -> None:
+        today_key = datetime.now().astimezone().date().isoformat()
+        self.store.set_lock_state(
+            "orphan_exit_order_cleanup_v1",
+            {
+                "day_key": today_key,
+                "canceled": 0,
+                "updated_at_utc": datetime.now(timezone.utc).replace(microsecond=0).isoformat(),
+            },
+        )
+
+        client = MagicMock()
+        client.get_position_risk.return_value = []
+
+        manager = PositionManager(
+            client=client,
+            store=self.store,
+            notifier=MagicMock(),
+            sl_liq_buffer_pct=1.0,
+            trigger_price_type="CONTRACT_PRICE",
+        )
+
+        summary = manager.run_once()
+
+        self.assertEqual(summary["orphan_exit_orders"], 0)
+        client.get_open_orders.assert_not_called()
+
     def test_filled_sl_on_open_position_records_close_fill(self) -> None:
         position_id = self._insert_open_position(
             symbol="ETHUSDT",

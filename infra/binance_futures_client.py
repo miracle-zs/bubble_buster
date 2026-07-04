@@ -425,6 +425,32 @@ class BinanceFuturesClient:
                 client_algo_id=orig_client_order_id,
             )
 
+    def get_open_orders(self, symbol: Optional[str] = None) -> List[Dict[str, Any]]:
+        params: Dict[str, Any] = {}
+        if symbol:
+            params["symbol"] = symbol
+
+        orders: List[Dict[str, Any]] = []
+        legacy_result = self._request("GET", "/fapi/v1/openOrders", params=params, signed=True)
+        if isinstance(legacy_result, list):
+            orders.extend(legacy_result)
+        elif isinstance(legacy_result, dict):
+            orders.append(legacy_result)
+
+        try:
+            algo_result = self._request("GET", "/fapi/v1/openAlgoOrders", params=params, signed=True)
+        except BinanceAPIError as exc:
+            if not self._is_algo_endpoint_unavailable_error(exc):
+                raise
+            LOGGER.warning("Open algo orders endpoint unavailable, only legacy open orders returned: %s", exc)
+            return orders
+
+        if isinstance(algo_result, list):
+            orders.extend(self._normalize_algo_order_payload(order) for order in algo_result if isinstance(order, dict))
+        elif isinstance(algo_result, dict):
+            orders.append(self._normalize_algo_order_payload(algo_result))
+        return orders
+
     def cancel_all_open_orders(self, symbol: str) -> Dict[str, Any]:
         return self._request("DELETE", "/fapi/v1/allOpenOrders", params={"symbol": symbol}, signed=True)
 
