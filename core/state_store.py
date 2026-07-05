@@ -386,6 +386,18 @@ class StateStore:
                 (qty, entry_price, utc_now_iso(), position_id),
             )
 
+    def mark_position_open(self, position_id: int) -> None:
+        with self._connect_ctx() as conn:
+            conn.execute(
+                """
+                UPDATE positions
+                SET status = 'OPEN',
+                    updated_at_utc = ?
+                WHERE id = ?
+                """,
+                (utc_now_iso(), position_id),
+            )
+
     def mark_position_closed(
         self,
         position_id: int,

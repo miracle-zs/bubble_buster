@@ -467,7 +467,7 @@ class Top10ShortStrategy:
                         sl_client_order_id=None,
                         opened_at_utc=opened_at.replace(microsecond=0).isoformat(),
                         expire_at_utc=expire_at.replace(microsecond=0).isoformat(),
-                        status="OPEN",
+                        status="PENDING_EXIT_SETUP",
                     )
 
                     successful_positions.append(
@@ -509,6 +509,7 @@ class Top10ShortStrategy:
                         position_id=position_id,
                         symbol=symbol,
                     )
+                    self.store.mark_position_open(position_id)
                 except Exception as exc:  # noqa: BLE001
                     exit_setup_failed_count += 1
                     exit_setup_failure_details.append(f"{symbol}: {exc}")

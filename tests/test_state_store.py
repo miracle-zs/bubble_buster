@@ -66,6 +66,36 @@ class StateStoreTest(unittest.TestCase):
         symbols_after = self.store.list_open_symbols()
         self.assertNotIn("BTCUSDT", symbols_after)
 
+    def test_pending_exit_setup_position_is_not_listed_until_marked_open(self) -> None:
+        run_id, _ = self.store.create_run("2026-02-13")
+        position_id = self.store.insert_position(
+            run_id=run_id,
+            symbol="AAAUSDT",
+            side="SHORT",
+            qty=1.0,
+            entry_price=10.0,
+            liq_price_open=12.0,
+            tp_price=None,
+            sl_price=None,
+            tp_order_id=None,
+            sl_order_id=None,
+            tp_client_order_id=None,
+            sl_client_order_id=None,
+            opened_at_utc="2026-02-13T00:00:00+00:00",
+            expire_at_utc="2026-02-14T23:30:00+00:00",
+            status="PENDING_EXIT_SETUP",
+        )
+
+        self.assertEqual(self.store.list_open_positions(), [])
+        self.assertNotIn("AAAUSDT", self.store.list_open_symbols())
+
+        self.store.mark_position_open(position_id)
+
+        open_positions = self.store.list_open_positions()
+        self.assertEqual(len(open_positions), 1)
+        self.assertEqual(open_positions[0]["symbol"], "AAAUSDT")
+        self.assertIn("AAAUSDT", self.store.list_open_symbols())
+
     def test_wallet_snapshot_roundtrip(self) -> None:
         snapshot_id = self.store.add_wallet_snapshot(
             captured_at_utc="2026-02-13T00:00:00+00:00",
