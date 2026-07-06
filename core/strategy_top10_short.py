@@ -470,6 +470,32 @@ class Top10ShortStrategy:
                         status="PENDING_EXIT_SETUP",
                     )
 
+                    opened_symbols.append(plan.symbol)
+                    opened_count += 1
+                    try:
+                        self._place_exit_orders(
+                            position_id=position_id,
+                            symbol=plan.symbol,
+                        )
+                        self.store.mark_position_open(position_id)
+                    except Exception as exc:  # noqa: BLE001
+                        exit_setup_failed_count += 1
+                        exit_setup_failure_details.append(f"{plan.symbol}: {exc}")
+                        LOGGER.exception("Failed to place exit orders for %s: %s", plan.symbol, exc)
+                        self.store.set_position_error(position_id, f"exit_setup: {exc}")
+                        risk_off_result = self._force_close_position(
+                            position_id=position_id,
+                            symbol=plan.symbol,
+                            reason="EXIT_SETUP_FAILED",
+                        )
+                        risk_off_details.append(
+                            (
+                                f"{risk_off_result['symbol']}: status={risk_off_result['status']}, "
+                                f"qty={risk_off_result['qty']}, reason={risk_off_result['reason']}"
+                            )
+                        )
+                        continue
+
                     successful_positions.append(
                         {
                             "position_id": position_id,
@@ -477,8 +503,6 @@ class Top10ShortStrategy:
                             "used_notional": qty_now * entry_price,
                         }
                     )
-                    opened_symbols.append(plan.symbol)
-                    opened_count += 1
                 except Exception as exc:  # noqa: BLE001
                     failed_notional += target_notional
                     entry_failed_count += 1
@@ -500,32 +524,9 @@ class Top10ShortStrategy:
 
             if failed_notional > 0 and successful_positions:
                 self._redistribute_failed_notional(successful_positions, failed_notional)
-
-            for pos in successful_positions:
-                position_id = int(pos["position_id"])
-                symbol = str(pos["symbol"])
-                try:
-                    self._place_exit_orders(
-                        position_id=position_id,
-                        symbol=symbol,
-                    )
-                    self.store.mark_position_open(position_id)
-                except Exception as exc:  # noqa: BLE001
-                    exit_setup_failed_count += 1
-                    exit_setup_failure_details.append(f"{symbol}: {exc}")
-                    LOGGER.exception("Failed to place exit orders for %s: %s", symbol, exc)
-                    self.store.set_position_error(position_id, f"exit_setup: {exc}")
-                    risk_off_result = self._force_close_position(
-                        position_id=position_id,
-                        symbol=symbol,
-                        reason="EXIT_SETUP_FAILED",
-                    )
-                    risk_off_details.append(
-                        (
-                            f"{risk_off_result['symbol']}: status={risk_off_result['status']}, "
-                            f"qty={risk_off_result['qty']}, reason={risk_off_result['reason']}"
-                        )
-                    )
+                self._refresh_exit_orders_for_positions(
+                    {int(pos["position_id"]) for pos in successful_positions}
+                )
 
             failed_count = entry_failed_count + exit_setup_failed_count
             summary = (

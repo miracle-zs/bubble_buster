@@ -742,6 +742,56 @@ class StrategyRebalanceTest(unittest.TestCase):
         self.assertEqual(result["status"], "SUCCESS")
         store.mark_position_open.assert_called_once_with(1001)
 
+    def test_entry_places_initial_exit_orders_before_waiting_for_later_bearish_symbols(self) -> None:
+        client = MagicMock()
+        client.get_available_balance.return_value = 500.0
+        client.diagnose_order_qty.return_value = {"normalized_qty": 1.0}
+
+        store = MagicMock()
+        store.create_run.return_value = ("run-1", True)
+        store.list_open_symbols.return_value = set()
+        store.insert_position.side_effect = [1001, 1002]
+        store.list_open_positions.return_value = []
+
+        strategy = self._build_strategy(client, store, rebalance_enabled=False)
+        strategy.top_n = 2
+        strategy._load_short_position = MagicMock(
+            side_effect=[
+                {"symbol": "AAAUSDT", "entryPrice": "10", "liquidationPrice": "12", "positionAmt": "-1"},
+                {"symbol": "BBBUSDT", "entryPrice": "20", "liquidationPrice": "24", "positionAmt": "-1"},
+            ]
+        )
+        strategy._place_market_short_with_shrink_retry = MagicMock(
+            side_effect=[
+                ({"orderId": 2001, "status": "FILLED", "origQty": "1", "side": "SELL", "type": "MARKET", "symbol": "AAAUSDT"}, 0),
+                ({"orderId": 2002, "status": "FILLED", "origQty": "1", "side": "SELL", "type": "MARKET", "symbol": "BBBUSDT"}, 0),
+            ]
+        )
+        strategy._place_exit_orders = MagicMock()
+
+        candidates = [
+            {"symbol": "AAAUSDT", "change": "15", "current_price": "10", "volume": "100"},
+            {"symbol": "BBBUSDT", "change": "14", "current_price": "20", "volume": "100"},
+        ]
+        ranked_entries = strategy._build_ranked_entries(candidates)
+
+        def ready_entries():
+            yield type("ReadyEntry", (), {"entry": ranked_entries[0], "reference_price": 10.0})()
+            strategy._place_exit_orders.assert_called_once_with(position_id=1001, symbol="AAAUSDT")
+            store.mark_position_open.assert_called_once_with(1001)
+            yield type("ReadyEntry", (), {"entry": ranked_entries[1], "reference_price": 20.0})()
+
+        strategy._iter_ready_entries_after_bearish_hour = MagicMock(return_value=ready_entries())
+
+        result = strategy.run_entry(
+            trade_day_utc="2026-03-01-test-immediate-exit-setup",
+            shared_top_gainers=candidates,
+        )
+
+        self.assertEqual(result["status"], "SUCCESS")
+        self.assertEqual(strategy._place_exit_orders.call_count, 2)
+        self.assertEqual(store.mark_position_open.call_count, 2)
+
     def test_market_short_retries_once_after_cooling_off_and_sleeps(self) -> None:
         client = MagicMock()
         client.normalize_order_qty.return_value = 1.0
