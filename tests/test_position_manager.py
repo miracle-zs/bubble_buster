@@ -865,9 +865,15 @@ class PositionManagerTest(unittest.TestCase):
             sl_price=59000.0,
             expire_in_hours=24,
         )
+        day_start = datetime(2026, 7, 1, 0, 0, tzinfo=timezone.utc)
+        noon = datetime(2026, 7, 1, 4, 0, tzinfo=timezone.utc)
         self.store.set_lock_state(
             PositionManager.NOON_PROTECTION_LOCK_NAME,
-            {"caps": {str(position_id): 59000.0}},
+            {
+                "caps": {str(position_id): 59000.0},
+                "day_start_utc": day_start.isoformat(),
+                "noon_time_utc": noon.isoformat(),
+            },
         )
 
         client = MagicMock()
@@ -891,6 +897,7 @@ class PositionManagerTest(unittest.TestCase):
             sl_liq_buffer_pct=1.0,
             trigger_price_type="CONTRACT_PRICE",
         )
+        manager._utc_now_datetime = MagicMock(return_value=datetime(2026, 7, 1, 6, 0, tzinfo=timezone.utc))
 
         summary = manager.run_once()
 
@@ -961,6 +968,7 @@ class PositionManagerTest(unittest.TestCase):
             sl_liq_buffer_pct=1.0,
             trigger_price_type="CONTRACT_PRICE",
         )
+        manager._utc_now_datetime = MagicMock(return_value=datetime(2026, 7, 1, 6, 0, tzinfo=timezone.utc))
 
         summary = manager.run_once()
 
@@ -973,6 +981,147 @@ class PositionManagerTest(unittest.TestCase):
         self.assertEqual(row["sl_order_id"], 333)
         lock_state = self.store.get_lock_state(PositionManager.NOON_PROTECTION_LOCK_NAME)
         self.assertAlmostEqual(float(lock_state["caps"][str(position_id)]), 0.90)
+
+    def test_run_once_ignores_stale_noon_window_from_previous_local_day(self) -> None:
+        stale_day_start = datetime(2026, 7, 4, 16, 0, tzinfo=timezone.utc)
+        stale_noon = datetime(2026, 7, 5, 4, 0, tzinfo=timezone.utc)
+        opened_at = datetime(2026, 7, 6, 0, 0, tzinfo=timezone.utc)
+        position_id = self.store.insert_position(
+            run_id=self.run_id,
+            symbol="LITUSDT",
+            side="SHORT",
+            qty=10.0,
+            entry_price=2.45,
+            liq_price_open=3.64,
+            tp_price=None,
+            sl_price=None,
+            tp_order_id=None,
+            sl_order_id=None,
+            tp_client_order_id=None,
+            sl_client_order_id=None,
+            opened_at_utc=opened_at.isoformat(),
+            expire_at_utc=(opened_at + timedelta(days=7)).isoformat(),
+            status="OPEN",
+        )
+        self.store.set_lock_state(
+            PositionManager.NOON_PROTECTION_LOCK_NAME,
+            {
+                "caps": {},
+                "day_start_utc": stale_day_start.isoformat(),
+                "noon_time_utc": stale_noon.isoformat(),
+            },
+        )
+
+        client = MagicMock()
+        client.get_position_risk.return_value = [
+            {
+                "symbol": "LITUSDT",
+                "positionAmt": "-10",
+                "liquidationPrice": "3.64",
+                "markPrice": "2.50",
+                "positionSide": "BOTH",
+            }
+        ]
+        client.get_symbol_rules.return_value = {"LITUSDT": SimpleNamespace(tick_size=0.0001)}
+        client.normalize_trigger_price.side_effect = lambda _symbol, price, round_up=False: round(float(price), 4)
+        client.format_trigger_price.side_effect = lambda _symbol, price, round_up=False: str(price)
+        client.format_order_qty.side_effect = lambda _symbol, qty: str(qty)
+        client.create_order.return_value = {
+            "orderId": 333,
+            "clientOrderId": "sl-liq-buffer",
+            "type": "STOP_MARKET",
+            "side": "BUY",
+            "origQty": "10",
+            "status": "NEW",
+        }
+
+        manager = PositionManager(
+            client=client,
+            store=self.store,
+            notifier=MagicMock(),
+            sl_liq_buffer_pct=1.0,
+            trigger_price_type="CONTRACT_PRICE",
+        )
+        manager._utc_now_datetime = MagicMock(return_value=datetime(2026, 7, 6, 1, 30, tzinfo=timezone.utc))
+
+        summary = manager.run_once()
+
+        self.assertEqual(summary["updated_sl"], 1)
+        client.get_klines.assert_not_called()
+        row = self._get_position(position_id)
+        self.assertAlmostEqual(float(row["sl_price"]), 3.6036)
+        lock_state = self.store.get_lock_state(PositionManager.NOON_PROTECTION_LOCK_NAME)
+        self.assertNotIn(str(position_id), lock_state["caps"])
+
+    def test_run_once_ignores_existing_noon_cap_from_stale_window(self) -> None:
+        stale_day_start = datetime(2026, 7, 4, 16, 0, tzinfo=timezone.utc)
+        stale_noon = datetime(2026, 7, 5, 4, 0, tzinfo=timezone.utc)
+        opened_at = datetime(2026, 7, 6, 0, 0, tzinfo=timezone.utc)
+        position_id = self.store.insert_position(
+            run_id=self.run_id,
+            symbol="TLMUSDT",
+            side="SHORT",
+            qty=10.0,
+            entry_price=0.0033,
+            liq_price_open=0.0048,
+            tp_price=None,
+            sl_price=0.003789,
+            tp_order_id=None,
+            sl_order_id=22,
+            tp_client_order_id=None,
+            sl_client_order_id="sl-old",
+            opened_at_utc=opened_at.isoformat(),
+            expire_at_utc=(opened_at + timedelta(days=7)).isoformat(),
+            status="OPEN",
+        )
+        self.store.set_lock_state(
+            PositionManager.NOON_PROTECTION_LOCK_NAME,
+            {
+                "caps": {str(position_id): 0.003789},
+                "day_start_utc": stale_day_start.isoformat(),
+                "noon_time_utc": stale_noon.isoformat(),
+            },
+        )
+
+        client = MagicMock()
+        client.get_order.return_value = {"status": "NEW"}
+        client.get_position_risk.return_value = [
+            {
+                "symbol": "TLMUSDT",
+                "positionAmt": "-10",
+                "liquidationPrice": "0.0048",
+                "markPrice": "0.0032",
+                "positionSide": "BOTH",
+            }
+        ]
+        client.get_symbol_rules.return_value = {"TLMUSDT": SimpleNamespace(tick_size=0.000001)}
+        client.normalize_trigger_price.side_effect = lambda _symbol, price, round_up=False: round(float(price), 6)
+        client.format_trigger_price.side_effect = lambda _symbol, price, round_up=False: str(price)
+        client.format_order_qty.side_effect = lambda _symbol, qty: str(qty)
+        client.create_order.return_value = {
+            "orderId": 444,
+            "clientOrderId": "sl-liq-buffer",
+            "type": "STOP_MARKET",
+            "side": "BUY",
+            "origQty": "10",
+            "status": "NEW",
+        }
+
+        manager = PositionManager(
+            client=client,
+            store=self.store,
+            notifier=MagicMock(),
+            sl_liq_buffer_pct=1.0,
+            trigger_price_type="CONTRACT_PRICE",
+        )
+        manager._utc_now_datetime = MagicMock(return_value=datetime(2026, 7, 6, 1, 30, tzinfo=timezone.utc))
+
+        summary = manager.run_once()
+
+        self.assertEqual(summary["updated_sl"], 1)
+        client.get_klines.assert_not_called()
+        row = self._get_position(position_id)
+        self.assertAlmostEqual(float(row["sl_price"]), 0.004752)
 
     def test_run_once_uses_noon_to_open_high_when_morning_noon_cap_already_breached(self) -> None:
         day_start = datetime(2026, 7, 1, 0, 0, tzinfo=timezone.utc)
@@ -1039,6 +1188,7 @@ class PositionManagerTest(unittest.TestCase):
             sl_liq_buffer_pct=1.0,
             trigger_price_type="CONTRACT_PRICE",
         )
+        manager._utc_now_datetime = MagicMock(return_value=datetime(2026, 7, 1, 6, 0, tzinfo=timezone.utc))
 
         summary = manager.run_once()
 

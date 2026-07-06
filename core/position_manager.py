@@ -1810,6 +1810,9 @@ class PositionManager:
             return None
         if noon_time <= day_start:
             return None
+        now_utc = self._utc_now_datetime()
+        if now_utc < day_start or now_utc >= day_start + timedelta(days=1):
+            return None
         return day_start, noon_time
 
     def _get_or_backfill_noon_protection_cap(
@@ -1818,13 +1821,13 @@ class PositionManager:
         risk: Dict[str, str],
     ) -> Optional[float]:
         position_id = int(pos["id"])
-        existing_cap = self._get_noon_protection_cap(position_id)
-        if existing_cap:
-            return existing_cap
 
         window = self._get_noon_protection_window()
         if window is None:
             return None
+        existing_cap = self._get_noon_protection_cap(position_id)
+        if existing_cap:
+            return existing_cap
         day_start, noon_time = window
         opened_at_raw = str(pos.get("opened_at_utc") or "")
         if not opened_at_raw:
