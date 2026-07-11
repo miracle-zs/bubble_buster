@@ -1,5 +1,6 @@
 import logging
 import math
+import threading
 import time
 import hashlib
 from dataclasses import dataclass
@@ -67,6 +68,7 @@ class Top10ShortStrategy:
     REBALANCE_MODE_EQUAL_RISK = "equal_risk"
     REBALANCE_MODE_AGE_DECAY = "age_decay"
     EQUITY_RECOVERY_LOCK_NAME = "equity_recovery_take_profit_v1"
+    ENTRY_WAIT_LOCK_NAME = "bearish_hour_entry_wait_v1"
 
     def __init__(
         self,
@@ -108,6 +110,7 @@ class Top10ShortStrategy:
         entry_wait_bearish_hour_enabled: bool = False,
         entry_wait_poll_sec: int = 30,
         entry_wait_close_grace_sec: int = 5,
+        entry_wait_max_hours: float = 16.0,
         cooling_off_retry_count: int = 0,
         cooling_off_retry_delay_sec: int = 0,
         runtime_timezone: str = "Asia/Shanghai",
@@ -152,6 +155,7 @@ class Top10ShortStrategy:
         self.entry_wait_bearish_hour_enabled = bool(entry_wait_bearish_hour_enabled)
         self.entry_wait_poll_sec = max(1, int(entry_wait_poll_sec))
         self.entry_wait_close_grace_sec = max(0, int(entry_wait_close_grace_sec))
+        self.entry_wait_max_hours = max(1.0, float(entry_wait_max_hours))
         self.cooling_off_retry_count = max(0, int(cooling_off_retry_count))
         self.cooling_off_retry_delay_sec = max(0, int(cooling_off_retry_delay_sec))
         self.runtime_timezone_name = (runtime_timezone or "").strip() or "UTC"
@@ -165,9 +169,33 @@ class Top10ShortStrategy:
         self.protection_exempt_symbols = {
             str(symbol or "").strip().upper() for symbol in (protection_exempt_symbols or set()) if str(symbol or "").strip()
         }
+        self._entry_wait_stop_event = threading.Event()
+        self._entry_wait_interrupted = False
 
     def _is_protection_exempt(self, symbol: str) -> bool:
         return str(symbol or "").strip().upper() in self.protection_exempt_symbols
+
+    def has_pending_entry_wait(self) -> bool:
+        state = self._load_entry_wait_state()
+        pending = state.get("pending")
+        if not isinstance(pending, dict) or not pending:
+            return False
+        deadline_raw = str(state.get("deadline_utc") or "").strip()
+        if deadline_raw:
+            try:
+                expired = self._utc_now_datetime() >= self._parse_iso_utc(deadline_raw)
+            except ValueError:
+                expired = True
+            if expired:
+                run_id = str(state.get("run_id") or "").strip()
+                if run_id:
+                    self.store.finalize_run(run_id, "FAILED", "WAIT_BEARISH_HOUR_EXPIRED_DURING_RESTART")
+                self._clear_entry_wait_state()
+                return False
+        return True
+
+    def request_entry_wait_stop(self) -> None:
+        self._entry_wait_stop_event.set()
 
     def run_entry(
         self,
@@ -176,20 +204,54 @@ class Top10ShortStrategy:
     ) -> Dict[str, object]:
         trade_day = (trade_day_utc or "").strip() or datetime.now(timezone.utc).date().isoformat()
         trade_day_utc = trade_day
-        run_id, created = self.store.create_run(trade_day_utc, account_id=self.account_id)
+        active_wait = self._load_entry_wait_state()
+        active_pending = active_wait.get("pending")
+        active_run_id = str(active_wait.get("run_id") or "").strip()
+        active_run = self.store.get_run(active_run_id) if active_run_id else None
+        if (
+            isinstance(active_pending, dict)
+            and active_pending
+            and active_run is not None
+            and str(active_run.status).upper() == "RUNNING"
+        ):
+            run_id = active_run_id
+            trade_day_utc = str(active_wait.get("trade_day_utc") or trade_day_utc)
+            created = False
+        else:
+            run_id, created = self.store.create_run(trade_day_utc, account_id=self.account_id)
+        resumed_wait = False
         if not created:
-            LOGGER.info("Entry skipped: run already exists for trade_day_utc=%s", trade_day_utc)
-            return {
-                "status": "SKIPPED",
-                "run_id": run_id,
-                "reason": "RUN_ALREADY_EXISTS",
-                "opened": 0,
-                "failed": 0,
-                "entry_failed": 0,
-                "exit_setup_failed": 0,
-            }
+            run_state = self.store.get_run(run_id)
+            wait_state = self._load_entry_wait_state()
+            if (
+                run_state is not None
+                and str(run_state.status).upper() == "RUNNING"
+                and str(wait_state.get("run_id") or "") == run_id
+                and isinstance(wait_state.get("pending"), dict)
+                and bool(wait_state.get("pending"))
+            ):
+                resumed_wait = True
+                shared_top_gainers = self._ranking_payload_from_wait_state(wait_state)
+                LOGGER.warning(
+                    "Resume persisted bearish-hour entry wait: account=%s run_id=%s pending=%s",
+                    self.account_id,
+                    run_id,
+                    len(wait_state["pending"]),
+                )
+            else:
+                LOGGER.info("Entry skipped: run already exists for trade_day_utc=%s", trade_day_utc)
+                return {
+                    "status": "SKIPPED",
+                    "run_id": run_id,
+                    "reason": "RUN_ALREADY_EXISTS",
+                    "opened": 0,
+                    "failed": 0,
+                    "entry_failed": 0,
+                    "exit_setup_failed": 0,
+                }
 
         opened_count = 0
+        self._entry_wait_interrupted = False
         entry_failed_count = 0
         exit_setup_failed_count = 0
         skipped_symbols: List[str] = []
@@ -264,6 +326,8 @@ class Top10ShortStrategy:
                 )
 
             if not candidates:
+                if resumed_wait:
+                    self._clear_entry_wait_state()
                 self.store.finalize_run(run_id, "SUCCESS", "All symbols already have open strategy positions")
                 self.notifier.send(
                     "【Top10做空】本次未开仓",
@@ -373,10 +437,9 @@ class Top10ShortStrategy:
                 except Exception as exc:  # noqa: BLE001
                     LOGGER.exception("Failed to compute entry target notional from equity rebalance target: %s", exc)
 
-            successful_positions: List[Dict[str, object]] = []
             failed_notional = 0.0
 
-            if self.entry_initial_delay_sec > 0:
+            if self.entry_initial_delay_sec > 0 and not resumed_wait:
                 LOGGER.info(
                     "Entry initial delay: account=%s wait_sec=%s",
                     self.account_id,
@@ -384,10 +447,19 @@ class Top10ShortStrategy:
                 )
                 time.sleep(self.entry_initial_delay_sec)
 
-            entry_signal_base_time = self._utc_now_datetime()
+            wait_state = self._load_entry_wait_state() if resumed_wait else {}
+            persisted_signal_time = str(wait_state.get("signal_base_time_utc") or "").strip()
+            entry_signal_base_time = (
+                self._parse_iso_utc(persisted_signal_time)
+                if persisted_signal_time
+                else self._utc_now_datetime()
+            )
+            self._last_entry_wait_expired_symbols: List[str] = []
             ready_entries = self._iter_ready_entries_after_bearish_hour(
                 candidates=candidates,
                 signal_base_time_utc=entry_signal_base_time,
+                run_id=run_id,
+                trade_day_utc=trade_day_utc,
             )
             for idx, ready_entry in enumerate(ready_entries):
                 entry = ready_entry.entry
@@ -496,13 +568,6 @@ class Top10ShortStrategy:
                         )
                         continue
 
-                    successful_positions.append(
-                        {
-                            "position_id": position_id,
-                            "symbol": plan.symbol,
-                            "used_notional": qty_now * entry_price,
-                        }
-                    )
                 except Exception as exc:  # noqa: BLE001
                     failed_notional += target_notional
                     entry_failed_count += 1
@@ -522,11 +587,24 @@ class Top10ShortStrategy:
                     )
                     time.sleep(self.entry_symbol_interval_sec)
 
-            if failed_notional > 0 and successful_positions:
-                self._redistribute_failed_notional(successful_positions, failed_notional)
-                self._refresh_exit_orders_for_positions(
-                    {int(pos["position_id"]) for pos in successful_positions}
+            for symbol in self._last_entry_wait_expired_symbols:
+                entry_failed_count += 1
+                entry_failure_details.append(f"{symbol}: WAIT_BEARISH_HOUR_EXPIRED")
+
+            if self._entry_wait_interrupted:
+                LOGGER.info(
+                    "Entry wait interrupted for graceful shutdown: account=%s run_id=%s",
+                    self.account_id,
+                    run_id,
                 )
+                return {
+                    "status": "INTERRUPTED",
+                    "run_id": run_id,
+                    "opened": opened_count,
+                    "failed": entry_failed_count + exit_setup_failed_count,
+                    "entry_failed": entry_failed_count,
+                    "exit_setup_failed": exit_setup_failed_count,
+                }
 
             failed_count = entry_failed_count + exit_setup_failed_count
             summary = (
@@ -580,6 +658,7 @@ class Top10ShortStrategy:
 
         except Exception as exc:  # noqa: BLE001
             LOGGER.exception("Entry run failed: %s", exc)
+            self._clear_entry_wait_state()
             self.store.finalize_run(run_id, "FAILED", str(exc))
             self.notifier.send(
                 "【Top10做空】执行失败",
@@ -621,6 +700,8 @@ class Top10ShortStrategy:
         self,
         candidates: List[RankEntry],
         signal_base_time_utc: datetime,
+        run_id: Optional[str] = None,
+        trade_day_utc: Optional[str] = None,
     ) -> Iterator[ReadyEntry]:
         if not self.entry_wait_bearish_hour_enabled:
             for idx, entry in enumerate(candidates):
@@ -632,17 +713,37 @@ class Top10ShortStrategy:
                 )
             return
 
-        pending: Dict[int, Dict[str, object]] = {}
-        for idx, entry in enumerate(candidates):
-            signal_time = signal_base_time_utc + timedelta(seconds=idx * self.entry_symbol_interval_sec)
-            pending[idx] = {
-                "entry": entry,
-                "signal_time": signal_time,
-                "hour_open": self._floor_to_utc_hour(signal_time),
-            }
+        pending = self._restore_or_create_entry_wait(
+            candidates=candidates,
+            signal_base_time_utc=signal_base_time_utc,
+            run_id=run_id,
+            trade_day_utc=trade_day_utc,
+        )
 
         while pending:
+            if self._entry_wait_stop_event.is_set():
+                self._entry_wait_interrupted = True
+                return
             now = self._utc_now_datetime()
+            wait_state = self._load_entry_wait_state()
+            deadline_raw = str(wait_state.get("deadline_utc") or "").strip()
+            deadline = self._parse_iso_utc(deadline_raw) if deadline_raw else None
+            if deadline is not None and now >= deadline:
+                self._last_entry_wait_expired_symbols = [
+                    str(state["entry"].symbol)
+                    for state in pending.values()
+                    if isinstance(state.get("entry"), RankEntry)
+                ]
+                LOGGER.warning(
+                    "Entry bearish-hour wait expired: account=%s run_id=%s symbols=%s deadline=%s",
+                    self.account_id,
+                    run_id,
+                    self._last_entry_wait_expired_symbols,
+                    deadline.isoformat(timespec="seconds"),
+                )
+                pending.clear()
+                self._clear_entry_wait_state()
+                break
             ready_this_round: List[Tuple[int, ReadyEntry]] = []
             next_check_times: List[datetime] = []
 
@@ -662,16 +763,29 @@ class Top10ShortStrategy:
                         state["hour_open"] = hour_open
                         break
 
-                    candle = self._fetch_hour_candle(entry.symbol, hour_open)
+                    try:
+                        candle = self._fetch_hour_candle(entry.symbol, hour_open)
+                    except Exception as exc:  # noqa: BLE001
+                        LOGGER.warning(
+                            "Entry bearish-hour kline fetch failed, retry same candle: account=%s symbol=%s hour_open=%s error=%s",
+                            self.account_id,
+                            entry.symbol,
+                            hour_open.isoformat(timespec="seconds"),
+                            exc,
+                        )
+                        next_check_times.append(now + timedelta(seconds=self.entry_wait_poll_sec))
+                        state["hour_open"] = hour_open
+                        break
                     if candle is None:
                         LOGGER.warning(
-                            "Entry bearish-hour wait missing kline: account=%s symbol=%s hour_open=%s",
+                            "Entry bearish-hour wait missing kline, retry same candle: account=%s symbol=%s hour_open=%s",
                             self.account_id,
                             entry.symbol,
                             hour_open.isoformat(timespec="seconds"),
                         )
-                        hour_open += timedelta(hours=1)
-                        continue
+                        next_check_times.append(now + timedelta(seconds=self.entry_wait_poll_sec))
+                        state["hour_open"] = hour_open
+                        break
 
                     open_price, close_price, close_time = candle
                     if close_price < open_price:
@@ -682,7 +796,6 @@ class Top10ShortStrategy:
                             bearish_close_time_utc=close_time,
                         )
                         ready_this_round.append((idx, ready_entry))
-                        pending.pop(idx, None)
                         LOGGER.info(
                             "Entry bearish-hour ready: account=%s symbol=%s signal=%s close=%s open=%.10f close_price=%.10f",
                             self.account_id,
@@ -703,6 +816,13 @@ class Top10ShortStrategy:
                         close_price,
                     )
                     hour_open += timedelta(hours=1)
+                    state["hour_open"] = hour_open
+                    self._persist_entry_wait_pending(
+                        pending=pending,
+                        run_id=run_id,
+                        trade_day_utc=trade_day_utc,
+                        signal_base_time_utc=signal_base_time_utc,
+                    )
 
             if ready_this_round:
                 for _idx, item in sorted(
@@ -713,6 +833,13 @@ class Top10ShortStrategy:
                     ),
                 ):
                     yield item
+                    pending.pop(_idx, None)
+                    self._persist_entry_wait_pending(
+                        pending=pending,
+                        run_id=run_id,
+                        trade_day_utc=trade_day_utc,
+                        signal_base_time_utc=signal_base_time_utc,
+                    )
                 continue
 
             if not pending:
@@ -727,9 +854,129 @@ class Top10ShortStrategy:
                 len(pending),
                 sleep_sec,
             )
-            time.sleep(sleep_sec)
+            if self._entry_wait_stop_event.wait(timeout=sleep_sec):
+                self._entry_wait_interrupted = True
+                return
 
         return
+
+    def _load_entry_wait_state(self) -> Dict[str, Any]:
+        state = self.store.get_lock_state(self.ENTRY_WAIT_LOCK_NAME) or {}
+        return state if isinstance(state, dict) else {}
+
+    def _clear_entry_wait_state(self) -> None:
+        self.store.set_lock_state(self.ENTRY_WAIT_LOCK_NAME, {})
+
+    def _ranking_payload_from_wait_state(self, state: Dict[str, Any]) -> List[Dict[str, Any]]:
+        pending = state.get("pending")
+        if not isinstance(pending, dict):
+            return []
+        payload: List[Dict[str, Any]] = []
+        for item in pending.values():
+            if not isinstance(item, dict):
+                continue
+            payload.append(
+                {
+                    "symbol": item.get("symbol"),
+                    "change": item.get("pct_change", 0.0),
+                    "current_price": item.get("last_price", 0.0),
+                    "volume": item.get("quote_volume", 0.0),
+                }
+            )
+        return payload
+
+    def _restore_or_create_entry_wait(
+        self,
+        candidates: List[RankEntry],
+        signal_base_time_utc: datetime,
+        run_id: Optional[str],
+        trade_day_utc: Optional[str],
+    ) -> Dict[int, Dict[str, object]]:
+        existing = self._load_entry_wait_state()
+        raw_pending = existing.get("pending")
+        if run_id and str(existing.get("run_id") or "") == run_id and isinstance(raw_pending, dict):
+            restored: Dict[int, Dict[str, object]] = {}
+            for idx, item in enumerate(raw_pending.values()):
+                if not isinstance(item, dict):
+                    continue
+                try:
+                    entry = RankEntry(
+                        symbol=str(item["symbol"]),
+                        pct_change=float(item.get("pct_change") or 0.0),
+                        last_price=float(item.get("last_price") or 0.0),
+                        quote_volume=float(item.get("quote_volume") or 0.0),
+                    )
+                    signal_time = self._parse_iso_utc(str(item["signal_time_utc"]))
+                    hour_open = self._parse_iso_utc(str(item["hour_open_utc"]))
+                except (KeyError, TypeError, ValueError):
+                    continue
+                restored[idx] = {"entry": entry, "signal_time": signal_time, "hour_open": hour_open}
+            if restored:
+                return restored
+
+        pending: Dict[int, Dict[str, object]] = {}
+        for idx, entry in enumerate(candidates):
+            signal_time = signal_base_time_utc + timedelta(seconds=idx * self.entry_symbol_interval_sec)
+            pending[idx] = {
+                "entry": entry,
+                "signal_time": signal_time,
+                "hour_open": self._floor_to_utc_hour(signal_time),
+            }
+        self._persist_entry_wait_pending(
+            pending=pending,
+            run_id=run_id,
+            trade_day_utc=trade_day_utc,
+            signal_base_time_utc=signal_base_time_utc,
+        )
+        return pending
+
+    def _persist_entry_wait_pending(
+        self,
+        pending: Dict[int, Dict[str, object]],
+        run_id: Optional[str],
+        trade_day_utc: Optional[str],
+        signal_base_time_utc: datetime,
+    ) -> None:
+        if not pending:
+            self._clear_entry_wait_state()
+            return
+        existing = self._load_entry_wait_state()
+        deadline_raw = str(existing.get("deadline_utc") or "").strip()
+        if deadline_raw and str(existing.get("run_id") or "") == str(run_id or ""):
+            deadline = self._parse_iso_utc(deadline_raw)
+        else:
+            local_signal = signal_base_time_utc.astimezone(self.runtime_timezone)
+            next_local_day = (local_signal + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
+            deadline = min(
+                signal_base_time_utc + timedelta(hours=self.entry_wait_max_hours),
+                next_local_day.astimezone(timezone.utc),
+            )
+        serialized: Dict[str, Dict[str, Any]] = {}
+        for idx, state in pending.items():
+            entry = state.get("entry")
+            signal_time = state.get("signal_time")
+            hour_open = state.get("hour_open")
+            if not isinstance(entry, RankEntry) or not isinstance(signal_time, datetime) or not isinstance(hour_open, datetime):
+                continue
+            serialized[str(idx)] = {
+                "symbol": entry.symbol,
+                "pct_change": entry.pct_change,
+                "last_price": entry.last_price,
+                "quote_volume": entry.quote_volume,
+                "signal_time_utc": signal_time.astimezone(timezone.utc).isoformat(),
+                "hour_open_utc": hour_open.astimezone(timezone.utc).isoformat(),
+            }
+        self.store.set_lock_state(
+            self.ENTRY_WAIT_LOCK_NAME,
+            {
+                "run_id": run_id,
+                "trade_day_utc": trade_day_utc,
+                "signal_base_time_utc": signal_base_time_utc.astimezone(timezone.utc).isoformat(),
+                "deadline_utc": deadline.astimezone(timezone.utc).isoformat(),
+                "pending": serialized,
+                "updated_at_utc": self._utc_now_iso(),
+            },
+        )
 
     def _fetch_hour_candle(self, symbol: str, hour_open_utc: datetime) -> Optional[Tuple[float, float, datetime]]:
         hour_open_utc = self._floor_to_utc_hour(hour_open_utc)
@@ -1057,52 +1304,59 @@ class Top10ShortStrategy:
             synced.add(position_id)
         return synced
 
-    def _redistribute_failed_notional(
-        self,
-        successful_positions: List[Dict[str, object]],
-        failed_notional: float,
-    ) -> None:
-        total_used = sum(float(item["used_notional"]) for item in successful_positions)
-        if total_used <= 0:
-            return
-
-        for item in successful_positions:
-            symbol = str(item["symbol"])
-            position_id = int(item["position_id"])
-            weight = float(item["used_notional"]) / total_used
-            extra_notional = failed_notional * weight
+    def recover_pending_exit_setups(self) -> Dict[str, object]:
+        positions = self.store.list_pending_exit_setup_positions()
+        summary: Dict[str, object] = {
+            "total": len(positions),
+            "recovered": 0,
+            "closed_external": 0,
+            "risk_off": 0,
+            "errors": 0,
+        }
+        for pos in positions:
+            position_id = int(pos["id"])
+            symbol = str(pos["symbol"])
             try:
-                price = self.client.get_symbol_price(symbol)
-                extra_qty = self.client.normalize_order_qty(symbol, extra_notional, price)
-                if extra_qty <= 0:
-                    continue
-                add_order, retry_count_used = self._place_market_short_with_shrink_retry(
-                    symbol=symbol,
-                    target_notional=extra_notional,
-                    reference_price=price,
-                    client_id_tag="red",
-                )
-                if retry_count_used > 0:
-                    LOGGER.warning(
-                        "Redistribution shrink-retry succeeded for %s after %s retries",
-                        symbol,
-                        retry_count_used,
+                risk = self._load_short_position(symbol)
+                if risk is None:
+                    self.store.mark_position_closed(
+                        position_id=position_id,
+                        status="CLOSED_EXTERNAL",
+                        close_reason="PENDING_EXIT_SETUP_POSITION_NOT_FOUND",
                     )
-                self.store.add_order_event(
-                    symbol=symbol,
-                    position_id=position_id,
-                    event_time_utc=self._utc_now_iso(),
-                    order_payload=add_order,
-                )
-
-                position_risk = self._load_short_position(symbol)
-                if position_risk:
-                    qty_now = abs(float(position_risk.get("positionAmt", extra_qty)))
-                    entry_price_now = self._safe_positive_float(position_risk.get("entryPrice")) or price
-                    self.store.set_position_qty(position_id, qty_now, entry_price_now)
+                    summary["closed_external"] = int(summary["closed_external"]) + 1
+                    continue
+                self._place_exit_orders(position_id=position_id, symbol=symbol)
+                self.store.mark_position_open(position_id)
+                self.store.clear_position_error(position_id)
+                summary["recovered"] = int(summary["recovered"]) + 1
             except Exception as exc:  # noqa: BLE001
-                LOGGER.exception("Redistribution failed for %s: %s", symbol, exc)
-                self.store.set_position_error(position_id, f"redistribute: {exc}")
+                summary["errors"] = int(summary["errors"]) + 1
+                self.store.set_position_error(position_id, f"pending_exit_recovery: {exc}")
+                LOGGER.exception(
+                    "Pending exit setup recovery failed account=%s position_id=%s symbol=%s: %s",
+                    self.account_id,
+                    position_id,
+                    symbol,
+                    exc,
+                )
+                try:
+                    result = self._force_close_position(
+                        position_id=position_id,
+                        symbol=symbol,
+                        reason="PENDING_EXIT_SETUP_RECOVERY_FAILED",
+                    )
+                    if str(result.get("status") or "").startswith("CLOSED"):
+                        summary["risk_off"] = int(summary["risk_off"]) + 1
+                except Exception as close_exc:  # noqa: BLE001
+                    LOGGER.exception(
+                        "Pending exit setup risk-off failed account=%s position_id=%s symbol=%s: %s",
+                        self.account_id,
+                        position_id,
+                        symbol,
+                        close_exc,
+                    )
+        return summary
 
     def _place_exit_orders(self, position_id: int, symbol: str) -> None:
         if self._is_protection_exempt(symbol):
@@ -1131,35 +1385,49 @@ class Top10ShortStrategy:
         sl_price = self.client.normalize_trigger_price(symbol, sl_raw, round_up=True)
         sl_stop_price = self.client.format_trigger_price(symbol, sl_price, round_up=True)
 
-        if self.fixed_take_profit_enabled:
-            tp_order = self._create_exit_order_with_fallback(
+        sl_order = None
+        try:
+            if self.fixed_take_profit_enabled:
+                tp_order = self._create_exit_order_with_fallback(
+                    symbol=symbol,
+                    order_type="TAKE_PROFIT_MARKET",
+                    stop_price=tp_stop_price,
+                    qty=position_amt,
+                    client_order_id=self._new_client_id("tp", symbol),
+                )
+                self.store.update_take_profit(
+                    position_id=position_id,
+                    tp_order_id=tp_order.get("orderId"),
+                    tp_client_order_id=tp_order.get("clientOrderId"),
+                    tp_price=tp_price,
+                )
+
+            if sl_price <= 0:
+                raise RuntimeError(f"Invalid stop loss price computed for {symbol}: {sl_price}")
+            sl_order = self._create_exit_order_with_fallback(
                 symbol=symbol,
-                order_type="TAKE_PROFIT_MARKET",
-                stop_price=tp_stop_price,
+                order_type="STOP_MARKET",
+                stop_price=sl_stop_price,
                 qty=position_amt,
-                client_order_id=self._new_client_id("tp", symbol),
+                client_order_id=self._new_client_id("sl", symbol),
             )
 
-        if sl_price <= 0:
-            raise RuntimeError(f"Invalid stop loss price computed for {symbol}: {sl_price}")
-        sl_order = self._create_exit_order_with_fallback(
-            symbol=symbol,
-            order_type="STOP_MARKET",
-            stop_price=sl_stop_price,
-            qty=position_amt,
-            client_order_id=self._new_client_id("sl", symbol),
-        )
-
-        self.store.update_position_orders(
-            position_id=position_id,
-            tp_order_id=tp_order.get("orderId") if tp_order else None,
-            sl_order_id=sl_order.get("orderId"),
-            tp_client_order_id=tp_order.get("clientOrderId") if tp_order else None,
-            sl_client_order_id=sl_order.get("clientOrderId"),
-            tp_price=tp_price,
-            sl_price=sl_price,
-            liq_price_latest=liq_price,
-        )
+            self.store.update_position_orders(
+                position_id=position_id,
+                tp_order_id=tp_order.get("orderId") if tp_order else None,
+                sl_order_id=sl_order.get("orderId"),
+                tp_client_order_id=tp_order.get("clientOrderId") if tp_order else None,
+                sl_client_order_id=sl_order.get("clientOrderId"),
+                tp_price=tp_price,
+                sl_price=sl_price,
+                liq_price_latest=liq_price,
+            )
+        except Exception:
+            if sl_order is not None:
+                self._cancel_order_if_exists(symbol, sl_order.get("orderId"), sl_order.get("clientOrderId"))
+            if tp_order is not None:
+                self._cancel_order_if_exists(symbol, tp_order.get("orderId"), tp_order.get("clientOrderId"))
+            raise
         self.store.set_position_qty(position_id, position_amt, entry_price)
 
         if tp_order is not None:
@@ -1177,6 +1445,10 @@ class Top10ShortStrategy:
         )
 
     def _force_close_position(self, position_id: int, symbol: str, reason: str) -> Dict[str, object]:
+        persisted = self.store.get_position(position_id)
+        if persisted is not None:
+            self._cancel_order_if_exists(symbol, persisted.get("tp_order_id"), persisted.get("tp_client_order_id"))
+            self._cancel_order_if_exists(symbol, persisted.get("sl_order_id"), persisted.get("sl_client_order_id"))
         position_risk = self._load_short_position(symbol)
         if not position_risk:
             self.store.mark_position_closed(

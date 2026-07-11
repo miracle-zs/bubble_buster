@@ -84,6 +84,13 @@ strategy_note.acc02 = TP 9% / 清仓100% / 浮亏砍仓ON
             self.assertNotIn("config_path", payload)
             self.assertNotIn("db_path", payload)
             self.assertNotIn("config_path", payload["runtime_settings"])
+            self.assertFalse(payload["runtime_settings"]["mutable"])
+
+            original_config = self.config_path.read_text(encoding="utf-8")
+            blocked = client.post("/api/runtime/settings/entry-catchup?enabled=false&persist=true")
+            self.assertEqual(blocked.status_code, 405)
+            self.assertEqual(blocked.json()["detail"], "Dashboard is read-only")
+            self.assertEqual(self.config_path.read_text(encoding="utf-8"), original_config)
 
     def test_accounts_summary_and_account_snapshot_api(self) -> None:
         app = create_app(config_path=str(self.config_path))

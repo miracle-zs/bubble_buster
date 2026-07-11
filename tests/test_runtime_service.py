@@ -940,7 +940,7 @@ def test_daily_loss_cut_runs_for_full_and_loss_cut_only() -> None:
     assert m2.daily_calls == 1
 
 
-def test_manage_timeout_marks_account_as_slow_but_waits_for_completion() -> None:
+def test_manage_timeout_returns_without_blocking_and_collects_completion_later() -> None:
     class SlowManager:
         def run_once(self):
             time.sleep(0.2)
@@ -985,7 +985,11 @@ def test_manage_timeout_marks_account_as_slow_but_waits_for_completion() -> None
     summary = service.run_manage_tick()
     assert "error" not in summary["slow"]
     assert summary["slow"].get("slow") is True
-    assert summary["slow"]["summary"]["total"] == 1
+    assert summary["slow"].get("running") is True
+
+    time.sleep(0.25)
+    completed = service.run_manage_tick()
+    assert completed["slow"]["summary"]["total"] == 1
 
 
 def test_entry_uses_shared_ranking_once_for_multi_accounts() -> None:

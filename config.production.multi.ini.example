@@ -25,6 +25,7 @@ entry_rank_fetch_multiplier = 3
 entry_wait_bearish_hour_enabled = true
 entry_wait_poll_sec = 30
 entry_wait_close_grace_sec = 5
+entry_wait_max_hours = 16
 ranker_max_workers = 24
 ranker_weight_limit_per_minute = 1000
 ranker_min_request_interval_ms = 20

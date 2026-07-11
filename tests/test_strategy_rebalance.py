@@ -570,6 +570,60 @@ class StrategyRebalanceTest(unittest.TestCase):
             [190.0, 95.0],
         )
 
+    def test_bearish_wait_state_roundtrips_for_restart_recovery(self) -> None:
+        client = MagicMock()
+        state = {}
+        store = MagicMock()
+        store.get_lock_state.side_effect = lambda _name: dict(state)
+
+        def save_state(_name, payload):
+            state.clear()
+            state.update(payload)
+
+        store.set_lock_state.side_effect = save_state
+        strategy = self._build_strategy(
+            client,
+            store,
+            rebalance_enabled=False,
+            entry_wait_bearish_hour_enabled=True,
+        )
+        candidates = strategy._build_ranked_entries(
+            [{"symbol": "AAAUSDT", "change": "15", "current_price": "10", "volume": "100"}]
+        )
+        signal_time = datetime.fromisoformat("2026-07-11T00:10:00+00:00")
+
+        first = strategy._restore_or_create_entry_wait(candidates, signal_time, "run-1", "2026-07-11")
+        restored = strategy._restore_or_create_entry_wait([], signal_time, "run-1", "2026-07-11")
+
+        self.assertEqual(first[0]["entry"].symbol, "AAAUSDT")
+        self.assertEqual(restored[0]["entry"].symbol, "AAAUSDT")
+        self.assertEqual(state["run_id"], "run-1")
+        self.assertIn("deadline_utc", state)
+
+    def test_initial_exit_setup_cleans_take_profit_when_stop_creation_fails(self) -> None:
+        client = MagicMock()
+        client.normalize_trigger_price.side_effect = [8.0, 11.9]
+        client.format_trigger_price.side_effect = ["8", "11.9"]
+        client.create_order.side_effect = [
+            {"orderId": 101, "clientOrderId": "tp-new", "status": "NEW"},
+            BinanceAPIError(code=-2021, message="Order would immediately trigger"),
+        ]
+        store = MagicMock()
+        strategy = self._build_strategy(client, store, rebalance_enabled=False)
+        strategy.fixed_take_profit_enabled = True
+        strategy._load_short_position = MagicMock(
+            return_value={"symbol": "AAAUSDT", "entryPrice": "10", "liquidationPrice": "12", "positionAmt": "-1"}
+        )
+
+        with self.assertRaises(BinanceAPIError):
+            strategy._place_exit_orders(position_id=1, symbol="AAAUSDT")
+
+        client.cancel_order.assert_called_once_with(
+            symbol="AAAUSDT",
+            order_id=101,
+            orig_client_order_id="tp-new",
+        )
+
     def test_entry_waits_before_first_symbol_when_initial_delay_configured(self) -> None:
         client = MagicMock()
         client.get_available_balance.return_value = 500.0

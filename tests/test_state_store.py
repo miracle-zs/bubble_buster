@@ -88,6 +88,9 @@ class StateStoreTest(unittest.TestCase):
 
         self.assertEqual(self.store.list_open_positions(), [])
         self.assertNotIn("AAAUSDT", self.store.list_open_symbols())
+        pending = self.store.list_pending_exit_setup_positions()
+        self.assertEqual([row["id"] for row in pending], [position_id])
+        self.assertEqual(self.store.get_position(position_id)["symbol"], "AAAUSDT")
 
         self.store.mark_position_open(position_id)
 

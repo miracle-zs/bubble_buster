@@ -851,7 +851,7 @@ class DashboardDataProvider:
         account_id: Optional[str] = None,
     ) -> Dict[str, Any]:
         params: List[Any] = []
-        where_sql = "WHERE p.status != 'OPEN'"
+        where_sql = "WHERE p.status NOT IN ('OPEN', 'PENDING_EXIT_SETUP')"
         if account_id:
             where_sql += " AND r.account_id = ?"
             params.append(account_id)
@@ -949,7 +949,7 @@ class DashboardDataProvider:
         account_id: Optional[str] = None,
     ) -> List[Dict[str, Any]]:
         params: List[Any] = []
-        where_sql = "WHERE p.status != 'OPEN'"
+        where_sql = "WHERE p.status NOT IN ('OPEN', 'PENDING_EXIT_SETUP')"
         if account_id:
             where_sql += " AND r.account_id = ?"
             params.append(account_id)

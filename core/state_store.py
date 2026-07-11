@@ -71,7 +71,6 @@ class StateStore:
     def _connect(self) -> sqlite3.Connection:
         conn = sqlite3.connect(self.db_path, timeout=SQLITE_BUSY_TIMEOUT_MS / 1000)
         conn.execute(f"PRAGMA busy_timeout = {SQLITE_BUSY_TIMEOUT_MS}")
-        conn.execute("PRAGMA journal_mode = WAL")
         conn.execute("PRAGMA synchronous = NORMAL")
         conn.row_factory = sqlite3.Row
         return conn
@@ -95,6 +94,7 @@ class StateStore:
         else:
             schema_sql = ""
         with self._connect_ctx() as conn:
+            conn.execute("PRAGMA journal_mode = WAL")
             if schema_sql:
                 conn.executescript(schema_sql)
             else:
@@ -301,6 +301,35 @@ class StateStore:
             ).fetchall()
             return [dict(row) for row in rows]
 
+    def list_pending_exit_setup_positions(self) -> List[Dict[str, Any]]:
+        with self._connect_ctx() as conn:
+            rows = conn.execute(
+                """
+                SELECT p.*
+                FROM positions p
+                INNER JOIN runs r ON r.run_id = p.run_id
+                WHERE p.status = 'PENDING_EXIT_SETUP'
+                  AND r.account_id = ?
+                ORDER BY p.id ASC
+                """,
+                (self.account_id,),
+            ).fetchall()
+            return [dict(row) for row in rows]
+
+    def get_position(self, position_id: int) -> Optional[Dict[str, Any]]:
+        with self._connect_ctx() as conn:
+            row = conn.execute(
+                """
+                SELECT p.*
+                FROM positions p
+                INNER JOIN runs r ON r.run_id = p.run_id
+                WHERE p.id = ? AND r.account_id = ?
+                LIMIT 1
+                """,
+                (int(position_id), self.account_id),
+            ).fetchone()
+            return dict(row) if row is not None else None
+
     def list_open_symbols(self) -> Set[str]:
         with self._connect_ctx() as conn:
             rows = conn.execute(
@@ -373,6 +402,26 @@ class StateStore:
                 WHERE id = ?
                 """,
                 (sl_order_id, sl_client_order_id, sl_price, liq_price_latest, utc_now_iso(), position_id),
+            )
+
+    def update_take_profit(
+        self,
+        position_id: int,
+        tp_order_id: Optional[int],
+        tp_client_order_id: Optional[str],
+        tp_price: Optional[float],
+    ) -> None:
+        with self._connect_ctx() as conn:
+            conn.execute(
+                """
+                UPDATE positions
+                SET tp_order_id = ?,
+                    tp_client_order_id = ?,
+                    tp_price = ?,
+                    updated_at_utc = ?
+                WHERE id = ?
+                """,
+                (tp_order_id, tp_client_order_id, tp_price, utc_now_iso(), int(position_id)),
             )
 
     def set_position_qty(self, position_id: int, qty: float, entry_price: float) -> None:

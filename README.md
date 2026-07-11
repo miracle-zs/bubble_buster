@@ -196,6 +196,7 @@ CRON_TZ=Asia/Shanghai
 - `timezone`：调度时区（建议 `Asia/Shanghai`）。
 - `entry_hour` / `entry_minute`：入场时间。
 - `entry_misfire_grace_min`：entry 允许补跑窗口。
+- `entry_wait_max_hours`：等待首根 1h 阴线的最长时间，同时不会跨过本地自然日；等待状态会持久化并在重启后恢复。
 - `entry_catchup_enabled`：错过是否补跑。
 - `entry_initial_delay_sec`：账户 entry 启动前的额外等待秒数。
 - `entry_symbol_interval_sec`：账户 entry 每个 symbol 之间的额外等待秒数。

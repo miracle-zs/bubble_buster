@@ -6,7 +6,7 @@ import shutil
 import sys
 import threading
 import time
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from logging.handlers import TimedRotatingFileHandler
 from pathlib import Path
 from typing import Optional
@@ -371,15 +371,6 @@ def _read_entry_catchup_from_config(config_path: str) -> bool:
     return str(runtime_cfg.get("entry_catchup_enabled", "true")).strip().lower() in {"1", "true", "yes", "on"}
 
 
-def _persist_entry_catchup_to_config(config_path: str, enabled: bool) -> None:
-    cfg = _load_config(config_path)
-    if not cfg.has_section("runtime"):
-        cfg.add_section("runtime")
-    cfg["runtime"]["entry_catchup_enabled"] = "true" if enabled else "false"
-    with open(config_path, "w", encoding="utf-8") as f:
-        cfg.write(f)
-
-
 def _runtime_entry_catchup_state(app: FastAPI) -> dict:
     config_path = str(getattr(app.state, "config_path", "") or _default_config_path())
     service_state = getattr(app.state, "service_state", {}) or {}
@@ -388,12 +379,12 @@ def _runtime_entry_catchup_state(app: FastAPI) -> dict:
         return {
             "entry_catchup_enabled": bool(getattr(service.cfg, "entry_catchup_enabled", True)),
             "source": "RUNTIME",
-            "mutable": True,
+            "mutable": False,
         }
     return {
         "entry_catchup_enabled": _read_entry_catchup_from_config(config_path),
         "source": "CONFIG",
-        "mutable": True,
+        "mutable": False,
     }
 
 
@@ -491,8 +482,11 @@ def _shutdown_background_service(app: FastAPI) -> None:
         if thread and thread.is_alive():
             thread.join(timeout=10)
     finally:
-        if lock_obj:
+        thread_still_running = bool(thread and thread.is_alive())
+        if lock_obj and not thread_still_running:
             lock_obj.release()
+        elif thread_still_running:
+            service_state["error"] = "runtime thread did not stop within 10s; lock retained"
         service_state["running"] = False
         service_state["service"] = None
 
@@ -502,6 +496,16 @@ def create_app(config_path: Optional[str] = None) -> FastAPI:
     static_root = (Path(__file__).resolve().parent / "app_static").resolve()
     static_root.mkdir(parents=True, exist_ok=True)
     app.mount("/static", StaticFiles(directory=str(static_root)), name="static")
+
+    @app.middleware("http")
+    async def enforce_read_only_dashboard(request: Request, call_next):
+        if request.method.upper() not in {"GET", "HEAD", "OPTIONS"}:
+            return JSONResponse(
+                status_code=405,
+                content={"detail": "Dashboard is read-only"},
+                headers={"Allow": "GET, HEAD, OPTIONS"},
+            )
+        return await call_next(request)
 
     @app.on_event("startup")
     def _startup() -> None:
@@ -683,30 +687,6 @@ def create_app(config_path: Optional[str] = None) -> FastAPI:
             return _runtime_entry_catchup_state(request.app)
         except Exception as exc:  # noqa: BLE001
             raise HTTPException(status_code=500, detail=f"runtime settings read failed: {exc}") from exc
-
-    @app.post("/api/runtime/settings/entry-catchup")
-    def update_entry_catchup(
-        request: Request,
-        enabled: bool = Query(...),
-        persist: bool = Query(default=True),
-    ):
-        service_state = getattr(request.app.state, "service_state", {}) or {}
-        service = service_state.get("service")
-        applied_runtime = False
-        if service is not None and getattr(service, "cfg", None) is not None:
-            service.cfg = replace(service.cfg, entry_catchup_enabled=bool(enabled))
-            applied_runtime = True
-
-        config_path = str(getattr(request.app.state, "config_path", "") or _default_config_path())
-        persisted = False
-        if persist:
-            _persist_entry_catchup_to_config(config_path, bool(enabled))
-            persisted = True
-
-        state = _runtime_entry_catchup_state(request.app)
-        state["applied_runtime"] = applied_runtime
-        state["persisted"] = persisted
-        return state
 
     @app.get("/healthz")
     def healthz(request: Request):

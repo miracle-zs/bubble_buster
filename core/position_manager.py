@@ -566,9 +566,6 @@ class PositionManager:
                 if qty <= 0:
                     raise RuntimeError("position qty is zero")
 
-                if tracked_pos is not None:
-                    self._cancel_order_if_exists(symbol, tracked_pos.get("sl_order_id"), tracked_pos.get("sl_client_order_id"))
-
                 sl_stop_price = self.client.format_trigger_price(symbol, merged_sl_price, round_up=round_up)
                 try:
                     sl_order = self._create_stop_order_with_fallback(
@@ -583,6 +580,8 @@ class PositionManager:
                 except BinanceAPIError as exc:
                     if not self._is_immediate_trigger_error(exc):
                         raise
+                    if tracked_pos is not None:
+                        self._cancel_exit_orders(tracked_pos)
                     close_info = self._close_noon_protection_immediate(
                         symbol=symbol,
                         qty=qty,
@@ -604,21 +603,28 @@ class PositionManager:
                     )
                     continue
 
-                self.store.add_order_event(
-                    symbol=symbol,
-                    position_id=tracked_position_id,
-                    event_time_utc=self._utc_now_iso(),
-                    order_payload=sl_order,
-                )
+                try:
+                    if tracked_position_id is not None:
+                        self.store.update_stop_loss(
+                            position_id=tracked_position_id,
+                            sl_order_id=sl_order.get("orderId"),
+                            sl_client_order_id=sl_order.get("clientOrderId"),
+                            sl_price=merged_sl_price,
+                            liq_price_latest=self._safe_positive_float(risk.get("liquidationPrice")),
+                        )
+                    self.store.add_order_event(
+                        symbol=symbol,
+                        position_id=tracked_position_id,
+                        event_time_utc=self._utc_now_iso(),
+                        order_payload=sl_order,
+                    )
+                except Exception:
+                    self._cancel_order_if_exists(symbol, sl_order.get("orderId"), sl_order.get("clientOrderId"))
+                    raise
+                if tracked_pos is not None:
+                    self._cancel_order_if_exists(symbol, tracked_pos.get("sl_order_id"), tracked_pos.get("sl_client_order_id"))
                 caps[cap_key] = merged_sl_price
                 if tracked_position_id is not None:
-                    self.store.update_stop_loss(
-                        position_id=tracked_position_id,
-                        sl_order_id=sl_order.get("orderId"),
-                        sl_client_order_id=sl_order.get("clientOrderId"),
-                        sl_price=merged_sl_price,
-                        liq_price_latest=self._safe_positive_float(risk.get("liquidationPrice")),
-                    )
                     self.store.clear_position_error(tracked_position_id)
                 summary["updated_sl"] += 1
                 details["updated_sl"].append(
@@ -787,9 +793,6 @@ class PositionManager:
                 if qty <= 0:
                     raise RuntimeError("position qty is zero")
 
-                if tracked_pos is not None:
-                    self._cancel_order_if_exists(symbol, tracked_pos.get("sl_order_id"), tracked_pos.get("sl_client_order_id"))
-
                 sl_stop_price = self.client.format_trigger_price(symbol, merged_sl_price, round_up=round_up)
                 sl_order = self._create_stop_order_with_fallback(
                     symbol=symbol,
@@ -801,22 +804,29 @@ class PositionManager:
                     use_reduce_only=use_reduce_only,
                 )
 
-                self.store.add_order_event(
-                    symbol=symbol,
-                    position_id=tracked_position_id,
-                    event_time_utc=self._utc_now_iso(),
-                    order_payload=sl_order,
-                )
+                try:
+                    if tracked_position_id is not None:
+                        self.store.update_stop_loss(
+                            position_id=tracked_position_id,
+                            sl_order_id=sl_order.get("orderId"),
+                            sl_client_order_id=sl_order.get("clientOrderId"),
+                            sl_price=merged_sl_price,
+                            liq_price_latest=self._safe_positive_float(risk.get("liquidationPrice")),
+                        )
+                    self.store.add_order_event(
+                        symbol=symbol,
+                        position_id=tracked_position_id,
+                        event_time_utc=self._utc_now_iso(),
+                        order_payload=sl_order,
+                    )
+                except Exception:
+                    self._cancel_order_if_exists(symbol, sl_order.get("orderId"), sl_order.get("clientOrderId"))
+                    raise
+                if tracked_pos is not None:
+                    self._cancel_order_if_exists(symbol, tracked_pos.get("sl_order_id"), tracked_pos.get("sl_client_order_id"))
                 caps[cap_key] = merged_sl_price
                 caps_updated_at_by_key[cap_key] = self._utc_now_datetime()
                 if tracked_position_id is not None:
-                    self.store.update_stop_loss(
-                        position_id=tracked_position_id,
-                        sl_order_id=sl_order.get("orderId"),
-                        sl_client_order_id=sl_order.get("clientOrderId"),
-                        sl_price=merged_sl_price,
-                        liq_price_latest=self._safe_positive_float(risk.get("liquidationPrice")),
-                    )
                     self.store.clear_position_error(tracked_position_id)
                 summary["updated_sl"] += 1
                 details["updated_sl"].append(
@@ -1152,7 +1162,13 @@ class PositionManager:
         if self._is_protection_exempt(symbol):
             return None
 
-        close_result = self._close_if_recorded_exit_filled(pos)
+        tp_status, sl_status = self._get_recorded_exit_statuses(pos)
+        close_result = self._close_if_recorded_exit_filled(
+            pos,
+            tp_status=tp_status,
+            sl_status=sl_status,
+            statuses_loaded=True,
+        )
         if close_result:
             return close_result
 
@@ -1166,7 +1182,7 @@ class PositionManager:
                 ),
             }
 
-        update_info = self._update_dynamic_stop(pos, risk)
+        update_info = self._update_dynamic_stop(pos, risk, sl_status=sl_status)
         if update_info:
             return {
                 "type": "updated_sl",
@@ -1174,6 +1190,13 @@ class PositionManager:
                     f"{symbol}(id={position_id}, old_sl={update_info['old_sl_price']}, "
                     f"new_sl={update_info['new_sl_price']}, liq={update_info['liq_price']})"
                 ),
+            }
+
+        repaired_tp = self._repair_take_profit_if_needed(pos, risk, tp_status=tp_status)
+        if repaired_tp:
+            return {
+                "type": "updated_sl",
+                "detail": f"{symbol}(id={position_id}, repaired_take_profit={repaired_tp})",
             }
 
         return None
@@ -1192,19 +1215,27 @@ class PositionManager:
             "detail": f"{symbol}(id={position_id}, reason=SHORT_POSITION_NOT_FOUND)",
         }
 
-    def _close_if_recorded_exit_filled(self, pos: Dict[str, object]) -> Optional[Dict[str, object]]:
+    def _get_recorded_exit_statuses(
+        self,
+        pos: Dict[str, object],
+    ) -> tuple[Optional[str], Optional[str]]:
+        symbol = str(pos["symbol"])
+        return (
+            self._get_order_status(symbol, pos.get("tp_order_id"), pos.get("tp_client_order_id")),
+            self._get_order_status(symbol, pos.get("sl_order_id"), pos.get("sl_client_order_id")),
+        )
+
+    def _close_if_recorded_exit_filled(
+        self,
+        pos: Dict[str, object],
+        tp_status: Optional[str] = None,
+        sl_status: Optional[str] = None,
+        statuses_loaded: bool = False,
+    ) -> Optional[Dict[str, object]]:
         position_id = int(pos["id"])
         symbol = str(pos["symbol"])
-        tp_status = self._get_order_status(
-            symbol,
-            pos.get("tp_order_id"),
-            pos.get("tp_client_order_id"),
-        )
-        sl_status = self._get_order_status(
-            symbol,
-            pos.get("sl_order_id"),
-            pos.get("sl_client_order_id"),
-        )
+        if not statuses_loaded:
+            tp_status, sl_status = self._get_recorded_exit_statuses(pos)
 
         if tp_status == "FILLED":
             close_order_id = self._close_on_trigger(pos, close_status="CLOSED_TP", close_reason="TAKE_PROFIT_FILLED")
@@ -1392,7 +1423,12 @@ class PositionManager:
         message = str(getattr(exc, "message", "") or exc).lower()
         return getattr(exc, "code", None) == -2021 or "immediately trigger" in message
 
-    def _update_dynamic_stop(self, pos: Dict[str, object], risk: Dict[str, str]) -> Optional[Dict[str, object]]:
+    def _update_dynamic_stop(
+        self,
+        pos: Dict[str, object],
+        risk: Dict[str, str],
+        sl_status: Optional[str] = None,
+    ) -> Optional[Dict[str, object]]:
         position_id = int(pos["id"])
         symbol = str(pos["symbol"])
         if self._is_protection_exempt(symbol):
@@ -1420,10 +1456,10 @@ class PositionManager:
         rules = self.client.get_symbol_rules().get(symbol)
         min_delta = rules.tick_size if rules else 0.0
 
-        if old_sl_price and abs(new_sl_price - old_sl_price) <= max(min_delta, 1e-12):
+        sl_is_live = sl_status in {"NEW", "PENDING", "PARTIALLY_FILLED"}
+        if old_sl_price and abs(new_sl_price - old_sl_price) <= max(min_delta, 1e-12) and sl_is_live:
             return None
 
-        self._cancel_order_if_exists(symbol, pos.get("sl_order_id"), pos.get("sl_client_order_id"))
         sl_order = self._create_stop_order_with_fallback(
             symbol=symbol,
             side="BUY",
@@ -1432,24 +1468,84 @@ class PositionManager:
             client_order_id=self._new_client_id("sl", symbol),
         )
 
-        self.store.update_stop_loss(
-            position_id=position_id,
-            sl_order_id=sl_order.get("orderId"),
-            sl_client_order_id=sl_order.get("clientOrderId"),
-            sl_price=new_sl_price,
-            liq_price_latest=liq_price,
-        )
-        self.store.add_order_event(
-            symbol=symbol,
-            position_id=position_id,
-            event_time_utc=self._utc_now_iso(),
-            order_payload=sl_order,
-        )
+        try:
+            self.store.update_stop_loss(
+                position_id=position_id,
+                sl_order_id=sl_order.get("orderId"),
+                sl_client_order_id=sl_order.get("clientOrderId"),
+                sl_price=new_sl_price,
+                liq_price_latest=liq_price,
+            )
+            self.store.add_order_event(
+                symbol=symbol,
+                position_id=position_id,
+                event_time_utc=self._utc_now_iso(),
+                order_payload=sl_order,
+            )
+        except Exception:
+            self._cancel_order_if_exists(symbol, sl_order.get("orderId"), sl_order.get("clientOrderId"))
+            raise
+        self._cancel_order_if_exists(symbol, pos.get("sl_order_id"), pos.get("sl_client_order_id"))
         return {
             "old_sl_price": old_sl_price,
             "new_sl_price": new_sl_price,
             "liq_price": liq_price,
         }
+
+    def _repair_take_profit_if_needed(
+        self,
+        pos: Dict[str, object],
+        risk: Dict[str, str],
+        tp_status: Optional[str] = None,
+    ) -> Optional[float]:
+        tp_price = self._safe_positive_float(pos.get("tp_price"))
+        if not tp_price:
+            return None
+        symbol = str(pos["symbol"])
+        if tp_status in {"NEW", "PENDING", "PARTIALLY_FILLED"}:
+            return None
+
+        position_amt = self._safe_float(risk.get("positionAmt"), default=0.0)
+        if position_amt >= 0:
+            return None
+        position_side = str(risk.get("positionSide") or "BOTH").strip().upper() or "BOTH"
+        close_side, use_reduce_only = self._resolve_close_side_for_exchange_position(
+            position_amt=position_amt,
+            position_side=position_side,
+        )
+        order_params: Dict[str, object] = {
+            "symbol": symbol,
+            "side": close_side,
+            "type": "TAKE_PROFIT_MARKET",
+            "stopPrice": self.client.format_trigger_price(symbol, tp_price, round_up=False),
+            "quantity": self.client.format_order_qty(symbol, abs(position_amt)),
+            "workingType": self.trigger_price_type,
+            "priceProtect": True,
+            "newClientOrderId": self._new_client_id("tpfix", symbol),
+        }
+        if use_reduce_only:
+            order_params["reduceOnly"] = True
+        if position_side in {"LONG", "SHORT"}:
+            order_params["positionSide"] = position_side
+        order = self.client.create_order(**order_params)
+        try:
+            self.store.update_take_profit(
+                position_id=int(pos["id"]),
+                tp_order_id=order.get("orderId"),
+                tp_client_order_id=order.get("clientOrderId"),
+                tp_price=tp_price,
+            )
+            self.store.add_order_event(
+                symbol=symbol,
+                position_id=int(pos["id"]),
+                event_time_utc=self._utc_now_iso(),
+                order_payload=order,
+            )
+        except Exception:
+            self._cancel_order_if_exists(symbol, order.get("orderId"), order.get("clientOrderId"))
+            raise
+        self._cancel_order_if_exists(symbol, pos.get("tp_order_id"), pos.get("tp_client_order_id"))
+        return tp_price
 
     def _create_stop_order_with_fallback(
         self,
@@ -1494,9 +1590,13 @@ class PositionManager:
                 orig_client_order_id=parsed_client_order_id,
             )
         except BinanceAPIError as exc:
-            # Order may already be gone due to auto-cancel, ignore and continue with position state.
-            LOGGER.debug("get_order failed for %s/%s/%s: %s", symbol, order_id, client_order_id, exc)
-            return None
+            try:
+                code = int(exc.code)
+            except (TypeError, ValueError):
+                code = None
+            if code in {-2011, -2013}:
+                return None
+            raise
 
     def _get_order_status(
         self,
@@ -1974,10 +2074,17 @@ class PositionManager:
 
     def _get_symbol_position_risk(self, symbol: str) -> Optional[Dict[str, str]]:
         rows = self.client.get_position_risk(symbol=symbol)
+        fallback = None
         for row in rows:
-            if row.get("symbol") == symbol:
+            if row.get("symbol") != symbol:
+                continue
+            if fallback is None:
+                fallback = row
+            position_side = str(row.get("positionSide") or "BOTH").strip().upper()
+            position_amt = self._safe_float(row.get("positionAmt"), default=0.0)
+            if position_side == "SHORT" or position_amt < 0:
                 return row
-        return None
+        return fallback
 
     @classmethod
     def _normalize_daily_loss_cut_scope(cls, scope: str) -> str:
@@ -1988,12 +2095,11 @@ class PositionManager:
             LOGGER.warning("Invalid daily_loss_cut_scope=%s, fallback to %s", normalized, cls.DAILY_LOSS_CUT_SCOPE_TRACKED)
         return cls.DAILY_LOSS_CUT_SCOPE_TRACKED
 
-    @staticmethod
-    def _is_expired(expire_at_utc: str) -> bool:
+    def _is_expired(self, expire_at_utc: str) -> bool:
         expire_time = datetime.fromisoformat(expire_at_utc)
         if expire_time.tzinfo is None:
             expire_time = expire_time.replace(tzinfo=timezone.utc)
-        now_utc = datetime.now(timezone.utc)
+        now_utc = self._utc_now_datetime()
         return now_utc >= expire_time
 
     @staticmethod

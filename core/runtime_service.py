@@ -1,11 +1,10 @@
 import logging
 import threading
 import time
-from concurrent.futures import Future, ThreadPoolExecutor, as_completed
+from concurrent.futures import Future, ThreadPoolExecutor, wait
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
-from concurrent.futures import TimeoutError as FutureTimeoutError
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 from zoneinfo import ZoneInfo
 
 
@@ -121,6 +120,15 @@ class StrategyRuntimeService:
         self._entry_futures: Dict[Future, str] = {}
         self._entry_future_started_at_by_account: Dict[str, float] = {}
         self._entry_future_warned_by_account: Dict[str, bool] = {}
+        self._manage_executor = ThreadPoolExecutor(
+            max_workers=self.max_account_workers,
+            thread_name_prefix="manage",
+        )
+        self._manage_futures_by_account: Dict[str, Future] = {}
+        self._scheduled_executor = ThreadPoolExecutor(
+            max_workers=self.max_account_workers,
+            thread_name_prefix="scheduled",
+        )
 
     def _entry_schedule_for_day(self, day: date, account_id: Optional[str] = None) -> datetime:
         account_ctx = self.account_runtimes.get(account_id or "", {})
@@ -223,11 +231,18 @@ class StrategyRuntimeService:
             return
 
         running_account_ids = set(self._entry_futures.values())
-        due_account_ids = [
-            aid
-            for aid in account_ids
-            if aid not in running_account_ids and self._should_run_entry(aid, now_local)
-        ]
+        due_account_ids = []
+        for aid in account_ids:
+            if aid in running_account_ids:
+                continue
+            strategy = self.account_runtimes[aid].get("strategy")
+            has_pending_wait = bool(
+                strategy is not None
+                and hasattr(strategy, "has_pending_entry_wait")
+                and strategy.has_pending_entry_wait()  # type: ignore[attr-defined]
+            )
+            if has_pending_wait or self._should_run_entry(aid, now_local):
+                due_account_ids.append(aid)
         if not due_account_ids:
             return
 
@@ -280,10 +295,7 @@ class StrategyRuntimeService:
             raise RuntimeError("strategy_missing")
         if shared_top_gainers is None:
             return run_entry()  # type: ignore[misc]
-        try:
-            return run_entry(shared_top_gainers=shared_top_gainers)  # type: ignore[misc]
-        except TypeError:
-            return run_entry()  # type: ignore[misc]
+        return run_entry(shared_top_gainers=shared_top_gainers)  # type: ignore[misc]
 
     def _build_shared_top_gainers(self, account_ids: List[str]) -> Optional[List[Dict[str, Any]]]:
         if len(account_ids) <= 1:
@@ -363,6 +375,34 @@ class StrategyRuntimeService:
             LOGGER.warning("service shared ranking unavailable, fallback to per-account ranking: %s", exc)
             return None
 
+    def _run_account_task_calls(
+        self,
+        calls: Dict[str, Callable[[], object]],
+        task_name: str,
+    ) -> Dict[str, object]:
+        if not calls:
+            return {}
+        futures = {self._scheduled_executor.submit(call): aid for aid, call in calls.items()}
+        timeout_sec = max(0.1, float(self.cfg.account_task_timeout_sec))
+        done, pending = wait(set(futures), timeout=timeout_sec)
+        results: Dict[str, object] = {}
+        for future in done:
+            aid = futures[future]
+            try:
+                results[aid] = future.result()
+            except Exception as exc:  # noqa: BLE001
+                results[aid] = {"error": str(exc)}
+        for future in pending:
+            aid = futures[future]
+            LOGGER.warning(
+                "service %s account exceeded hard scheduler timeout %.2fs, continue in background account=%s",
+                task_name,
+                timeout_sec,
+                aid,
+            )
+            results[aid] = {"slow": True, "running": True}
+        return results
+
     def _loss_cut_schedule_for_day(self, day: date) -> datetime:
         return datetime(
             year=day.year,
@@ -415,59 +455,14 @@ class StrategyRuntimeService:
             return
 
         results: Dict[str, object] = {}
-        if len(account_ids) == 1:
-            aid = account_ids[0]
+        calls: Dict[str, Callable[[], object]] = {}
+        for aid in account_ids:
             manager = self.account_runtimes[aid].get("manager")
             if manager is None or not hasattr(manager, "run_daily_loss_cut"):
                 results[aid] = {"error": "manager_missing"}
             else:
-                try:
-                    results[aid] = manager.run_daily_loss_cut()  # type: ignore[attr-defined]
-                except Exception as exc:  # noqa: BLE001
-                    results[aid] = {"error": str(exc)}
-        else:
-            timeout_sec = max(0.1, float(self.cfg.account_task_timeout_sec))
-            done_futures = set()
-            slow_accounts = set()
-            with ThreadPoolExecutor(max_workers=min(self.max_account_workers, len(account_ids))) as ex:
-                futures = {}
-                for aid in account_ids:
-                    manager = self.account_runtimes[aid].get("manager")
-                    if manager is None or not hasattr(manager, "run_daily_loss_cut"):
-                        results[aid] = {"error": "manager_missing"}
-                        continue
-                    futures[ex.submit(manager.run_daily_loss_cut)] = aid  # type: ignore[attr-defined]
-
-                try:
-                    for future in as_completed(futures, timeout=timeout_sec):
-                        done_futures.add(future)
-                        aid = futures[future]
-                        try:
-                            results[aid] = future.result()
-                        except Exception as exc:  # noqa: BLE001
-                            results[aid] = {"error": str(exc)}
-                except FutureTimeoutError:
-                    pass
-
-                for future, aid in futures.items():
-                    if future in done_futures:
-                        continue
-                    slow_accounts.add(aid)
-                    LOGGER.warning(
-                        "service daily loss-cut account exceeded soft-timeout %.2fs, waiting completion account=%s",
-                        timeout_sec,
-                        aid,
-                    )
-                    try:
-                        result = future.result()
-                        if isinstance(result, dict):
-                            result.setdefault("slow", True)
-                        results[aid] = result
-                    except Exception as exc:  # noqa: BLE001
-                        results[aid] = {"error": str(exc)}
-                for aid in slow_accounts:
-                    if isinstance(results.get(aid), dict):
-                        results[aid].setdefault("slow", True)
+                calls[aid] = manager.run_daily_loss_cut  # type: ignore[attr-defined]
+        results.update(self._run_account_task_calls(calls, "daily-loss-cut"))
         LOGGER.info("service daily loss-cut result: %s", results)
 
     def _noon_protection_schedule_for_day(self, day: date) -> datetime:
@@ -514,68 +509,17 @@ class StrategyRuntimeService:
             return
 
         results: Dict[str, object] = {}
-        if len(account_ids) == 1:
-            aid = account_ids[0]
+        calls: Dict[str, Callable[[], object]] = {}
+        for aid in account_ids:
             manager = self.account_runtimes[aid].get("manager")
             if manager is None or not hasattr(manager, "run_noon_protection_stop"):
                 results[aid] = {"error": "manager_missing"}
             else:
-                try:
-                    results[aid] = manager.run_noon_protection_stop(  # type: ignore[attr-defined]
+                calls[aid] = lambda manager=manager: manager.run_noon_protection_stop(  # type: ignore[attr-defined]
                         day_start_utc=day_start_utc,
                         noon_time_utc=noon_time_utc,
                     )
-                except Exception as exc:  # noqa: BLE001
-                    results[aid] = {"error": str(exc)}
-        else:
-            timeout_sec = max(0.1, float(self.cfg.account_task_timeout_sec))
-            done_futures = set()
-            slow_accounts = set()
-            with ThreadPoolExecutor(max_workers=min(self.max_account_workers, len(account_ids))) as ex:
-                futures = {}
-                for aid in account_ids:
-                    manager = self.account_runtimes[aid].get("manager")
-                    if manager is None or not hasattr(manager, "run_noon_protection_stop"):
-                        results[aid] = {"error": "manager_missing"}
-                        continue
-                    futures[
-                        ex.submit(
-                            manager.run_noon_protection_stop,  # type: ignore[attr-defined]
-                            day_start_utc=day_start_utc,
-                            noon_time_utc=noon_time_utc,
-                        )
-                    ] = aid
-
-                try:
-                    for future in as_completed(futures, timeout=timeout_sec):
-                        done_futures.add(future)
-                        aid = futures[future]
-                        try:
-                            results[aid] = future.result()
-                        except Exception as exc:  # noqa: BLE001
-                            results[aid] = {"error": str(exc)}
-                except FutureTimeoutError:
-                    pass
-
-                for future, aid in futures.items():
-                    if future in done_futures:
-                        continue
-                    slow_accounts.add(aid)
-                    LOGGER.warning(
-                        "service noon protection account exceeded soft-timeout %.2fs, waiting completion account=%s",
-                        timeout_sec,
-                        aid,
-                    )
-                    try:
-                        result = future.result()
-                        if isinstance(result, dict):
-                            result.setdefault("slow", True)
-                        results[aid] = result
-                    except Exception as exc:  # noqa: BLE001
-                        results[aid] = {"error": str(exc)}
-                for aid in slow_accounts:
-                    if isinstance(results.get(aid), dict):
-                        results[aid].setdefault("slow", True)
+        results.update(self._run_account_task_calls(calls, "noon-protection"))
         LOGGER.info("service noon protection result: %s", results)
 
     def _morning_protection_schedule_for_day(self, day: date, account_id: Optional[str] = None) -> datetime:
@@ -731,6 +675,12 @@ class StrategyRuntimeService:
         strategy = ctx.get("strategy")
         balance_sampler = ctx.get("balance_sampler")
 
+        pending_recovery = None
+        if strategy is not None and hasattr(strategy, "recover_pending_exit_setups"):
+            pending_recovery = strategy.recover_pending_exit_setups()  # type: ignore[attr-defined]
+            if isinstance(pending_recovery, dict) and int(pending_recovery.get("total", 0)) > 0:
+                LOGGER.warning("service pending exit setup recovery account=%s: %s", account_id, pending_recovery)
+
         summary = manager.run_once()  # type: ignore[attr-defined]
         if balance_sampler is not None:
             try:
@@ -747,7 +697,7 @@ class StrategyRuntimeService:
             except Exception as exc:  # noqa: BLE001
                 LOGGER.warning("service equity recovery take-profit failed account=%s: %s", account_id, exc)
 
-        return {"account_id": account_id, "summary": summary}
+        return {"account_id": account_id, "summary": summary, "pending_recovery": pending_recovery}
 
     def _record_account_failure(self, account_id: str, error_text: str) -> None:
         state = self.account_states.setdefault(account_id, AccountRuntimeState())
@@ -780,9 +730,25 @@ class StrategyRuntimeService:
             for aid, ctx in self.account_runtimes.items()
             if str(ctx.get("mode", "full")).strip().lower() == "full"
         ]
-        eligible_accounts = []
         outputs: Dict[str, Dict[str, object]] = {}
+        completed_accounts = set()
+        for aid, future in list(self._manage_futures_by_account.items()):
+            if not future.done():
+                continue
+            self._manage_futures_by_account.pop(aid, None)
+            self._consume_manage_future(aid, future, outputs)
+            completed_accounts.add(aid)
+
+        eligible_accounts = []
         for aid in account_ids:
+            if aid in completed_accounts:
+                continue
+            if aid in self._manage_futures_by_account:
+                outputs.setdefault(
+                    aid,
+                    {"account_id": aid, "slow": True, "running": True, "reason": "PREVIOUS_CYCLE_STILL_RUNNING"},
+                )
+                continue
             state = self.account_states.setdefault(aid, AccountRuntimeState())
             if state.tripped_until_cycle >= self.cycle_no:
                 LOGGER.warning(
@@ -795,58 +761,41 @@ class StrategyRuntimeService:
                 continue
             eligible_accounts.append(aid)
 
-        if not eligible_accounts:
-            return outputs
+        submitted: Dict[Future, str] = {}
+        for aid in eligible_accounts:
+            future = self._manage_executor.submit(self._run_manage_for_account, aid)
+            self._manage_futures_by_account[aid] = future
+            submitted[future] = aid
 
-        timeout_sec = max(0.1, float(self.cfg.account_task_timeout_sec))
-        if len(eligible_accounts) == 1:
-            only = eligible_accounts[0]
-            try:
-                result = self._run_manage_for_account(only)
-                self.account_states[only].failures = 0
-                outputs[only] = result
-            except Exception as exc:  # noqa: BLE001
-                self._record_account_failure(only, str(exc))
-                outputs[only] = {"account_id": only, "error": str(exc)}
-            return outputs
-
-        with ThreadPoolExecutor(max_workers=min(self.max_account_workers, len(eligible_accounts))) as ex:
-            futures = {ex.submit(self._run_manage_for_account, aid): aid for aid in eligible_accounts}
-            done_futures = set()
-            slow_accounts = set()
-            try:
-                for future in as_completed(futures, timeout=timeout_sec):
-                    done_futures.add(future)
-                    aid = futures[future]
-                    try:
-                        outputs[aid] = future.result()
-                        self.account_states[aid].failures = 0
-                    except Exception as exc:  # noqa: BLE001
-                        self._record_account_failure(aid, str(exc))
-                        outputs[aid] = {"account_id": aid, "error": str(exc)}
-            except FutureTimeoutError:
-                pass
-
-            for future, aid in futures.items():
-                if future in done_futures:
-                    continue
-                slow_accounts.add(aid)
+        if submitted:
+            timeout_sec = max(0.1, float(self.cfg.account_task_timeout_sec))
+            done, pending = wait(set(submitted), timeout=timeout_sec)
+            for future in done:
+                aid = submitted[future]
+                self._manage_futures_by_account.pop(aid, None)
+                self._consume_manage_future(aid, future, outputs)
+            for future in pending:
+                aid = submitted[future]
                 LOGGER.warning(
-                    "service manage account exceeded soft-timeout %.2fs, waiting completion account=%s",
+                    "service manage account exceeded hard scheduler timeout %.2fs, continue in background account=%s",
                     timeout_sec,
                     aid,
                 )
-                try:
-                    outputs[aid] = future.result()
-                    self.account_states[aid].failures = 0
-                except Exception as exc:  # noqa: BLE001
-                    self._record_account_failure(aid, str(exc))
-                    outputs[aid] = {"account_id": aid, "error": str(exc)}
-            for aid in slow_accounts:
-                output = outputs.get(aid)
-                if isinstance(output, dict):
-                    output["slow"] = True
+                outputs[aid] = {"account_id": aid, "slow": True, "running": True}
         return outputs
+
+    def _consume_manage_future(
+        self,
+        account_id: str,
+        future: Future,
+        outputs: Dict[str, Dict[str, object]],
+    ) -> None:
+        try:
+            outputs[account_id] = future.result()
+            self.account_states.setdefault(account_id, AccountRuntimeState()).failures = 0
+        except Exception as exc:  # noqa: BLE001
+            self._record_account_failure(account_id, str(exc))
+            outputs[account_id] = {"account_id": account_id, "error": str(exc)}
 
     def _orphan_exit_order_cleanup_schedule_for_day(self, day: date) -> datetime:
         return datetime(
@@ -959,5 +908,11 @@ class StrategyRuntimeService:
             except Exception as exc:  # noqa: BLE001
                 LOGGER.exception("runtime service cycle failed: %s", exc)
             stopper.wait(timeout=max(0.2, self.cfg.loop_sleep_sec))
-        self._entry_executor.shutdown(wait=False, cancel_futures=True)
+        for ctx in self.account_runtimes.values():
+            strategy = ctx.get("strategy")
+            if strategy is not None and hasattr(strategy, "request_entry_wait_stop"):
+                strategy.request_entry_wait_stop()  # type: ignore[attr-defined]
+        self._entry_executor.shutdown(wait=True, cancel_futures=True)
+        self._manage_executor.shutdown(wait=True, cancel_futures=True)
+        self._scheduled_executor.shutdown(wait=True, cancel_futures=True)
         LOGGER.info("runtime service stopped")

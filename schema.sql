@@ -38,6 +38,7 @@ CREATE TABLE IF NOT EXISTS positions (
 
 CREATE INDEX IF NOT EXISTS idx_positions_status ON positions(status);
 CREATE INDEX IF NOT EXISTS idx_positions_symbol_status ON positions(symbol, status);
+CREATE INDEX IF NOT EXISTS idx_positions_status_opened ON positions(status, opened_at_utc);
 
 CREATE TABLE IF NOT EXISTS order_events (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -57,6 +58,8 @@ CREATE TABLE IF NOT EXISTS order_events (
 
 CREATE INDEX IF NOT EXISTS idx_order_events_position ON order_events(position_id);
 CREATE INDEX IF NOT EXISTS idx_order_events_symbol ON order_events(symbol);
+CREATE INDEX IF NOT EXISTS idx_order_events_position_order_id_id ON order_events(position_id, order_id, id DESC);
+CREATE INDEX IF NOT EXISTS idx_order_events_position_side_status_id ON order_events(position_id, side, status, id DESC);
 
 CREATE TABLE IF NOT EXISTS wallet_snapshots (
     id INTEGER PRIMARY KEY AUTOINCREMENT,

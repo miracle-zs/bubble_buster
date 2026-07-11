@@ -109,6 +109,59 @@ class PositionManagerTest(unittest.TestCase):
         self.assertIn("止损更新明细", content)
         self.assertIn("BTCUSDT", content)
 
+    def test_canceled_stop_is_recreated_before_old_order_is_canceled(self) -> None:
+        position_id = self._insert_open_position(
+            symbol="BTCUSDT",
+            qty=0.01,
+            tp_order_id=None,
+            sl_order_id=22,
+            tp_price=None,
+            sl_price=60390.0,
+            expire_in_hours=24,
+        )
+        call_order = []
+        client = MagicMock()
+        client.get_order.return_value = {"status": "CANCELED"}
+        client.get_position_risk.return_value = [
+            {"symbol": "BTCUSDT", "positionAmt": "-0.01", "liquidationPrice": "61000", "positionSide": "BOTH"}
+        ]
+        client.get_symbol_rules.return_value = {"BTCUSDT": SimpleNamespace(tick_size=0.1)}
+        client.normalize_trigger_price.return_value = 60390.0
+        client.format_trigger_price.return_value = "60390.0"
+        client.format_order_qty.return_value = "0.01"
+
+        def create_order(**_kwargs):
+            call_order.append("create")
+            return {"orderId": 333, "clientOrderId": "sl-new", "status": "NEW"}
+
+        def cancel_order(**_kwargs):
+            call_order.append("cancel")
+            return {}
+
+        client.create_order.side_effect = create_order
+        client.cancel_order.side_effect = cancel_order
+        manager = PositionManager(client, self.store, MagicMock(), 1.0, "CONTRACT_PRICE")
+
+        summary = manager.run_once()
+
+        self.assertEqual(summary["updated_sl"], 1)
+        self.assertEqual(call_order, ["create", "cancel"])
+        row = self._get_position(position_id)
+        self.assertEqual(row["sl_order_id"], 333)
+
+    def test_tracked_short_risk_prefers_short_leg_in_hedge_mode(self) -> None:
+        client = MagicMock()
+        client.get_position_risk.return_value = [
+            {"symbol": "BTCUSDT", "positionAmt": "1", "positionSide": "LONG"},
+            {"symbol": "BTCUSDT", "positionAmt": "-2", "positionSide": "SHORT"},
+        ]
+        manager = PositionManager(client, self.store, MagicMock(), 1.0, "CONTRACT_PRICE")
+
+        risk = manager._get_symbol_position_risk("BTCUSDT")
+
+        self.assertIsNotNone(risk)
+        self.assertEqual(risk["positionSide"], "SHORT")
+
     def test_timeout_close_position(self) -> None:
         position_id = self._insert_open_position(
             symbol="BTCUSDT",
