@@ -1179,6 +1179,7 @@ class DashboardDataProvider:
         dd = self._apply_drawdown(curve)
         trade_stats = {
             "closed_trades_priced": 0,
+            "realized_fill_count": 0,
             "wins": 0,
             "losses": 0,
             "breakeven": 0,

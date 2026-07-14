@@ -95,6 +95,37 @@ class DashboardServerTest(unittest.TestCase):
         self.assertIn("unpriced_closed_details", snapshot)
         self.assertIn("net_cashflow_usdt", snapshot["summary"])
 
+    def test_snapshot_without_trade_stats_still_returns_curve_stats(self) -> None:
+        now = datetime.now(timezone.utc).replace(microsecond=0)
+        self.store.scoped("acc01").add_wallet_snapshot(
+            (now - timedelta(minutes=1)).isoformat(),
+            1000.0,
+            source="API",
+        )
+        self.store.scoped("acc01").add_wallet_snapshot(now.isoformat(), 990.0, source="API")
+
+        provider = DashboardDataProvider(
+            db_path=self.db_path,
+            log_file=self.log_file,
+            timezone_name="UTC",
+            entry_hour=7,
+            entry_minute=40,
+        )
+
+        snapshot = provider.snapshot(
+            log_lines=0,
+            window_hours=24,
+            account_id="acc01",
+            include_details=False,
+            include_log=False,
+            include_curves=True,
+            include_balance_curve=True,
+            include_trade_stats=False,
+        )
+
+        self.assertEqual(len(snapshot["strategy_equity_curve"]), 2)
+        self.assertEqual(snapshot["drawdown_stats_strategy"]["realized_fill_count"], 0)
+
     def test_snapshot_without_db_file(self) -> None:
         missing_db = str(Path(self.temp_dir.name) / "missing.db")
         provider = DashboardDataProvider(
