@@ -777,6 +777,69 @@ class DashboardDataProvider:
             tuple(params),
         )
 
+    def _load_all_time_account_pnl(
+        self,
+        conn: sqlite3.Connection,
+        account_id: Optional[str] = None,
+    ) -> Dict[str, float]:
+        params: List[Any] = []
+        where_sql = ""
+        if account_id:
+            where_sql = "WHERE account_id = ?"
+            params.append(account_id)
+        first_row = conn.execute(
+            f"""
+            SELECT captured_at_utc, balance_usdt
+            FROM wallet_snapshots
+            {where_sql}
+            ORDER BY captured_at_utc ASC, id ASC
+            LIMIT 1
+            """,
+            tuple(params),
+        ).fetchone()
+        latest_row = conn.execute(
+            f"""
+            SELECT captured_at_utc, balance_usdt
+            FROM wallet_snapshots
+            {where_sql}
+            ORDER BY captured_at_utc DESC, id DESC
+            LIMIT 1
+            """,
+            tuple(params),
+        ).fetchone()
+        if first_row is None or latest_row is None:
+            return {
+                "all_time_account_pnl": 0.0,
+                "all_time_account_cashflow_usdt": 0.0,
+                "all_time_account_baseline_usdt": 0.0,
+            }
+
+        baseline = float(first_row["balance_usdt"])
+        latest = float(latest_row["balance_usdt"])
+        cashflow_params: List[Any] = [str(first_row["captured_at_utc"]), str(latest_row["captured_at_utc"])]
+        cashflow_where = "WHERE asset = 'USDT' AND event_time_utc >= ? AND event_time_utc <= ?"
+        if account_id:
+            cashflow_where += " AND account_id = ?"
+            cashflow_params.append(account_id)
+        cashflow_row = conn.execute(
+            f"""
+            SELECT COALESCE(SUM(amount), 0) AS amount
+            FROM (
+                SELECT MAX(amount) AS amount
+                FROM cashflow_events
+                {cashflow_where}
+                GROUP BY account_id, COALESCE(NULLIF(tran_id, ''), unique_key)
+            )
+            """,
+            tuple(cashflow_params),
+        ).fetchone()
+        cashflow = float(cashflow_row["amount"] if cashflow_row is not None else 0.0)
+        return {
+            "all_time_account_pnl": round(latest - baseline - cashflow, 8),
+            "all_time_account_cashflow_usdt": round(cashflow, 8),
+            "all_time_account_baseline_usdt": round(baseline, 8),
+        }
+
     def _build_balance_curve(
         self,
         conn: sqlite3.Connection,
@@ -842,6 +905,7 @@ class DashboardDataProvider:
             "unpriced_closed_positions": 0,
             "equity_baseline": round((self._safe_float(curve[0].get("equity")) if curve else 0.0) or 0.0, 8),
         }
+        stats.update(self._load_all_time_account_pnl(conn, account_id=account_id))
         return curve, stats
 
     def _load_trade_outcome_stats(
@@ -851,7 +915,7 @@ class DashboardDataProvider:
         account_id: Optional[str] = None,
     ) -> Dict[str, Any]:
         params: List[Any] = []
-        where_sql = "WHERE p.status NOT IN ('OPEN', 'PENDING_EXIT_SETUP')"
+        where_sql = "WHERE f.realized_pnl IS NOT NULL"
         if account_id:
             where_sql += " AND r.account_id = ?"
             params.append(account_id)
@@ -859,57 +923,31 @@ class DashboardDataProvider:
             conn,
             f"""
             SELECT
-                p.id, p.symbol, p.side, p.qty, p.entry_price,
-                p.tp_price, p.sl_price,
-                p.tp_order_id, p.sl_order_id,
-                p.status, p.close_reason,
-                p.closed_at_utc, p.updated_at_utc, p.close_order_id,
-                oe.event_time_utc AS close_event_time_utc,
-                oe.price AS close_event_price,
-                oe.qty AS close_event_qty,
-                oe.raw_json AS close_raw_json
-            FROM positions p
-            LEFT JOIN runs r ON r.run_id = p.run_id
-            LEFT JOIN order_events oe ON oe.id = (
-                SELECT oe2.id
-                FROM order_events oe2
-                WHERE oe2.position_id = p.id
-                  AND (
-                    (p.close_order_id IS NOT NULL AND oe2.order_id = p.close_order_id)
-                    OR (p.close_order_id IS NULL AND oe2.side = 'BUY' AND oe2.status = 'FILLED')
-                  )
-                ORDER BY oe2.id DESC
-                LIMIT 1
-            )
+                f.id, f.realized_pnl, f.commission, f.commission_asset
+            FROM fills f
+            JOIN positions p ON p.id = f.position_id
+            JOIN runs r ON r.run_id = p.run_id
             {where_sql}
-            ORDER BY COALESCE(p.closed_at_utc, oe.event_time_utc, p.updated_at_utc) ASC, p.id ASC
+            ORDER BY f.event_time_utc ASC, f.id ASC
             """,
             tuple(params),
         )
 
         cumulative_trade_pnl = 0.0
+        trading_fees_usdt = 0.0
         wins = 0
         losses = 0
         breakeven = 0
-        skipped_unpriced = 0
         gross_profit = 0.0
         gross_loss_abs = 0.0
 
         for row in rows:
-            side = str(row.get("side") or "").upper()
-            if side and side != "SHORT":
-                continue
-            qty = self._safe_float(row.get("qty")) or 0.0
-            entry_price = self._safe_float(row.get("entry_price")) or 0.0
-            if qty <= 0 or entry_price <= 0:
-                skipped_unpriced += 1
-                continue
-            close_price = self._extract_close_price(row)
-            if close_price is None or close_price <= 0:
-                skipped_unpriced += 1
-                continue
-            pnl = (entry_price - close_price) * qty
+            pnl = self._safe_float(row.get("realized_pnl")) or 0.0
             cumulative_trade_pnl += pnl
+            commission_asset = str(row.get("commission_asset") or "").upper()
+            commission = self._safe_float(row.get("commission")) or 0.0
+            if commission_asset == "USDT":
+                trading_fees_usdt += commission
             if pnl > 0:
                 wins += 1
                 gross_profit += pnl
@@ -919,14 +957,36 @@ class DashboardDataProvider:
             else:
                 breakeven += 1
 
-        priced_closed_count = wins + losses + breakeven
-        win_rate_pct = (wins / priced_closed_count * 100.0) if priced_closed_count > 0 else 0.0
+        realized_fill_count = wins + losses + breakeven
+        win_rate_pct = (wins / realized_fill_count * 100.0) if realized_fill_count > 0 else 0.0
         avg_win = (gross_profit / wins) if wins > 0 else 0.0
         avg_loss_abs = (gross_loss_abs / losses) if losses > 0 else 0.0
         profit_factor = (gross_profit / gross_loss_abs) if gross_loss_abs > 0 else None
         avg_win_loss_ratio = (avg_win / avg_loss_abs) if (avg_loss_abs > 0 and avg_win > 0) else None
+        missing_realized_params: List[Any] = []
+        missing_realized_where = "WHERE p.status NOT IN ('OPEN', 'PENDING_EXIT_SETUP')"
+        if account_id:
+            missing_realized_where += " AND r.account_id = ?"
+            missing_realized_params.append(account_id)
+        missing_realized_row = conn.execute(
+            f"""
+            SELECT COUNT(*) AS count
+            FROM positions p
+            JOIN runs r ON r.run_id = p.run_id
+            {missing_realized_where}
+              AND NOT EXISTS (
+                  SELECT 1
+                  FROM fills f
+                  WHERE f.position_id = p.id
+                    AND f.realized_pnl IS NOT NULL
+              )
+            """,
+            tuple(missing_realized_params),
+        ).fetchone()
+        missing_realized_positions = int(missing_realized_row["count"] if missing_realized_row else 0)
         return {
-            "closed_trades_priced": priced_closed_count,
+            "closed_trades_priced": realized_fill_count,
+            "realized_fill_count": realized_fill_count,
             "wins": wins,
             "losses": losses,
             "breakeven": breakeven,
@@ -937,7 +997,9 @@ class DashboardDataProvider:
             "avg_loss_abs": round(avg_loss_abs, 8),
             "profit_factor": round(profit_factor, 6) if profit_factor is not None else None,
             "avg_win_loss_ratio": round(avg_win_loss_ratio, 6) if avg_win_loss_ratio is not None else None,
-            "unpriced_closed_positions": skipped_unpriced,
+            "trading_fees_usdt": round(trading_fees_usdt, 8),
+            "net_trade_pnl": round(cumulative_trade_pnl - trading_fees_usdt, 8),
+            "unpriced_closed_positions": missing_realized_positions,
             "trade_realized_pnl": round(cumulative_trade_pnl, 8),
             "as_of_utc": now_utc.replace(microsecond=0).isoformat(),
         }
@@ -981,6 +1043,12 @@ class DashboardDataProvider:
                 LIMIT 1
             )
             {where_sql}
+              AND NOT EXISTS (
+                  SELECT 1
+                  FROM fills f
+                  WHERE f.position_id = p.id
+                    AND f.realized_pnl IS NOT NULL
+              )
             ORDER BY COALESCE(p.closed_at_utc, oe.event_time_utc, p.updated_at_utc) DESC, p.id DESC
             LIMIT ?
             """,
@@ -991,15 +1059,6 @@ class DashboardDataProvider:
             side = str(row.get("side") or "").upper()
             if side and side != "SHORT":
                 continue
-            qty = self._safe_float(row.get("qty")) or 0.0
-            entry_price = self._safe_float(row.get("entry_price")) or 0.0
-            if qty <= 0 or entry_price <= 0:
-                reason = "INVALID_POSITION_FIELDS"
-            else:
-                close_price = self._extract_close_price(row)
-                if close_price is not None and close_price > 0:
-                    continue
-                reason = "MISSING_FILL_PRICE"
             items.append(
                 {
                     "id": row.get("id"),
@@ -1007,7 +1066,7 @@ class DashboardDataProvider:
                     "status": row.get("status"),
                     "close_reason": row.get("close_reason"),
                     "close_order_id": row.get("close_order_id"),
-                    "detected_reason": reason,
+                    "detected_reason": "MISSING_EXCHANGE_REALIZED_PNL",
                     "closed_at_utc": row.get("closed_at_utc") or row.get("close_event_time_utc") or row.get("updated_at_utc"),
                 }
             )
@@ -1038,9 +1097,10 @@ class DashboardDataProvider:
             cashflow_rows = self._query_rows(
                 conn,
                 f"""
-                SELECT id, event_time_utc, amount
+                SELECT MIN(id) AS id, MAX(event_time_utc) AS event_time_utc, MAX(amount) AS amount
                 FROM cashflow_events
                 {where_sql}
+                GROUP BY account_id, COALESCE(NULLIF(tran_id, ''), unique_key)
                 ORDER BY event_time_utc ASC, id ASC
                 LIMIT 5000
                 """,
@@ -1130,6 +1190,8 @@ class DashboardDataProvider:
             "profit_factor": None,
             "avg_win_loss_ratio": None,
             "trade_realized_pnl": 0.0,
+            "trading_fees_usdt": 0.0,
+            "net_trade_pnl": 0.0,
             "unpriced_closed_positions": 0,
         }
         if include_trade_stats:
@@ -1148,6 +1210,7 @@ class DashboardDataProvider:
             "avg_loss_abs": trade_stats["avg_loss_abs"],
             "profit_factor": trade_stats["profit_factor"],
             "avg_win_loss_ratio": trade_stats["avg_win_loss_ratio"],
+            "realized_fill_count": trade_stats["realized_fill_count"],
             "max_drawdown": dd["max_drawdown"],
             "max_drawdown_pct": dd["max_drawdown_pct"],
             "current_drawdown": dd["current_drawdown"],
@@ -1156,7 +1219,10 @@ class DashboardDataProvider:
             "equity_baseline": round((baseline_equity or 0.0), 8),
             "net_cashflow_usdt": round(float(curve[-1].get("cum_cashflow") or 0.0), 8),
             "trade_realized_pnl": trade_stats["trade_realized_pnl"],
+            "trading_fees_usdt": trade_stats["trading_fees_usdt"],
+            "net_trade_pnl": trade_stats["net_trade_pnl"],
         }
+        stats.update(self._load_all_time_account_pnl(conn, account_id=account_id))
         return curve, stats
 
     def snapshot(
@@ -1237,12 +1303,18 @@ class DashboardDataProvider:
                 "avg_loss_abs": 0.0,
                 "profit_factor": None,
                 "avg_win_loss_ratio": None,
+                "realized_fill_count": 0,
+                "trading_fees_usdt": 0.0,
+                "net_trade_pnl": 0.0,
                 "max_drawdown": 0.0,
                 "max_drawdown_pct": 0.0,
                 "current_drawdown": 0.0,
                 "current_drawdown_pct": 0.0,
                 "unpriced_closed_positions": 0,
                 "equity_baseline": 0.0,
+                "all_time_account_pnl": 0.0,
+                "all_time_account_cashflow_usdt": 0.0,
+                "all_time_account_baseline_usdt": 0.0,
             },
             "drawdown_stats_balance": {
                 "wallet_balance_usdt": live_wallet["balance_usdt"],
@@ -1258,12 +1330,18 @@ class DashboardDataProvider:
                 "avg_loss_abs": 0.0,
                 "profit_factor": None,
                 "avg_win_loss_ratio": None,
+                "realized_fill_count": 0,
+                "trading_fees_usdt": 0.0,
+                "net_trade_pnl": 0.0,
                 "max_drawdown": 0.0,
                 "max_drawdown_pct": 0.0,
                 "current_drawdown": 0.0,
                 "current_drawdown_pct": 0.0,
                 "unpriced_closed_positions": 0,
                 "equity_baseline": live_wallet["balance_usdt"] if live_wallet["balance_usdt"] is not None else 0.0,
+                "all_time_account_pnl": 0.0,
+                "all_time_account_cashflow_usdt": 0.0,
+                "all_time_account_baseline_usdt": 0.0,
             },
             "drawdown_stats": {
                 "wallet_balance_usdt": live_wallet["balance_usdt"],
@@ -1279,12 +1357,18 @@ class DashboardDataProvider:
                 "avg_loss_abs": 0.0,
                 "profit_factor": None,
                 "avg_win_loss_ratio": None,
+                "realized_fill_count": 0,
+                "trading_fees_usdt": 0.0,
+                "net_trade_pnl": 0.0,
                 "max_drawdown": 0.0,
                 "max_drawdown_pct": 0.0,
                 "current_drawdown": 0.0,
                 "current_drawdown_pct": 0.0,
                 "unpriced_closed_positions": 0,
                 "equity_baseline": live_wallet["balance_usdt"] if live_wallet["balance_usdt"] is not None else 0.0,
+                "all_time_account_pnl": 0.0,
+                "all_time_account_cashflow_usdt": 0.0,
+                "all_time_account_baseline_usdt": 0.0,
             },
             "log_tail": self._tail_log(lines=log_lines) if include_log else [],
         }
@@ -1419,9 +1503,17 @@ class DashboardDataProvider:
                     data["cashflow_events"] = self._query_rows(
                         conn,
                         """
-                        SELECT id, event_time_utc, asset, amount, income_type, symbol, tran_id, info
+                        SELECT MIN(id) AS id,
+                               MAX(event_time_utc) AS event_time_utc,
+                               asset,
+                               MAX(amount) AS amount,
+                               income_type,
+                               symbol,
+                               tran_id,
+                               info
                         FROM cashflow_events
                         WHERE (? IS NULL OR account_id = ?)
+                        GROUP BY account_id, COALESCE(NULLIF(tran_id, ''), unique_key)
                         ORDER BY event_time_utc DESC, id DESC
                         LIMIT 80
                         """,
@@ -2367,11 +2459,7 @@ DASHBOARD_HTML = """<!doctype html>
         <div class="v" id="maxDrawdown">--</div>
       </article>
       <article class="card">
-        <div class="k">Win Rate</div>
-        <div class="v" id="winRate">--</div>
-      </article>
-      <article class="card">
-        <div class="k">Net Cashflow (USDT)</div>
+        <div class="k">Window Cashflow (USDT)</div>
         <div class="v" id="netCashflow">--</div>
       </article>
     </section>
@@ -2513,7 +2601,6 @@ DASHBOARD_HTML = """<!doctype html>
     walletBalance: document.getElementById("walletBalance"),
     realizedPnl: document.getElementById("realizedPnl"),
     maxDrawdown: document.getElementById("maxDrawdown"),
-    winRate: document.getElementById("winRate"),
     netCashflow: document.getElementById("netCashflow"),
     curveTitle: document.getElementById("curveTitle"),
     tabStrategy: document.getElementById("tabStrategy"),
@@ -2926,12 +3013,6 @@ DASHBOARD_HTML = """<!doctype html>
     setText(el.walletBalance, fmtNum(walletDisplay, 4));
     setText(el.realizedPnl, fmtSigned(stats.total_realized_pnl, 4));
     setText(el.maxDrawdown, fmtNum(stats.max_drawdown_pct, 2) + "%");
-    var pricedTrades = Number(stats.closed_trades_priced || 0);
-    if (currentCurveTab === "balance" || pricedTrades <= 0) {
-      setText(el.winRate, "--");
-    } else {
-      setText(el.winRate, fmtNum(stats.win_rate_pct, 2) + "%");
-    }
     setText(el.netCashflow, fmtSigned(stats.net_cashflow_usdt, 4));
     if (el.realizedPnl) {
       var pnl = toNum(stats.total_realized_pnl);
@@ -2940,14 +3021,6 @@ DASHBOARD_HTML = """<!doctype html>
     if (el.maxDrawdown) {
       var dd = toNum(stats.max_drawdown_pct);
       el.maxDrawdown.className = "v " + (dd && dd > 0 ? "bad" : "");
-    }
-    if (el.winRate) {
-      if (currentCurveTab === "balance" || pricedTrades <= 0) {
-        el.winRate.className = "v";
-      } else {
-        var wr = toNum(stats.win_rate_pct);
-        el.winRate.className = "v " + (wr === null ? "" : (wr >= 50 ? "ok" : "warn"));
-      }
     }
     if (el.netCashflow) {
       var cf = toNum(stats.net_cashflow_usdt);
@@ -2971,23 +3044,11 @@ DASHBOARD_HTML = """<!doctype html>
     var rows = [
       ["Account Equity", walletBalance === null ? "--" : fmtNum(walletBalance, 4) + " USDT"],
       ["Equity Change", fmtSigned(s.total_realized_pnl, 4) + " USDT"],
-      ["Net Cashflow", fmtSigned(s.net_cashflow_usdt, 4) + " USDT"],
-      ["Trade Realized", fmtSigned(s.trade_realized_pnl, 4) + " USDT"],
-      ["Gross Profit", fmtSigned(s.gross_profit, 4) + " USDT"],
-      ["Gross Loss", (toNum(s.gross_loss_abs) === null ? "--" : ("-" + fmtNum(s.gross_loss_abs, 4) + " USDT"))],
-      ["Avg Win / Avg Loss", (currentCurveTab === "balance" || Number(s.closed_trades_priced || 0) <= 0)
-        ? "--"
-        : (fmtNum(s.avg_win, 4) + " / " + fmtNum(s.avg_loss_abs, 4))],
-      ["Profit Factor", (currentCurveTab === "balance" || Number(s.closed_trades_priced || 0) <= 0)
-        ? "--"
-        : (Number(s.losses || 0) <= 0
-          ? (Number(s.wins || 0) > 0 ? "∞" : "--")
-          : fmtNum(s.profit_factor, 3))],
+      ["All-time Equity Change", fmtSigned(s.all_time_account_pnl, 4) + " USDT"],
+      ["Window Cashflow", fmtSigned(s.net_cashflow_usdt, 4) + " USDT"],
       ["Max Drawdown", fmtNum(s.max_drawdown, 4) + " (" + fmtNum(s.max_drawdown_pct, 2) + "%)"],
       ["Current Drawdown", fmtNum(s.current_drawdown, 4) + " (" + fmtNum(s.current_drawdown_pct, 2) + "%)"],
-      ["Win Rate", (currentCurveTab === "balance" || Number(s.closed_trades_priced || 0) <= 0) ? "--" : (fmtNum(s.win_rate_pct, 2) + "%")],
-      ["Closed Trades (Priced)", txt(s.closed_trades_priced)],
-      ["Closed w/o Fill Price", txt(s.unpriced_closed_positions)],
+      ["Closed w/o Exchange PnL", txt(s.unpriced_closed_positions)],
       ["Balance Source", txt(w.source)]
     ];
 

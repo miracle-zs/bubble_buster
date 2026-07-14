@@ -441,6 +441,7 @@ class DashboardServerTest(unittest.TestCase):
             "origQty": "2",
             "executedQty": "2",
             "avgPrice": "80",
+            "realizedPnl": "40",
             "status": "FILLED",
         }
         self.store.add_order_event(
@@ -636,7 +637,7 @@ class DashboardServerTest(unittest.TestCase):
         self.assertEqual(strategy_curve[0]["t"], base.isoformat())
         self.assertEqual(strategy_curve[-1]["t"], (base + timedelta(minutes=179)).isoformat())
 
-    def test_close_price_fetcher_falls_back_to_tp_sl_order_ids(self) -> None:
+    def test_trade_outcome_stats_require_exchange_realized_pnl(self) -> None:
         run_id, _ = self.store.create_run("2026-02-15")
         now = datetime.now(timezone.utc).replace(microsecond=0)
         position_id = self.store.insert_position(
@@ -683,10 +684,11 @@ class DashboardServerTest(unittest.TestCase):
         strategy_stats = snapshot["drawdown_stats_strategy"]
         unpriced = snapshot["unpriced_closed_details"]
 
-        self.assertEqual(strategy_stats["closed_trades_priced"], 1)
-        self.assertAlmostEqual(strategy_stats["trade_realized_pnl"], 2.0)
-        self.assertEqual(unpriced, [])
-        self.assertIn(7001, calls["ids"])
+        self.assertEqual(strategy_stats["closed_trades_priced"], 0)
+        self.assertAlmostEqual(strategy_stats["trade_realized_pnl"], 0.0)
+        self.assertEqual(len(unpriced), 1)
+        self.assertEqual(unpriced[0]["detected_reason"], "MISSING_EXCHANGE_REALIZED_PNL")
+        self.assertEqual(calls["ids"], [])
 
     def test_trade_outcome_stats_include_profit_factor_and_avg_ratio(self) -> None:
         run_id, _ = self.store.create_run("2026-02-16")
@@ -721,6 +723,7 @@ class DashboardServerTest(unittest.TestCase):
                 "price": "90",
                 "origQty": "1",
                 "executedQty": "1",
+                "realizedPnl": "10",
                 "status": "FILLED",
             },
         )
@@ -760,6 +763,7 @@ class DashboardServerTest(unittest.TestCase):
                 "price": "110",
                 "origQty": "1",
                 "executedQty": "1",
+                "realizedPnl": "-10",
                 "status": "FILLED",
             },
         )
@@ -788,6 +792,161 @@ class DashboardServerTest(unittest.TestCase):
         self.assertAlmostEqual(stats["profit_factor"], 1.0)
         self.assertAlmostEqual(stats["avg_win_loss_ratio"], 1.0)
 
+    def test_trade_outcome_stats_use_exchange_realized_pnl_for_partial_exits(self) -> None:
+        run_id, _ = self.store.create_run("2026-02-17")
+        now = datetime.now(timezone.utc).replace(microsecond=0)
+        position_id = self.store.insert_position(
+            run_id=run_id,
+            symbol="PARTIALUSDT",
+            side="SHORT",
+            qty=10.0,
+            entry_price=100.0,
+            liq_price_open=130.0,
+            tp_price=80.0,
+            sl_price=120.0,
+            tp_order_id=8301,
+            sl_order_id=8302,
+            tp_client_order_id="tp-partial",
+            sl_client_order_id="sl-partial",
+            opened_at_utc=now.isoformat(),
+            expire_at_utc=now.isoformat(),
+            status="OPEN",
+        )
+        self.store.add_order_event(
+            symbol="PARTIALUSDT",
+            position_id=position_id,
+            event_time_utc=now.isoformat(),
+            order_payload={
+                "orderId": 8301,
+                "clientOrderId": "tp-partial-1",
+                "type": "MARKET",
+                "side": "BUY",
+                "origQty": "4",
+                "executedQty": "4",
+                "avgPrice": "90",
+                "realizedPnl": "4.0",
+                "commission": "0.04",
+                "commissionAsset": "USDT",
+                "status": "FILLED",
+            },
+        )
+        self.store.add_order_event(
+            symbol="PARTIALUSDT",
+            position_id=position_id,
+            event_time_utc=(now + timedelta(seconds=1)).isoformat(),
+            order_payload={
+                "orderId": 8302,
+                "clientOrderId": "tp-partial-2",
+                "type": "MARKET",
+                "side": "BUY",
+                "origQty": "6",
+                "executedQty": "6",
+                "avgPrice": "105",
+                "realizedPnl": "-3.0",
+                "commission": "0.06",
+                "commissionAsset": "USDT",
+                "status": "FILLED",
+            },
+        )
+        self.store.mark_position_closed(
+            position_id=position_id,
+            status="CLOSED_TP",
+            close_reason="TAKE_PROFIT_FILLED",
+            close_order_id=8302,
+        )
+
+        provider = DashboardDataProvider(
+            db_path=self.db_path,
+            log_file=self.log_file,
+            timezone_name="UTC",
+            entry_hour=7,
+            entry_minute=40,
+        )
+
+        stats = provider.snapshot(log_lines=0)["drawdown_stats_strategy"]
+
+        self.assertEqual(stats["closed_trades_priced"], 2)
+        self.assertAlmostEqual(stats["trade_realized_pnl"], 1.0)
+        self.assertAlmostEqual(stats["gross_profit"], 4.0)
+        self.assertAlmostEqual(stats["gross_loss_abs"], 3.0)
+        self.assertAlmostEqual(stats["trading_fees_usdt"], 0.1)
+        self.assertAlmostEqual(stats["net_trade_pnl"], 0.9)
+
+    def test_strategy_stats_include_all_time_account_pnl_adjusted_for_later_cashflows(self) -> None:
+        now = datetime.now(timezone.utc).replace(microsecond=0)
+        baseline = now - timedelta(days=2)
+        self.store.add_cashflow_event(
+            event_time_utc=(baseline - timedelta(minutes=1)).isoformat(),
+            asset="USDT",
+            amount=1000.0,
+            income_type="TRANSFER",
+            tran_id="before-baseline",
+        )
+        self.store.add_wallet_snapshot(baseline.isoformat(), 1000.0, source="API")
+        self.store.add_cashflow_event(
+            event_time_utc=(baseline + timedelta(minutes=1)).isoformat(),
+            asset="USDT",
+            amount=50.0,
+            income_type="TRANSFER",
+            tran_id="after-baseline",
+        )
+        self.store.add_wallet_snapshot(now.isoformat(), 371.0, source="API")
+
+        provider = DashboardDataProvider(
+            db_path=self.db_path,
+            log_file=self.log_file,
+            timezone_name="UTC",
+            entry_hour=7,
+            entry_minute=40,
+        )
+
+        stats = provider.snapshot(log_lines=0, window_hours=24)["drawdown_stats_strategy"]
+
+        self.assertAlmostEqual(stats["all_time_account_pnl"], -679.0)
+        self.assertAlmostEqual(stats["all_time_account_cashflow_usdt"], 50.0)
+        self.assertAlmostEqual(stats["all_time_account_baseline_usdt"], 1000.0)
+
+    def test_cashflow_stats_and_details_deduplicate_same_transfer_id(self) -> None:
+        now = datetime.now(timezone.utc).replace(microsecond=0)
+        self.store.add_wallet_snapshot((now - timedelta(hours=2)).isoformat(), 1000.0, source="API")
+        self.store.add_wallet_snapshot(now.isoformat(), 900.0, source="API")
+        with sqlite3.connect(self.db_path) as conn:
+            for row_id in (1, 2):
+                conn.execute(
+                    """
+                    INSERT INTO cashflow_events (
+                        account_id, unique_key, event_time_utc, asset, amount, income_type,
+                        symbol, tran_id, info, raw_json, created_at_utc
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        "default",
+                        f"duplicate-{row_id}",
+                        (now - timedelta(hours=1)).isoformat(),
+                        "USDT",
+                        50.0,
+                        "TRANSFER",
+                        None,
+                        "same-transfer",
+                        "TRANSFER",
+                        None,
+                        now.isoformat(),
+                    ),
+                )
+            conn.commit()
+
+        provider = DashboardDataProvider(
+            db_path=self.db_path,
+            log_file=self.log_file,
+            timezone_name="UTC",
+            entry_hour=7,
+            entry_minute=40,
+        )
+        snapshot = provider.snapshot(log_lines=0, window_hours=24)
+
+        self.assertAlmostEqual(snapshot["drawdown_stats_strategy"]["all_time_account_cashflow_usdt"], 50.0)
+        self.assertEqual(len(snapshot["cashflow_events"]), 1)
+
     def test_render_account_dashboard_html_escapes_account_id(self) -> None:
         html = render_account_dashboard_html(
             refresh_sec=5,
@@ -795,6 +954,12 @@ class DashboardServerTest(unittest.TestCase):
         )
         self.assertIn("encodeURIComponent(accountId)", html)
         self.assertNotIn('/api/account/acc01";alert(1);//', html)
+        self.assertIn("All-time Equity Change", html)
+        self.assertIn("Window Cashflow", html)
+        self.assertNotIn("Recorded Exchange Realized PnL", html)
+        self.assertNotIn("Gross Profit", html)
+        self.assertNotIn("Profit Factor", html)
+        self.assertNotIn('id="winRate"', html)
 
     def test_render_overview_uses_readable_task_layout(self) -> None:
         html = render_accounts_overview_html(refresh_sec=5)
