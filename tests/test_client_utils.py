@@ -2,6 +2,8 @@ import importlib.util
 import unittest
 from unittest.mock import MagicMock, patch
 
+import requests
+
 if importlib.util.find_spec("requests") is None:
     raise unittest.SkipTest("requests is not installed")
 
@@ -48,6 +50,39 @@ class ClientUtilsTest(unittest.TestCase):
         ]
         self.assertGreater(request_params[1]["timestamp"], request_params[0]["timestamp"])
         self.assertNotEqual(request_params[0]["signature"], request_params[1]["signature"])
+
+    def test_order_write_network_error_is_not_blindly_retried(self) -> None:
+        client = BinanceFuturesClient(api_key="k", api_secret="s", retry_count=3)
+        client.session.request = MagicMock(side_effect=requests.RequestException("reset"))
+
+        with self.assertRaises(BinanceAPIError) as caught:
+            client._request(
+                "POST",
+                "/fapi/v1/order",
+                params={"symbol": "BTCUSDT", "newClientOrderId": "test-1"},
+                signed=True,
+            )
+
+        self.assertEqual(caught.exception.code, "NETWORK")
+        self.assertEqual(client.session.request.call_count, 1)
+
+    def test_create_order_reconciles_network_error_by_client_id(self) -> None:
+        client = BinanceFuturesClient(api_key="k", api_secret="s")
+        client._request = MagicMock(side_effect=BinanceAPIError("NETWORK", "reset"))  # type: ignore[method-assign]
+        client.get_order = MagicMock(  # type: ignore[method-assign]
+            return_value={"orderId": 123, "clientOrderId": "test-1", "status": "NEW"}
+        )
+
+        order = client.create_order(
+            symbol="BTCUSDT",
+            side="SELL",
+            type="MARKET",
+            quantity="1",
+            newClientOrderId="test-1",
+        )
+
+        self.assertEqual(order["orderId"], 123)
+        client.get_order.assert_called_once_with(symbol="BTCUSDT", orig_client_order_id="test-1")
 
     def test_set_margin_type_preserves_non_numeric_api_error(self) -> None:
         client = BinanceFuturesClient(api_key="k", api_secret="s")

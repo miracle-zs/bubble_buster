@@ -1694,9 +1694,9 @@ class PositionManager:
         self._cancel_order_if_exists(symbol, pos.get("tp_order_id"), pos.get("tp_client_order_id"))
         self._cancel_order_if_exists(symbol, pos.get("sl_order_id"), pos.get("sl_client_order_id"))
 
-    def _cancel_order_if_exists(self, symbol: str, order_id: object, client_order_id: object) -> None:
+    def _cancel_order_if_exists(self, symbol: str, order_id: object, client_order_id: object) -> bool:
         if not order_id and not client_order_id:
-            return
+            return True
         try:
             parsed_order_id = int(order_id) if order_id else None
             parsed_client_order_id = str(client_order_id) if client_order_id else None
@@ -1705,8 +1705,10 @@ class PositionManager:
                 order_id=parsed_order_id,
                 orig_client_order_id=parsed_client_order_id,
             )
+            return True
         except BinanceAPIError as exc:
-            LOGGER.debug("cancel_order ignored for %s/%s/%s: %s", symbol, order_id, client_order_id, exc)
+            LOGGER.warning("cancel_order failed for %s/%s/%s: %s", symbol, order_id, client_order_id, exc)
+            return False
 
     @staticmethod
     def _build_manage_notification(summary: Dict[str, int], details: Dict[str, List[str]]) -> str:

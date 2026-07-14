@@ -211,7 +211,7 @@ class RuntimeServiceTest(unittest.TestCase):
         service.run_cycle(now_local=next_day, now_monotonic=190.0)
         self.assertEqual(manager.orphan_cleanup_calls, 2)
 
-    def test_orphan_exit_order_cleanup_does_not_catch_up_after_window_missed(self):
+    def test_orphan_exit_order_cleanup_catches_up_after_service_restart(self):
         service, _, manager, _ = self._create_service(
             run_manage_on_startup=False,
             manager_interval_sec=3600,
@@ -226,13 +226,13 @@ class RuntimeServiceTest(unittest.TestCase):
         next_day_due = datetime(2026, 2, 14, 3, 30, tzinfo=ZoneInfo("UTC"))
 
         service.run_cycle(now_local=missed, now_monotonic=10.0)
-        self.assertEqual(manager.orphan_cleanup_calls, 0)
+        self.assertEqual(manager.orphan_cleanup_calls, 1)
 
         service.run_cycle(now_local=missed, now_monotonic=70.0)
-        self.assertEqual(manager.orphan_cleanup_calls, 0)
+        self.assertEqual(manager.orphan_cleanup_calls, 1)
 
         service.run_cycle(now_local=next_day_due, now_monotonic=130.0)
-        self.assertEqual(manager.orphan_cleanup_calls, 1)
+        self.assertEqual(manager.orphan_cleanup_calls, 2)
 
     def test_run_forever_can_stop_via_event(self):
         service, _, manager, _ = self._create_service(

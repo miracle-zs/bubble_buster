@@ -74,7 +74,9 @@ def _format_by_step(value: float, step: float) -> str:
 
 class BinanceFuturesClient:
     RETRIABLE_HTTP_STATUS = {408, 429, 500, 502, 503, 504}
-    RETRIABLE_ERROR_CODES = {-1001, -1003, -1006, -1007, -1008, -1021, -4117}
+    # -4117 means the client order id is already in use. Retrying the same
+    # write is unsafe; callers must reconcile by client id instead.
+    RETRIABLE_ERROR_CODES = {-1001, -1003, -1006, -1007, -1008, -1021}
     CONDITIONAL_ORDER_TYPES = {
         "STOP",
         "STOP_MARKET",
@@ -180,6 +182,10 @@ class BinanceFuturesClient:
     ) -> Any:
         method = method.upper()
         base_payload = self._normalize_params(params)
+        has_idempotency_key = any(
+            key in base_payload
+            for key in ("newClientOrderId", "clientAlgoId", "newClientAlgoId")
+        )
 
         url = f"{self.base_url}{path}"
 
@@ -201,7 +207,7 @@ class BinanceFuturesClient:
                         timeout=self.timeout_sec,
                     )
             except requests.RequestException as exc:
-                if attempt >= self.retry_count:
+                if attempt >= self.retry_count or (method == "POST" and has_idempotency_key):
                     raise BinanceAPIError("NETWORK", str(exc)) from exc
                 sleep_sec = self.retry_delay_sec * (2 ** (attempt - 1))
                 LOGGER.warning("Network error for %s %s: %s. Retry in %.2fs", method, path, exc, sleep_sec)
@@ -226,7 +232,11 @@ class BinanceFuturesClient:
                 pass
 
             err = BinanceAPIError(code=code, message=msg, http_status=response.status_code)
-            if attempt < self.retry_count and self._is_retriable_error(err):
+            if (
+                attempt < self.retry_count
+                and self._is_retriable_error(err)
+                and not (method == "POST" and has_idempotency_key)
+            ):
                 sleep_sec = self.retry_delay_sec * (2 ** (attempt - 1))
                 LOGGER.warning(
                     "Retriable API error for %s %s: %s. Retry in %.2fs",
@@ -375,13 +385,72 @@ class BinanceFuturesClient:
             try:
                 return self.create_algo_order(**algo_params)
             except BinanceAPIError as exc:
+                recovered = self._recover_order_after_network_error(
+                    symbol=str(params.get("symbol") or ""),
+                    client_order_id=str(params.get("newClientOrderId") or "") or None,
+                    conditional=True,
+                    error=exc,
+                )
+                if recovered is not None:
+                    return recovered
                 if not self._is_algo_endpoint_unavailable_error(exc):
                     raise
                 LOGGER.warning(
                     "Algo order endpoint unavailable, fallback to legacy order endpoint: %s",
                     exc,
                 )
-        return self._request("POST", "/fapi/v1/order", params=params, signed=True)
+        try:
+            return self._request("POST", "/fapi/v1/order", params=params, signed=True)
+        except BinanceAPIError as exc:
+            recovered = self._recover_order_after_network_error(
+                symbol=str(params.get("symbol") or ""),
+                client_order_id=str(params.get("newClientOrderId") or "") or None,
+                conditional=False,
+                error=exc,
+            )
+            if recovered is not None:
+                return recovered
+            raise
+
+    def _recover_order_after_network_error(
+        self,
+        symbol: str,
+        client_order_id: Optional[str],
+        conditional: bool,
+        error: BinanceAPIError,
+    ) -> Optional[Dict[str, Any]]:
+        if not symbol or not client_order_id:
+            return None
+        if (
+            error.code != "NETWORK"
+            and self._safe_error_code(error) != -4117
+            and not self._is_retriable_error(error)
+        ):
+            return None
+        try:
+            order = (
+                self.get_algo_order(client_algo_id=client_order_id)
+                if conditional
+                else self.get_order(symbol=symbol, orig_client_order_id=client_order_id)
+            )
+        except BinanceAPIError as lookup_error:
+            if not self._is_order_not_found_error(lookup_error):
+                LOGGER.warning(
+                    "Could not reconcile timed-out order symbol=%s client_id=%s: %s",
+                    symbol,
+                    client_order_id,
+                    lookup_error,
+                )
+            return None
+        if order:
+            LOGGER.warning(
+                "Reconciled timed-out order symbol=%s client_id=%s order_id=%s",
+                symbol,
+                client_order_id,
+                order.get("orderId"),
+            )
+            return order
+        return None
 
     def cancel_order(
         self,

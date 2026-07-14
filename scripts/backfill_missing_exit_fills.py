@@ -189,10 +189,24 @@ def load_target_positions(conn: sqlite3.Connection, account_id: str = "", limit:
         FROM positions p
         JOIN runs r ON r.run_id = p.run_id
         WHERE p.status != 'OPEN'
-          AND NOT EXISTS (
-              SELECT 1 FROM fills f
-              WHERE f.position_id = p.id
-                AND f.side = 'BUY'
+          AND (
+              NOT EXISTS (
+                  SELECT 1 FROM fills f
+                  WHERE f.position_id = p.id
+                    AND f.side = 'BUY'
+              )
+              OR EXISTS (
+                  SELECT 1 FROM fills f
+                  WHERE f.position_id = p.id
+                    AND f.side = 'BUY'
+                    AND f.realized_pnl IS NULL
+              )
+              OR COALESCE((
+                  SELECT SUM(f.executed_qty)
+                  FROM fills f
+                  WHERE f.position_id = p.id
+                    AND f.side = 'BUY'
+              ), 0) < ABS(p.qty) - 1e-9
           )
     """
     params: List[Any] = []
@@ -243,8 +257,43 @@ def has_matching_buy_fill(conn: sqlite3.Connection, position_id: int, order_id: 
     return row is not None
 
 
-def should_skip_recovered_fill(has_existing_buy_fill: bool, has_matching_buy_fill: bool) -> bool:
-    return has_existing_buy_fill or has_matching_buy_fill
+def has_complete_matching_buy_fill(
+    conn: sqlite3.Connection,
+    position_id: int,
+    order_id: Optional[int],
+) -> bool:
+    if order_id is None:
+        row = conn.execute(
+            """
+            SELECT 1 FROM fills
+            WHERE position_id = ? AND side = 'BUY'
+              AND realized_pnl IS NOT NULL AND executed_qty > 0
+            LIMIT 1
+            """,
+            (position_id,),
+        ).fetchone()
+    else:
+        row = conn.execute(
+            """
+            SELECT 1 FROM fills
+            WHERE position_id = ? AND side = 'BUY' AND order_id = ?
+              AND realized_pnl IS NOT NULL AND executed_qty > 0
+            LIMIT 1
+            """,
+            (position_id, int(order_id)),
+        ).fetchone()
+    return row is not None
+
+
+def should_skip_recovered_fill(
+    has_existing_buy_fill: bool,
+    has_matching_buy_fill: bool,
+    has_complete_matching_buy_fill: bool = False,
+) -> bool:
+    """Skip only when the recovered close order is already complete."""
+    if has_complete_matching_buy_fill:
+        return True
+    return has_matching_buy_fill and not has_existing_buy_fill
 
 
 def recover_from_local_order_events(conn: sqlite3.Connection, position: sqlite3.Row) -> Optional[Dict[str, Any]]:
@@ -344,10 +393,7 @@ def recover_from_binance(position: sqlite3.Row, client: Any) -> Optional[Dict[st
 def insert_recovered_fill(conn: sqlite3.Connection, position: sqlite3.Row, fill: Dict[str, Any]) -> bool:
     position_id = int(position["id"])
     order_id = safe_int(fill.get("order_id"))
-    if should_skip_recovered_fill(
-        has_existing_buy_fill=has_buy_fill(conn, position_id),
-        has_matching_buy_fill=has_matching_buy_fill(conn, position_id, order_id),
-    ):
+    if has_complete_matching_buy_fill(conn, position_id, order_id):
         return False
     row = None
     if order_id is not None:
@@ -393,7 +439,7 @@ def insert_recovered_fill(conn: sqlite3.Connection, position: sqlite3.Row, fill:
         order_event_id = int(row["id"])
     conn.execute(
         """
-        INSERT OR IGNORE INTO fills (
+        INSERT INTO fills (
             order_event_id, position_id, symbol,
             order_id, client_order_id, side, reduce_only, status,
             executed_qty, quote_qty, avg_price,
@@ -401,6 +447,22 @@ def insert_recovered_fill(conn: sqlite3.Connection, position: sqlite3.Row, fill:
             event_time_utc, raw_json, created_at_utc
         )
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(order_event_id) DO UPDATE SET
+            position_id = COALESCE(excluded.position_id, fills.position_id),
+            symbol = excluded.symbol,
+            order_id = COALESCE(excluded.order_id, fills.order_id),
+            client_order_id = COALESCE(excluded.client_order_id, fills.client_order_id),
+            side = COALESCE(excluded.side, fills.side),
+            reduce_only = COALESCE(excluded.reduce_only, fills.reduce_only),
+            status = COALESCE(excluded.status, fills.status),
+            executed_qty = excluded.executed_qty,
+            quote_qty = COALESCE(excluded.quote_qty, fills.quote_qty),
+            avg_price = COALESCE(excluded.avg_price, fills.avg_price),
+            realized_pnl = COALESCE(excluded.realized_pnl, fills.realized_pnl),
+            commission = COALESCE(excluded.commission, fills.commission),
+            commission_asset = COALESCE(excluded.commission_asset, fills.commission_asset),
+            event_time_utc = excluded.event_time_utc,
+            raw_json = excluded.raw_json
         """,
         (
             order_event_id,

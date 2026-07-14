@@ -254,6 +254,67 @@ class StateStoreTest(unittest.TestCase):
         self.assertAlmostEqual(float(fill_row["avg_price"]), 2850.0)
         self.assertAlmostEqual(float(fill_row["realized_pnl"]), 12.5)
 
+    def test_order_event_fill_upsert_recovers_late_realized_pnl(self) -> None:
+        run_id, _ = self.store.create_run("2026-02-13")
+        position_id = self.store.insert_position(
+            run_id=run_id,
+            symbol="ETHUSDT",
+            side="SHORT",
+            qty=1.0,
+            entry_price=3000.0,
+            liq_price_open=4000.0,
+            tp_price=2500.0,
+            sl_price=3900.0,
+            tp_order_id=None,
+            sl_order_id=None,
+            tp_client_order_id=None,
+            sl_client_order_id=None,
+            opened_at_utc="2026-02-13T00:00:00+00:00",
+            expire_at_utc="2026-02-14T00:00:00+00:00",
+        )
+        event_id = self.store.add_order_event(
+            symbol="ETHUSDT",
+            position_id=position_id,
+            event_time_utc="2026-02-13T01:00:00+00:00",
+            order_payload={
+                "orderId": 7002,
+                "clientOrderId": "close-eth-2",
+                "type": "MARKET",
+                "side": "BUY",
+                "origQty": "1",
+                "executedQty": "1",
+                "avgPrice": "2850",
+                "status": "FILLED",
+            },
+        )
+
+        with self.store._connect_ctx() as conn:
+            self.store._insert_fill_from_order_event(
+                conn=conn,
+                order_event_id=event_id,
+                position_id=position_id,
+                symbol="ETHUSDT",
+                event_time_utc="2026-02-13T01:01:00+00:00",
+                order_payload={
+                    "orderId": 7002,
+                    "clientOrderId": "close-eth-2",
+                    "type": "MARKET",
+                    "side": "BUY",
+                    "origQty": "1",
+                    "executedQty": "1",
+                    "avgPrice": "2850",
+                    "status": "FILLED",
+                    "realizedPnl": "-8.5",
+                },
+            )
+
+        with sqlite3.connect(self.db_path) as conn:
+            realized_pnl = conn.execute(
+                "SELECT realized_pnl FROM fills WHERE order_event_id = ?",
+                (event_id,),
+            ).fetchone()[0]
+        self.assertAlmostEqual(float(realized_pnl), -8.5)
+
 
 if __name__ == "__main__":
     unittest.main()

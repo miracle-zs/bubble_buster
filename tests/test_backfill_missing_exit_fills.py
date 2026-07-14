@@ -87,10 +87,17 @@ class BackfillMissingExitFillsTest(unittest.TestCase):
                 has_matching_buy_fill=False,
             )
         )
-        self.assertTrue(
+        self.assertFalse(
             should_skip_recovered_fill(
                 has_existing_buy_fill=True,
                 has_matching_buy_fill=False,
+            )
+        )
+        self.assertTrue(
+            should_skip_recovered_fill(
+                has_existing_buy_fill=True,
+                has_matching_buy_fill=True,
+                has_complete_matching_buy_fill=True,
             )
         )
 

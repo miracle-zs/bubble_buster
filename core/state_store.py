@@ -981,7 +981,7 @@ class StateStore:
 
         conn.execute(
             """
-            INSERT OR IGNORE INTO fills (
+            INSERT INTO fills (
                 order_event_id, position_id, symbol,
                 order_id, client_order_id, side, reduce_only, status,
                 executed_qty, quote_qty, avg_price,
@@ -989,6 +989,22 @@ class StateStore:
                 event_time_utc, raw_json, created_at_utc
             )
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(order_event_id) DO UPDATE SET
+                position_id = COALESCE(excluded.position_id, fills.position_id),
+                symbol = excluded.symbol,
+                order_id = COALESCE(excluded.order_id, fills.order_id),
+                client_order_id = COALESCE(excluded.client_order_id, fills.client_order_id),
+                side = COALESCE(excluded.side, fills.side),
+                reduce_only = COALESCE(excluded.reduce_only, fills.reduce_only),
+                status = COALESCE(excluded.status, fills.status),
+                executed_qty = excluded.executed_qty,
+                quote_qty = COALESCE(excluded.quote_qty, fills.quote_qty),
+                avg_price = COALESCE(excluded.avg_price, fills.avg_price),
+                realized_pnl = COALESCE(excluded.realized_pnl, fills.realized_pnl),
+                commission = COALESCE(excluded.commission, fills.commission),
+                commission_asset = COALESCE(excluded.commission_asset, fills.commission_asset),
+                event_time_utc = excluded.event_time_utc,
+                raw_json = excluded.raw_json
             """,
             (
                 int(order_event_id),

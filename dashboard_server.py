@@ -848,12 +848,14 @@ class DashboardDataProvider:
         window_start_utc: Optional[str],
         max_points: int,
         account_id: Optional[str] = None,
+        wallet_rows: Optional[List[Dict[str, Any]]] = None,
     ) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
-        wallet_rows = self._query_wallet_rows(
-            conn=conn,
-            window_start_utc=window_start_utc,
-            account_id=account_id,
-        )
+        if wallet_rows is None:
+            wallet_rows = self._query_wallet_rows(
+                conn=conn,
+                window_start_utc=window_start_utc,
+                account_id=account_id,
+            )
 
         curve: List[Dict[str, Any]] = []
         if wallet_rows:
@@ -1081,12 +1083,14 @@ class DashboardDataProvider:
         max_points: int,
         account_id: Optional[str] = None,
         include_trade_stats: bool = True,
+        wallet_rows: Optional[List[Dict[str, Any]]] = None,
     ) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
-        wallet_rows = self._query_wallet_rows(
-            conn=conn,
-            window_start_utc=window_start_utc,
-            account_id=account_id,
-        )
+        if wallet_rows is None:
+            wallet_rows = self._query_wallet_rows(
+                conn=conn,
+                window_start_utc=window_start_utc,
+                account_id=account_id,
+            )
         cashflow_rows: List[Dict[str, Any]] = []
         params: List[Any] = []
         where_sql = "WHERE asset = 'USDT'"
@@ -1534,6 +1538,11 @@ class DashboardDataProvider:
                     )
 
                 if include_curves:
+                    wallet_rows = self._query_wallet_rows(
+                        conn=conn,
+                        window_start_utc=window_start_utc,
+                        account_id=scoped_account,
+                    )
                     strategy_curve, strategy_stats = self._build_strategy_equity_curve(
                         conn=conn,
                         now_utc=now_utc,
@@ -1542,6 +1551,7 @@ class DashboardDataProvider:
                         max_points=points_limit,
                         account_id=scoped_account,
                         include_trade_stats=include_trade_stats,
+                        wallet_rows=wallet_rows,
                     )
                     data["strategy_equity_curve"] = strategy_curve[-points_limit:]
                     data["drawdown_stats_strategy"] = strategy_stats
@@ -1555,6 +1565,7 @@ class DashboardDataProvider:
                             window_start_utc=window_start_utc,
                             max_points=points_limit,
                             account_id=scoped_account,
+                            wallet_rows=wallet_rows,
                         )
                         data["balance_curve"] = balance_curve[-points_limit:]
                         data["drawdown_stats_balance"] = balance_stats
@@ -3115,7 +3126,10 @@ DASHBOARD_HTML = """<!doctype html>
 
   function refreshCurveFast() {
     fetchDashboard(api + "/curve", { lite: true }, function (err, d) {
-      if (err) return;
+      if (err) {
+        if (el.curveTitle) el.curveTitle.textContent = "权益曲线（加载失败，请稍后重试）";
+        return;
+      }
       mergeCurveOnly(d);
       renderCurveTabState();
       renderEquityChart(activeCurve(latestData || d));
@@ -3208,6 +3222,9 @@ DASHBOARD_HTML = """<!doctype html>
     fetchDashboard(api + "/details", { lite: false }, function (err, d) {
       detailsInFlight = false;
       if (err) {
+        if (el.positionsBody) {
+          el.positionsBody.innerHTML = '<tr><td colspan="8" class="mono bad">详情加载失败，请稍后重试</td></tr>';
+        }
         return;
       }
       renderDetails(d || {});

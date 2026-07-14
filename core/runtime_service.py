@@ -10,7 +10,6 @@ from zoneinfo import ZoneInfo
 
 LOGGER = logging.getLogger(__name__)
 PROTECTION_RESTART_GRACE = timedelta(hours=2)
-ORPHAN_EXIT_ORDER_CLEANUP_WINDOW = timedelta(minutes=5)
 
 
 @dataclass(frozen=True)
@@ -108,7 +107,6 @@ class StrategyRuntimeService:
         self._last_morning_protection_local_date_by_account: Dict[str, date] = {}
         self._last_hourly_exchange_take_profit_hour_by_account: Dict[str, str] = {}
         self._last_orphan_exit_order_cleanup_local_date: Optional[date] = None
-        self._last_orphan_exit_order_cleanup_skipped_date: Optional[date] = None
         self._next_readonly_wallet_snapshot_monotonic_by_account: Dict[str, float] = {}
         self._shared_ranking_cache: Optional[List[Dict[str, Any]]] = None
         self._shared_ranking_cache_day: Optional[date] = None
@@ -815,23 +813,9 @@ class StrategyRuntimeService:
         today = now_local.date()
         if self._last_orphan_exit_order_cleanup_local_date == today:
             return
-        if self._last_orphan_exit_order_cleanup_skipped_date == today:
-            return
-
         target = self._orphan_exit_order_cleanup_schedule_for_day(today)
         if now_local < target:
             return
-        if now_local > target + ORPHAN_EXIT_ORDER_CLEANUP_WINDOW:
-            self._last_orphan_exit_order_cleanup_skipped_date = today
-            LOGGER.warning(
-                "Orphan exit order cleanup missed fixed window, skip for today: now=%s target=%s window_min=%s",
-                now_local.isoformat(),
-                target.isoformat(),
-                int(ORPHAN_EXIT_ORDER_CLEANUP_WINDOW.total_seconds() // 60),
-            )
-            return
-
-        self._last_orphan_exit_order_cleanup_local_date = today
         results: Dict[str, Dict[str, object]] = {}
         for aid, ctx in self.account_runtimes.items():
             if str(ctx.get("mode", "full")).strip().lower() != "full":
@@ -845,6 +829,8 @@ class StrategyRuntimeService:
             except Exception as exc:  # noqa: BLE001
                 LOGGER.exception("service orphan exit order cleanup failed account=%s: %s", aid, exc)
                 results[aid] = {"account_id": aid, "error": str(exc)}
+        if not any("error" in result for result in results.values()):
+            self._last_orphan_exit_order_cleanup_local_date = today
         LOGGER.info("service orphan exit order cleanup summary: %s", results)
 
     def run_cycle(
