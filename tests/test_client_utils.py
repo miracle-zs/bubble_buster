@@ -10,6 +10,7 @@ if importlib.util.find_spec("requests") is None:
 from infra.binance_futures_client import (
     BinanceAPIError,
     BinanceFuturesClient,
+    OrderStateUnknownError,
     SymbolRules,
     ceil_to_step,
     floor_to_step,
@@ -83,6 +84,54 @@ class ClientUtilsTest(unittest.TestCase):
 
         self.assertEqual(order["orderId"], 123)
         client.get_order.assert_called_once_with(symbol="BTCUSDT", orig_client_order_id="test-1")
+
+    @patch("infra.binance_futures_client.time.sleep")
+    def test_create_order_waits_for_exchange_eventual_consistency(self, sleep_mock: MagicMock) -> None:
+        client = BinanceFuturesClient(api_key="k", api_secret="s")
+        client._request = MagicMock(side_effect=BinanceAPIError("NETWORK", "reset"))  # type: ignore[method-assign]
+        client.get_order = MagicMock(  # type: ignore[method-assign]
+            side_effect=[
+                BinanceAPIError(-2013, "Order does not exist."),
+                BinanceAPIError(-2013, "Order does not exist."),
+                {"orderId": 123, "clientOrderId": "test-1", "status": "FILLED"},
+            ]
+        )
+
+        order = client.create_order(
+            symbol="BTCUSDT",
+            side="SELL",
+            type="MARKET",
+            quantity="1",
+            newClientOrderId="test-1",
+        )
+
+        self.assertEqual(order["orderId"], 123)
+        self.assertEqual(client.get_order.call_count, 3)
+        self.assertEqual(sleep_mock.call_count, 2)
+
+    @patch("infra.binance_futures_client.time.sleep")
+    def test_create_order_reports_unknown_state_after_reconciliation_exhausted(
+        self,
+        _sleep_mock: MagicMock,
+    ) -> None:
+        client = BinanceFuturesClient(api_key="k", api_secret="s")
+        client._request = MagicMock(side_effect=BinanceAPIError("NETWORK", "reset"))  # type: ignore[method-assign]
+        client.get_order = MagicMock(  # type: ignore[method-assign]
+            side_effect=BinanceAPIError(-2013, "Order does not exist.")
+        )
+
+        with self.assertRaises(OrderStateUnknownError) as caught:
+            client.create_order(
+                symbol="BTCUSDT",
+                side="SELL",
+                type="MARKET",
+                quantity="1",
+                newClientOrderId="test-1",
+            )
+
+        self.assertEqual(caught.exception.symbol, "BTCUSDT")
+        self.assertEqual(caught.exception.client_order_id, "test-1")
+        self.assertEqual(client.get_order.call_count, 5)
 
     def test_set_margin_type_preserves_non_numeric_api_error(self) -> None:
         client = BinanceFuturesClient(api_key="k", api_secret="s")

@@ -21,6 +21,23 @@ class BinanceAPIError(Exception):
         super().__init__(f"Binance API Error {code}: {message}")
 
 
+class OrderStateUnknownError(BinanceAPIError):
+    """The write may have reached Binance, but its final state is not observable yet."""
+
+    def __init__(self, symbol: str, client_order_id: str, cause: BinanceAPIError):
+        self.symbol = symbol
+        self.client_order_id = client_order_id
+        self.cause = cause
+        super().__init__(
+            code="ORDER_STATE_UNKNOWN",
+            message=(
+                f"Could not reconcile order symbol={symbol} client_id={client_order_id} "
+                f"after uncertain write: {cause}"
+            ),
+            http_status=cause.http_status,
+        )
+
+
 @dataclass(frozen=True)
 class SymbolRules:
     symbol: str
@@ -97,6 +114,8 @@ class BinanceFuturesClient:
         recv_window: int = 5000,
         http_pool_maxsize: int = 64,
         proxies: Optional[Dict[str, str]] = None,
+        order_reconcile_attempts: int = 5,
+        order_reconcile_delay_sec: float = 0.2,
     ):
         if not api_key or not api_secret:
             raise ValueError("Binance API key/secret is required")
@@ -108,6 +127,8 @@ class BinanceFuturesClient:
         self.retry_count = max(1, retry_count)
         self.retry_delay_sec = max(0.1, retry_delay_sec)
         self.recv_window = recv_window
+        self.order_reconcile_attempts = max(1, int(order_reconcile_attempts))
+        self.order_reconcile_delay_sec = max(0.0, float(order_reconcile_delay_sec))
 
         self.session = requests.Session()
         self.session.headers.update({"X-MBX-APIKEY": self.api_key})
@@ -427,30 +448,41 @@ class BinanceFuturesClient:
             and not self._is_retriable_error(error)
         ):
             return None
-        try:
-            order = (
-                self.get_algo_order(client_algo_id=client_order_id)
-                if conditional
-                else self.get_order(symbol=symbol, orig_client_order_id=client_order_id)
-            )
-        except BinanceAPIError as lookup_error:
-            if not self._is_order_not_found_error(lookup_error):
+        for attempt in range(1, self.order_reconcile_attempts + 1):
+            try:
+                order = (
+                    self.get_algo_order(client_algo_id=client_order_id)
+                    if conditional
+                    else self.get_order(symbol=symbol, orig_client_order_id=client_order_id)
+                )
+            except BinanceAPIError as lookup_error:
+                if not self._is_order_not_found_error(lookup_error):
+                    LOGGER.warning(
+                        "Order reconciliation lookup failed symbol=%s client_id=%s attempt=%s/%s: %s",
+                        symbol,
+                        client_order_id,
+                        attempt,
+                        self.order_reconcile_attempts,
+                        lookup_error,
+                    )
+                order = None
+            if order:
                 LOGGER.warning(
-                    "Could not reconcile timed-out order symbol=%s client_id=%s: %s",
+                    "Reconciled timed-out order symbol=%s client_id=%s order_id=%s attempt=%s",
                     symbol,
                     client_order_id,
-                    lookup_error,
+                    order.get("orderId"),
+                    attempt,
                 )
-            return None
-        if order:
-            LOGGER.warning(
-                "Reconciled timed-out order symbol=%s client_id=%s order_id=%s",
-                symbol,
-                client_order_id,
-                order.get("orderId"),
-            )
-            return order
-        return None
+                return order
+            if attempt < self.order_reconcile_attempts and self.order_reconcile_delay_sec > 0:
+                time.sleep(self.order_reconcile_delay_sec * (2 ** (attempt - 1)))
+
+        raise OrderStateUnknownError(
+            symbol=symbol,
+            client_order_id=client_order_id,
+            cause=error,
+        )
 
     def cancel_order(
         self,

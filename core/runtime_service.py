@@ -829,7 +829,10 @@ class StrategyRuntimeService:
             except Exception as exc:  # noqa: BLE001
                 LOGGER.exception("service orphan exit order cleanup failed account=%s: %s", aid, exc)
                 results[aid] = {"account_id": aid, "error": str(exc)}
-        if not any("error" in result for result in results.values()):
+        if not any(
+            "error" in result or int(result.get("failed", 0)) > 0
+            for result in results.values()
+        ):
             self._last_orphan_exit_order_cleanup_local_date = today
         LOGGER.info("service orphan exit order cleanup summary: %s", results)
 

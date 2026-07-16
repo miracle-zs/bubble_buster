@@ -32,7 +32,7 @@ if importlib.util.find_spec("requests") is None:
     sys.modules["requests"] = requests_stub
     sys.modules["requests.adapters"] = adapters_stub
 
-from infra.binance_futures_client import BinanceAPIError
+from infra.binance_futures_client import BinanceAPIError, OrderStateUnknownError
 from core.strategy_top10_short import Top10ShortStrategy
 
 
@@ -99,6 +99,80 @@ class StrategyOrderRetryTest(unittest.TestCase):
                 client_id_tag="ent",
             )
         self.assertEqual(client.create_order.call_count, 1)
+
+    @patch("core.strategy_top10_short.time.sleep")
+    def test_unknown_entry_order_recovers_from_exchange_short_without_resubmit(
+        self,
+        _sleep_mock: MagicMock,
+    ) -> None:
+        client = MagicMock()
+        client.normalize_order_qty.return_value = 10.0
+        client.format_order_qty.return_value = "10"
+        client.create_order.side_effect = OrderStateUnknownError(
+            symbol="ABCUSDT",
+            client_order_id="ent-abc-1",
+            cause=BinanceAPIError("NETWORK", "reset"),
+        )
+        strategy = self._build_strategy(client)
+        strategy._load_short_position = MagicMock(
+            side_effect=[
+                None,
+                {"symbol": "ABCUSDT", "positionAmt": "-10", "entryPrice": "10"},
+            ]
+        )
+
+        order, retry_count = strategy._place_market_short_with_shrink_retry(
+            symbol="ABCUSDT",
+            target_notional=100.0,
+            reference_price=10.0,
+            client_id_tag="ent",
+        )
+
+        self.assertEqual(retry_count, 0)
+        self.assertEqual(order["status"], "POSITION_RECONCILED")
+        self.assertEqual(order["clientOrderId"], "ent-abc-1")
+        self.assertEqual(client.create_order.call_count, 1)
+
+    def test_pending_exit_recovery_defers_fresh_entry_setup(self) -> None:
+        client = MagicMock()
+        strategy = self._build_strategy(client)
+        now = strategy._utc_now_datetime()
+        strategy.store.list_pending_exit_setup_positions.return_value = [
+            {
+                "id": 7,
+                "symbol": "ABCUSDT",
+                "created_at_utc": now.replace(microsecond=0).isoformat(),
+            }
+        ]
+
+        summary = strategy.recover_pending_exit_setups()
+
+        self.assertEqual(summary["total"], 1)
+        self.assertEqual(summary["deferred"], 1)
+        strategy.store.mark_position_open.assert_not_called()
+        client.get_position_risk.assert_not_called()
+
+    def test_exit_refresh_surfaces_cancel_failure_and_does_not_place_replacement(self) -> None:
+        client = MagicMock()
+        client.cancel_order.side_effect = BinanceAPIError(-1001, "disconnected")
+        strategy = self._build_strategy(client)
+        strategy.store.list_open_positions.return_value = [
+            {
+                "id": 7,
+                "symbol": "ABCUSDT",
+                "tp_order_id": 101,
+                "tp_client_order_id": "tp-old",
+                "sl_order_id": 102,
+                "sl_client_order_id": "sl-old",
+            }
+        ]
+        strategy._place_exit_orders = MagicMock()
+
+        strategy._refresh_exit_orders_for_positions({7})
+
+        strategy._place_exit_orders.assert_not_called()
+        strategy.store.set_position_error.assert_called_once()
+        self.assertIn("cancel_order failed", strategy.store.set_position_error.call_args.args[1])
 
     def test_margin_error_detected_by_message_when_code_missing(self) -> None:
         err = BinanceAPIError("NETWORK", "margin is insufficient")

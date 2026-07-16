@@ -11,7 +11,7 @@ from uuid import uuid4
 from zoneinfo import ZoneInfo
 
 from core.state_store import StateStore
-from infra.binance_futures_client import BinanceAPIError, BinanceFuturesClient
+from infra.binance_futures_client import BinanceAPIError, BinanceFuturesClient, OrderStateUnknownError
 from infra.binance_top10_monitor import build_top_gainers
 from infra.notifier import (
     ServerChanNotifier,
@@ -69,6 +69,7 @@ class Top10ShortStrategy:
     REBALANCE_MODE_AGE_DECAY = "age_decay"
     EQUITY_RECOVERY_LOCK_NAME = "equity_recovery_take_profit_v1"
     ENTRY_WAIT_LOCK_NAME = "bearish_hour_entry_wait_v1"
+    PENDING_EXIT_SETUP_RECOVERY_GRACE_SEC = 30.0
 
     def __init__(
         self,
@@ -1308,14 +1309,25 @@ class Top10ShortStrategy:
         positions = self.store.list_pending_exit_setup_positions()
         summary: Dict[str, object] = {
             "total": len(positions),
+            "deferred": 0,
             "recovered": 0,
             "closed_external": 0,
             "risk_off": 0,
             "errors": 0,
         }
+        now_utc = self._utc_now_datetime()
         for pos in positions:
             position_id = int(pos["id"])
             symbol = str(pos["symbol"])
+            created_at_text = str(pos.get("created_at_utc") or pos.get("opened_at_utc") or "").strip()
+            if created_at_text:
+                try:
+                    age_sec = (now_utc - self._parse_iso_utc(created_at_text)).total_seconds()
+                except (TypeError, ValueError):
+                    age_sec = self.PENDING_EXIT_SETUP_RECOVERY_GRACE_SEC
+                if age_sec < self.PENDING_EXIT_SETUP_RECOVERY_GRACE_SEC:
+                    summary["deferred"] = int(summary["deferred"]) + 1
+                    continue
             try:
                 risk = self._load_short_position(symbol)
                 if risk is None:
@@ -1424,9 +1436,17 @@ class Top10ShortStrategy:
             )
         except Exception:
             if sl_order is not None:
-                self._cancel_order_if_exists(symbol, sl_order.get("orderId"), sl_order.get("clientOrderId"))
+                self._cancel_order_after_setup_failure(
+                    symbol,
+                    sl_order.get("orderId"),
+                    sl_order.get("clientOrderId"),
+                )
             if tp_order is not None:
-                self._cancel_order_if_exists(symbol, tp_order.get("orderId"), tp_order.get("clientOrderId"))
+                self._cancel_order_after_setup_failure(
+                    symbol,
+                    tp_order.get("orderId"),
+                    tp_order.get("clientOrderId"),
+                )
             raise
         self.store.set_position_qty(position_id, position_amt, entry_price)
 
@@ -1446,9 +1466,24 @@ class Top10ShortStrategy:
 
     def _force_close_position(self, position_id: int, symbol: str, reason: str) -> Dict[str, object]:
         persisted = self.store.get_position(position_id)
+        cancel_errors: List[str] = []
         if persisted is not None:
-            self._cancel_order_if_exists(symbol, persisted.get("tp_order_id"), persisted.get("tp_client_order_id"))
-            self._cancel_order_if_exists(symbol, persisted.get("sl_order_id"), persisted.get("sl_client_order_id"))
+            for order_id, client_order_id in (
+                (persisted.get("tp_order_id"), persisted.get("tp_client_order_id")),
+                (persisted.get("sl_order_id"), persisted.get("sl_client_order_id")),
+            ):
+                try:
+                    self._cancel_order_if_exists(symbol, order_id, client_order_id)
+                except RuntimeError as exc:
+                    cancel_errors.append(str(exc))
+                    LOGGER.error(
+                        "Exit cancellation failed before risk-off; continuing reduce-only close "
+                        "account=%s position_id=%s symbol=%s: %s",
+                        self.account_id,
+                        position_id,
+                        symbol,
+                        exc,
+                    )
         position_risk = self._load_short_position(symbol)
         if not position_risk:
             self.store.mark_position_closed(
@@ -1463,6 +1498,7 @@ class Top10ShortStrategy:
                 "reason": reason,
                 "qty": 0.0,
                 "close_order_id": None,
+                "cancel_errors": cancel_errors,
             }
 
         qty = abs(float(position_risk.get("positionAmt", "0") or 0))
@@ -1479,6 +1515,7 @@ class Top10ShortStrategy:
                 "reason": reason,
                 "qty": 0.0,
                 "close_order_id": None,
+                "cancel_errors": cancel_errors,
             }
 
         close_order = self.client.create_order(
@@ -1509,6 +1546,7 @@ class Top10ShortStrategy:
             "reason": reason,
             "qty": qty,
             "close_order_id": close_order.get("orderId"),
+            "cancel_errors": cancel_errors,
         }
 
     def _rebalance_to_target(
@@ -2010,7 +2048,20 @@ class Top10ShortStrategy:
                 orig_client_order_id=parsed_client_order_id,
             )
         except BinanceAPIError as exc:
-            LOGGER.debug("cancel_order ignored for rebalance %s/%s/%s: %s", symbol, order_id, client_order_id, exc)
+            raise RuntimeError(
+                f"cancel_order failed for {symbol}/{order_id or '-'}/{client_order_id or '-'}: {exc}"
+            ) from exc
+
+    def _cancel_order_after_setup_failure(
+        self,
+        symbol: str,
+        order_id: object,
+        client_order_id: object,
+    ) -> None:
+        try:
+            self._cancel_order_if_exists(symbol, order_id, client_order_id)
+        except RuntimeError as exc:
+            LOGGER.error("Failed to clean up partial exit setup: %s", exc)
 
     @staticmethod
     def _format_rebalance_summary(summary: Optional[Dict[str, object]]) -> str:
@@ -2231,6 +2282,33 @@ class Top10ShortStrategy:
                     context=self._describe_cooling_off_context(client_id_tag),
                 )
                 return order, retries_used
+            except OrderStateUnknownError as exc:
+                risk = self._wait_for_short_position_after_unknown_order(symbol)
+                if risk is None:
+                    raise
+                qty_now = abs(self._safe_float(risk.get("positionAmt"), default=0.0))
+                LOGGER.error(
+                    "Recovered uncertain entry from exchange position account=%s symbol=%s "
+                    "client_id=%s qty=%s",
+                    self.account_id,
+                    symbol,
+                    exc.client_order_id,
+                    qty_now,
+                )
+                return (
+                    {
+                        "orderId": None,
+                        "clientOrderId": exc.client_order_id,
+                        "symbol": symbol,
+                        "side": "SELL",
+                        "type": "MARKET",
+                        "status": "POSITION_RECONCILED",
+                        "origQty": str(qty_now),
+                        "executedQty": str(qty_now),
+                        "avgPrice": str(risk.get("entryPrice") or reference_price),
+                    },
+                    retries_used,
+                )
             except BinanceAPIError as exc:
                 last_error = exc
                 if not self._is_insufficient_margin_error(exc):
@@ -2266,6 +2344,20 @@ class Top10ShortStrategy:
         raise RuntimeError(
             f"{symbol}: qty归一化后为0(缩量重试后不满足最小下单规则)"
         )
+
+    def _wait_for_short_position_after_unknown_order(
+        self,
+        symbol: str,
+        attempts: int = 5,
+        delay_sec: float = 0.2,
+    ) -> Optional[Dict[str, Any]]:
+        for attempt in range(max(1, int(attempts))):
+            risk = self._load_short_position(symbol)
+            if risk is not None and self._safe_float(risk.get("positionAmt"), default=0.0) < 0:
+                return risk
+            if attempt + 1 < attempts and delay_sec > 0:
+                time.sleep(delay_sec * (2 ** attempt))
+        return None
 
     @classmethod
     def _is_insufficient_margin_error(cls, exc: BinanceAPIError) -> bool:

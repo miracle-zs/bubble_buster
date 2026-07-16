@@ -410,6 +410,42 @@ class PositionManagerTest(unittest.TestCase):
             orig_client_order_id="old-bas-sl",
         )
 
+    def test_cleanup_orphan_exit_orders_retries_after_cancel_failure(self) -> None:
+        client = MagicMock()
+        client.get_position_risk.return_value = []
+        client.get_open_orders.return_value = [
+            {
+                "symbol": "BASUSDT",
+                "orderId": 301,
+                "clientOrderId": "old-bas-sl",
+                "type": "STOP_MARKET",
+                "side": "BUY",
+                "status": "NEW",
+                "reduceOnly": True,
+            }
+        ]
+        client.cancel_order.side_effect = [
+            BinanceAPIError(-1001, "disconnected"),
+            {"orderId": 301, "status": "CANCELED"},
+        ]
+        manager = PositionManager(
+            client=client,
+            store=self.store,
+            notifier=MagicMock(),
+            sl_liq_buffer_pct=1.0,
+            trigger_price_type="CONTRACT_PRICE",
+        )
+
+        first = manager.cleanup_orphan_exit_orders_once_per_day()
+        second = manager.cleanup_orphan_exit_orders_once_per_day()
+
+        self.assertEqual(first["canceled"], 0)
+        self.assertEqual(first["failed"], 1)
+        self.assertFalse(first["skipped"])
+        self.assertEqual(second["canceled"], 1)
+        self.assertEqual(second["failed"], 0)
+        self.assertEqual(client.cancel_order.call_count, 2)
+
     def test_run_once_does_not_scan_orphan_exit_orders(self) -> None:
         client = MagicMock()
         client.get_position_risk.return_value = []

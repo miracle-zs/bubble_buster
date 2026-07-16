@@ -1070,15 +1070,17 @@ class PositionManager:
             return {"canceled": 0, "details": [], "skipped": True, "day_key": day_key}
 
         result = self._cleanup_orphan_exit_orders()
-        self.store.set_lock_state(
-            self.ORPHAN_EXIT_ORDER_CLEANUP_LOCK_NAME,
-            {
-                "day_key": day_key,
-                "canceled": int(result["canceled"]),
-                "updated_at_utc": self._utc_now_iso(),
-            },
-        )
+        if int(result.get("failed", 0)) == 0:
+            self.store.set_lock_state(
+                self.ORPHAN_EXIT_ORDER_CLEANUP_LOCK_NAME,
+                {
+                    "day_key": day_key,
+                    "canceled": int(result["canceled"]),
+                    "updated_at_utc": self._utc_now_iso(),
+                },
+            )
         result["day_key"] = day_key
+        result["skipped"] = False
         return result
 
     @staticmethod
@@ -1095,7 +1097,9 @@ class PositionManager:
         }
         open_orders = self.client.get_open_orders()
         canceled = 0
+        failed = 0
         details: List[str] = []
+        failed_details: List[str] = []
         for order in open_orders:
             symbol = str(order.get("symbol") or "").strip()
             if not symbol or symbol in active_short_symbols:
@@ -1104,10 +1108,19 @@ class PositionManager:
                 continue
             order_id = order.get("orderId")
             client_order_id = order.get("clientOrderId")
-            self._cancel_order_if_exists(symbol, order_id, client_order_id)
-            canceled += 1
-            details.append(f"{symbol}(order_id={order_id or '-'}, client_id={client_order_id or '-'})")
-        return {"canceled": canceled, "details": details}
+            detail = f"{symbol}(order_id={order_id or '-'}, client_id={client_order_id or '-'})"
+            if self._cancel_order_if_exists(symbol, order_id, client_order_id):
+                canceled += 1
+                details.append(detail)
+            else:
+                failed += 1
+                failed_details.append(detail)
+        return {
+            "canceled": canceled,
+            "failed": failed,
+            "details": details,
+            "failed_details": failed_details,
+        }
 
     @classmethod
     def _is_orphan_exit_order_candidate(cls, order: Dict[str, object]) -> bool:
