@@ -1584,6 +1584,7 @@ class PositionManagerTest(unittest.TestCase):
         self.assertEqual(summary["updated_sl"], 0)
         self.assertEqual(summary["closed_immediate"], 1)
         self.assertEqual(summary["errors"], 0)
+
         self.assertEqual(client.create_order.call_count, 2)
         stop_kwargs = client.create_order.call_args_list[0].kwargs
         self.assertEqual(stop_kwargs["type"], "STOP_MARKET")
@@ -1599,6 +1600,94 @@ class PositionManagerTest(unittest.TestCase):
         self.assertEqual(row["close_reason"], "NOON_PROTECTION_IMMEDIATE_TRIGGER")
         self.assertEqual(row["close_order_id"], 999)
         self.assertIsNone(row["last_error"])
+
+    def test_noon_protection_symbol_retry_preserves_other_cached_caps(self) -> None:
+        noon_utc = datetime(2026, 2, 13, 12, 0, tzinfo=timezone.utc)
+        day_start_utc = datetime(2026, 2, 13, 0, 0, tzinfo=timezone.utc)
+        position_id = self.store.insert_position(
+            run_id=self.run_id,
+            symbol="DENTUSDT",
+            side="SHORT",
+            qty=1000.0,
+            entry_price=0.001,
+            liq_price_open=0.01,
+            tp_price=None,
+            sl_price=0.0020,
+            tp_order_id=None,
+            sl_order_id=22,
+            tp_client_order_id=None,
+            sl_client_order_id="sl-old",
+            opened_at_utc=datetime(2026, 2, 13, 8, 0, tzinfo=timezone.utc).isoformat(),
+            expire_at_utc=datetime(2026, 2, 14, 8, 0, tzinfo=timezone.utc).isoformat(),
+            status="OPEN",
+        )
+
+        client = MagicMock()
+        client.get_position_risk.return_value = [
+            {
+                "symbol": "DENTUSDT",
+                "positionAmt": "-1000",
+                "positionSide": "SHORT",
+                "liquidationPrice": "0.01",
+            },
+            {
+                "symbol": "OTHERUSDT",
+                "positionAmt": "-500",
+                "positionSide": "SHORT",
+                "liquidationPrice": "0.02",
+            },
+        ]
+        client.get_klines.return_value = [
+            [0, "0", "0.0017", "0", "0", 0],
+        ]
+        client.get_symbol_rules.return_value = {
+            "DENTUSDT": SimpleNamespace(tick_size=0.0001),
+        }
+        client.normalize_trigger_price.side_effect = lambda _symbol, price, round_up=False: float(price)
+        client.format_trigger_price.side_effect = lambda _symbol, price, round_up=False: str(price)
+        client.format_order_qty.side_effect = lambda _symbol, qty: str(qty)
+        client.create_order.return_value = {
+            "orderId": 3003,
+            "clientOrderId": "sl-dent-retry",
+            "type": "STOP_MARKET",
+            "side": "BUY",
+            "origQty": "1000",
+            "status": "NEW",
+        }
+
+        self.store.set_lock_state(
+            PositionManager.NOON_PROTECTION_LOCK_NAME,
+            {
+                "caps": {
+                    str(position_id): 0.0020,
+                    "EX:OTHERUSDT:SHORT": 0.0030,
+                }
+            },
+        )
+
+        manager = PositionManager(
+            client=client,
+            store=self.store,
+            notifier=MagicMock(),
+            sl_liq_buffer_pct=1.0,
+            trigger_price_type="CONTRACT_PRICE",
+        )
+
+        summary = manager.run_noon_protection_stop(
+            day_start_utc=day_start_utc,
+            noon_time_utc=noon_utc,
+            symbols={"DENTUSDT"},
+        )
+
+        self.assertEqual(summary["total"], 1)
+        self.assertEqual(summary["updated_sl"], 1)
+        self.assertEqual(client.get_klines.call_count, 1)
+        self.assertEqual(client.create_order.call_count, 1)
+
+        lock_state = self.store.get_lock_state(PositionManager.NOON_PROTECTION_LOCK_NAME)
+        self.assertIsNotNone(lock_state)
+        assert lock_state is not None
+        self.assertIn("EX:OTHERUSDT:SHORT", lock_state["caps"])
 
     def test_morning_protection_tightens_tracked_short_older_than_min_hold_to_current_hour_high(self) -> None:
         opened_at = datetime(2026, 3, 16, 23, 0, tzinfo=timezone.utc)

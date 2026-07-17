@@ -1,5 +1,5 @@
 import unittest
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from threading import Event, Thread
 from unittest.mock import MagicMock
 import time
@@ -1292,6 +1292,87 @@ def test_noon_protection_skips_restart_beyond_two_hour_grace() -> None:
     )
     assert manager.noon_calls == 0
 
+
+def test_noon_protection_retries_only_failed_accounts_and_symbols() -> None:
+    class StrategyStub:
+        def run_entry(self):
+            return {"status": "SKIPPED"}
+
+    class ManagerStub:
+        def __init__(self, fail_first: bool = False) -> None:
+            self.fail_first = fail_first
+            self.noon_calls = []
+
+        def run_once(self):
+            return {"total": 0}
+
+        def run_noon_protection_stop(self, day_start_utc, noon_time_utc, symbols=None):
+            self.noon_calls.append(symbols)
+            if self.fail_first and len(self.noon_calls) == 1:
+                return {
+                    "total": 1,
+                    "updated_sl": 0,
+                    "errors": 1,
+                    "failed_symbols": ["AKEUSDT"],
+                }
+            return {
+                "total": 1,
+                "updated_sl": 1,
+                "errors": 0,
+                "failed_symbols": [],
+            }
+
+    healthy = ManagerStub()
+    flaky = ManagerStub(fail_first=True)
+    cfg = ServiceRuntimeConfig(
+        timezone_name="UTC",
+        entry_hour=23,
+        entry_minute=59,
+        entry_misfire_grace_min=120,
+        entry_catchup_enabled=True,
+        daily_loss_cut_enabled=False,
+        daily_loss_cut_hour=11,
+        daily_loss_cut_minute=55,
+        manager_interval_sec=3600,
+        manager_max_catch_up_runs=1,
+        loop_sleep_sec=1.0,
+        run_manage_on_startup=False,
+        noon_protection_enabled=True,
+        noon_protection_hour=12,
+        noon_protection_minute=0,
+        noon_protection_retry_interval_sec=60.0,
+        orphan_exit_order_cleanup_enabled=False,
+    )
+    service = StrategyRuntimeService(
+        strategy=StrategyStub(),
+        manager=healthy,
+        cfg=cfg,
+        now_monotonic=0.0,
+        account_runtimes={
+            "acc01": {"mode": "full", "strategy": StrategyStub(), "manager": healthy, "balance_sampler": None},
+            "acc04": {"mode": "full", "strategy": StrategyStub(), "manager": flaky, "balance_sampler": None},
+        },
+        max_account_workers=2,
+    )
+
+    noon = datetime(2026, 2, 13, 12, 0, tzinfo=ZoneInfo("UTC"))
+    service.run_cycle(now_local=noon, now_monotonic=1.0)
+    assert len(healthy.noon_calls) == 1
+    assert len(flaky.noon_calls) == 1
+    assert flaky.noon_calls[0] is None
+
+    service.run_cycle(now_local=noon + timedelta(seconds=30), now_monotonic=2.0)
+    assert len(healthy.noon_calls) == 1
+    assert len(flaky.noon_calls) == 1
+
+    service.run_cycle(now_local=noon + timedelta(seconds=60), now_monotonic=3.0)
+    assert len(healthy.noon_calls) == 1
+    assert len(flaky.noon_calls) == 2
+    assert flaky.noon_calls[1] == {"AKEUSDT"}
+
+    service.run_cycle(now_local=noon + timedelta(seconds=120), now_monotonic=4.0)
+    assert len(healthy.noon_calls) == 1
+    assert len(flaky.noon_calls) == 2
 
 def test_morning_protection_runs_once_for_full_and_loss_cut_only_accounts() -> None:
     class StrategyStub:

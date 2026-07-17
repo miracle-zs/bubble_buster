@@ -321,6 +321,9 @@ def create_components(
         noon_protection_enabled=runtime_cfg_selected.getboolean("noon_protection_enabled", fallback=True),
         noon_protection_hour=runtime_cfg_selected.getint("noon_protection_hour", fallback=12),
         noon_protection_minute=runtime_cfg_selected.getint("noon_protection_minute", fallback=0),
+        noon_protection_retry_interval_sec=runtime_cfg_selected.getfloat(
+            "noon_protection_retry_interval_sec", fallback=60.0
+        ),
         morning_protection_enabled=runtime_cfg_selected.getboolean("morning_protection_enabled", fallback=False),
         morning_protection_hour=runtime_cfg_selected.getint("morning_protection_hour", fallback=7),
         morning_protection_minute=runtime_cfg_selected.getint("morning_protection_minute", fallback=55),

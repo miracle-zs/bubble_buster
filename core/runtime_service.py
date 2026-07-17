@@ -4,7 +4,7 @@ import time
 from concurrent.futures import Future, ThreadPoolExecutor, wait
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, Set
 from zoneinfo import ZoneInfo
 
 
@@ -33,6 +33,7 @@ class ServiceRuntimeConfig:
     noon_protection_enabled: bool = True
     noon_protection_hour: int = 12
     noon_protection_minute: int = 0
+    noon_protection_retry_interval_sec: float = 60.0
     morning_protection_enabled: bool = False
     morning_protection_hour: int = 7
     morning_protection_minute: int = 55
@@ -104,6 +105,9 @@ class StrategyRuntimeService:
         self._last_loss_cut_local_date: Optional[date] = None
         self._last_loss_cut_skipped_date: Optional[date] = None
         self._last_noon_protection_local_date: Optional[date] = None
+        self._noon_protection_pending_symbols_by_account: Dict[str, Optional[Set[str]]] = {}
+        self._noon_protection_retry_due_local: Optional[datetime] = None
+        self._noon_protection_retry_local_date: Optional[date] = None
         self._last_morning_protection_local_date_by_account: Dict[str, date] = {}
         self._last_hourly_exchange_take_profit_hour_by_account: Dict[str, str] = {}
         self._last_orphan_exit_order_cleanup_local_date: Optional[date] = None
@@ -479,28 +483,44 @@ class StrategyRuntimeService:
         if not self.cfg.noon_protection_enabled:
             return
         today = now_local.date()
-        if self._last_noon_protection_local_date == today:
-            return
         target = self._noon_protection_schedule_for_day(today)
-        if now_local < target:
-            return
-        if now_local - target > PROTECTION_RESTART_GRACE:
-            LOGGER.warning(
-                "Noon protection missed beyond restart grace, skip for today: now=%s target=%s grace_hours=2",
-                now_local.isoformat(timespec="seconds"),
-                target.isoformat(timespec="seconds"),
-            )
-            self._last_noon_protection_local_date = today
-            return
+        if self._noon_protection_retry_local_date != today:
+            self._noon_protection_pending_symbols_by_account = {}
+            self._noon_protection_retry_due_local = None
+            self._noon_protection_retry_local_date = None
+
+        is_retry = self._last_noon_protection_local_date == today
+        if is_retry:
+            if not self._noon_protection_pending_symbols_by_account:
+                return
+            if (
+                self._noon_protection_retry_due_local is not None
+                and now_local < self._noon_protection_retry_due_local
+            ):
+                return
+        else:
+            if now_local < target:
+                return
+            if now_local - target > PROTECTION_RESTART_GRACE:
+                LOGGER.warning(
+                    "Noon protection missed beyond restart grace, skip for today: now=%s target=%s grace_hours=2",
+                    now_local.isoformat(timespec="seconds"),
+                    target.isoformat(timespec="seconds"),
+                )
+                self._last_noon_protection_local_date = today
+                return
 
         day_start_local = target.replace(hour=0, minute=0, second=0, microsecond=0)
         day_start_utc = day_start_local.astimezone(timezone.utc)
         noon_time_utc = target.astimezone(timezone.utc)
-        account_ids = [
-            aid
-            for aid, ctx in self.account_runtimes.items()
-            if str(ctx.get("mode", "full")).strip().lower() in {"full", "loss_cut_only"}
-        ]
+        if is_retry:
+            account_ids = list(self._noon_protection_pending_symbols_by_account)
+        else:
+            account_ids = [
+                aid
+                for aid, ctx in self.account_runtimes.items()
+                if str(ctx.get("mode", "full")).strip().lower() in {"full", "loss_cut_only"}
+            ]
         self._last_noon_protection_local_date = today
         if not account_ids:
             LOGGER.warning("service noon protection skipped: no account is enabled")
@@ -513,12 +533,64 @@ class StrategyRuntimeService:
             if manager is None or not hasattr(manager, "run_noon_protection_stop"):
                 results[aid] = {"error": "manager_missing"}
             else:
-                calls[aid] = lambda manager=manager: manager.run_noon_protection_stop(  # type: ignore[attr-defined]
+                retry_symbols = (
+                    self._noon_protection_pending_symbols_by_account.get(aid)
+                    if is_retry
+                    else None
+                )
+                if is_retry and retry_symbols:
+                    calls[aid] = lambda manager=manager, retry_symbols=frozenset(retry_symbols): manager.run_noon_protection_stop(  # type: ignore[attr-defined]
+                        day_start_utc=day_start_utc,
+                        noon_time_utc=noon_time_utc,
+                        symbols=set(retry_symbols),
+                    )
+                else:
+                    calls[aid] = lambda manager=manager: manager.run_noon_protection_stop(  # type: ignore[attr-defined]
                         day_start_utc=day_start_utc,
                         noon_time_utc=noon_time_utc,
                     )
         results.update(self._run_account_task_calls(calls, "noon-protection"))
         LOGGER.info("service noon protection result: %s", results)
+
+        pending_symbols_by_account: Dict[str, Optional[Set[str]]] = {}
+        for aid, result in results.items():
+            if not isinstance(result, dict):
+                pending_symbols_by_account[aid] = None
+                continue
+            raw_failed_symbols = result.get("failed_symbols")
+            failed_symbols = {
+                str(symbol or "").strip().upper()
+                for symbol in (raw_failed_symbols if isinstance(raw_failed_symbols, (list, tuple, set)) else [])
+                if str(symbol or "").strip()
+            }
+            try:
+                error_count = int(result.get("errors", 0) or 0)
+            except (TypeError, ValueError):
+                error_count = 1
+            needs_retry = bool(
+                failed_symbols
+                or error_count > 0
+                or result.get("error")
+                or result.get("slow")
+                or result.get("running")
+            )
+            if needs_retry:
+                pending_symbols_by_account[aid] = failed_symbols or None
+
+        if pending_symbols_by_account:
+            self._noon_protection_pending_symbols_by_account = pending_symbols_by_account
+            self._noon_protection_retry_local_date = today
+            retry_interval = max(1.0, float(self.cfg.noon_protection_retry_interval_sec))
+            self._noon_protection_retry_due_local = now_local + timedelta(seconds=retry_interval)
+            LOGGER.warning(
+                "service noon protection pending retry accounts=%s retry_in_sec=%s",
+                pending_symbols_by_account,
+                retry_interval,
+            )
+        else:
+            self._noon_protection_pending_symbols_by_account = {}
+            self._noon_protection_retry_local_date = None
+            self._noon_protection_retry_due_local = None
 
     def _morning_protection_schedule_for_day(self, day: date, account_id: Optional[str] = None) -> datetime:
         account_ctx = self.account_runtimes.get(account_id or "", {})

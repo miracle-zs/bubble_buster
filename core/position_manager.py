@@ -445,9 +445,15 @@ class PositionManager:
         self,
         day_start_utc: datetime,
         noon_time_utc: datetime,
+        symbols: Optional[Set[str]] = None,
     ) -> Dict[str, object]:
         day_start = day_start_utc.astimezone(timezone.utc).replace(microsecond=0)
         noon_time = noon_time_utc.astimezone(timezone.utc).replace(microsecond=0)
+        target_symbols = {
+            str(symbol or "").strip().upper()
+            for symbol in symbols
+            if str(symbol or "").strip()
+        } if symbols is not None else None
 
         tracked_positions = self.store.list_open_positions()
         tracked_by_symbol: Dict[str, Dict[str, object]] = {}
@@ -473,6 +479,8 @@ class PositionManager:
                 continue
             symbol = str(risk.get("symbol") or "").strip()
             if not symbol:
+                continue
+            if target_symbols is not None and symbol.upper() not in target_symbols:
                 continue
             if self._is_protection_exempt(symbol):
                 continue
@@ -642,11 +650,16 @@ class PositionManager:
                 if symbol and symbol not in failed_symbols:
                     failed_symbols.append(symbol)
 
-        pruned_caps = {
-            cap_key: cap_price
-            for cap_key, cap_price in caps.items()
-            if cap_key in active_cap_keys
-        }
+        if target_symbols is None:
+            pruned_caps = {
+                cap_key: cap_price
+                for cap_key, cap_price in caps.items()
+                if cap_key in active_cap_keys
+            }
+        else:
+            # A retry is scoped to failed symbols. Preserve the other symbols'
+            # caps because this pass intentionally did not inspect them.
+            pruned_caps = caps
         self._persist_noon_protection_caps(
             pruned_caps,
             day_start_utc=day_start_utc,

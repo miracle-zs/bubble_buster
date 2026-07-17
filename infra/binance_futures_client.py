@@ -129,6 +129,7 @@ class BinanceFuturesClient:
         self.recv_window = recv_window
         self.order_reconcile_attempts = max(1, int(order_reconcile_attempts))
         self.order_reconcile_delay_sec = max(0.0, float(order_reconcile_delay_sec))
+        self._server_time_offset_ms = 0
 
         self.session = requests.Session()
         self.session.headers.update({"X-MBX-APIKEY": self.api_key})
@@ -157,6 +158,24 @@ class BinanceFuturesClient:
         except (TypeError, ValueError):
             return None
 
+    def _sync_server_time(self) -> int:
+        started_ms = int(time.time() * 1000)
+        payload = self._request("GET", "/fapi/v1/time")
+        completed_ms = int(time.time() * 1000)
+        try:
+            server_time_ms = int(payload["serverTime"])
+        except (KeyError, TypeError, ValueError) as exc:
+            raise BinanceAPIError("TIME_SYNC", f"Invalid Binance server time response: {payload!r}") from exc
+
+        midpoint_ms = (started_ms + completed_ms) // 2
+        self._server_time_offset_ms = server_time_ms - midpoint_ms
+        LOGGER.info(
+            "Binance server time synchronized offset_ms=%s rtt_ms=%s",
+            self._server_time_offset_ms,
+            max(0, completed_ms - started_ms),
+        )
+        return self._server_time_offset_ms
+
     def _is_order_not_found_error(self, err: BinanceAPIError) -> bool:
         code = self._safe_error_code(err)
         return code in self.ORDER_NOT_FOUND_CODES
@@ -183,7 +202,7 @@ class BinanceFuturesClient:
 
     def _sign_params(self, params: Dict[str, Any]) -> Dict[str, Any]:
         signed = dict(params)
-        signed["timestamp"] = int(time.time() * 1000)
+        signed["timestamp"] = int(time.time() * 1000) + self._server_time_offset_ms
         signed["recvWindow"] = self.recv_window
         query = urlencode(signed, doseq=True)
         signature = hmac.new(
@@ -209,6 +228,7 @@ class BinanceFuturesClient:
         )
 
         url = f"{self.base_url}{path}"
+        timestamp_sync_attempted = False
 
         for attempt in range(1, self.retry_count + 1):
             payload = self._sign_params(base_payload) if signed else dict(base_payload)
@@ -253,6 +273,20 @@ class BinanceFuturesClient:
                 pass
 
             err = BinanceAPIError(code=code, message=msg, http_status=response.status_code)
+            if (
+                attempt < self.retry_count
+                and signed
+                and not timestamp_sync_attempted
+                and self._safe_error_code(err) == -1021
+            ):
+                timestamp_sync_attempted = True
+                try:
+                    self._sync_server_time()
+                except Exception as sync_exc:  # noqa: BLE001
+                    LOGGER.warning("Binance server time synchronization failed after -1021: %s", sync_exc)
+                    raise err
+                LOGGER.warning("Refreshing Binance server time after timestamp error for %s %s", method, path)
+                continue
             if (
                 attempt < self.retry_count
                 and self._is_retriable_error(err)

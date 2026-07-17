@@ -38,6 +38,7 @@ class ClientUtilsTest(unittest.TestCase):
         second_response.text = '{"ok": true}'
         second_response.json.return_value = {"ok": True}
         client.session.request = MagicMock(side_effect=[first_response, second_response])
+        client._sync_server_time = MagicMock()  # type: ignore[method-assign]
 
         time_values = iter(1000.0 + (idx * 0.1) for idx in range(20))
         with patch("infra.binance_futures_client.time.time", side_effect=lambda: next(time_values)):
@@ -51,6 +52,53 @@ class ClientUtilsTest(unittest.TestCase):
         ]
         self.assertGreater(request_params[1]["timestamp"], request_params[0]["timestamp"])
         self.assertNotEqual(request_params[0]["signature"], request_params[1]["signature"])
+
+    def test_idempotent_order_timestamp_error_syncs_and_retries(self) -> None:
+        client = BinanceFuturesClient(
+            api_key="k",
+            api_secret="s",
+            retry_count=2,
+            retry_delay_sec=0.1,
+        )
+        sync_mock = MagicMock(
+            side_effect=lambda: setattr(client, "_server_time_offset_ms", 2500)
+        )
+        client._sync_server_time = sync_mock  # type: ignore[method-assign]
+
+        first_response = MagicMock()
+        first_response.status_code = 400
+        first_response.text = '{"code": -1021, "msg": "Timestamp outside recvWindow"}'
+        first_response.json.return_value = {
+            "code": -1021,
+            "msg": "Timestamp outside recvWindow",
+        }
+        second_response = MagicMock()
+        second_response.status_code = 200
+        second_response.text = '{"algoId": 123, "clientAlgoId": "test-1", "algoStatus": "NEW"}'
+        second_response.json.return_value = {
+            "algoId": 123,
+            "clientAlgoId": "test-1",
+            "algoStatus": "NEW",
+        }
+        client.session.request = MagicMock(side_effect=[first_response, second_response])
+
+        with patch("infra.binance_futures_client.time.time", return_value=1000.0):
+            result = client._request(
+                "POST",
+                "/fapi/v1/algoOrder",
+                params={"symbol": "BTCUSDT", "clientAlgoId": "test-1"},
+                signed=True,
+            )
+
+        self.assertEqual(result["algoId"], 123)
+        sync_mock.assert_called_once_with()
+        request_params = [
+            call.kwargs["data"]
+            for call in client.session.request.call_args_list
+        ]
+        self.assertEqual(request_params[0]["clientAlgoId"], "test-1")
+        self.assertEqual(request_params[1]["clientAlgoId"], "test-1")
+        self.assertGreater(request_params[1]["timestamp"], request_params[0]["timestamp"])
 
     def test_order_write_network_error_is_not_blindly_retried(self) -> None:
         client = BinanceFuturesClient(api_key="k", api_secret="s", retry_count=3)
