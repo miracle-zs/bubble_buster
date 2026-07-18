@@ -2,6 +2,7 @@ import logging
 import math
 import threading
 import time
+from functools import wraps
 import hashlib
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
@@ -10,6 +11,11 @@ from typing import Any, Callable, Dict, Iterator, List, Optional, Set, Tuple
 from uuid import uuid4
 from zoneinfo import ZoneInfo
 
+from core.entry_structure_protection import (
+    EntryStructureProtection,
+    EntryStructureProtectionState,
+)
+from core.market_fill_reconciler import MarketFillReconciler
 from core.state_store import StateStore
 from infra.binance_futures_client import BinanceAPIError, BinanceFuturesClient, OrderStateUnknownError
 from infra.binance_top10_monitor import build_top_gainers
@@ -20,6 +26,15 @@ from infra.notifier import (
 )
 
 LOGGER = logging.getLogger(__name__)
+
+
+def _serialized_account_mutation(method):
+    @wraps(method)
+    def wrapped(self, *args, **kwargs):
+        with self._mutation_lock:
+            return method(self, *args, **kwargs)
+
+    return wrapped
 
 
 @dataclass(frozen=True)
@@ -44,6 +59,13 @@ class ReadyEntry:
     reference_price: float
     signal_time_utc: datetime
     bearish_close_time_utc: Optional[datetime]
+
+
+@dataclass(frozen=True)
+class EntryStructureWindow:
+    bearish_close_time_utc: datetime
+    window_start_utc: datetime
+    highest_price: float
 
 
 @dataclass(frozen=True)
@@ -117,6 +139,7 @@ class Top10ShortStrategy:
         runtime_timezone: str = "Asia/Shanghai",
         account_id: str = "default",
         protection_exempt_symbols: Optional[Set[str]] = None,
+        mutation_lock: Optional[Any] = None,
     ):
         self.client = client
         self.store = store
@@ -172,6 +195,9 @@ class Top10ShortStrategy:
         }
         self._entry_wait_stop_event = threading.Event()
         self._entry_wait_interrupted = False
+        self._entry_structure_protection_state = EntryStructureProtectionState(store)
+        self._market_fill_reconciler = MarketFillReconciler(client, store)
+        self._mutation_lock = mutation_lock or threading.RLock()
 
     def _is_protection_exempt(self, symbol: str) -> bool:
         return str(symbol or "").strip().upper() in self.protection_exempt_symbols
@@ -205,6 +231,13 @@ class Top10ShortStrategy:
     ) -> Dict[str, object]:
         trade_day = (trade_day_utc or "").strip() or datetime.now(timezone.utc).date().isoformat()
         trade_day_utc = trade_day
+        pending_entry_recovery = self.recover_pending_entries()
+        if int(pending_entry_recovery.get("total", 0) or 0) > 0:
+            LOGGER.warning(
+                "Recovered incomplete entries before entry run account=%s result=%s",
+                self.account_id,
+                pending_entry_recovery,
+            )
         active_wait = self._load_entry_wait_state()
         active_pending = active_wait.get("pending")
         active_run_id = str(active_wait.get("run_id") or "").strip()
@@ -224,21 +257,27 @@ class Top10ShortStrategy:
         if not created:
             run_state = self.store.get_run(run_id)
             wait_state = self._load_entry_wait_state()
-            if (
-                run_state is not None
-                and str(run_state.status).upper() == "RUNNING"
-                and str(wait_state.get("run_id") or "") == run_id
-                and isinstance(wait_state.get("pending"), dict)
-                and bool(wait_state.get("pending"))
-            ):
-                resumed_wait = True
-                shared_top_gainers = self._ranking_payload_from_wait_state(wait_state)
-                LOGGER.warning(
-                    "Resume persisted bearish-hour entry wait: account=%s run_id=%s pending=%s",
-                    self.account_id,
-                    run_id,
-                    len(wait_state["pending"]),
+            if run_state is not None and str(run_state.status).upper() == "RUNNING":
+                has_persisted_wait = (
+                    str(wait_state.get("run_id") or "") == run_id
+                    and isinstance(wait_state.get("pending"), dict)
+                    and bool(wait_state.get("pending"))
                 )
+                if has_persisted_wait:
+                    resumed_wait = True
+                    shared_top_gainers = self._ranking_payload_from_wait_state(wait_state)
+                    LOGGER.warning(
+                        "Resume persisted bearish-hour entry wait: account=%s run_id=%s pending=%s",
+                        self.account_id,
+                        run_id,
+                        len(wait_state["pending"]),
+                    )
+                else:
+                    LOGGER.warning(
+                        "Resume incomplete RUNNING entry from ranking stage: account=%s run_id=%s",
+                        self.account_id,
+                        run_id,
+                    )
             else:
                 LOGGER.info("Entry skipped: run already exists for trade_day_utc=%s", trade_day_utc)
                 return {
@@ -265,7 +304,12 @@ class Top10ShortStrategy:
         post_rebalance_summary: Optional[Dict[str, object]] = None
 
         try:
-            open_symbols = self.store.list_open_symbols()
+            active_symbols = self.store.list_active_symbols()
+            open_symbols = (
+                active_symbols
+                if isinstance(active_symbols, set)
+                else self.store.list_open_symbols()
+            )
             fetch_top_n = max(
                 self.top_n,
                 self.top_n * self.entry_rank_fetch_multiplier,
@@ -465,7 +509,12 @@ class Top10ShortStrategy:
             for idx, ready_entry in enumerate(ready_entries):
                 entry = ready_entry.entry
                 reference_price = ready_entry.reference_price
+                position_id: Optional[int] = None
+                mutation_acquired = False
                 try:
+                    entry_structure_window = self._prepare_entry_structure_window(ready_entry)
+                    self._mutation_lock.acquire()
+                    mutation_acquired = True
                     self.client.ensure_isolated_and_leverage(entry.symbol, self.leverage)
                     qty_diagnostic = self.client.diagnose_order_qty(entry.symbol, target_notional, reference_price)
                     qty = float(qty_diagnostic["normalized_qty"])
@@ -500,6 +549,25 @@ class Top10ShortStrategy:
                         )
                         continue
 
+                    intent_opened_at = self._utc_now_datetime()
+                    position_id = self.store.insert_position(
+                        run_id=run_id,
+                        symbol=plan.symbol,
+                        side="SHORT",
+                        qty=plan.qty,
+                        entry_price=reference_price,
+                        liq_price_open=None,
+                        tp_price=None,
+                        sl_price=None,
+                        tp_order_id=None,
+                        sl_order_id=None,
+                        tp_client_order_id=None,
+                        sl_client_order_id=None,
+                        opened_at_utc=intent_opened_at.isoformat(),
+                        expire_at_utc=(intent_opened_at + timedelta(hours=self.max_hold_hours)).isoformat(),
+                        status="PENDING_ENTRY",
+                    )
+
                     open_order, retry_count_used = self._place_market_short_with_shrink_retry(
                         symbol=plan.symbol,
                         target_notional=plan.target_notional_usdt,
@@ -510,7 +578,7 @@ class Top10ShortStrategy:
                         shrink_retry_details.append(f"{plan.symbol}: 缩量重试{retry_count_used}次后成功")
                     self.store.add_order_event(
                         symbol=plan.symbol,
-                        position_id=None,
+                        position_id=position_id,
                         event_time_utc=self._utc_now_iso(),
                         order_payload=open_order,
                     )
@@ -522,34 +590,54 @@ class Top10ShortStrategy:
                     entry_price = float(position_risk.get("entryPrice") or reference_price)
                     liq_price = self._safe_positive_float(position_risk.get("liquidationPrice"))
                     qty_now = abs(float(position_risk.get("positionAmt", plan.qty)))
-                    opened_at = self._utc_now_datetime()
+                    observed_opened_at = self._utc_now_datetime()
+                    opened_at = self._resolve_entry_fill_time(open_order, observed_opened_at)
                     expire_at = opened_at + timedelta(hours=self.max_hold_hours)
 
-                    position_id = self.store.insert_position(
-                        run_id=run_id,
-                        symbol=plan.symbol,
-                        side="SHORT",
+                    self.store.set_position_entry_fill(
+                        position_id=position_id,
                         qty=qty_now,
                         entry_price=entry_price,
                         liq_price_open=liq_price,
-                        tp_price=None,
-                        sl_price=None,
-                        tp_order_id=None,
-                        sl_order_id=None,
-                        tp_client_order_id=None,
-                        sl_client_order_id=None,
-                        opened_at_utc=opened_at.replace(microsecond=0).isoformat(),
-                        expire_at_utc=expire_at.replace(microsecond=0).isoformat(),
-                        status="PENDING_EXIT_SETUP",
+                        opened_at_utc=opened_at.isoformat(),
+                        expire_at_utc=expire_at.isoformat(),
                     )
 
                     opened_symbols.append(plan.symbol)
                     opened_count += 1
                     try:
-                        self._place_exit_orders(
-                            position_id=position_id,
+                        entry_structure_protection = self._complete_entry_structure_protection(
                             symbol=plan.symbol,
+                            window=entry_structure_window,
+                            fill_time_utc=opened_at,
+                            entry_price=entry_price,
                         )
+                        if entry_structure_protection is not None:
+                            self._entry_structure_protection_state.put(
+                                position_id=position_id,
+                                protection=entry_structure_protection,
+                            )
+                            LOGGER.info(
+                                "Entry structure protection ready: account=%s position_id=%s symbol=%s "
+                                "window_start=%s bearish_close=%s fill=%s stop_price=%.10f",
+                                self.account_id,
+                                position_id,
+                                plan.symbol,
+                                entry_structure_protection.window_start_utc.isoformat(),
+                                entry_structure_protection.bearish_close_time_utc.isoformat(),
+                                entry_structure_protection.window_end_utc.isoformat(),
+                                entry_structure_protection.stop_price,
+                            )
+                            self._place_exit_orders(
+                                position_id=position_id,
+                                symbol=plan.symbol,
+                                entry_structure_stop_price=entry_structure_protection.stop_price,
+                            )
+                        else:
+                            self._place_exit_orders(
+                                position_id=position_id,
+                                symbol=plan.symbol,
+                            )
                         self.store.mark_position_open(position_id)
                     except Exception as exc:  # noqa: BLE001
                         exit_setup_failed_count += 1
@@ -570,10 +658,41 @@ class Top10ShortStrategy:
                         continue
 
                 except Exception as exc:  # noqa: BLE001
+                    if position_id is not None:
+                        try:
+                            current = self.store.get_position(position_id)
+                            if current is not None and str(current.get("status") or "") in {
+                                "PENDING_ENTRY",
+                                "PENDING_EXIT_SETUP",
+                            }:
+                                risk = self._load_short_position(entry.symbol)
+                                if risk is None:
+                                    self.store.mark_position_closed(
+                                        position_id=position_id,
+                                        status="ENTRY_FAILED",
+                                        close_reason="ENTRY_NOT_FOUND_AFTER_FAILURE",
+                                    )
+                                else:
+                                    self._force_close_position(
+                                        position_id=position_id,
+                                        symbol=entry.symbol,
+                                        reason="ENTRY_WORKFLOW_FAILED",
+                                    )
+                        except Exception as recovery_exc:  # noqa: BLE001
+                            LOGGER.exception(
+                                "Failed to recover incomplete entry account=%s position_id=%s symbol=%s: %s",
+                                self.account_id,
+                                position_id,
+                                entry.symbol,
+                                recovery_exc,
+                            )
                     failed_notional += target_notional
                     entry_failed_count += 1
                     entry_failure_details.append(f"{entry.symbol}: {exc}")
                     LOGGER.exception("Initial entry failed for %s: %s", entry.symbol, exc)
+                finally:
+                    if mutation_acquired:
+                        self._mutation_lock.release()
 
                 if (
                     not self.entry_wait_bearish_hour_enabled
@@ -1011,10 +1130,205 @@ class Top10ShortStrategy:
             return open_price, close_price, close_time
         return None
 
+    def _build_entry_structure_protection(
+        self,
+        ready_entry: ReadyEntry,
+        fill_time_utc: datetime,
+        entry_price: float,
+    ) -> Optional[EntryStructureProtection]:
+        window = self._prepare_entry_structure_window(ready_entry)
+        return self._complete_entry_structure_protection(
+            symbol=ready_entry.entry.symbol,
+            window=window,
+            fill_time_utc=fill_time_utc,
+            entry_price=entry_price,
+        )
+
+    def _prepare_entry_structure_window(
+        self,
+        ready_entry: ReadyEntry,
+    ) -> Optional[EntryStructureWindow]:
+        bearish_close_raw = getattr(ready_entry, "bearish_close_time_utc", None)
+        if not self.entry_wait_bearish_hour_enabled or not isinstance(bearish_close_raw, datetime):
+            return None
+
+        bearish_close = self._closed_hour_boundary(bearish_close_raw)
+
+        window_start = bearish_close - timedelta(hours=2)
+        start_ms = int(window_start.timestamp() * 1000)
+        end_ms = int(bearish_close.timestamp() * 1000) - 1
+        rows = self.client.get_klines(
+            symbol=ready_entry.entry.symbol,
+            interval="1h",
+            start_time=start_ms,
+            end_time=end_ms,
+            limit=2,
+        )
+        expected_open_times = {
+            start_ms,
+            start_ms + 60 * 60 * 1000,
+        }
+        highs_by_open: Dict[int, float] = {}
+        for row in rows or []:
+            if len(row) < 3:
+                continue
+            try:
+                row_open_ms = int(row[0])
+            except (TypeError, ValueError):
+                continue
+            if row_open_ms not in expected_open_times:
+                continue
+            high_price = self._safe_positive_float(row[2])
+            if high_price is not None:
+                highs_by_open[row_open_ms] = high_price
+        missing = expected_open_times.difference(highs_by_open)
+        if missing:
+            raise RuntimeError(
+                f"Missing entry structure candles for {ready_entry.entry.symbol}: "
+                f"expected={sorted(expected_open_times)} missing={sorted(missing)}"
+            )
+        return EntryStructureWindow(
+            bearish_close_time_utc=bearish_close,
+            window_start_utc=window_start,
+            highest_price=max(highs_by_open.values()),
+        )
+
+    def _complete_entry_structure_protection(
+        self,
+        symbol: str,
+        window: Optional[EntryStructureWindow],
+        fill_time_utc: datetime,
+        entry_price: float,
+    ) -> Optional[EntryStructureProtection]:
+        if window is None:
+            return None
+        fill_time = fill_time_utc.astimezone(timezone.utc)
+        fill_local = fill_time.astimezone(self.runtime_timezone)
+        local_noon = fill_local.replace(hour=12, minute=0, second=0, microsecond=0)
+        if fill_local < local_noon:
+            return None
+        if fill_time < window.bearish_close_time_utc:
+            raise RuntimeError(
+                f"Entry fill precedes bearish close for {symbol}: "
+                f"fill={fill_time.isoformat()} close={window.bearish_close_time_utc.isoformat()}"
+            )
+        high_candidates = [window.highest_price, float(entry_price)]
+        post_close_high = self._fetch_agg_trade_high(
+            symbol=symbol,
+            start_utc=window.bearish_close_time_utc,
+            end_utc=fill_time,
+        )
+        if post_close_high is not None:
+            high_candidates.append(post_close_high)
+        stop_price = self.client.normalize_trigger_price(
+            symbol,
+            max(high_candidates),
+            round_up=True,
+        )
+        if stop_price <= 0:
+            raise RuntimeError(f"Invalid entry structure stop for {symbol}: {stop_price}")
+        return EntryStructureProtection(
+            stop_price=stop_price,
+            bearish_close_time_utc=window.bearish_close_time_utc,
+            window_start_utc=window.window_start_utc,
+            window_end_utc=fill_time,
+        )
+
+    def _fetch_agg_trade_high(
+        self,
+        symbol: str,
+        start_utc: datetime,
+        end_utc: datetime,
+    ) -> Optional[float]:
+        start_ms = int(start_utc.timestamp() * 1000)
+        end_ms = int(end_utc.timestamp() * 1000)
+        if end_ms <= start_ms:
+            return None
+        max_window_ms = 60 * 60 * 1000 - 1
+        if end_ms - start_ms > max_window_ms:
+            highs: List[float] = []
+            chunk_start_ms = start_ms
+            while chunk_start_ms <= end_ms:
+                chunk_end_ms = min(end_ms, chunk_start_ms + max_window_ms)
+                chunk_high = self._fetch_agg_trade_high(
+                    symbol=symbol,
+                    start_utc=datetime.fromtimestamp(chunk_start_ms / 1000.0, tz=timezone.utc),
+                    end_utc=datetime.fromtimestamp(chunk_end_ms / 1000.0, tz=timezone.utc),
+                )
+                if chunk_high is not None:
+                    highs.append(chunk_high)
+                chunk_start_ms = chunk_end_ms + 1
+            return max(highs) if highs else None
+
+        page = self.client.get_agg_trades(
+            symbol=symbol,
+            start_time=start_ms,
+            end_time=end_ms,
+            limit=1000,
+        )
+        highest_price: Optional[float] = None
+        previous_last_id: Optional[int] = None
+        for _page_number in range(100):
+            if not page:
+                break
+            last_time_ms = 0
+            last_id: Optional[int] = None
+            for trade in page:
+                try:
+                    trade_time_ms = int(trade.get("T", 0) or 0)
+                except (TypeError, ValueError):
+                    continue
+                if trade_time_ms < start_ms:
+                    continue
+                if trade_time_ms > end_ms:
+                    last_time_ms = max(last_time_ms, trade_time_ms)
+                    continue
+                price = self._safe_positive_float(trade.get("p"))
+                if price is not None:
+                    highest_price = price if highest_price is None else max(highest_price, price)
+                last_time_ms = max(last_time_ms, trade_time_ms)
+                try:
+                    last_id = int(trade.get("a"))
+                except (TypeError, ValueError):
+                    pass
+            if len(page) < 1000 or last_time_ms >= end_ms:
+                break
+            if last_id is None or last_id == previous_last_id:
+                raise RuntimeError(f"Cannot paginate aggregate trades for {symbol}")
+            previous_last_id = last_id
+            page = self.client.get_agg_trades(
+                symbol=symbol,
+                from_id=last_id + 1,
+                limit=1000,
+            )
+        else:
+            raise RuntimeError(f"Aggregate trade pagination exceeded limit for {symbol}")
+        return highest_price
+
+    @staticmethod
+    def _closed_hour_boundary(value: datetime) -> datetime:
+        close_time = value.astimezone(timezone.utc)
+        boundary = close_time.replace(minute=0, second=0, microsecond=0)
+        if close_time > boundary:
+            boundary += timedelta(hours=1)
+        return boundary
+
+    @staticmethod
+    def _resolve_entry_fill_time(order: Dict[str, object], fallback: datetime) -> datetime:
+        for key in ("updateTime", "transactTime", "time"):
+            try:
+                timestamp_ms = int(order.get(key) or 0)
+            except (TypeError, ValueError):
+                continue
+            if timestamp_ms > 0:
+                return datetime.fromtimestamp(timestamp_ms / 1000.0, tz=timezone.utc)
+        return fallback.astimezone(timezone.utc)
+
     @staticmethod
     def _floor_to_utc_hour(value: datetime) -> datetime:
         return value.astimezone(timezone.utc).replace(minute=0, second=0, microsecond=0)
 
+    @_serialized_account_mutation
     def run_equity_recovery_take_profit(self) -> Dict[str, object]:
         if not self.equity_recovery_take_profit_enabled:
             return {"status": "DISABLED"}
@@ -1179,11 +1493,10 @@ class Top10ShortStrategy:
                     newClientOrderId=self._new_client_id("ptp", symbol),
                     newOrderRespType="RESULT",
                 )
-                self.store.add_order_event(
+                self._market_fill_reconciler.record_market_order(
                     symbol=symbol,
                     position_id=position_id,
-                    event_time_utc=self._utc_now_iso(),
-                    order_payload=order,
+                    order=order,
                 )
                 reduced_notional += reduce_qty * mark_price
                 adjusted += 1
@@ -1305,6 +1618,85 @@ class Top10ShortStrategy:
             synced.add(position_id)
         return synced
 
+    @_serialized_account_mutation
+    def recover_pending_entries(self) -> Dict[str, object]:
+        positions = self.store.list_pending_entry_positions()
+        if not isinstance(positions, list):
+            positions = []
+        summary: Dict[str, object] = {
+            "total": len(positions),
+            "deferred": 0,
+            "recovered": 0,
+            "closed_missing": 0,
+            "risk_off": 0,
+            "errors": 0,
+        }
+        if not positions:
+            return summary
+        now_utc = self._utc_now_datetime()
+        for pos in positions:
+            position_id = int(pos["id"])
+            symbol = str(pos["symbol"])
+            created_at_text = str(pos.get("created_at_utc") or pos.get("opened_at_utc") or "").strip()
+            if created_at_text:
+                try:
+                    age_sec = (now_utc - self._parse_iso_utc(created_at_text)).total_seconds()
+                except (TypeError, ValueError):
+                    age_sec = self.PENDING_EXIT_SETUP_RECOVERY_GRACE_SEC
+                if age_sec < self.PENDING_EXIT_SETUP_RECOVERY_GRACE_SEC:
+                    summary["deferred"] = int(summary["deferred"]) + 1
+                    continue
+            try:
+                risk = self._load_short_position(symbol)
+                if risk is None:
+                    self.store.mark_position_closed(
+                        position_id=position_id,
+                        status="ENTRY_FAILED",
+                        close_reason="PENDING_ENTRY_POSITION_NOT_FOUND",
+                    )
+                    summary["closed_missing"] = int(summary["closed_missing"]) + 1
+                    continue
+                qty = abs(self._safe_float(risk.get("positionAmt"), default=0.0))
+                entry_price = self._safe_positive_float(risk.get("entryPrice"))
+                if qty <= 0 or entry_price is None:
+                    raise RuntimeError(f"Invalid pending entry exchange snapshot for {symbol}")
+                opened_at = self._parse_iso_utc(str(pos.get("opened_at_utc") or self._utc_now_iso()))
+                self.store.set_position_entry_fill(
+                    position_id=position_id,
+                    qty=qty,
+                    entry_price=entry_price,
+                    liq_price_open=self._safe_positive_float(risk.get("liquidationPrice")),
+                    opened_at_utc=opened_at.isoformat(),
+                    expire_at_utc=(opened_at + timedelta(hours=self.max_hold_hours)).isoformat(),
+                )
+                self._place_exit_orders(position_id=position_id, symbol=symbol)
+                self.store.mark_position_open(position_id)
+                self.store.clear_position_error(position_id)
+                summary["recovered"] = int(summary["recovered"]) + 1
+            except Exception as exc:  # noqa: BLE001
+                summary["errors"] = int(summary["errors"]) + 1
+                self.store.set_position_error(position_id, f"pending_entry_recovery: {exc}")
+                LOGGER.exception(
+                    "Pending entry recovery failed account=%s position_id=%s symbol=%s: %s",
+                    self.account_id,
+                    position_id,
+                    symbol,
+                    exc,
+                )
+                try:
+                    self._force_close_position(position_id, symbol, "PENDING_ENTRY_RECOVERY_FAILED")
+                    summary["risk_off"] = int(summary["risk_off"]) + 1
+                except Exception as close_exc:  # noqa: BLE001
+                    LOGGER.exception(
+                        "Pending entry recovery risk-off failed account=%s position_id=%s symbol=%s: %s",
+                        self.account_id,
+                        position_id,
+                        symbol,
+                        close_exc,
+                    )
+        return summary
+
+    @_serialized_account_mutation
     def recover_pending_exit_setups(self) -> Dict[str, object]:
         positions = self.store.list_pending_exit_setup_positions()
         summary: Dict[str, object] = {
@@ -1370,7 +1762,12 @@ class Top10ShortStrategy:
                     )
         return summary
 
-    def _place_exit_orders(self, position_id: int, symbol: str) -> None:
+    def _place_exit_orders(
+        self,
+        position_id: int,
+        symbol: str,
+        entry_structure_stop_price: Optional[float] = None,
+    ) -> None:
         if self._is_protection_exempt(symbol):
             LOGGER.info("Skip initial exit orders for exempt symbol account=%s symbol=%s", self.account_id, symbol)
             return
@@ -1395,6 +1792,18 @@ class Top10ShortStrategy:
             raise RuntimeError(f"No liquidation price available for {symbol}; cannot place stop loss")
         sl_raw = liq_price * (1 - self.sl_liq_buffer_pct / 100.0)
         sl_price = self.client.normalize_trigger_price(symbol, sl_raw, round_up=True)
+        if entry_structure_stop_price is None:
+            stored_protection = self._entry_structure_protection_state.get(position_id)
+            if stored_protection is not None:
+                entry_structure_stop_price = stored_protection.stop_price
+        structure_stop = self._safe_positive_float(entry_structure_stop_price)
+        if structure_stop is not None:
+            normalized_structure_stop = self.client.normalize_trigger_price(
+                symbol,
+                structure_stop,
+                round_up=True,
+            )
+            sl_price = min(sl_price, normalized_structure_stop)
         sl_stop_price = self.client.format_trigger_price(symbol, sl_price, round_up=True)
 
         sl_order = None
@@ -1406,12 +1815,6 @@ class Top10ShortStrategy:
                     stop_price=tp_stop_price,
                     qty=position_amt,
                     client_order_id=self._new_client_id("tp", symbol),
-                )
-                self.store.update_take_profit(
-                    position_id=position_id,
-                    tp_order_id=tp_order.get("orderId"),
-                    tp_client_order_id=tp_order.get("clientOrderId"),
-                    tp_price=tp_price,
                 )
 
             if sl_price <= 0:
@@ -1464,28 +1867,13 @@ class Top10ShortStrategy:
             order_payload=sl_order,
         )
 
+    @_serialized_account_mutation
     def _force_close_position(self, position_id: int, symbol: str, reason: str) -> Dict[str, object]:
         persisted = self.store.get_position(position_id)
         cancel_errors: List[str] = []
-        if persisted is not None:
-            for order_id, client_order_id in (
-                (persisted.get("tp_order_id"), persisted.get("tp_client_order_id")),
-                (persisted.get("sl_order_id"), persisted.get("sl_client_order_id")),
-            ):
-                try:
-                    self._cancel_order_if_exists(symbol, order_id, client_order_id)
-                except RuntimeError as exc:
-                    cancel_errors.append(str(exc))
-                    LOGGER.error(
-                        "Exit cancellation failed before risk-off; continuing reduce-only close "
-                        "account=%s position_id=%s symbol=%s: %s",
-                        self.account_id,
-                        position_id,
-                        symbol,
-                        exc,
-                    )
         position_risk = self._load_short_position(symbol)
         if not position_risk:
+            cancel_errors = self._cancel_risk_off_exit_orders(persisted, symbol, position_id)
             self.store.mark_position_closed(
                 position_id=position_id,
                 status="CLOSED_EXTERNAL",
@@ -1503,6 +1891,7 @@ class Top10ShortStrategy:
 
         qty = abs(float(position_risk.get("positionAmt", "0") or 0))
         if qty <= 0:
+            cancel_errors = self._cancel_risk_off_exit_orders(persisted, symbol, position_id)
             self.store.mark_position_closed(
                 position_id=position_id,
                 status="CLOSED_EXTERNAL",
@@ -1527,11 +1916,10 @@ class Top10ShortStrategy:
             newClientOrderId=self._new_client_id("rf", symbol),
             newOrderRespType="RESULT",
         )
-        self.store.add_order_event(
+        self._market_fill_reconciler.record_market_order(
             symbol=symbol,
             position_id=position_id,
-            event_time_utc=self._utc_now_iso(),
-            order_payload=close_order,
+            order=close_order,
         )
         self.store.mark_position_closed(
             position_id=position_id,
@@ -1539,6 +1927,7 @@ class Top10ShortStrategy:
             close_reason=reason,
             close_order_id=close_order.get("orderId"),
         )
+        cancel_errors = self._cancel_risk_off_exit_orders(persisted, symbol, position_id)
         return {
             "symbol": symbol,
             "position_id": position_id,
@@ -1549,6 +1938,34 @@ class Top10ShortStrategy:
             "cancel_errors": cancel_errors,
         }
 
+    def _cancel_risk_off_exit_orders(
+        self,
+        persisted: Optional[Dict[str, object]],
+        symbol: str,
+        position_id: int,
+    ) -> List[str]:
+        cancel_errors: List[str] = []
+        if persisted is None:
+            return cancel_errors
+        for order_id, client_order_id in (
+            (persisted.get("tp_order_id"), persisted.get("tp_client_order_id")),
+            (persisted.get("sl_order_id"), persisted.get("sl_client_order_id")),
+        ):
+            try:
+                self._cancel_order_if_exists(symbol, order_id, client_order_id)
+            except RuntimeError as exc:
+                cancel_errors.append(str(exc))
+                LOGGER.error(
+                    "Exit cancellation failed after risk-off close "
+                    "account=%s position_id=%s symbol=%s: %s",
+                    self.account_id,
+                    position_id,
+                    symbol,
+                    exc,
+                )
+        return cancel_errors
+
+    @_serialized_account_mutation
     def _rebalance_to_target(
         self,
         target_count: int,
@@ -1721,12 +2138,19 @@ class Top10ShortStrategy:
                     )
                 else:
                     order = self.client.create_order(**order_params)
-                self.store.add_order_event(
-                    symbol=plan.symbol,
-                    position_id=plan.position_id,
-                    event_time_utc=self._utc_now_iso(),
-                    order_payload=order,
-                )
+                if plan.side == "BUY":
+                    self._market_fill_reconciler.record_market_order(
+                        symbol=plan.symbol,
+                        position_id=plan.position_id,
+                        order=order,
+                    )
+                else:
+                    self.store.add_order_event(
+                        symbol=plan.symbol,
+                        position_id=plan.position_id,
+                        event_time_utc=self._utc_now_iso(),
+                        order_payload=order,
+                    )
                 action_id = action_id_by_position.get(plan.position_id)
                 if action_id is not None:
                     self.store.update_rebalance_action_result(
@@ -1972,6 +2396,7 @@ class Top10ShortStrategy:
         local_time = self._parse_iso_utc(current_time_utc).astimezone(self.runtime_timezone).timetz().replace(tzinfo=None)
         return dt_time(7, 30) <= local_time <= dt_time(12, 0)
 
+    @_serialized_account_mutation
     def _refresh_exit_orders_for_positions(self, position_ids: Set[int]) -> None:
         open_positions = self.store.list_open_positions()
         open_by_id = {int(row["id"]): row for row in open_positions}
@@ -1981,9 +2406,13 @@ class Top10ShortStrategy:
                 continue
             symbol = str(pos["symbol"])
             try:
-                self._cancel_order_if_exists(symbol, pos.get("tp_order_id"), pos.get("tp_client_order_id"))
-                self._cancel_order_if_exists(symbol, pos.get("sl_order_id"), pos.get("sl_client_order_id"))
+                old_tp_order_id = pos.get("tp_order_id")
+                old_tp_client_order_id = pos.get("tp_client_order_id")
+                old_sl_order_id = pos.get("sl_order_id")
+                old_sl_client_order_id = pos.get("sl_client_order_id")
                 self._place_exit_orders(position_id=position_id, symbol=symbol)
+                self._cancel_order_if_exists(symbol, old_tp_order_id, old_tp_client_order_id)
+                self._cancel_order_if_exists(symbol, old_sl_order_id, old_sl_client_order_id)
                 self.store.clear_position_error(position_id)
             except Exception as exc:  # noqa: BLE001
                 self.store.set_position_error(position_id, f"rebalance_exit_refresh: {exc}")

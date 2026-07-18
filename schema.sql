@@ -42,6 +42,7 @@ CREATE INDEX IF NOT EXISTS idx_positions_status_opened ON positions(status, open
 
 CREATE TABLE IF NOT EXISTS order_events (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
+    account_id TEXT NOT NULL DEFAULT 'default',
     position_id INTEGER,
     symbol TEXT NOT NULL,
     order_id INTEGER,
@@ -58,6 +59,7 @@ CREATE TABLE IF NOT EXISTS order_events (
 
 CREATE INDEX IF NOT EXISTS idx_order_events_position ON order_events(position_id);
 CREATE INDEX IF NOT EXISTS idx_order_events_symbol ON order_events(symbol);
+CREATE INDEX IF NOT EXISTS idx_order_events_account_id_id ON order_events(account_id, id);
 CREATE INDEX IF NOT EXISTS idx_order_events_position_order_id_id ON order_events(position_id, order_id, id DESC);
 CREATE INDEX IF NOT EXISTS idx_order_events_position_side_status_id ON order_events(position_id, side, status, id DESC);
 

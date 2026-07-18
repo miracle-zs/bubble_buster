@@ -98,6 +98,54 @@ class StrategyOrderRetryTest(unittest.TestCase):
                 reference_price=10.0,
                 client_id_tag="ent",
             )
+
+    def test_risk_off_market_close_happens_before_exit_cancellation(self) -> None:
+        events = []
+        client = MagicMock()
+        client.format_order_qty.return_value = "10"
+        client.get_user_trades.return_value = []
+
+        def create_order(**_kwargs):
+            events.append("MARKET")
+            return {
+                "orderId": 9001,
+                "clientOrderId": "risk-off",
+                "type": "MARKET",
+                "side": "BUY",
+                "origQty": "10",
+                "executedQty": "10",
+                "status": "FILLED",
+            }
+
+        def cancel_order(**_kwargs):
+            events.append("CANCEL")
+            return {"status": "CANCELED"}
+
+        client.create_order.side_effect = create_order
+        client.cancel_order.side_effect = cancel_order
+        strategy = self._build_strategy(client)
+        strategy._load_short_position = MagicMock(
+            return_value={"symbol": "ABCUSDT", "positionAmt": "-10", "entryPrice": "10"}
+        )
+        strategy.store.get_position.return_value = {
+            "id": 7,
+            "symbol": "ABCUSDT",
+            "tp_order_id": 101,
+            "tp_client_order_id": "tp-old",
+            "sl_order_id": 102,
+            "sl_client_order_id": "sl-old",
+        }
+        strategy.store.get_lock_state.return_value = {}
+
+        result = strategy._force_close_position(
+            position_id=7,
+            symbol="ABCUSDT",
+            reason="EXIT_SETUP_FAILED",
+        )
+
+        self.assertEqual(result["status"], "CLOSED_RISK_OFF")
+        self.assertEqual(events, ["MARKET", "CANCEL", "CANCEL"])
+        strategy.store.mark_position_closed.assert_called_once()
         self.assertEqual(client.create_order.call_count, 1)
 
     @patch("core.strategy_top10_short.time.sleep")
@@ -152,7 +200,7 @@ class StrategyOrderRetryTest(unittest.TestCase):
         strategy.store.mark_position_open.assert_not_called()
         client.get_position_risk.assert_not_called()
 
-    def test_exit_refresh_surfaces_cancel_failure_and_does_not_place_replacement(self) -> None:
+    def test_exit_refresh_places_replacement_before_canceling_old_orders(self) -> None:
         client = MagicMock()
         client.cancel_order.side_effect = BinanceAPIError(-1001, "disconnected")
         strategy = self._build_strategy(client)
@@ -170,9 +218,29 @@ class StrategyOrderRetryTest(unittest.TestCase):
 
         strategy._refresh_exit_orders_for_positions({7})
 
-        strategy._place_exit_orders.assert_not_called()
+        strategy._place_exit_orders.assert_called_once_with(position_id=7, symbol="ABCUSDT")
         strategy.store.set_position_error.assert_called_once()
         self.assertIn("cancel_order failed", strategy.store.set_position_error.call_args.args[1])
+
+    def test_exit_refresh_keeps_old_orders_when_replacement_creation_fails(self) -> None:
+        client = MagicMock()
+        strategy = self._build_strategy(client)
+        strategy.store.list_open_positions.return_value = [
+            {
+                "id": 7,
+                "symbol": "ABCUSDT",
+                "tp_order_id": 101,
+                "tp_client_order_id": "tp-old",
+                "sl_order_id": 102,
+                "sl_client_order_id": "sl-old",
+            }
+        ]
+        strategy._place_exit_orders = MagicMock(side_effect=RuntimeError("replacement failed"))
+
+        strategy._refresh_exit_orders_for_positions({7})
+
+        client.cancel_order.assert_not_called()
+        strategy.store.set_position_error.assert_called_once()
 
     def test_margin_error_detected_by_message_when_code_missing(self) -> None:
         err = BinanceAPIError("NETWORK", "margin is insufficient")
@@ -298,6 +366,41 @@ class StrategyOrderRetryTest(unittest.TestCase):
         client.get_position_risk.assert_not_called()
         client.create_order.assert_not_called()
         store.update_position_orders.assert_not_called()
+
+    def test_place_exit_orders_uses_tighter_entry_structure_stop(self) -> None:
+        client = MagicMock()
+        client.get_position_risk.return_value = [
+            {
+                "symbol": "ABCUSDT",
+                "entryPrice": "100",
+                "liquidationPrice": "120",
+                "positionAmt": "-2",
+            }
+        ]
+        client.normalize_trigger_price.side_effect = [118.8, 105.0]
+        client.format_trigger_price.return_value = "105"
+        client.create_order.return_value = {
+            "orderId": 222,
+            "clientOrderId": "sl-structure",
+            "type": "STOP_MARKET",
+            "side": "BUY",
+            "origQty": "2",
+            "status": "NEW",
+        }
+        store = MagicMock()
+        strategy = self._build_strategy(client)
+        strategy.store = store
+        strategy._entry_structure_protection_state.store = store
+        strategy.fixed_take_profit_enabled = False
+
+        strategy._place_exit_orders(
+            position_id=123,
+            symbol="ABCUSDT",
+            entry_structure_stop_price=105.0,
+        )
+
+        self.assertEqual(client.create_order.call_args.kwargs["stopPrice"], "105")
+        self.assertEqual(store.update_position_orders.call_args.kwargs["sl_price"], 105.0)
 
 
 if __name__ == "__main__":

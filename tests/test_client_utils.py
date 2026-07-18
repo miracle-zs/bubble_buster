@@ -115,11 +115,29 @@ class ClientUtilsTest(unittest.TestCase):
         self.assertEqual(caught.exception.code, "NETWORK")
         self.assertEqual(client.session.request.call_count, 1)
 
-    def test_create_order_reconciles_network_error_by_client_id(self) -> None:
+    def test_create_order_does_not_treat_recovered_new_market_order_as_filled(self) -> None:
         client = BinanceFuturesClient(api_key="k", api_secret="s")
         client._request = MagicMock(side_effect=BinanceAPIError("NETWORK", "reset"))  # type: ignore[method-assign]
         client.get_order = MagicMock(  # type: ignore[method-assign]
             return_value={"orderId": 123, "clientOrderId": "test-1", "status": "NEW"}
+        )
+
+        with self.assertRaises(OrderStateUnknownError):
+            client.create_order(
+                symbol="BTCUSDT",
+                side="SELL",
+                type="MARKET",
+                quantity="1",
+                newClientOrderId="test-1",
+            )
+
+        self.assertEqual(client.get_order.call_count, client.order_reconcile_attempts)
+
+    def test_create_order_reconciles_filled_market_order_by_client_id(self) -> None:
+        client = BinanceFuturesClient(api_key="k", api_secret="s")
+        client._request = MagicMock(side_effect=BinanceAPIError("NETWORK", "reset"))  # type: ignore[method-assign]
+        client.get_order = MagicMock(  # type: ignore[method-assign]
+            return_value={"orderId": 123, "clientOrderId": "test-1", "status": "FILLED"}
         )
 
         order = client.create_order(
@@ -131,7 +149,6 @@ class ClientUtilsTest(unittest.TestCase):
         )
 
         self.assertEqual(order["orderId"], 123)
-        client.get_order.assert_called_once_with(symbol="BTCUSDT", orig_client_order_id="test-1")
 
     @patch("infra.binance_futures_client.time.sleep")
     def test_create_order_waits_for_exchange_eventual_consistency(self, sleep_mock: MagicMock) -> None:

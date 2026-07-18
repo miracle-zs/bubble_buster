@@ -6,6 +6,7 @@
 - 每日定时浮亏砍仓；
 - 早盘保护止损（07:55 对持有超 6 小时仓位按当前小时高低点收紧止损）；
 - 中午保护止损（12:00 以 0 点/入场后到 12 点最高价收紧止损）；
+- 12:00 后阴线确认入场使用“前一根非阴线 + 触发阴线”两小时结构高点作为初始保护，且跨日只收紧不放宽；
 - 本地 Dashboard 可视化；
 - SQLite 落库，便于回放和排障。
 
@@ -197,6 +198,7 @@ CRON_TZ=Asia/Shanghai
 - `entry_hour` / `entry_minute`：入场时间。
 - `entry_misfire_grace_min`：entry 允许补跑窗口。
 - `entry_wait_max_hours`：等待首根 1h 阴线的最长时间，同时不会跨过本地自然日；等待状态会持久化并在重启后恢复。
+- 12:00 后才等到首根 1h 阴线时，初始止损取前一根非阴线与触发阴线两小时最高价，并包含阴线收盘到实际成交之间的价格；保护状态按仓位持久化。
 - `entry_catchup_enabled`：错过是否补跑。
 - `entry_initial_delay_sec`：账户 entry 启动前的额外等待秒数。
 - `entry_symbol_interval_sec`：账户 entry 每个 symbol 之间的额外等待秒数。

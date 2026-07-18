@@ -131,6 +131,7 @@ class StrategyRuntimeService:
             max_workers=self.max_account_workers,
             thread_name_prefix="scheduled",
         )
+        self._scheduled_futures_by_task_account: Dict[tuple[str, str], Future] = {}
 
     def _entry_schedule_for_day(self, day: date, account_id: Optional[str] = None) -> datetime:
         account_ctx = self.account_runtimes.get(account_id or "", {})
@@ -190,6 +191,21 @@ class StrategyRuntimeService:
             return False
         status = str(result.get("status", "")).strip().upper()
         return status in {"SUCCESS", "SKIPPED", "DISABLED"}
+
+    @staticmethod
+    def _account_task_succeeded(result: object) -> bool:
+        if not isinstance(result, dict):
+            return False
+        if result.get("error") or result.get("slow") or result.get("running"):
+            return False
+        try:
+            if int(result.get("errors", 0) or 0) > 0:
+                return False
+            if int(result.get("failed", 0) or 0) > 0:
+                return False
+        except (TypeError, ValueError):
+            return False
+        return not bool(result.get("failed_symbols"))
 
     def _collect_entry_futures(self, now_local: datetime) -> None:
         timeout_sec = max(0.1, float(self.cfg.account_task_timeout_sec))
@@ -384,12 +400,31 @@ class StrategyRuntimeService:
     ) -> Dict[str, object]:
         if not calls:
             return {}
-        futures = {self._scheduled_executor.submit(call): aid for aid, call in calls.items()}
+        results: Dict[str, object] = {}
+        futures: Dict[Future, str] = {}
+        for aid, call in calls.items():
+            key = (task_name, aid)
+            existing = self._scheduled_futures_by_task_account.get(key)
+            if existing is not None:
+                if not existing.done():
+                    results[aid] = {"slow": True, "running": True}
+                    continue
+                self._scheduled_futures_by_task_account.pop(key, None)
+                try:
+                    results[aid] = existing.result()
+                except Exception as exc:  # noqa: BLE001
+                    results[aid] = {"error": str(exc)}
+                continue
+            future = self._scheduled_executor.submit(call)
+            self._scheduled_futures_by_task_account[key] = future
+            futures[future] = aid
+        if not futures:
+            return results
         timeout_sec = max(0.1, float(self.cfg.account_task_timeout_sec))
         done, pending = wait(set(futures), timeout=timeout_sec)
-        results: Dict[str, object] = {}
         for future in done:
             aid = futures[future]
+            self._scheduled_futures_by_task_account.pop((task_name, aid), None)
             try:
                 results[aid] = future.result()
             except Exception as exc:  # noqa: BLE001
@@ -643,7 +678,6 @@ class StrategyRuntimeService:
             manager = ctx.get("manager")
             if manager is None or not hasattr(manager, "run_morning_protection_stop"):
                 results[aid] = {"error": "manager_missing"}
-                self._last_morning_protection_local_date_by_account[aid] = today
                 continue
 
             min_hold_hours = float(
@@ -659,7 +693,8 @@ class StrategyRuntimeService:
                 )
             except Exception as exc:  # noqa: BLE001
                 results[aid] = {"error": str(exc)}
-            self._last_morning_protection_local_date_by_account[aid] = today
+            if self._account_task_succeeded(results[aid]):
+                self._last_morning_protection_local_date_by_account[aid] = today
 
         if results:
             LOGGER.info("service morning protection result: %s", results)
@@ -690,7 +725,7 @@ class StrategyRuntimeService:
                     self.cfg.hourly_exchange_take_profit_minute,
                 )
             ) % 60
-            if now_local.minute != target_minute:
+            if now_local.minute < target_minute:
                 continue
             if self._last_hourly_exchange_take_profit_hour_by_account.get(aid) == hour_key:
                 continue
@@ -698,7 +733,6 @@ class StrategyRuntimeService:
             manager = ctx.get("manager")
             if manager is None or not hasattr(manager, "run_hourly_exchange_take_profit"):
                 results[aid] = {"error": "manager_missing"}
-                self._last_hourly_exchange_take_profit_hour_by_account[aid] = hour_key
                 continue
 
             drop_pct = float(
@@ -714,7 +748,8 @@ class StrategyRuntimeService:
                 )
             except Exception as exc:  # noqa: BLE001
                 results[aid] = {"error": str(exc)}
-            self._last_hourly_exchange_take_profit_hour_by_account[aid] = hour_key
+            if self._account_task_succeeded(results[aid]):
+                self._last_hourly_exchange_take_profit_hour_by_account[aid] = hour_key
 
         if results:
             LOGGER.info("service hourly exchange take-profit result: %s", results)
@@ -745,6 +780,16 @@ class StrategyRuntimeService:
         strategy = ctx.get("strategy")
         balance_sampler = ctx.get("balance_sampler")
 
+        pending_entry_recovery = None
+        if strategy is not None and hasattr(strategy, "recover_pending_entries"):
+            pending_entry_recovery = strategy.recover_pending_entries()  # type: ignore[attr-defined]
+            if isinstance(pending_entry_recovery, dict) and int(pending_entry_recovery.get("total", 0)) > 0:
+                LOGGER.warning(
+                    "service pending entry recovery account=%s: %s",
+                    account_id,
+                    pending_entry_recovery,
+                )
+
         pending_recovery = None
         if strategy is not None and hasattr(strategy, "recover_pending_exit_setups"):
             pending_recovery = strategy.recover_pending_exit_setups()  # type: ignore[attr-defined]
@@ -767,7 +812,12 @@ class StrategyRuntimeService:
             except Exception as exc:  # noqa: BLE001
                 LOGGER.warning("service equity recovery take-profit failed account=%s: %s", account_id, exc)
 
-        return {"account_id": account_id, "summary": summary, "pending_recovery": pending_recovery}
+        return {
+            "account_id": account_id,
+            "summary": summary,
+            "pending_entry_recovery": pending_entry_recovery,
+            "pending_recovery": pending_recovery,
+        }
 
     def _record_account_failure(self, account_id: str, error_text: str) -> None:
         state = self.account_states.setdefault(account_id, AccountRuntimeState())

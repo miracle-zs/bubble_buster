@@ -102,6 +102,7 @@ class BinanceFuturesClient:
         "TRAILING_STOP_MARKET",
     }
     ORDER_NOT_FOUND_CODES = {-2011, -2013}
+    TERMINAL_FAILURE_ORDER_STATUSES = {"CANCELED", "CANCELLED", "EXPIRED", "REJECTED"}
 
     def __init__(
         self,
@@ -343,6 +344,27 @@ class BinanceFuturesClient:
             params["limit"] = limit
         return self._request("GET", "/fapi/v1/klines", params=params)
 
+    def get_agg_trades(
+        self,
+        symbol: str,
+        from_id: Optional[int] = None,
+        start_time: Optional[int] = None,
+        end_time: Optional[int] = None,
+        limit: int = 1000,
+    ) -> List[Dict[str, Any]]:
+        params: Dict[str, Any] = {
+            "symbol": symbol,
+            "limit": max(1, min(1000, int(limit))),
+        }
+        if from_id is not None:
+            params["fromId"] = int(from_id)
+        if start_time is not None:
+            params["startTime"] = int(start_time)
+        if end_time is not None:
+            params["endTime"] = int(end_time)
+        data = self._request("GET", "/fapi/v1/aggTrades", params=params)
+        return data if isinstance(data, list) else []
+
     def get_balance(self) -> List[Dict[str, Any]]:
         return self._request("GET", "/fapi/v2/balance", signed=True)
 
@@ -455,7 +477,8 @@ class BinanceFuturesClient:
                     exc,
                 )
         try:
-            return self._request("POST", "/fapi/v1/order", params=params, signed=True)
+            result = self._request("POST", "/fapi/v1/order", params=params, signed=True)
+            return self._validate_market_result(params=params, order=result)
         except BinanceAPIError as exc:
             recovered = self._recover_order_after_network_error(
                 symbol=str(params.get("symbol") or ""),
@@ -464,8 +487,34 @@ class BinanceFuturesClient:
                 error=exc,
             )
             if recovered is not None:
-                return recovered
+                return self._validate_market_result(params=params, order=recovered)
             raise
+
+    def _validate_market_result(self, params: Dict[str, Any], order: Dict[str, Any]) -> Dict[str, Any]:
+        order_type = str(params.get("type") or "").strip().upper()
+        response_type = str(params.get("newOrderRespType") or "").strip().upper()
+        if order_type != "MARKET" or response_type != "RESULT":
+            return order
+        status = str(order.get("status") or "").strip().upper()
+        if status in {"FILLED", "POSITION_RECONCILED"}:
+            return order
+        client_order_id = str(params.get("newClientOrderId") or order.get("clientOrderId") or "").strip()
+        if status in self.TERMINAL_FAILURE_ORDER_STATUSES:
+            raise BinanceAPIError(
+                code="ORDER_NOT_FILLED",
+                message=f"Market order ended with status={status} client_id={client_order_id}",
+            )
+        cause = BinanceAPIError(
+            code="ORDER_NOT_TERMINAL",
+            message=f"Market order is not terminal status={status or 'UNKNOWN'} client_id={client_order_id}",
+        )
+        if client_order_id:
+            raise OrderStateUnknownError(
+                symbol=str(params.get("symbol") or ""),
+                client_order_id=client_order_id,
+                cause=cause,
+            )
+        raise cause
 
     def _recover_order_after_network_error(
         self,
@@ -501,14 +550,26 @@ class BinanceFuturesClient:
                     )
                 order = None
             if order:
-                LOGGER.warning(
-                    "Reconciled timed-out order symbol=%s client_id=%s order_id=%s attempt=%s",
-                    symbol,
-                    client_order_id,
-                    order.get("orderId"),
-                    attempt,
-                )
-                return order
+                status = str(order.get("status") or "").strip().upper()
+                if status in self.TERMINAL_FAILURE_ORDER_STATUSES:
+                    raise BinanceAPIError(
+                        code="ORDER_NOT_FILLED",
+                        message=(
+                            f"Reconciled order ended without a fill symbol={symbol} "
+                            f"client_id={client_order_id} status={status}"
+                        ),
+                    )
+                if not conditional and status != "FILLED":
+                    order = None
+                else:
+                    LOGGER.warning(
+                        "Reconciled timed-out order symbol=%s client_id=%s order_id=%s attempt=%s",
+                        symbol,
+                        client_order_id,
+                        order.get("orderId"),
+                        attempt,
+                    )
+                    return order
             if attempt < self.order_reconcile_attempts and self.order_reconcile_delay_sec > 0:
                 time.sleep(self.order_reconcile_delay_sec * (2 ** (attempt - 1)))
 

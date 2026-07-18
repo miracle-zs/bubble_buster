@@ -10,6 +10,7 @@ from unittest.mock import MagicMock, patch
 if importlib.util.find_spec("requests") is None:
     raise unittest.SkipTest("requests is not installed")
 
+from core.entry_structure_protection import EntryStructureProtection, EntryStructureProtectionState
 from core.position_manager import PositionManager
 from core.state_store import StateStore
 from infra.binance_futures_client import BinanceAPIError
@@ -32,7 +33,7 @@ class PositionManagerTest(unittest.TestCase):
         self.assertLessEqual(len(client_id), 36)
         self.assertRegex(client_id, r"^[.A-Z:/a-z0-9_-]{1,36}$")
 
-    def test_dynamic_stop_loss_update(self) -> None:
+    def test_dynamic_stop_never_widens_existing_live_stop(self) -> None:
         position_id = self._insert_open_position(
             symbol="BTCUSDT",
             qty=0.01,
@@ -79,35 +80,17 @@ class PositionManagerTest(unittest.TestCase):
 
         summary = manager.run_once()
 
-        self.assertEqual(summary["updated_sl"], 1)
+        self.assertEqual(summary["updated_sl"], 0)
         self.assertEqual(summary["closed_timeout"], 0)
 
-        client.cancel_order.assert_called_once_with(
-            symbol="BTCUSDT",
-            order_id=22,
-            orig_client_order_id="sl-old",
-        )
-        client.create_order.assert_called_once()
-        create_kwargs = client.create_order.call_args.kwargs
-        self.assertEqual(create_kwargs["type"], "STOP_MARKET")
-        self.assertEqual(create_kwargs["workingType"], "CONTRACT_PRICE")
-        self.assertEqual(create_kwargs["symbol"], "BTCUSDT")
-        self.assertEqual(create_kwargs["quantity"], "0.01")
-        self.assertTrue(create_kwargs["reduceOnly"])
-        self.assertNotIn("closePosition", create_kwargs)
+        client.cancel_order.assert_not_called()
+        client.create_order.assert_not_called()
 
         row = self._get_position(position_id)
         self.assertEqual(row["status"], "OPEN")
-        self.assertEqual(row["sl_order_id"], 333)
-        self.assertAlmostEqual(float(row["sl_price"]), 60390.0)
-        self.assertAlmostEqual(float(row["liq_price_latest"]), 61000.0)
-
-        notifier.send.assert_called_once()
-        title, content = notifier.send.call_args.args
-        self.assertEqual(title, "【Top10做空】巡检动作汇总")
-        self.assertIn("| updated_sl | 1 |", content)
-        self.assertIn("止损更新明细", content)
-        self.assertIn("BTCUSDT", content)
+        self.assertEqual(row["sl_order_id"], 22)
+        self.assertAlmostEqual(float(row["sl_price"]), 59000.0)
+        notifier.send.assert_not_called()
 
     def test_canceled_stop_is_recreated_before_old_order_is_canceled(self) -> None:
         position_id = self._insert_open_position(
@@ -188,8 +171,22 @@ class PositionManagerTest(unittest.TestCase):
             "type": "MARKET",
             "side": "BUY",
             "origQty": "0.02",
+            "executedQty": "0.02",
             "status": "FILLED",
         }
+        client.get_user_trades.return_value = [
+            {
+                "orderId": 999,
+                "side": "BUY",
+                "qty": "0.02",
+                "quoteQty": "980",
+                "price": "49000",
+                "realizedPnl": "20",
+                "commission": "0.4",
+                "commissionAsset": "USDT",
+                "time": 1784337000000,
+            }
+        ]
 
         notifier = MagicMock()
         manager = PositionManager(
@@ -218,6 +215,11 @@ class PositionManagerTest(unittest.TestCase):
         self.assertEqual(row["close_reason"], "MAX_HOLD_EXCEEDED")
         self.assertEqual(row["close_order_id"], 999)
         self.assertIsNotNone(row["closed_at_utc"])
+        fill = self._get_buy_fill(position_id)
+        self.assertIsNotNone(fill)
+        assert fill is not None
+        self.assertAlmostEqual(float(fill["avg_price"]), 49000.0)
+        self.assertAlmostEqual(float(fill["realized_pnl"]), 20.0)
 
         notifier.send.assert_called_once()
         title, content = notifier.send.call_args.args
@@ -667,7 +669,7 @@ class PositionManagerTest(unittest.TestCase):
 
         summary = manager.run_once()
         self.assertEqual(summary["errors"], 0)
-        self.assertEqual(summary["updated_sl"], 1)
+        self.assertEqual(summary["updated_sl"], 0)
 
         row = self._get_position(position_id)
         self.assertIsNone(row["last_error"])
@@ -995,7 +997,7 @@ class PositionManagerTest(unittest.TestCase):
         row = self._get_position(position_id)
         self.assertAlmostEqual(float(row["sl_price"]), 59000.0)
 
-    def test_run_once_backfills_noon_cap_for_position_opened_after_noon(self) -> None:
+    def test_run_once_does_not_use_pre_noon_high_for_position_opened_after_noon(self) -> None:
         day_start = datetime(2026, 7, 1, 0, 0, tzinfo=timezone.utc)
         noon = datetime(2026, 7, 1, 4, 0, tzinfo=timezone.utc)
         opened_at = datetime(2026, 7, 1, 5, 0, tzinfo=timezone.utc)
@@ -1061,13 +1063,78 @@ class PositionManagerTest(unittest.TestCase):
 
         summary = manager.run_once()
 
+        self.assertEqual(summary["updated_sl"], 0)
+        client.get_klines.assert_not_called()
+        client.create_order.assert_not_called()
+        row = self._get_position(position_id)
+        self.assertAlmostEqual(float(row["sl_price"]), 1.10)
+        self.assertEqual(row["sl_order_id"], 22)
+        lock_state = self.store.get_lock_state(PositionManager.NOON_PROTECTION_LOCK_NAME)
+        self.assertNotIn(str(position_id), lock_state["caps"])
+
+    def test_run_once_backfills_noon_cap_for_position_opened_before_noon(self) -> None:
+        day_start = datetime(2026, 7, 1, 0, 0, tzinfo=timezone.utc)
+        noon = datetime(2026, 7, 1, 4, 0, tzinfo=timezone.utc)
+        opened_at = datetime(2026, 7, 1, 2, 0, tzinfo=timezone.utc)
+        position_id = self.store.insert_position(
+            run_id=self.run_id,
+            symbol="MUSDT",
+            side="SHORT",
+            qty=100.0,
+            entry_price=0.78,
+            liq_price_open=1.12,
+            tp_price=None,
+            sl_price=1.10,
+            tp_order_id=None,
+            sl_order_id=22,
+            tp_client_order_id=None,
+            sl_client_order_id="sl-old",
+            opened_at_utc=opened_at.isoformat(),
+            expire_at_utc=(opened_at + timedelta(days=7)).isoformat(),
+            status="OPEN",
+        )
+        self.store.set_lock_state(
+            PositionManager.NOON_PROTECTION_LOCK_NAME,
+            {
+                "caps": {},
+                "day_start_utc": day_start.isoformat(),
+                "noon_time_utc": noon.isoformat(),
+            },
+        )
+        client = MagicMock()
+        client.get_order.return_value = {"status": "NEW"}
+        client.get_position_risk.return_value = [
+            {
+                "symbol": "MUSDT",
+                "positionAmt": "-100",
+                "liquidationPrice": "1.12",
+                "positionSide": "BOTH",
+            }
+        ]
+        client.get_klines.return_value = [[0, "0.7", "0.90", "0.6", "0.8", 0]]
+        client.get_symbol_rules.return_value = {"MUSDT": SimpleNamespace(tick_size=0.0001)}
+        client.normalize_trigger_price.side_effect = lambda _symbol, price, round_up=False: float(price)
+        client.format_trigger_price.side_effect = lambda _symbol, price, round_up=False: str(price)
+        client.format_order_qty.side_effect = lambda _symbol, qty: str(qty)
+        client.create_order.return_value = {
+            "orderId": 333,
+            "clientOrderId": "sl-noon-backfill",
+            "type": "STOP_MARKET",
+            "side": "BUY",
+            "origQty": "100",
+            "status": "NEW",
+        }
+        manager = PositionManager(client, self.store, MagicMock(), 1.0, "CONTRACT_PRICE")
+        manager._utc_now_datetime = MagicMock(return_value=datetime(2026, 7, 1, 6, 0, tzinfo=timezone.utc))
+
+        summary = manager.run_once()
+
         self.assertEqual(summary["updated_sl"], 1)
         klines_kwargs = client.get_klines.call_args.kwargs
-        self.assertEqual(klines_kwargs["start_time"], int(day_start.timestamp() * 1000))
+        self.assertEqual(klines_kwargs["start_time"], int(opened_at.timestamp() * 1000))
         self.assertEqual(klines_kwargs["end_time"], int(noon.timestamp() * 1000))
         row = self._get_position(position_id)
         self.assertAlmostEqual(float(row["sl_price"]), 0.90)
-        self.assertEqual(row["sl_order_id"], 333)
         lock_state = self.store.get_lock_state(PositionManager.NOON_PROTECTION_LOCK_NAME)
         self.assertAlmostEqual(float(lock_state["caps"][str(position_id)]), 0.90)
 
@@ -1142,7 +1209,7 @@ class PositionManagerTest(unittest.TestCase):
         lock_state = self.store.get_lock_state(PositionManager.NOON_PROTECTION_LOCK_NAME)
         self.assertNotIn(str(position_id), lock_state["caps"])
 
-    def test_run_once_ignores_existing_noon_cap_from_stale_window(self) -> None:
+    def test_run_once_keeps_existing_noon_cap_across_local_midnight(self) -> None:
         stale_day_start = datetime(2026, 7, 4, 16, 0, tzinfo=timezone.utc)
         stale_noon = datetime(2026, 7, 5, 4, 0, tzinfo=timezone.utc)
         opened_at = datetime(2026, 7, 6, 0, 0, tzinfo=timezone.utc)
@@ -1207,12 +1274,13 @@ class PositionManagerTest(unittest.TestCase):
 
         summary = manager.run_once()
 
-        self.assertEqual(summary["updated_sl"], 1)
+        self.assertEqual(summary["updated_sl"], 0)
         client.get_klines.assert_not_called()
+        client.create_order.assert_not_called()
         row = self._get_position(position_id)
-        self.assertAlmostEqual(float(row["sl_price"]), 0.004752)
+        self.assertAlmostEqual(float(row["sl_price"]), 0.003789)
 
-    def test_run_once_uses_noon_to_open_high_when_morning_noon_cap_already_breached(self) -> None:
+    def test_run_once_uses_persisted_entry_structure_stop_for_post_noon_position(self) -> None:
         day_start = datetime(2026, 7, 1, 0, 0, tzinfo=timezone.utc)
         noon = datetime(2026, 7, 1, 4, 0, tzinfo=timezone.utc)
         opened_at = datetime(2026, 7, 1, 5, 0, tzinfo=timezone.utc)
@@ -1241,6 +1309,15 @@ class PositionManagerTest(unittest.TestCase):
                 "noon_time_utc": noon.isoformat(),
             },
         )
+        EntryStructureProtectionState(self.store).put(
+            position_id=position_id,
+            protection=EntryStructureProtection(
+                stop_price=1.05,
+                bearish_close_time_utc=datetime(2026, 7, 1, 5, 0, tzinfo=timezone.utc),
+                window_start_utc=datetime(2026, 7, 1, 3, 0, tzinfo=timezone.utc),
+                window_end_utc=opened_at,
+            ),
+        )
 
         client = MagicMock()
         client.get_order.return_value = {"status": "NEW"}
@@ -1252,10 +1329,6 @@ class PositionManagerTest(unittest.TestCase):
                 "markPrice": "1.02",
                 "positionSide": "BOTH",
             }
-        ]
-        client.get_klines.side_effect = [
-            [[0, "0.7", "0.90", "0.6", "0.8", 0]],
-            [[0, "0.9", "1.05", "0.8", "0.95", 0]],
         ]
         client.get_symbol_rules.return_value = {"MUSDT": SimpleNamespace(tick_size=0.0001)}
         client.normalize_trigger_price.side_effect = lambda _symbol, price, round_up=False: float(price)
@@ -1283,10 +1356,7 @@ class PositionManagerTest(unittest.TestCase):
 
         self.assertEqual(summary["closed_sl"], 0)
         self.assertEqual(summary["updated_sl"], 1)
-        self.assertEqual(client.get_klines.call_count, 2)
-        second_klines_kwargs = client.get_klines.call_args_list[1].kwargs
-        self.assertEqual(second_klines_kwargs["start_time"], int(noon.timestamp() * 1000))
-        self.assertEqual(second_klines_kwargs["end_time"], int(opened_at.timestamp() * 1000))
+        client.get_klines.assert_not_called()
         create_kwargs = client.create_order.call_args.kwargs
         self.assertEqual(create_kwargs["type"], "STOP_MARKET")
         self.assertEqual(create_kwargs["side"], "BUY")
@@ -1297,6 +1367,65 @@ class PositionManagerTest(unittest.TestCase):
         self.assertEqual(row["status"], "OPEN")
         self.assertAlmostEqual(float(row["sl_price"]), 1.05)
         self.assertEqual(row["sl_order_id"], 444)
+
+    def test_dynamic_protection_market_closes_after_immediate_trigger_rejection(self) -> None:
+        position_id = self._insert_open_position(
+            symbol="MUSDT",
+            qty=100.0,
+            tp_order_id=None,
+            sl_order_id=22,
+            tp_price=None,
+            sl_price=1.10,
+            expire_in_hours=24,
+        )
+        EntryStructureProtectionState(self.store).put(
+            position_id=position_id,
+            protection=EntryStructureProtection(
+                stop_price=1.05,
+                bearish_close_time_utc=datetime(2026, 7, 1, 5, 0, tzinfo=timezone.utc),
+                window_start_utc=datetime(2026, 7, 1, 3, 0, tzinfo=timezone.utc),
+                window_end_utc=datetime(2026, 7, 1, 5, 0, 5, tzinfo=timezone.utc),
+            ),
+        )
+        call_order = []
+        client = MagicMock()
+        client.get_order.return_value = {"status": "NEW"}
+        client.get_position_risk.return_value = [
+            {
+                "symbol": "MUSDT",
+                "positionAmt": "-100",
+                "liquidationPrice": "1.12",
+                "positionSide": "BOTH",
+            }
+        ]
+        client.get_symbol_rules.return_value = {"MUSDT": SimpleNamespace(tick_size=0.0001)}
+        client.normalize_trigger_price.side_effect = lambda _symbol, price, round_up=False: float(price)
+        client.format_trigger_price.side_effect = lambda _symbol, price, round_up=False: str(price)
+        client.format_order_qty.side_effect = lambda _symbol, qty: str(qty)
+
+        def create_order(**kwargs):
+            call_order.append(kwargs["type"])
+            if kwargs["type"] == "STOP_MARKET":
+                raise BinanceAPIError(code=-2021, message="Order would immediately trigger")
+            return {"orderId": 999, "clientOrderId": "protection-close", "status": "FILLED"}
+
+        def cancel_order(**_kwargs):
+            call_order.append("CANCEL_OLD")
+            return {}
+
+        client.create_order.side_effect = create_order
+        client.cancel_order.side_effect = cancel_order
+        manager = PositionManager(client, self.store, MagicMock(), 1.0, "CONTRACT_PRICE")
+
+        summary = manager.run_once()
+
+        self.assertEqual(summary["closed_sl"], 1)
+        self.assertEqual(summary["errors"], 0)
+        self.assertEqual(call_order[:2], ["STOP_MARKET", "MARKET"])
+        self.assertEqual(call_order[2:], ["CANCEL_OLD", "CANCEL_OLD"])
+        row = self._get_position(position_id)
+        self.assertEqual(row["status"], "CLOSED_SL")
+        self.assertEqual(row["close_reason"], "PROTECTION_IMMEDIATE_TRIGGER")
 
     def test_noon_protection_applies_to_untracked_exchange_positions(self) -> None:
         noon_utc = datetime(2026, 2, 13, 12, 0, tzinfo=timezone.utc)
@@ -2173,6 +2302,99 @@ class PositionManagerTest(unittest.TestCase):
         self.assertEqual(order_kwargs["positionSide"], "LONG")
         self.assertEqual(order_kwargs["stopPrice"], "118.0")
 
+    def test_morning_protection_immediate_trigger_closes_before_canceling_old_exits(self) -> None:
+        opened_at = datetime(2026, 3, 16, 23, 0, tzinfo=timezone.utc)
+        check_time = datetime(2026, 3, 17, 7, 55, tzinfo=timezone.utc)
+        position_id = self.store.insert_position(
+            run_id=self.run_id,
+            symbol="DENTUSDT",
+            side="SHORT",
+            qty=1000.0,
+            entry_price=0.001,
+            liq_price_open=0.01,
+            tp_price=0.0008,
+            sl_price=0.0025,
+            tp_order_id=100,
+            sl_order_id=200,
+            tp_client_order_id="tp-old",
+            sl_client_order_id="sl-old",
+            opened_at_utc=opened_at.isoformat(),
+            expire_at_utc=(opened_at + timedelta(days=1)).isoformat(),
+            status="OPEN",
+        )
+
+        call_order = []
+        client = MagicMock()
+        client.get_position_risk.return_value = [
+            {
+                "symbol": "DENTUSDT",
+                "positionAmt": "-1000",
+                "positionSide": "BOTH",
+                "liquidationPrice": "0.01",
+            }
+        ]
+        client.get_klines.return_value = [[0, "0", "0.0021", "0.0019", "0", 0]]
+        client.get_symbol_rules.return_value = {"DENTUSDT": SimpleNamespace(tick_size=0.0001)}
+        client.normalize_trigger_price.side_effect = lambda _symbol, price, round_up=False: float(price)
+        client.format_trigger_price.side_effect = lambda _symbol, price, round_up=False: str(price)
+        client.format_order_qty.side_effect = lambda _symbol, qty: str(qty)
+
+        def create_order(**kwargs):
+            call_order.append(kwargs["type"])
+            if kwargs["type"] == "STOP_MARKET":
+                raise BinanceAPIError(-2021, "Order would immediately trigger.")
+            return {
+                "orderId": 5004,
+                "clientOrderId": "msi-close",
+                "type": "MARKET",
+                "side": "BUY",
+                "origQty": "1000",
+                "executedQty": "1000",
+                "status": "FILLED",
+            }
+
+        def cancel_order(**_kwargs):
+            call_order.append("CANCEL_OLD")
+            return {"status": "CANCELED"}
+
+        client.create_order.side_effect = create_order
+        client.cancel_order.side_effect = cancel_order
+        client.get_user_trades.return_value = [
+            {
+                "orderId": 5004,
+                "side": "BUY",
+                "qty": "1000",
+                "quoteQty": "2100",
+                "price": "2.1",
+                "realizedPnl": "-10",
+                "commission": "0.5",
+                "commissionAsset": "USDT",
+                "time": 1773734100000,
+            }
+        ]
+
+        manager = PositionManager(
+            client=client,
+            store=self.store,
+            notifier=MagicMock(),
+            sl_liq_buffer_pct=1.0,
+            trigger_price_type="CONTRACT_PRICE",
+        )
+
+        summary = manager.run_morning_protection_stop(
+            check_time_utc=check_time,
+            min_hold_hours=6.0,
+        )
+
+        self.assertEqual(summary["closed_immediate"], 1)
+        self.assertEqual(summary["errors"], 0)
+        self.assertEqual(call_order[:2], ["STOP_MARKET", "MARKET"])
+        self.assertEqual(call_order[2:], ["CANCEL_OLD", "CANCEL_OLD"])
+        row = self._get_position(position_id)
+        self.assertEqual(row["status"], "CLOSED_MORNING_PROTECTION")
+        self.assertEqual(row["close_reason"], "MORNING_PROTECTION_IMMEDIATE_TRIGGER")
+        self.assertEqual(row["close_order_id"], 5004)
+
     def test_dynamic_stop_respects_tighter_morning_protection_cap(self) -> None:
         position_id = self._insert_open_position(
             symbol="BTCUSDT",
@@ -2401,6 +2623,60 @@ class PositionManagerTest(unittest.TestCase):
         self.assertEqual(summary["closed_take_profit"], 0)
         client.get_klines.assert_not_called()
         client.create_order.assert_not_called()
+
+    def test_hourly_exchange_take_profit_prefers_tracked_open_time_during_trade_api_race(self) -> None:
+        opened_at_utc = datetime(2026, 3, 16, 9, 0, 5, tzinfo=timezone.utc)
+        now_local = datetime(2026, 3, 16, 9, 0, 20, tzinfo=timezone.utc)
+        self.store.insert_position(
+            run_id=self.run_id,
+            symbol="SPELLUSDT",
+            side="SHORT",
+            qty=100.0,
+            entry_price=1.0,
+            liq_price_open=2.0,
+            tp_price=None,
+            sl_price=1.8,
+            tp_order_id=None,
+            sl_order_id=123,
+            tp_client_order_id=None,
+            sl_client_order_id="sl-spell",
+            opened_at_utc=opened_at_utc.isoformat(),
+            expire_at_utc=(opened_at_utc + timedelta(days=1)).isoformat(),
+            status="OPEN",
+        )
+
+        client = MagicMock()
+        client.get_position_risk.return_value = [
+            {
+                "symbol": "SPELLUSDT",
+                "positionAmt": "-100",
+                "entryPrice": "1",
+                "positionSide": "BOTH",
+            }
+        ]
+        client.get_klines.return_value = [
+            [int(opened_at_utc.timestamp() * 1000), "1", "1.01", "0.99", "1", 0],
+        ]
+
+        manager = PositionManager(
+            client=client,
+            store=self.store,
+            notifier=MagicMock(),
+            sl_liq_buffer_pct=1.0,
+            trigger_price_type="CONTRACT_PRICE",
+            daily_loss_cut_scope="exchange",
+        )
+
+        summary = manager.refresh_hourly_exchange_take_profit_state(
+            now_local=now_local,
+            drop_pct=20.0,
+        )
+
+        self.assertEqual(summary["initialized"], 1)
+        self.assertEqual(summary["errors"], 0)
+        client.get_user_trades.assert_not_called()
+        state = self.store.get_lock_state(PositionManager.HOURLY_EXCHANGE_TP_LOCK_NAME) or {}
+        self.assertEqual(state["symbols"]["SPELLUSDT"]["opened_at_utc"], opened_at_utc.isoformat())
 
     def test_hourly_exchange_take_profit_initializes_state_from_true_open_time(self) -> None:
         opened_at_utc = datetime(2026, 3, 16, 1, 0, tzinfo=timezone.utc)

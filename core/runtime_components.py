@@ -2,6 +2,7 @@ import configparser
 import io
 import logging
 import os
+import threading
 from pathlib import Path
 from typing import Dict, Optional, Set, Tuple
 
@@ -150,6 +151,7 @@ def _build_single_account_components(
         proxies=proxies,
         timeout_sec=10,
     )
+    mutation_lock = threading.RLock()
 
     strategy = Top10ShortStrategy(
         client=client,
@@ -196,6 +198,7 @@ def _build_single_account_components(
         runtime_timezone=runtime_cfg.get("timezone", fallback="Asia/Shanghai").strip(),
         account_id=account_id,
         protection_exempt_symbols=protection_exempt_symbols,
+        mutation_lock=mutation_lock,
     )
 
     manager = PositionManager(
@@ -207,6 +210,7 @@ def _build_single_account_components(
         daily_loss_cut_scope=runtime_cfg.get("daily_loss_cut_scope", fallback="tracked").strip(),
         account_id=account_id,
         protection_exempt_symbols=protection_exempt_symbols,
+        mutation_lock=mutation_lock,
     )
 
     wallet_sampler = WalletSnapshotSampler(

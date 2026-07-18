@@ -31,6 +31,10 @@ class DashboardServerTest(unittest.TestCase):
     def tearDown(self) -> None:
         self.temp_dir.cleanup()
 
+    def _backdate_runs(self, timestamp: str = "2026-01-01T00:00:00+00:00") -> None:
+        with sqlite3.connect(self.db_path) as conn:
+            conn.execute("UPDATE runs SET started_at_utc = ?", (timestamp,))
+
     def test_snapshot_contains_runs_positions_events(self) -> None:
         run_id, _ = self.store.create_run("2026-02-13")
         self.store.finalize_run(run_id, "SUCCESS", "done")
@@ -294,6 +298,7 @@ class DashboardServerTest(unittest.TestCase):
         self.store.create_run("2026-02-13", account_id="acc01")
         self.store.create_run("2026-02-13", account_id="acc02")
         self.store.create_run("2026-02-13", account_id="acc03")
+        self._backdate_runs()
         with open(self.log_file, "w", encoding="utf-8") as f:
             f.write(
                 "\n".join(
@@ -325,10 +330,63 @@ class DashboardServerTest(unittest.TestCase):
         self.assertEqual(rows["acc02"]["tasks"]["noon_protection"]["status"], "PARTIAL")
         self.assertEqual(rows["acc02"]["tasks"]["manage"]["status"], "FAILED")
         self.assertEqual(rows["acc01"]["tasks"]["equity_recovery_take_profit"]["status"], "SUCCESS")
-        self.assertEqual(rows["acc03"]["tasks"]["entry"]["status"], "UNKNOWN")
+        self.assertEqual(rows["acc03"]["tasks"]["entry"]["status"], "RUNNING")
+
+    def test_accounts_summary_falls_back_to_persisted_entry_run_when_log_is_missing(self) -> None:
+        run_id, _ = self.store.create_run("2026-07-18", account_id="acc01")
+        self.store.finalize_run(
+            run_id,
+            "SUCCESS",
+            "run_id=x, opened=4, failed=1, entry_failed=1, exit_setup_failed=0, skipped_existing=2",
+        )
+
+        provider = DashboardDataProvider(
+            db_path=self.db_path,
+            log_file=self.log_file,
+            timezone_name="UTC",
+            entry_hour=7,
+            entry_minute=40,
+        )
+
+        payload = provider.accounts_summary()
+        row = next(item for item in payload["accounts"] if item["account_id"] == "acc01")
+
+        self.assertEqual(row["tasks"]["entry"]["status"], "SUCCESS")
+        self.assertIn("opened=4", row["tasks"]["entry"]["summary"])
+        self.assertIn("failed=1", row["tasks"]["entry"]["summary"])
+        self.assertIn("skipped=2", row["tasks"]["entry"]["summary"])
+        self.assertIsNotNone(row["tasks"]["entry"]["time_local"])
+
+    def test_accounts_summary_reports_persisted_bearish_entry_wait_as_running(self) -> None:
+        run_id, _ = self.store.create_run("2026-07-18", account_id="acc01")
+        self.store.scoped("acc01").set_lock_state(
+            "bearish_hour_entry_wait_v1",
+            {
+                "run_id": run_id,
+                "pending": {
+                    "0": {"symbol": "BTCUSDT"},
+                    "1": {"symbol": "ETHUSDT"},
+                },
+            },
+        )
+
+        provider = DashboardDataProvider(
+            db_path=self.db_path,
+            log_file=self.log_file,
+            timezone_name="UTC",
+            entry_hour=7,
+            entry_minute=40,
+        )
+
+        payload = provider.accounts_summary()
+        row = next(item for item in payload["accounts"] if item["account_id"] == "acc01")
+
+        self.assertEqual(row["tasks"]["entry"]["status"], "RUNNING")
+        self.assertIn("waiting=2", row["tasks"]["entry"]["summary"])
 
     def test_accounts_summary_finds_morning_entry_result_in_large_current_log(self) -> None:
         self.store.create_run("2026-06-29", account_id="acc01")
+        self._backdate_runs()
         with open(self.log_file, "w", encoding="utf-8") as f:
             f.write(
                 "2026-06-29 07:40:14,932 - INFO - core.runtime_service - "
@@ -358,6 +416,7 @@ class DashboardServerTest(unittest.TestCase):
 
     def test_accounts_summary_keeps_full_symbol_lists_for_task_details(self) -> None:
         self.store.create_run("2026-02-13", account_id="acc01")
+        self._backdate_runs()
         with open(self.log_file, "w", encoding="utf-8") as f:
             f.write(
                 "\n".join(

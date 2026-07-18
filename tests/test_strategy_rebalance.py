@@ -2,7 +2,7 @@ import importlib.util
 import sys
 import types
 import unittest
-from datetime import datetime
+from datetime import datetime, timezone
 from unittest.mock import MagicMock, patch
 
 if importlib.util.find_spec("requests") is None:
@@ -33,7 +33,9 @@ if importlib.util.find_spec("requests") is None:
     sys.modules["requests"] = requests_stub
     sys.modules["requests.adapters"] = adapters_stub
 
-from core.strategy_top10_short import Top10ShortStrategy
+from core.entry_structure_protection import EntryStructureProtection
+from core.state_store import RunState
+from core.strategy_top10_short import EntryStructureWindow, RankEntry, ReadyEntry, Top10ShortStrategy
 from infra.binance_futures_client import BinanceAPIError
 
 
@@ -536,12 +538,16 @@ class StrategyRebalanceTest(unittest.TestCase):
             ]
         )
         strategy._place_exit_orders = MagicMock()
+        strategy._prepare_entry_structure_window = MagicMock(return_value=None)
         strategy._utc_now_datetime = MagicMock(
             side_effect=[
                 datetime.fromisoformat("2025-12-01T00:10:00+00:00"),
                 datetime.fromisoformat("2025-12-01T03:00:10+00:00"),
                 datetime.fromisoformat("2025-12-01T03:00:11+00:00"),
                 datetime.fromisoformat("2025-12-01T03:00:12+00:00"),
+                datetime.fromisoformat("2025-12-01T03:00:13+00:00"),
+                datetime.fromisoformat("2025-12-01T03:00:14+00:00"),
+                datetime.fromisoformat("2025-12-01T03:00:15+00:00"),
             ]
         )
 
@@ -599,6 +605,177 @@ class StrategyRebalanceTest(unittest.TestCase):
         self.assertEqual(restored[0]["entry"].symbol, "AAAUSDT")
         self.assertEqual(state["run_id"], "run-1")
         self.assertIn("deadline_utc", state)
+
+    def test_post_noon_entry_structure_uses_previous_and_trigger_hour_high(self) -> None:
+        client = MagicMock()
+        client.get_klines.return_value = [
+            [1784253600000, "0.0238200", "0.0259000", "0.0235100", "0.0239200", "0", 1784257199999],
+            [1784257200000, "0.0239300", "0.0240600", "0.0196600", "0.0213900", "0", 1784260799999],
+        ]
+        client.get_agg_trades.return_value = [
+            {"a": 1, "p": "0.0215700", "T": 1784260805321},
+            {"a": 2, "p": "0.0216100", "T": 1784260805804},
+        ]
+        client.normalize_trigger_price.side_effect = lambda _symbol, price, round_up=False: float(price)
+        strategy = self._build_strategy(
+            client,
+            MagicMock(),
+            rebalance_enabled=False,
+            entry_wait_bearish_hour_enabled=True,
+        )
+        ready_entry = ReadyEntry(
+            entry=RankEntry("ESPORTSUSDT", 50.17, 0.02139, 1.0),
+            reference_price=0.02139,
+            signal_time_utc=datetime(2026, 7, 16, 23, 40, tzinfo=timezone.utc),
+            bearish_close_time_utc=datetime(2026, 7, 17, 3, 59, 59, 999000, tzinfo=timezone.utc),
+        )
+
+        protection = strategy._build_entry_structure_protection(
+            ready_entry=ready_entry,
+            fill_time_utc=datetime(2026, 7, 17, 4, 0, 5, 804000, tzinfo=timezone.utc),
+            entry_price=0.02159,
+        )
+
+        self.assertIsNotNone(protection)
+        assert protection is not None
+        self.assertAlmostEqual(protection.stop_price, 0.02590)
+        self.assertEqual(protection.window_start_utc, datetime(2026, 7, 17, 2, 0, tzinfo=timezone.utc))
+        self.assertEqual(protection.bearish_close_time_utc, datetime(2026, 7, 17, 4, 0, tzinfo=timezone.utc))
+        self.assertEqual(protection.window_end_utc, datetime(2026, 7, 17, 4, 0, 5, 804000, tzinfo=timezone.utc))
+        klines_kwargs = client.get_klines.call_args.kwargs
+        self.assertEqual(klines_kwargs["interval"], "1h")
+        self.assertEqual(klines_kwargs["limit"], 2)
+        agg_kwargs = client.get_agg_trades.call_args.kwargs
+        self.assertEqual(agg_kwargs["start_time"], 1784260800000)
+        self.assertEqual(agg_kwargs["end_time"], 1784260805804)
+
+    def test_aggregate_trade_high_splits_requests_into_valid_one_hour_windows(self) -> None:
+        client = MagicMock()
+
+        def agg_trades(**kwargs):
+            return [{"a": kwargs["start_time"], "p": str(kwargs["start_time"]), "T": kwargs["start_time"]}]
+
+        client.get_agg_trades.side_effect = agg_trades
+        strategy = self._build_strategy(client, MagicMock(), rebalance_enabled=False)
+        start = datetime(2026, 7, 17, 4, 0, tzinfo=timezone.utc)
+
+        high = strategy._fetch_agg_trade_high(
+            symbol="BTCUSDT",
+            start_utc=start,
+            end_utc=datetime(2026, 7, 17, 6, 30, tzinfo=timezone.utc),
+        )
+
+        self.assertIsNotNone(high)
+        self.assertEqual(client.get_agg_trades.call_count, 3)
+        for request in client.get_agg_trades.call_args_list:
+            self.assertLessEqual(
+                request.kwargs["end_time"] - request.kwargs["start_time"],
+                60 * 60 * 1000 - 1,
+            )
+
+    def test_running_entry_without_wait_state_resumes_instead_of_skipping_forever(self) -> None:
+        client = MagicMock()
+        store = MagicMock()
+        store.create_run.return_value = ("run-1", False)
+        store.get_run.return_value = RunState(
+            run_id="run-1",
+            account_id="acc01",
+            trade_day_utc="2026-07-18",
+            started_at_utc="2026-07-18T00:00:00+00:00",
+            completed_at_utc=None,
+            status="RUNNING",
+            reason=None,
+        )
+        store.get_lock_state.return_value = {}
+        store.list_active_symbols.return_value = set()
+        strategy = self._build_strategy(client, store, rebalance_enabled=False)
+
+        result = strategy.run_entry(
+            trade_day_utc="2026-07-18",
+            shared_top_gainers=[],
+        )
+
+        self.assertEqual(result["status"], "SUCCESS")
+        store.finalize_run.assert_called_once_with("run-1", "SUCCESS", "No ranked symbols")
+
+    def test_run_entry_applies_structure_stop_immediately_after_fill(self) -> None:
+        client = MagicMock()
+        client.get_available_balance.return_value = 500.0
+        client.diagnose_order_qty.return_value = {"normalized_qty": 100.0}
+        store = MagicMock()
+        store.create_run.return_value = ("run-1", True)
+        store.list_open_symbols.return_value = set()
+        store.insert_position.return_value = 5618
+        store.list_open_positions.return_value = []
+        strategy = self._build_strategy(
+            client,
+            store,
+            rebalance_enabled=False,
+            entry_wait_bearish_hour_enabled=True,
+        )
+        strategy.top_n = 1
+        ready_entry = ReadyEntry(
+            entry=RankEntry("ESPORTSUSDT", 50.17, 0.02139, 1.0),
+            reference_price=0.02139,
+            signal_time_utc=datetime(2026, 7, 16, 23, 40, tzinfo=timezone.utc),
+            bearish_close_time_utc=datetime(2026, 7, 17, 3, 59, 59, 999000, tzinfo=timezone.utc),
+        )
+        structure_window = EntryStructureWindow(
+            bearish_close_time_utc=datetime(2026, 7, 17, 4, 0, tzinfo=timezone.utc),
+            window_start_utc=datetime(2026, 7, 17, 2, 0, tzinfo=timezone.utc),
+            highest_price=0.02590,
+        )
+        protection = EntryStructureProtection(
+            stop_price=0.02590,
+            bearish_close_time_utc=structure_window.bearish_close_time_utc,
+            window_start_utc=structure_window.window_start_utc,
+            window_end_utc=datetime(2026, 7, 17, 4, 0, 5, 804000, tzinfo=timezone.utc),
+        )
+        strategy._iter_ready_entries_after_bearish_hour = MagicMock(return_value=iter([ready_entry]))
+        strategy._prepare_entry_structure_window = MagicMock(return_value=structure_window)
+        strategy._complete_entry_structure_protection = MagicMock(return_value=protection)
+        strategy._place_market_short_with_shrink_retry = MagicMock(
+            return_value=(
+                {
+                    "orderId": 1696249220,
+                    "status": "FILLED",
+                    "side": "SELL",
+                    "type": "MARKET",
+                    "symbol": "ESPORTSUSDT",
+                    "updateTime": 1784260805804,
+                },
+                0,
+            )
+        )
+        strategy._load_short_position = MagicMock(
+            return_value={
+                "symbol": "ESPORTSUSDT",
+                "entryPrice": "0.02159",
+                "liquidationPrice": "0.03083257",
+                "positionAmt": "-1582",
+            }
+        )
+        strategy._place_exit_orders = MagicMock()
+
+        result = strategy.run_entry(
+            trade_day_utc="2026-07-17-entry-structure",
+            shared_top_gainers=[
+                {"symbol": "ESPORTSUSDT", "change": "50.17", "current_price": "0.02139", "volume": "1"},
+            ],
+        )
+
+        self.assertEqual(result["opened"], 1)
+        strategy._place_exit_orders.assert_called_once_with(
+            position_id=5618,
+            symbol="ESPORTSUSDT",
+            entry_structure_stop_price=0.02590,
+        )
+        inserted = store.insert_position.call_args.kwargs
+        self.assertEqual(inserted["status"], "PENDING_ENTRY")
+        entry_fill = store.set_position_entry_fill.call_args.kwargs
+        self.assertEqual(entry_fill["opened_at_utc"], "2026-07-17T04:00:05.804000+00:00")
+        lock_payload = store.set_lock_state.call_args.args[1]
+        self.assertEqual(lock_payload["positions"]["5618"]["stop_price"], 0.02590)
 
     def test_initial_exit_setup_cleans_take_profit_when_stop_creation_fails(self) -> None:
         client = MagicMock()
@@ -782,7 +959,8 @@ class StrategyRebalanceTest(unittest.TestCase):
         )
 
         def assert_position_is_pending_during_exit_setup(**_kwargs):
-            self.assertEqual(store.insert_position.call_args.kwargs["status"], "PENDING_EXIT_SETUP")
+            self.assertEqual(store.insert_position.call_args.kwargs["status"], "PENDING_ENTRY")
+            store.set_position_entry_fill.assert_called_once()
 
         strategy._place_exit_orders = MagicMock(side_effect=assert_position_is_pending_during_exit_setup)
 

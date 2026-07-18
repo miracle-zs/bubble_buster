@@ -439,6 +439,7 @@ class DashboardDataProvider:
     def _latest_task_statuses_for_accounts(
         self,
         account_ids: List[str],
+        conn: Optional[sqlite3.Connection] = None,
     ) -> Dict[str, Dict[str, Dict[str, Any]]]:
         normalized_ids = [str(aid).strip() for aid in account_ids if str(aid).strip()]
         payload = {aid: self._task_status_template() for aid in normalized_ids}
@@ -459,7 +460,159 @@ class DashboardDataProvider:
             for key, value in account_tasks.items():
                 if key in tasks and isinstance(value, dict):
                     tasks[key] = dict(value)
+
+        if conn is not None:
+            persisted_entries = self._latest_entry_statuses_from_db(conn, normalized_ids)
+            for aid, persisted_entry in persisted_entries.items():
+                current_entry = payload[aid]["entry"]
+                if self._task_status_is_newer(persisted_entry, current_entry):
+                    payload[aid]["entry"] = persisted_entry
         return payload
+
+    def _task_status_is_newer(self, candidate: Dict[str, Any], current: Dict[str, Any]) -> bool:
+        if str(current.get("status") or "UNKNOWN").upper() == "UNKNOWN":
+            return True
+
+        def parse_local(value: Any) -> Optional[datetime]:
+            text = str(value or "").strip()
+            if not text:
+                return None
+            try:
+                parsed = datetime.strptime(text, "%Y-%m-%d %H:%M:%S")
+            except ValueError:
+                return None
+            return parsed.replace(tzinfo=self.local_tz)
+
+        candidate_time = parse_local(candidate.get("time_local"))
+        current_time = parse_local(current.get("time_local"))
+        if candidate_time is None:
+            return False
+        if current_time is None:
+            return True
+        return candidate_time >= current_time
+
+    def _latest_entry_statuses_from_db(
+        self,
+        conn: sqlite3.Connection,
+        account_ids: List[str],
+    ) -> Dict[str, Dict[str, Any]]:
+        if not account_ids:
+            return {}
+        placeholders = ",".join("?" for _ in account_ids)
+        rows = self._query_rows(
+            conn,
+            f"""
+            SELECT
+                r.run_id, r.account_id, r.started_at_utc, r.completed_at_utc,
+                r.status, r.message, COUNT(p.id) AS position_count
+            FROM runs r
+            INNER JOIN (
+                SELECT account_id, MAX(started_at_utc) AS max_started_at_utc
+                FROM runs
+                WHERE account_id IN ({placeholders})
+                GROUP BY account_id
+            ) latest
+                ON latest.account_id = r.account_id
+               AND latest.max_started_at_utc = r.started_at_utc
+            LEFT JOIN positions p ON p.run_id = r.run_id
+            GROUP BY
+                r.run_id, r.account_id, r.started_at_utc, r.completed_at_utc,
+                r.status, r.message
+            """,
+            tuple(account_ids),
+        )
+        wait_state_by_account = self._entry_wait_states_from_db(conn, account_ids)
+        return {
+            str(row.get("account_id") or "").strip(): self._entry_status_from_run_row(
+                row,
+                wait_state=wait_state_by_account.get(str(row.get("account_id") or "").strip()),
+            )
+            for row in rows
+            if str(row.get("account_id") or "").strip()
+        }
+
+    @staticmethod
+    def _entry_wait_states_from_db(
+        conn: sqlite3.Connection,
+        account_ids: List[str],
+    ) -> Dict[str, Dict[str, Any]]:
+        lock_name_by_account = {
+            aid: f"{aid}:bearish_hour_entry_wait_v1"
+            for aid in account_ids
+        }
+        if not lock_name_by_account:
+            return {}
+        placeholders = ",".join("?" for _ in lock_name_by_account)
+        rows = conn.execute(
+            f"SELECT lock_name, holder FROM locks WHERE lock_name IN ({placeholders})",
+            tuple(lock_name_by_account.values()),
+        ).fetchall()
+        account_by_lock_name = {name: aid for aid, name in lock_name_by_account.items()}
+        states: Dict[str, Dict[str, Any]] = {}
+        for row in rows:
+            account_id = account_by_lock_name.get(str(row["lock_name"] or ""))
+            if not account_id:
+                continue
+            try:
+                parsed = json.loads(str(row["holder"] or "{}"))
+            except (TypeError, ValueError):
+                continue
+            if isinstance(parsed, dict):
+                states[account_id] = parsed
+        return states
+
+    def _entry_status_from_run_row(
+        self,
+        row: Dict[str, Any],
+        wait_state: Optional[Dict[str, Any]],
+    ) -> Dict[str, Any]:
+        status = str(row.get("status") or "UNKNOWN").strip().upper()
+        if status not in {"SUCCESS", "FAILED", "RUNNING", "SKIPPED"}:
+            status = "UNKNOWN"
+        message = str(row.get("message") or "").strip()
+        position_count = self._safe_int(row.get("position_count"), 0)
+        opened = self._run_message_count(message, "opened", default=position_count)
+        failed = self._run_message_count(message, "failed", default=0)
+        skipped = self._run_message_count(message, "skipped_existing", default=0)
+
+        parts = [f"opened={opened}", f"failed={failed}", f"skipped={skipped}"]
+        if status == "RUNNING":
+            pending_count = 0
+            if isinstance(wait_state, dict) and str(wait_state.get("run_id") or "") == str(row.get("run_id") or ""):
+                pending = wait_state.get("pending")
+                pending_count = len(pending) if isinstance(pending, dict) else 0
+            if pending_count > 0:
+                parts.append(f"waiting={pending_count}")
+        elif message and self._run_message_count(message, "opened", default=None) is None:
+            parts.append(f"reason={message[:80]}")
+
+        event_time = row.get("started_at_utc") if status == "RUNNING" else (
+            row.get("completed_at_utc") or row.get("started_at_utc")
+        )
+        return {
+            "status": status,
+            "time_local": self._format_utc_as_local(event_time),
+            "summary": " ".join(parts),
+        }
+
+    @staticmethod
+    def _run_message_count(message: str, key: str, default: Optional[int]) -> Optional[int]:
+        matched = re.search(rf"(?:^|[,\s]){re.escape(key)}=(\d+)", message)
+        if matched is None:
+            return default
+        return int(matched.group(1))
+
+    def _format_utc_as_local(self, value: Any) -> Optional[str]:
+        text = str(value or "").strip()
+        if not text:
+            return None
+        try:
+            parsed = datetime.fromisoformat(text)
+        except ValueError:
+            return None
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        return parsed.astimezone(self.local_tz).strftime("%Y-%m-%d %H:%M:%S")
 
     def _query_rows(self, conn: sqlite3.Connection, query: str, params: tuple = ()) -> List[Dict[str, Any]]:
         rows = conn.execute(query, params).fetchall()
@@ -1672,7 +1825,10 @@ class DashboardDataProvider:
                         ),
                     }
 
-                task_statuses = self._latest_task_statuses_for_accounts(list(by_account.keys()))
+                task_statuses = self._latest_task_statuses_for_accounts(
+                    list(by_account.keys()),
+                    conn=conn,
+                )
                 for aid, row in by_account.items():
                     row["tasks"] = task_statuses.get(aid, self._task_status_template())
                     # 为 readonly 账户添加交易统计

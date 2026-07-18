@@ -119,6 +119,20 @@ class StrategyEquityRecoveryTest(unittest.TestCase):
         client.normalize_order_qty.side_effect = lambda _s, notional, price: notional / price
         client.format_order_qty.side_effect = lambda _s, qty: str(qty)
         client.create_order.side_effect = self._mock_order_factory()
+        client.get_user_trades.side_effect = lambda symbol, order_id, limit: [
+            {
+                "symbol": symbol,
+                "orderId": order_id,
+                "side": "BUY",
+                "qty": "1",
+                "quoteQty": "10",
+                "price": "10",
+                "realizedPnl": "1",
+                "commission": "0.01",
+                "commissionAsset": "USDT",
+                "time": 1771832400000,
+            }
+        ]
 
         store = MagicMock()
         store.get_latest_wallet_snapshot.return_value = {
@@ -167,6 +181,20 @@ class StrategyEquityRecoveryTest(unittest.TestCase):
         client.normalize_order_qty.side_effect = lambda _s, notional, price: notional / price
         client.format_order_qty.side_effect = lambda _s, qty: str(qty)
         client.create_order.side_effect = self._mock_order_factory()
+        client.get_user_trades.side_effect = lambda symbol, order_id, limit: [
+            {
+                "symbol": symbol,
+                "orderId": order_id,
+                "side": "BUY",
+                "qty": "1",
+                "quoteQty": "10",
+                "price": "10",
+                "realizedPnl": "1",
+                "commission": "0.01",
+                "commissionAsset": "USDT",
+                "time": 1771832400000,
+            }
+        ]
 
         store = MagicMock()
         store.get_latest_wallet_snapshot.side_effect = [

@@ -1,5 +1,6 @@
 import json
 import os
+import re
 import sqlite3
 import uuid
 import hashlib
@@ -47,11 +48,13 @@ def utc_now_iso() -> str:
 
 ACCOUNT_ID_MIGRATION_TABLES = {
     "runs",
+    "order_events",
     "wallet_snapshots",
     "cashflow_events",
     "equity_recovery_events",
 }
 SQLITE_BUSY_TIMEOUT_MS = 30000
+ACTIVE_POSITION_STATUSES = ("PENDING_ENTRY", "PENDING_EXIT_SETUP", "OPEN")
 
 
 class StateStore:
@@ -72,6 +75,7 @@ class StateStore:
         conn = sqlite3.connect(self.db_path, timeout=SQLITE_BUSY_TIMEOUT_MS / 1000)
         conn.execute(f"PRAGMA busy_timeout = {SQLITE_BUSY_TIMEOUT_MS}")
         conn.execute("PRAGMA synchronous = NORMAL")
+        conn.execute("PRAGMA foreign_keys = ON")
         conn.row_factory = sqlite3.Row
         return conn
 
@@ -94,11 +98,17 @@ class StateStore:
         else:
             schema_sql = ""
         with self._connect_ctx() as conn:
+            conn.execute("PRAGMA foreign_keys = OFF")
             conn.execute("PRAGMA journal_mode = WAL")
             if schema_sql:
+                # Older databases do not have this column yet, while the current
+                # schema creates an index for it. Add it before executescript.
+                self._ensure_account_id_column(conn, "order_events", self.account_id)
                 conn.executescript(schema_sql)
             else:
                 raise ValueError("schema_path is required for StateStore.init_schema")
+            self._backfill_order_event_account_ids(conn)
+            self._repair_legacy_run_foreign_keys(conn)
 
     def create_run(self, trade_day_utc: str, account_id: str = "default") -> Tuple[str, bool]:
         """Creates a run for a UTC trade day.
@@ -156,6 +166,7 @@ class StateStore:
             raise ValueError("default_account_id is required")
 
         with self._connect_ctx() as conn:
+            conn.execute("PRAGMA foreign_keys = OFF")
             row = conn.execute(
                 "SELECT name FROM sqlite_master WHERE type='table' AND name='runs'"
             ).fetchone()
@@ -165,10 +176,9 @@ class StateStore:
             columns = conn.execute("PRAGMA table_info(runs)").fetchall()
             has_account_id = any(str(col["name"]) == "account_id" for col in columns)
             if not has_account_id:
-                conn.execute("ALTER TABLE runs RENAME TO runs_legacy")
                 conn.execute(
                     """
-                    CREATE TABLE runs (
+                    CREATE TABLE runs_new (
                         run_id TEXT PRIMARY KEY,
                         account_id TEXT NOT NULL,
                         trade_day_utc TEXT NOT NULL,
@@ -182,13 +192,14 @@ class StateStore:
                 )
                 conn.execute(
                     """
-                    INSERT INTO runs (run_id, account_id, trade_day_utc, started_at_utc, completed_at_utc, status, message)
+                    INSERT INTO runs_new (run_id, account_id, trade_day_utc, started_at_utc, completed_at_utc, status, message)
                     SELECT run_id, ?, trade_day_utc, started_at_utc, completed_at_utc, status, message
-                    FROM runs_legacy
+                    FROM runs
                     """,
                     (default_account_id,),
                 )
-                conn.execute("DROP TABLE runs_legacy")
+                conn.execute("DROP TABLE runs")
+                conn.execute("ALTER TABLE runs_new RENAME TO runs")
 
             self._ensure_account_id_column(
                 conn=conn,
@@ -205,6 +216,13 @@ class StateStore:
                 table_name="equity_recovery_events",
                 default_account_id=default_account_id,
             )
+            self._ensure_account_id_column(
+                conn=conn,
+                table_name="order_events",
+                default_account_id=default_account_id,
+            )
+            self._backfill_order_event_account_ids(conn)
+            self._repair_legacy_run_foreign_keys(conn)
 
     def _ensure_account_id_column(
         self,
@@ -228,6 +246,90 @@ class StateStore:
             f"ALTER TABLE {table_name} ADD COLUMN account_id TEXT NOT NULL DEFAULT '{escaped}'"
         )
 
+    @staticmethod
+    def _backfill_order_event_account_ids(conn: sqlite3.Connection) -> None:
+        columns = conn.execute("PRAGMA table_info(order_events)").fetchall()
+        if not any(str(column["name"]) == "account_id" for column in columns):
+            return
+        run_columns = conn.execute("PRAGMA table_info(runs)").fetchall()
+        if not any(str(column["name"]) == "account_id" for column in run_columns):
+            # migrate_to_multi_account() will call this again after rebuilding runs.
+            return
+        conn.execute(
+            """
+            UPDATE order_events
+            SET account_id = COALESCE(
+                (
+                    SELECT r.account_id
+                    FROM positions p
+                    JOIN runs r ON r.run_id = p.run_id
+                    WHERE p.id = order_events.position_id
+                ),
+                account_id
+            )
+            WHERE position_id IS NOT NULL
+            """
+        )
+
+    @staticmethod
+    def _repair_legacy_run_foreign_keys(conn: sqlite3.Connection) -> None:
+        for table_name in ("positions", "rebalance_cycles", "rebalance_actions"):
+            foreign_keys = conn.execute(f"PRAGMA foreign_key_list({table_name})").fetchall()
+            if not any(str(row["table"]) == "runs_legacy" for row in foreign_keys):
+                continue
+
+            table_row = conn.execute(
+                "SELECT sql FROM sqlite_master WHERE type='table' AND name=?",
+                (table_name,),
+            ).fetchone()
+            if table_row is None or not table_row["sql"]:
+                continue
+            index_rows = conn.execute(
+                "SELECT sql FROM sqlite_master WHERE type='index' AND tbl_name=? AND sql IS NOT NULL",
+                (table_name,),
+            ).fetchall()
+            columns = [str(row["name"]) for row in conn.execute(f"PRAGMA table_info({table_name})").fetchall()]
+            temp_name = f"{table_name}__fk_repair"
+            create_sql = str(table_row["sql"])
+            create_sql = re.sub(
+                rf"^CREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?(?:\"{re.escape(table_name)}\"|{re.escape(table_name)})",
+                f'CREATE TABLE "{temp_name}"',
+                create_sql,
+                count=1,
+                flags=re.IGNORECASE,
+            )
+            create_sql = create_sql.replace('"runs_legacy"', '"runs"').replace("runs_legacy", "runs")
+            quoted_columns = ", ".join(f'"{column}"' for column in columns)
+            conn.execute(f'DROP TABLE IF EXISTS "{temp_name}"')
+            conn.execute(create_sql)
+            conn.execute(
+                f'INSERT INTO "{temp_name}" ({quoted_columns}) SELECT {quoted_columns} FROM "{table_name}"'
+            )
+            conn.execute(f'DROP TABLE "{table_name}"')
+            conn.execute(f'ALTER TABLE "{temp_name}" RENAME TO "{table_name}"')
+            for index_row in index_rows:
+                conn.execute(str(index_row["sql"]))
+
+        legacy_table = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='runs_legacy'"
+        ).fetchone()
+        if legacy_table is None:
+            return
+        referenced = False
+        table_rows = conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'"
+        ).fetchall()
+        for row in table_rows:
+            table_name = str(row["name"])
+            if table_name == "runs_legacy":
+                continue
+            foreign_keys = conn.execute(f'PRAGMA foreign_key_list("{table_name}")').fetchall()
+            if any(str(foreign_key["table"]) == "runs_legacy" for foreign_key in foreign_keys):
+                referenced = True
+                break
+        if not referenced:
+            conn.execute('DROP TABLE "runs_legacy"')
+
     def insert_position(
         self,
         run_id: str,
@@ -249,6 +351,24 @@ class StateStore:
     ) -> int:
         now_iso = utc_now_iso()
         with self._connect_ctx() as conn:
+            if status in ACTIVE_POSITION_STATUSES:
+                existing = conn.execute(
+                    """
+                    SELECT p.id
+                    FROM positions p
+                    JOIN runs r ON r.run_id = p.run_id
+                    WHERE r.account_id = ?
+                      AND UPPER(p.symbol) = UPPER(?)
+                      AND p.status IN ('PENDING_ENTRY', 'PENDING_EXIT_SETUP', 'OPEN')
+                    LIMIT 1
+                    """,
+                    (self.account_id, symbol),
+                ).fetchone()
+                if existing is not None:
+                    raise sqlite3.IntegrityError(
+                        f"Active position already exists for account={self.account_id} symbol={symbol} "
+                        f"position_id={existing['id']}"
+                    )
             cursor = conn.execute(
                 """
                 INSERT INTO positions (
@@ -316,6 +436,21 @@ class StateStore:
             ).fetchall()
             return [dict(row) for row in rows]
 
+    def list_pending_entry_positions(self) -> List[Dict[str, Any]]:
+        with self._connect_ctx() as conn:
+            rows = conn.execute(
+                """
+                SELECT p.*
+                FROM positions p
+                INNER JOIN runs r ON r.run_id = p.run_id
+                WHERE p.status = 'PENDING_ENTRY'
+                  AND r.account_id = ?
+                ORDER BY p.id ASC
+                """,
+                (self.account_id,),
+            ).fetchall()
+            return [dict(row) for row in rows]
+
     def get_position(self, position_id: int) -> Optional[Dict[str, Any]]:
         with self._connect_ctx() as conn:
             row = conn.execute(
@@ -338,6 +473,20 @@ class StateStore:
                 FROM positions p
                 INNER JOIN runs r ON r.run_id = p.run_id
                 WHERE p.status = 'OPEN'
+                  AND r.account_id = ?
+                """,
+                (self.account_id,),
+            ).fetchall()
+            return {str(row["symbol"]) for row in rows}
+
+    def list_active_symbols(self) -> Set[str]:
+        with self._connect_ctx() as conn:
+            rows = conn.execute(
+                """
+                SELECT DISTINCT p.symbol
+                FROM positions p
+                INNER JOIN runs r ON r.run_id = p.run_id
+                WHERE p.status IN ('PENDING_ENTRY', 'PENDING_EXIT_SETUP', 'OPEN')
                   AND r.account_id = ?
                 """,
                 (self.account_id,),
@@ -435,6 +584,41 @@ class StateStore:
                 (qty, entry_price, utc_now_iso(), position_id),
             )
 
+    def set_position_entry_fill(
+        self,
+        position_id: int,
+        qty: float,
+        entry_price: float,
+        liq_price_open: Optional[float],
+        opened_at_utc: str,
+        expire_at_utc: str,
+    ) -> None:
+        with self._connect_ctx() as conn:
+            conn.execute(
+                """
+                UPDATE positions
+                SET qty = ?,
+                    entry_price = ?,
+                    liq_price_open = COALESCE(?, liq_price_open),
+                    liq_price_latest = COALESCE(?, liq_price_latest),
+                    opened_at_utc = ?,
+                    expire_at_utc = ?,
+                    status = 'PENDING_EXIT_SETUP',
+                    updated_at_utc = ?
+                WHERE id = ? AND status = 'PENDING_ENTRY'
+                """,
+                (
+                    qty,
+                    entry_price,
+                    liq_price_open,
+                    liq_price_open,
+                    opened_at_utc,
+                    expire_at_utc,
+                    utc_now_iso(),
+                    int(position_id),
+                ),
+            )
+
     def mark_position_open(self, position_id: int) -> None:
         with self._connect_ctx() as conn:
             conn.execute(
@@ -501,13 +685,14 @@ class StateStore:
             cursor = conn.execute(
                 """
                 INSERT INTO order_events (
-                    position_id, symbol, order_id, client_order_id,
+                    account_id, position_id, symbol, order_id, client_order_id,
                     type, side, price, qty, status,
                     event_time_utc, raw_json
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
+                    self.account_id,
                     position_id,
                     symbol,
                     order_payload.get("orderId"),
@@ -531,6 +716,130 @@ class StateStore:
                 order_payload=order_payload,
             )
             return event_id
+
+    def update_order_event(
+        self,
+        order_event_id: int,
+        symbol: str,
+        event_time_utc: str,
+        order_payload: Dict[str, Any],
+        position_id: Optional[int] = None,
+    ) -> None:
+        with self._connect_ctx() as conn:
+            conn.execute(
+                """
+                UPDATE order_events
+                SET account_id = ?,
+                    position_id = COALESCE(?, position_id),
+                    symbol = ?,
+                    order_id = COALESCE(?, order_id),
+                    client_order_id = COALESCE(?, client_order_id),
+                    type = COALESCE(?, type),
+                    side = COALESCE(?, side),
+                    price = COALESCE(?, price),
+                    qty = COALESCE(?, qty),
+                    status = COALESCE(?, status),
+                    event_time_utc = ?,
+                    raw_json = ?
+                WHERE id = ?
+                """,
+                (
+                    self.account_id,
+                    position_id,
+                    symbol,
+                    order_payload.get("orderId"),
+                    order_payload.get("clientOrderId"),
+                    order_payload.get("type"),
+                    order_payload.get("side"),
+                    _safe_float(order_payload.get("price") or order_payload.get("avgPrice")),
+                    _safe_float(order_payload.get("origQty") or order_payload.get("executedQty")),
+                    order_payload.get("status"),
+                    event_time_utc,
+                    json.dumps(order_payload, ensure_ascii=False),
+                    int(order_event_id),
+                ),
+            )
+            self._insert_fill_from_order_event(
+                conn=conn,
+                order_event_id=int(order_event_id),
+                position_id=position_id,
+                symbol=symbol,
+                event_time_utc=event_time_utc,
+                order_payload=order_payload,
+            )
+
+    def find_order_event_id(
+        self,
+        symbol: str,
+        position_id: Optional[int],
+        order_id: Optional[int],
+        client_order_id: Optional[str],
+    ) -> Optional[int]:
+        if order_id is None and not client_order_id:
+            return None
+        clauses = ["account_id = ?", "UPPER(symbol) = UPPER(?)"]
+        params: List[Any] = [self.account_id, symbol]
+        if position_id is None:
+            clauses.append("position_id IS NULL")
+        else:
+            clauses.append("position_id = ?")
+            params.append(int(position_id))
+        if order_id is not None and client_order_id:
+            clauses.append("(order_id = ? OR client_order_id = ?)")
+            params.extend((int(order_id), str(client_order_id)))
+        elif order_id is not None:
+            clauses.append("order_id = ?")
+            params.append(int(order_id))
+        else:
+            clauses.append("client_order_id = ?")
+            params.append(str(client_order_id))
+        with self._connect_ctx() as conn:
+            row = conn.execute(
+                f"SELECT id FROM order_events WHERE {' AND '.join(clauses)} ORDER BY id DESC LIMIT 1",
+                tuple(params),
+            ).fetchone()
+            return int(row["id"]) if row is not None else None
+
+    def list_market_order_events_missing_realized_fill(self, limit: int = 20) -> List[Dict[str, Any]]:
+        with self._connect_ctx() as conn:
+            rows = conn.execute(
+                """
+                SELECT
+                    oe.id AS order_event_id,
+                    oe.position_id,
+                    oe.symbol,
+                    oe.order_id,
+                    oe.client_order_id,
+                    oe.type,
+                    oe.side,
+                    oe.status,
+                    oe.event_time_utc,
+                    oe.raw_json
+                FROM order_events oe
+                LEFT JOIN positions p ON p.id = oe.position_id
+                WHERE oe.account_id = ?
+                  AND UPPER(COALESCE(oe.side, '')) = 'BUY'
+                  AND UPPER(COALESCE(oe.status, '')) IN ('FILLED', 'POSITION_RECONCILED')
+                  AND NOT EXISTS (
+                      SELECT 1
+                      FROM fills f
+                      WHERE (
+                            f.order_event_id = oe.id
+                            OR (
+                            oe.position_id IS NOT NULL
+                            AND f.position_id = oe.position_id
+                            AND oe.order_id IS NOT NULL
+                            AND f.order_id = oe.order_id
+                            )
+                         )
+                        AND f.realized_pnl IS NOT NULL
+                  )
+                ORDER BY oe.id DESC
+                LIMIT ?
+                """,
+                (self.account_id, max(1, int(limit))),
+            ).fetchall()
+            return [dict(row) for row in rows]
 
     def create_rebalance_cycle(
         self,

@@ -99,6 +99,34 @@ class StateStoreTest(unittest.TestCase):
         self.assertEqual(open_positions[0]["symbol"], "AAAUSDT")
         self.assertIn("AAAUSDT", self.store.list_open_symbols())
 
+    def test_pending_entry_blocks_duplicate_active_symbol(self) -> None:
+        run_id, _ = self.store.create_run("2026-02-13")
+        position_args = {
+            "run_id": run_id,
+            "symbol": "AAAUSDT",
+            "side": "SHORT",
+            "qty": 1.0,
+            "entry_price": 10.0,
+            "liq_price_open": None,
+            "tp_price": None,
+            "sl_price": None,
+            "tp_order_id": None,
+            "sl_order_id": None,
+            "tp_client_order_id": None,
+            "sl_client_order_id": None,
+            "opened_at_utc": "2026-02-13T00:00:00+00:00",
+            "expire_at_utc": "2026-02-14T23:30:00+00:00",
+        }
+        first_id = self.store.insert_position(**position_args, status="PENDING_ENTRY")
+
+        self.assertIn("AAAUSDT", self.store.list_active_symbols())
+        self.assertEqual(
+            [row["id"] for row in self.store.list_pending_entry_positions()],
+            [first_id],
+        )
+        with self.assertRaises(sqlite3.IntegrityError):
+            self.store.insert_position(**position_args, status="OPEN")
+
     def test_wallet_snapshot_roundtrip(self) -> None:
         snapshot_id = self.store.add_wallet_snapshot(
             captured_at_utc="2026-02-13T00:00:00+00:00",

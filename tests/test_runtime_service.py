@@ -33,6 +33,7 @@ class RuntimeServiceTest(unittest.TestCase):
             manager_max_catch_up_runs=overrides.get("manager_max_catch_up_runs", 3),
             loop_sleep_sec=overrides.get("loop_sleep_sec", 1.0),
             run_manage_on_startup=overrides.get("run_manage_on_startup", False),
+            account_task_timeout_sec=overrides.get("account_task_timeout_sec", 30.0),
             orphan_exit_order_cleanup_enabled=overrides.get("orphan_exit_order_cleanup_enabled", True),
             orphan_exit_order_cleanup_hour=overrides.get("orphan_exit_order_cleanup_hour", 3),
             orphan_exit_order_cleanup_minute=overrides.get("orphan_exit_order_cleanup_minute", 30),
@@ -1014,6 +1015,37 @@ def test_manage_timeout_returns_without_blocking_and_collects_completion_later()
     time.sleep(0.25)
     completed = service.run_manage_tick()
     assert completed["slow"]["summary"]["total"] == 1
+
+
+def test_scheduled_task_timeout_does_not_submit_duplicate_for_same_account() -> None:
+    started = Event()
+    release = Event()
+    calls = 0
+
+    def blocking_call():
+        nonlocal calls
+        calls += 1
+        started.set()
+        release.wait(timeout=5)
+        return {"total": 1, "errors": 0}
+
+    service, _, _, _ = RuntimeServiceTest()._create_service(account_task_timeout_sec=0.05)
+
+    first = service._run_account_task_calls({"acc01": blocking_call}, "morning-protection")
+    assert started.wait(timeout=1)
+    second = service._run_account_task_calls({"acc01": blocking_call}, "morning-protection")
+
+    assert first["acc01"]["running"] is True
+    assert second["acc01"]["running"] is True
+    assert calls == 1
+
+    release.set()
+    assert _wait_until(
+        lambda: service._scheduled_futures_by_task_account[("morning-protection", "acc01")].done()
+    )
+    completed = service._run_account_task_calls({"acc01": blocking_call}, "morning-protection")
+    assert completed["acc01"]["total"] == 1
+    assert calls == 1
 
 
 def test_entry_uses_shared_ranking_once_for_multi_accounts() -> None:
