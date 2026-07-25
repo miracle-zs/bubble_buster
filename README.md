@@ -219,6 +219,7 @@ CRON_TZ=Asia/Shanghai
   - morning cap 会持久化到锁状态，后续动态止损不会把它放宽回去。
 - `hourly_exchange_take_profit_enabled` / `hourly_exchange_take_profit_minute` / `hourly_exchange_take_profit_drop_pct`：
   - 账户级“整点前保护止盈”任务，默认关闭。
+  - 有利跌幅触发阈值默认 `18%`；达到阈值后不会立即退出，而是在后续首根 `1h` 阳线确认后平仓。
   - 只对交易所当前空头仓位生效，适合 `loss_cut_only + exchange` 类账户（例如账号 `55`）。
   - 系统会从该仓位真实开仓时间开始回溯；只要历史上曾达到配置跌幅，且到本地 `59` 分检查时当前 `1h` 正在形成的K线为阳线，就会直接市价平仓。
 - `protection_exempt_symbols`：

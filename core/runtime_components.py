@@ -249,7 +249,7 @@ def _build_single_account_components(
             "hourly_exchange_take_profit_minute", fallback=0
         ),
         "hourly_exchange_take_profit_drop_pct": runtime_cfg.getfloat(
-            "hourly_exchange_take_profit_drop_pct", fallback=20.0
+            "hourly_exchange_take_profit_drop_pct", fallback=18.0
         ),
         "protection_exempt_symbols": protection_exempt_symbols,
         "strategy": strategy,
@@ -341,7 +341,7 @@ def create_components(
             "hourly_exchange_take_profit_minute", fallback=0
         ),
         hourly_exchange_take_profit_drop_pct=runtime_cfg_selected.getfloat(
-            "hourly_exchange_take_profit_drop_pct", fallback=20.0
+            "hourly_exchange_take_profit_drop_pct", fallback=18.0
         ),
         orphan_exit_order_cleanup_enabled=runtime_cfg_selected.getboolean(
             "orphan_exit_order_cleanup_enabled", fallback=True

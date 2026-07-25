@@ -313,12 +313,11 @@ entry_minute = 40
 manager_interval_sec = 60
 hourly_exchange_take_profit_enabled = false
 hourly_exchange_take_profit_minute = 59
-hourly_exchange_take_profit_drop_pct = 20
 
 [account.55.runtime]
 hourly_exchange_take_profit_enabled = true
 hourly_exchange_take_profit_minute = 58
-hourly_exchange_take_profit_drop_pct = 18
+hourly_exchange_take_profit_drop_pct = 17
 
 [notify]
 enabled = false
@@ -337,10 +336,10 @@ serverchan_sendkey =
 
     assert account_runtimes["acc01"]["hourly_exchange_take_profit_enabled"] is False
     assert account_runtimes["acc01"]["hourly_exchange_take_profit_minute"] == 59
-    assert account_runtimes["acc01"]["hourly_exchange_take_profit_drop_pct"] == 20.0
+    assert account_runtimes["acc01"]["hourly_exchange_take_profit_drop_pct"] == 18.0
     assert account_runtimes["55"]["hourly_exchange_take_profit_enabled"] is True
     assert account_runtimes["55"]["hourly_exchange_take_profit_minute"] == 58
-    assert account_runtimes["55"]["hourly_exchange_take_profit_drop_pct"] == 18.0
+    assert account_runtimes["55"]["hourly_exchange_take_profit_drop_pct"] == 17.0
 
 
 def test_create_components_applies_per_account_morning_protection_override(tmp_path) -> None:
