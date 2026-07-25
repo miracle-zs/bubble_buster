@@ -359,13 +359,41 @@ class DashboardServerTest(unittest.TestCase):
 
     def test_accounts_summary_reports_persisted_bearish_entry_wait_as_running(self) -> None:
         run_id, _ = self.store.create_run("2026-07-18", account_id="acc01")
+        now = datetime.now(timezone.utc).replace(microsecond=0)
+        self.store.insert_position(
+            run_id=run_id,
+            symbol="BTCUSDT",
+            side="SHORT",
+            qty=1.0,
+            entry_price=100.0,
+            liq_price_open=150.0,
+            tp_price=None,
+            sl_price=120.0,
+            tp_order_id=None,
+            sl_order_id=1001,
+            tp_client_order_id=None,
+            sl_client_order_id="sl-btc",
+            opened_at_utc=now.isoformat(),
+            expire_at_utc=(now + timedelta(days=2)).isoformat(),
+            status="OPEN",
+        )
         self.store.scoped("acc01").set_lock_state(
             "bearish_hour_entry_wait_v1",
             {
                 "run_id": run_id,
+                "deadline_utc": (now + timedelta(hours=8)).isoformat(),
+                "updated_at_utc": now.isoformat(),
                 "pending": {
-                    "0": {"symbol": "BTCUSDT"},
-                    "1": {"symbol": "ETHUSDT"},
+                    "1": {
+                        "symbol": "ETHUSDT",
+                        "signal_time_utc": now.isoformat(),
+                        "hour_open_utc": now.replace(minute=0, second=0).isoformat(),
+                    },
+                    "2": {
+                        "symbol": "SOLUSDT",
+                        "signal_time_utc": now.isoformat(),
+                        "hour_open_utc": now.replace(minute=0, second=0).isoformat(),
+                    },
                 },
             },
         )
@@ -383,6 +411,69 @@ class DashboardServerTest(unittest.TestCase):
 
         self.assertEqual(row["tasks"]["entry"]["status"], "RUNNING")
         self.assertIn("waiting=2", row["tasks"]["entry"]["summary"])
+        progress = row["entry_progress"]
+        self.assertEqual(progress["status"], "WAITING")
+        self.assertEqual(progress["target_count"], 3)
+        self.assertEqual(progress["opened_count"], 1)
+        self.assertEqual(progress["waiting_count"], 2)
+        self.assertEqual([item["symbol"] for item in progress["opened_symbols"]], ["BTCUSDT"])
+        self.assertEqual(
+            [item["symbol"] for item in progress["waiting_symbols"]],
+            ["ETHUSDT", "SOLUSDT"],
+        )
+        self.assertIsNotNone(progress["next_check_local"])
+        self.assertIsNotNone(progress["deadline_local"])
+
+    def test_accounts_summary_keeps_completed_entry_progress_after_wait_state_is_cleared(self) -> None:
+        run_id, _ = self.store.create_run("2026-07-18", account_id="acc01")
+        now = datetime.now(timezone.utc).replace(microsecond=0)
+        for symbol in ("BTCUSDT", "ETHUSDT"):
+            self.store.insert_position(
+                run_id=run_id,
+                symbol=symbol,
+                side="SHORT",
+                qty=1.0,
+                entry_price=100.0,
+                liq_price_open=150.0,
+                tp_price=None,
+                sl_price=120.0,
+                tp_order_id=None,
+                sl_order_id=1001,
+                tp_client_order_id=None,
+                sl_client_order_id=f"sl-{symbol}",
+                opened_at_utc=now.isoformat(),
+                expire_at_utc=(now + timedelta(days=2)).isoformat(),
+                status="OPEN",
+            )
+        self.store.finalize_run(
+            run_id,
+            "SUCCESS",
+            "run_id=x, opened=2, failed=2, entry_failed=1, exit_setup_failed=1, skipped_existing=1",
+        )
+        self.store.scoped("acc01").set_lock_state("bearish_hour_entry_wait_v1", {})
+
+        provider = DashboardDataProvider(
+            db_path=self.db_path,
+            log_file=self.log_file,
+            timezone_name="UTC",
+            entry_hour=7,
+            entry_minute=40,
+        )
+
+        row = provider.accounts_summary()["accounts"][0]
+        progress = row["entry_progress"]
+        self.assertEqual(progress["status"], "PARTIAL")
+        self.assertEqual(progress["target_count"], 4)
+        self.assertEqual(progress["opened_count"], 2)
+        self.assertEqual(progress["waiting_count"], 0)
+        self.assertEqual(progress["failed_count"], 2)
+        self.assertEqual(progress["entry_failed_count"], 1)
+        self.assertEqual(progress["exit_setup_failed_count"], 1)
+        self.assertEqual(progress["skipped_count"], 1)
+        self.assertEqual(
+            [item["symbol"] for item in progress["opened_symbols"]],
+            ["BTCUSDT", "ETHUSDT"],
+        )
 
     def test_accounts_summary_finds_morning_entry_result_in_large_current_log(self) -> None:
         self.store.create_run("2026-06-29", account_id="acc01")
@@ -1053,6 +1144,12 @@ class DashboardServerTest(unittest.TestCase):
 
     def test_render_overview_uses_readable_task_layout(self) -> None:
         html = render_accounts_overview_html(refresh_sec=5)
+        self.assertIn('id="entry-progress-board"', html)
+        self.assertIn('id="entry-progress-updated"', html)
+        self.assertIn("今日开单进度", html)
+        self.assertIn("renderEntryProgress", html)
+        self.assertIn("entry-progress-meter", html)
+        self.assertIn("等待1h阴线", html)
         self.assertIn('id="task-board"', html)
         self.assertIn('id="task-updated-at"', html)
         self.assertIn('id="task-filter-all"', html)

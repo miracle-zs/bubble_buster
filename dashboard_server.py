@@ -531,6 +531,162 @@ class DashboardDataProvider:
             if str(row.get("account_id") or "").strip()
         }
 
+    def _entry_progresses_from_db(
+        self,
+        conn: sqlite3.Connection,
+        account_ids: List[str],
+    ) -> Dict[str, Dict[str, Any]]:
+        if not account_ids:
+            return {}
+        placeholders = ",".join("?" for _ in account_ids)
+        run_rows = self._query_rows(
+            conn,
+            f"""
+            SELECT
+                r.run_id, r.account_id, r.trade_day_utc, r.started_at_utc,
+                r.completed_at_utc, r.status, r.message
+            FROM runs r
+            INNER JOIN (
+                SELECT account_id, MAX(started_at_utc) AS max_started_at_utc
+                FROM runs
+                WHERE account_id IN ({placeholders})
+                GROUP BY account_id
+            ) latest
+                ON latest.account_id = r.account_id
+               AND latest.max_started_at_utc = r.started_at_utc
+            """,
+            tuple(account_ids),
+        )
+        if not run_rows:
+            return {}
+
+        run_ids = [str(row.get("run_id") or "") for row in run_rows if row.get("run_id")]
+        positions_by_run: Dict[str, List[Dict[str, Any]]] = {run_id: [] for run_id in run_ids}
+        if run_ids:
+            run_placeholders = ",".join("?" for _ in run_ids)
+            position_rows = self._query_rows(
+                conn,
+                f"""
+                SELECT run_id, symbol, status, opened_at_utc, entry_price, sl_price
+                FROM positions
+                WHERE run_id IN ({run_placeholders})
+                ORDER BY opened_at_utc ASC, id ASC
+                """,
+                tuple(run_ids),
+            )
+            for position in position_rows:
+                positions_by_run.setdefault(str(position.get("run_id") or ""), []).append(position)
+
+        wait_states = self._entry_wait_states_from_db(conn, account_ids)
+        progress_by_account: Dict[str, Dict[str, Any]] = {}
+        for run in run_rows:
+            account_id = str(run.get("account_id") or "").strip()
+            run_id = str(run.get("run_id") or "").strip()
+            if not account_id or not run_id:
+                continue
+
+            positions = positions_by_run.get(run_id, [])
+            opened_symbols = [
+                {
+                    "symbol": str(position.get("symbol") or "").strip(),
+                    "opened_at_local": self._format_utc_as_local(position.get("opened_at_utc")),
+                    "entry_price": self._safe_float(position.get("entry_price")),
+                    "sl_price": self._safe_float(position.get("sl_price")),
+                    "position_status": str(position.get("status") or "UNKNOWN").strip().upper(),
+                }
+                for position in positions
+                if str(position.get("symbol") or "").strip()
+            ]
+
+            wait_state = wait_states.get(account_id) or {}
+            if str(wait_state.get("run_id") or "") != run_id:
+                wait_state = {}
+            raw_pending = wait_state.get("pending")
+            pending_items = raw_pending.values() if isinstance(raw_pending, dict) else []
+            waiting_symbols: List[Dict[str, Any]] = []
+            next_checks: List[datetime] = []
+            for item in pending_items:
+                if not isinstance(item, dict):
+                    continue
+                symbol = str(item.get("symbol") or "").strip()
+                if not symbol:
+                    continue
+                hour_open_raw = str(item.get("hour_open_utc") or "").strip()
+                next_check: Optional[datetime] = None
+                if hour_open_raw:
+                    try:
+                        parsed_hour_open = datetime.fromisoformat(hour_open_raw)
+                        if parsed_hour_open.tzinfo is None:
+                            parsed_hour_open = parsed_hour_open.replace(tzinfo=timezone.utc)
+                        next_check = parsed_hour_open.astimezone(timezone.utc) + timedelta(hours=1)
+                    except ValueError:
+                        next_check = None
+                if next_check is not None:
+                    next_checks.append(next_check)
+                waiting_symbols.append(
+                    {
+                        "symbol": symbol,
+                        "signal_time_local": self._format_utc_as_local(item.get("signal_time_utc")),
+                        "observing_hour_local": self._format_utc_as_local(hour_open_raw),
+                        "next_check_local": self._format_utc_as_local(next_check.isoformat()) if next_check else None,
+                    }
+                )
+
+            message = str(run.get("message") or "").strip()
+            persisted_opened = self._run_message_count(message, "opened", default=len(opened_symbols)) or 0
+            opened_count = max(len(opened_symbols), persisted_opened)
+            failed_count = self._run_message_count(message, "failed", default=0) or 0
+            entry_failed_count = self._run_message_count(message, "entry_failed", default=None)
+            exit_setup_failed_count = self._run_message_count(message, "exit_setup_failed", default=0) or 0
+            if entry_failed_count is None:
+                entry_failed_count = max(0, failed_count - exit_setup_failed_count)
+            skipped_count = self._run_message_count(message, "skipped_existing", default=0) or 0
+            waiting_count = len(waiting_symbols)
+            # Exit-setup failures already had an entry fill and are included in opened_count.
+            target_count = opened_count + waiting_count + entry_failed_count + skipped_count
+            run_status = str(run.get("status") or "UNKNOWN").strip().upper()
+            if waiting_count > 0:
+                progress_status = "WAITING"
+            elif run_status == "FAILED":
+                progress_status = "FAILED"
+            elif failed_count > 0:
+                progress_status = "PARTIAL"
+            elif run_status == "SUCCESS":
+                progress_status = "COMPLETED"
+            elif run_status == "SKIPPED":
+                progress_status = "SKIPPED"
+            else:
+                progress_status = "RUNNING"
+
+            deadline_raw = str(wait_state.get("deadline_utc") or "").strip()
+            updated_raw = str(wait_state.get("updated_at_utc") or "").strip()
+            event_time = updated_raw or run.get("completed_at_utc") or run.get("started_at_utc")
+            started_at_local = self._format_utc_as_local(run.get("started_at_utc"))
+            is_today = bool(
+                started_at_local
+                and started_at_local[:10] == datetime.now(self.local_tz).date().isoformat()
+            )
+            progress_by_account[account_id] = {
+                "run_id": run_id,
+                "trade_day_utc": run.get("trade_day_utc"),
+                "is_today": is_today,
+                "status": progress_status,
+                "target_count": target_count,
+                "opened_count": opened_count,
+                "waiting_count": waiting_count,
+                "failed_count": failed_count,
+                "entry_failed_count": entry_failed_count,
+                "exit_setup_failed_count": exit_setup_failed_count,
+                "skipped_count": skipped_count,
+                "opened_symbols": opened_symbols,
+                "waiting_symbols": waiting_symbols,
+                "next_check_local": self._format_utc_as_local(min(next_checks).isoformat()) if next_checks else None,
+                "deadline_local": self._format_utc_as_local(deadline_raw),
+                "started_at_local": started_at_local,
+                "updated_at_local": self._format_utc_as_local(event_time),
+            }
+        return progress_by_account
+
     @staticmethod
     def _entry_wait_states_from_db(
         conn: sqlite3.Connection,
@@ -1829,8 +1985,13 @@ class DashboardDataProvider:
                     list(by_account.keys()),
                     conn=conn,
                 )
+                entry_progresses = self._entry_progresses_from_db(
+                    conn,
+                    list(by_account.keys()),
+                )
                 for aid, row in by_account.items():
                     row["tasks"] = task_statuses.get(aid, self._task_status_template())
+                    row["entry_progress"] = entry_progresses.get(aid)
                     # 为 readonly 账户添加交易统计
                     if self.account_modes.get(aid, "full") == "readonly":
                         fetcher = self.trade_stats_fetchers.get(aid)
@@ -3577,6 +3738,47 @@ ACCOUNTS_OVERVIEW_HTML = """<!doctype html>
     .actions { display:flex; gap:8px; margin-top: 12px; }
     .btn { text-decoration:none; color:#081018; background:var(--accent); border-radius:8px; padding:6px 10px; font-size:12px; font-weight:700; }
     .btn.alt { background: transparent; border: 1px solid var(--line); color: var(--text); }
+    .entry-progress-panel { margin-top:22px; }
+    .entry-progress-heading { display:flex; align-items:flex-end; justify-content:space-between; gap:16px; margin-bottom:10px; }
+    .entry-progress-heading .section-title { margin:0; }
+    .entry-progress-updated { color:var(--muted); font-size:12px; }
+    .entry-progress-shell { border-top:1px solid #265067; border-bottom:1px solid #18384c; background:rgba(8,21,31,0.58); }
+    .entry-progress-header, .entry-progress-row { display:grid; grid-template-columns:120px minmax(250px,0.9fr) 190px minmax(280px,1.4fr) 170px; column-gap:16px; align-items:center; }
+    .entry-progress-header { min-height:38px; padding:0 14px; color:#7fa5bb; background:rgba(17,38,52,0.62); font-size:10px; font-weight:700; text-transform:uppercase; }
+    .entry-progress-row { min-height:92px; padding:12px 14px; border-top:1px solid rgba(35,71,92,0.58); }
+    .entry-progress-account { display:flex; flex-direction:column; gap:4px; }
+    .entry-progress-account strong { color:var(--accent); font-size:15px; }
+    .entry-progress-account span { color:var(--muted); font-size:10px; }
+    .entry-progress-meter-wrap { min-width:0; }
+    .entry-progress-counts { display:flex; align-items:baseline; gap:12px; margin-bottom:8px; color:#cfe5f3; font-size:11px; }
+    .entry-progress-counts strong { color:#f0f8ff; font-size:18px; }
+    .entry-progress-meter { display:flex; width:100%; height:7px; overflow:hidden; background:#142a38; border:1px solid #284b5e; }
+    .entry-progress-meter-opened { background:var(--ok); }
+    .entry-progress-meter-waiting { background:var(--warn); }
+    .entry-progress-meter-failed { background:var(--bad); }
+    .entry-progress-state { display:flex; flex-direction:column; align-items:flex-start; gap:6px; }
+    .entry-progress-status { font-size:12px; font-weight:800; }
+    .entry-progress-status.status-warn { color:var(--warn); }
+    .entry-progress-next { color:var(--muted); font-size:10px; line-height:1.4; }
+    .entry-progress-symbols { min-width:0; display:flex; flex-direction:column; gap:6px; }
+    .entry-progress-symbol-line { display:grid; grid-template-columns:48px minmax(0,1fr); gap:8px; font-size:11px; line-height:1.45; }
+    .entry-progress-symbol-label { color:#789db2; }
+    .entry-progress-symbol-list { color:#c7dce9; word-break:break-word; }
+    .entry-progress-symbol-list.waiting { color:#ffd08a; }
+    .entry-progress-deadline { color:#9bb8ca; font-size:11px; line-height:1.5; }
+    .entry-progress-empty { padding:20px 14px; color:var(--muted); font-size:12px; }
+    @media (max-width: 900px) {
+      .entry-progress-header, .entry-progress-row { grid-template-columns:100px minmax(210px,1fr) 150px minmax(230px,1fr); }
+      .entry-progress-deadline, .entry-progress-header span:last-child { display:none; }
+    }
+    @media (max-width: 640px) {
+      .entry-progress-heading { align-items:flex-start; flex-direction:column; gap:5px; }
+      .entry-progress-header { display:none; }
+      .entry-progress-row { grid-template-columns:1fr; row-gap:10px; min-height:0; padding:14px 2px; }
+      .entry-progress-account { flex-direction:row; align-items:baseline; justify-content:space-between; }
+      .entry-progress-state { flex-direction:row; align-items:center; justify-content:space-between; }
+      .entry-progress-deadline { display:block; }
+    }
   </style>
 </head>
 <body>
@@ -3584,6 +3786,18 @@ ACCOUNTS_OVERVIEW_HTML = """<!doctype html>
     <h1 class="title">Bubble Buster 账户总览</h1>
     <p class="sub">自动刷新：<span id="refresh">__REFRESH_SEC__</span>s</p>
     <section id="cards" class="grid"></section>
+    <section class="entry-progress-panel">
+      <div class="entry-progress-heading">
+        <h2 class="section-title">今日开单进度</h2>
+        <div id="entry-progress-updated" class="entry-progress-updated">数据更新时间 --</div>
+      </div>
+      <div class="entry-progress-shell">
+        <div class="entry-progress-header">
+          <span>账号</span><span>进度</span><span>状态</span><span>Symbol</span><span>等待截止</span>
+        </div>
+        <div id="entry-progress-board"></div>
+      </div>
+    </section>
     <section class="task-panel">
       <div class="task-panel-head">
         <div>
@@ -3608,6 +3822,8 @@ ACCOUNTS_OVERVIEW_HTML = """<!doctype html>
   if (!pathPrefix) pathPrefix = "";
   var summaryApi = pathPrefix + "/api/accounts/summary";
   var cards = document.getElementById("cards");
+  var entryProgressBoard = document.getElementById("entry-progress-board");
+  var entryProgressUpdated = document.getElementById("entry-progress-updated");
   var taskBoard = document.getElementById("task-board");
   var taskUpdatedAt = document.getElementById("task-updated-at");
   var curveCache = {};
@@ -3906,6 +4122,83 @@ ACCOUNTS_OVERVIEW_HTML = """<!doctype html>
     return html;
   }
 
+  function entryProgressStatus(status) {
+    var raw = String(status || "UNKNOWN").toUpperCase();
+    if (raw === "COMPLETED") return { text: "已完成", cls: "status-ok" };
+    if (raw === "WAITING") return { text: "等待1h阴线", cls: "status-warn" };
+    if (raw === "RUNNING") return { text: "执行中", cls: "status-warn" };
+    if (raw === "PARTIAL") return { text: "部分完成", cls: "status-warn" };
+    if (raw === "SKIPPED") return { text: "已跳过", cls: "status-warn" };
+    if (raw === "FAILED") return { text: "失败", cls: "status-bad" };
+    return { text: "未开始", cls: "status-warn" };
+  }
+
+  function compactLocalTime(value) {
+    var raw = String(value || "");
+    return raw.length >= 16 ? raw.slice(11, 16) : raw;
+  }
+
+  function progressSymbolText(items, includeTime) {
+    var rows = Object.prototype.toString.call(items) === "[object Array]" ? items : [];
+    var parts = [];
+    for (var i = 0; i < rows.length; i += 1) {
+      var item = rows[i] || {};
+      var symbol = String(item.symbol || "");
+      if (!symbol) continue;
+      var time = includeTime ? compactLocalTime(item.opened_at_local || item.next_check_local) : "";
+      parts.push(symbol + (time ? " " + time : ""));
+    }
+    return parts.join(" · ");
+  }
+
+  function renderEntryProgress() {
+    if (!entryProgressBoard) return;
+    var rows = summaryRows || [];
+    var html = "";
+    var latest = "";
+    for (var i = 0; i < rows.length; i += 1) {
+      var row = rows[i] || {};
+      if (String(row.mode || "full").toLowerCase() !== "full") continue;
+      var progress = row.entry_progress || null;
+      var aid = escapeHtml(String(row.account_id || ""));
+      if (!progress || progress.is_today === false) {
+        html += '<div class="entry-progress-row">'
+          + '<div class="entry-progress-account"><strong>' + aid + '</strong><span>今日尚未执行</span></div>'
+          + '<div class="entry-progress-meter-wrap"><div class="entry-progress-counts"><strong>0</strong><span>/ 0</span></div><div class="entry-progress-meter"></div></div>'
+          + '<div class="entry-progress-state"><span class="entry-progress-status status-warn">未开始</span><span class="entry-progress-next">--</span></div>'
+          + '<div class="entry-progress-symbols"><div class="entry-progress-symbol-line"><span class="entry-progress-symbol-label">Symbol</span><span class="entry-progress-symbol-list">--</span></div></div>'
+          + '<div class="entry-progress-deadline">--</div></div>';
+        continue;
+      }
+      var target = Math.max(0, Number(progress.target_count || 0));
+      var opened = Math.max(0, Number(progress.opened_count || 0));
+      var waiting = Math.max(0, Number(progress.waiting_count || 0));
+      var failed = Math.max(0, Number(progress.failed_count || 0));
+      var entryFailed = Math.max(0, Number(progress.entry_failed_count == null ? failed : progress.entry_failed_count));
+      var denom = target > 0 ? target : Math.max(1, opened + waiting + failed);
+      var openedPct = Math.min(100, opened / denom * 100);
+      var waitingPct = Math.min(100 - openedPct, waiting / denom * 100);
+      var failedPct = Math.min(100 - openedPct - waitingPct, entryFailed / denom * 100);
+      var status = entryProgressStatus(progress.status);
+      var openedText = progressSymbolText(progress.opened_symbols, true) || "--";
+      var waitingText = progressSymbolText(progress.waiting_symbols, true) || "--";
+      var nextText = progress.next_check_local ? ("下次检查 " + compactLocalTime(progress.next_check_local)) : "无等待任务";
+      var deadlineText = progress.deadline_local ? ("截止 " + String(progress.deadline_local)) : "--";
+      var updated = String(progress.updated_at_local || "");
+      if (updated && (!latest || updated > latest)) latest = updated;
+      html += '<div class="entry-progress-row">'
+        + '<div class="entry-progress-account"><strong>' + aid + '</strong><span>' + escapeHtml(String(progress.started_at_local || "--")) + '</span></div>'
+        + '<div class="entry-progress-meter-wrap"><div class="entry-progress-counts"><strong>' + opened + '</strong><span>/ ' + target + ' 已开</span><span>等待 ' + waiting + '</span><span>失败 ' + failed + '</span></div>'
+        + '<div class="entry-progress-meter"><span class="entry-progress-meter-opened" style="width:' + openedPct.toFixed(2) + '%"></span><span class="entry-progress-meter-waiting" style="width:' + waitingPct.toFixed(2) + '%"></span><span class="entry-progress-meter-failed" style="width:' + failedPct.toFixed(2) + '%"></span></div></div>'
+        + '<div class="entry-progress-state"><span class="entry-progress-status ' + status.cls + '">' + status.text + '</span><span class="entry-progress-next">' + escapeHtml(nextText) + '</span></div>'
+        + '<div class="entry-progress-symbols"><div class="entry-progress-symbol-line"><span class="entry-progress-symbol-label">已开</span><span class="entry-progress-symbol-list">' + escapeHtml(openedText) + '</span></div>'
+        + '<div class="entry-progress-symbol-line"><span class="entry-progress-symbol-label">等待</span><span class="entry-progress-symbol-list waiting">' + escapeHtml(waitingText) + '</span></div></div>'
+        + '<div class="entry-progress-deadline">' + escapeHtml(deadlineText) + '</div></div>';
+    }
+    entryProgressBoard.innerHTML = html || '<div class="entry-progress-empty">暂无完整策略账号</div>';
+    if (entryProgressUpdated) entryProgressUpdated.textContent = "数据更新时间 " + (latest || "--");
+  }
+
   function createObserver() {
     if (curveObserver || !window.IntersectionObserver) return;
     curveObserver = new IntersectionObserver(function (entries) {
@@ -4149,6 +4442,7 @@ ACCOUNTS_OVERVIEW_HTML = """<!doctype html>
       try { payload = JSON.parse(xhr.responseText || "{}"); } catch (e) { return; }
       summaryRows = payload.accounts || [];
       renderCards();
+      renderEntryProgress();
       renderTaskBoard();
     };
     xhr.send();
