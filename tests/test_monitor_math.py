@@ -10,6 +10,7 @@ from infra.binance_top10_monitor import (
     build_top_gainers,
     calculate_daily_percentage_change,
     get_open_price_at_midnight,
+    MarketDataUnavailableError,
 )
 
 
@@ -31,6 +32,7 @@ class MonitorMathTest(unittest.TestCase):
         self.assertEqual(mock_klines.call_count, 1)
         kwargs = mock_klines.call_args.kwargs
         self.assertEqual(kwargs.get("limit"), 1)
+        self.assertEqual(kwargs.get("endTime"), midnight + (60 * 60 * 1000) - 1)
         self.assertIs(kwargs.get("rate_limiter"), limiter)
 
     @patch("infra.binance_top10_monitor.get_klines_data")
@@ -42,7 +44,7 @@ class MonitorMathTest(unittest.TestCase):
 
         price = get_open_price_at_midnight("OPNUSDT", midnight, rate_limiter=limiter)
 
-        self.assertAlmostEqual(price or 0.0, 2.5)
+        self.assertIsNone(price)
         self.assertEqual(mock_klines.call_count, 1)
 
     @patch("infra.binance_top10_monitor.get_klines_data")
@@ -87,6 +89,12 @@ class MonitorMathTest(unittest.TestCase):
         self.assertEqual(called_symbols, {"AAAUSDT", "BBBUSDT"})
         self.assertEqual(mock_exchange_info.call_args.kwargs.get("request_weight"), 1)
         self.assertEqual(mock_ticker.call_args.kwargs.get("request_weight"), 40)
+
+    @patch("infra.binance_top10_monitor.get_exchange_info", return_value=[])
+    def test_build_top_gainers_does_not_treat_exchange_outage_as_empty_success(self, mock_exchange_info) -> None:
+        with self.assertRaises(MarketDataUnavailableError):
+            build_top_gainers(top_n=2)
+        mock_exchange_info.assert_called_once()
 
 
 if __name__ == "__main__":

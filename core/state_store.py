@@ -92,6 +92,9 @@ class StateStore:
             conn.close()
 
     def init_schema(self) -> None:
+        # Migrate legacy account columns before schema.sql creates account-scoped indexes.
+        # This also makes direct callers (including the dashboard) safe on old databases.
+        self.migrate_to_multi_account(default_account_id=self.account_id)
         if self.schema_path:
             with open(self.schema_path, "r", encoding="utf-8") as f:
                 schema_sql = f.read()
@@ -101,9 +104,10 @@ class StateStore:
             conn.execute("PRAGMA foreign_keys = OFF")
             conn.execute("PRAGMA journal_mode = WAL")
             if schema_sql:
-                # Older databases do not have this column yet, while the current
-                # schema creates an index for it. Add it before executescript.
-                self._ensure_account_id_column(conn, "order_events", self.account_id)
+                # The migration above normally adds these columns. Keep this guard
+                # for databases created concurrently between the two connections.
+                for table_name in ACCOUNT_ID_MIGRATION_TABLES:
+                    self._ensure_account_id_column(conn, table_name, self.account_id)
                 conn.executescript(schema_sql)
             else:
                 raise ValueError("schema_path is required for StateStore.init_schema")
@@ -250,6 +254,11 @@ class StateStore:
     def _backfill_order_event_account_ids(conn: sqlite3.Connection) -> None:
         columns = conn.execute("PRAGMA table_info(order_events)").fetchall()
         if not any(str(column["name"]) == "account_id" for column in columns):
+            return
+        positions_row = conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='positions'"
+        ).fetchone()
+        if positions_row is None:
             return
         run_columns = conn.execute("PRAGMA table_info(runs)").fetchall()
         if not any(str(column["name"]) == "account_id" for column in run_columns):
@@ -1037,7 +1046,7 @@ class StateStore:
                 """
                 SELECT id, account_id, captured_at_utc, balance_usdt, source, error, created_at_utc
                 FROM wallet_snapshots
-                WHERE account_id = ?
+                WHERE account_id = ? AND error IS NULL
                 ORDER BY id DESC
                 LIMIT 1
                 """,
@@ -1059,7 +1068,10 @@ class StateStore:
                     """
                     SELECT id, account_id, captured_at_utc, balance_usdt, source, error, created_at_utc
                     FROM wallet_snapshots
-                    WHERE account_id = ? AND captured_at_utc >= ? AND captured_at_utc <= ?
+                    WHERE account_id = ?
+                      AND error IS NULL
+                      AND captured_at_utc >= ?
+                      AND captured_at_utc <= ?
                     ORDER BY balance_usdt ASC, captured_at_utc ASC, id ASC
                     LIMIT 1
                     """,
@@ -1070,7 +1082,9 @@ class StateStore:
                     """
                     SELECT id, account_id, captured_at_utc, balance_usdt, source, error, created_at_utc
                     FROM wallet_snapshots
-                    WHERE account_id = ? AND captured_at_utc >= ?
+                    WHERE account_id = ?
+                      AND error IS NULL
+                      AND captured_at_utc >= ?
                     ORDER BY balance_usdt ASC, captured_at_utc ASC, id ASC
                     LIMIT 1
                     """,
@@ -1174,7 +1188,7 @@ class StateStore:
                 """
                 SELECT captured_at_utc
                 FROM wallet_snapshots
-                WHERE account_id = ?
+                WHERE account_id = ? AND error IS NULL
                 ORDER BY captured_at_utc ASC, id ASC
                 LIMIT 1
                 """,
@@ -1237,17 +1251,26 @@ class StateStore:
             )
             return int(cursor.rowcount or 0) > 0
 
-    def get_latest_cashflow_event_time(self, asset: str = "USDT") -> Optional[str]:
+    def get_latest_cashflow_event_time(
+        self,
+        asset: str = "USDT",
+        income_type: Optional[str] = None,
+    ) -> Optional[str]:
         with self._connect_ctx() as conn:
+            where = "account_id = ? AND asset = ?"
+            params: List[Any] = [self.account_id, (asset or "USDT").upper()]
+            if income_type:
+                where += " AND income_type = ?"
+                params.append(str(income_type).upper().strip())
             row = conn.execute(
-                """
+                f"""
                 SELECT event_time_utc
                 FROM cashflow_events
-                WHERE account_id = ? AND asset = ?
+                WHERE {where}
                 ORDER BY event_time_utc DESC, id DESC
                 LIMIT 1
                 """,
-                (self.account_id, (asset or "USDT").upper()),
+                tuple(params),
             ).fetchone()
             return str(row["event_time_utc"]) if row is not None else None
 

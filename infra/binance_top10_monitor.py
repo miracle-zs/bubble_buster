@@ -63,6 +63,10 @@ VOLUME_THRESHOLD = LEGACY_SETTINGS['VOLUME_THRESHOLD']
 PROXIES = LEGACY_SETTINGS['PROXIES']
 
 
+class MarketDataUnavailableError(RuntimeError):
+    """Raised when a required ranking data source is unavailable."""
+
+
 class ApiWeightLimiter:
     """Thread-safe weight limiter using a rolling 60-second window."""
 
@@ -130,6 +134,7 @@ def retry(
     delay: float = 1,
     backoff: float = 2,
     default_return_value=None,
+    raise_on_failure: bool = False,
 ):
     """Retry decorator with exponential backoff for transient HTTP calls."""
 
@@ -158,6 +163,8 @@ def retry(
                 return func(*args, **kwargs)
             except requests.exceptions.RequestException as e:
                 logging.error("Final attempt for %s failed with args %s: %s", func.__name__, args, e)
+                if raise_on_failure:
+                    raise
                 if default_return_value is not None:
                     return default_return_value
 
@@ -170,7 +177,7 @@ def retry(
     return decorator
 
 
-@retry(default_return_value=[])
+@retry(default_return_value=[], raise_on_failure=True)
 def get_exchange_info(
     session: Optional[requests.Session] = None,
     base_url: str = BINANCE_API_BASE,
@@ -192,7 +199,7 @@ def get_exchange_info(
     return symbols
 
 
-@retry(default_return_value=[])
+@retry(default_return_value=[], raise_on_failure=True)
 def get_24hr_ticker_data(
     session: Optional[requests.Session] = None,
     base_url: str = BINANCE_API_BASE,
@@ -208,7 +215,7 @@ def get_24hr_ticker_data(
     return response.json()
 
 
-@retry(default_return_value=[])
+@retry(default_return_value=[], raise_on_failure=True)
 def get_klines_data(
     symbol: str,
     interval: str,
@@ -253,38 +260,31 @@ def get_open_price_at_midnight(
     base_url: str = BINANCE_API_BASE,
     rate_limiter: Optional[ApiWeightLimiter] = None,
 ) -> Optional[float]:
-    """Fetches the first available 1h kline open price after UTC midnight."""
+    """Fetch the exact UTC-midnight 1h candle open, without forward fallback."""
+    end_time = midnight_utc_timestamp + (60 * 60 * 1000) - 1
     klines = get_klines_data(
         symbol,
         '1h',
         midnight_utc_timestamp,
+        endTime=end_time,
         limit=1,
         session=session,
         base_url=base_url,
         rate_limiter=rate_limiter,
     )
 
-    if klines:
-        return float(klines[0][1])
+    for row in klines or []:
+        if len(row) < 2:
+            continue
+        try:
+            row_open_time = int(row[0])
+        except (TypeError, ValueError):
+            continue
+        if row_open_time == midnight_utc_timestamp:
+            return float(row[1])
 
-    logging.warning("No immediate UTC-start kline for %s. Expanding forward search window.", symbol)
-    # Fallback: search forward two hours and use the first available 1h kline.
-    end_time_wider = midnight_utc_timestamp + (2 * 60 * 60 * 1000)
-    klines_wider = get_klines_data(
-        symbol,
-        '1h',
-        midnight_utc_timestamp,
-        end_time_wider,
-        session=session,
-        base_url=base_url,
-        rate_limiter=rate_limiter,
-    )
-
-    if not klines_wider:
-        logging.warning("Could not fetch 1-hour klines for %s after UTC midnight.", symbol)
-        return None
-
-    return float(klines_wider[0][1])
+    logging.warning("No exact UTC-midnight 1h kline for %s at %s", symbol, midnight_utc_timestamp)
+    return None
 
 
 def calculate_daily_percentage_change(current_price: float, midnight_open_price: Optional[float]) -> float:
@@ -327,8 +327,7 @@ def build_top_gainers(
         request_weight=1,
     )
     if not symbols:
-        logging.warning("Top10 ranking aborted: no USDT perpetual symbols found")
-        return []
+        raise MarketDataUnavailableError("exchange info unavailable or empty")
     logging.info(
         "Top10 ranking stage done: exchange_info symbols=%s elapsed=%.2fs",
         len(symbols),
@@ -343,8 +342,7 @@ def build_top_gainers(
         request_weight=40,
     )
     if not ticker_data:
-        logging.warning("Top10 ranking aborted: no 24h ticker data")
-        return []
+        raise MarketDataUnavailableError("24h ticker data unavailable or empty")
     logging.info(
         "Top10 ranking stage done: ticker_24hr rows=%s elapsed=%.2fs",
         len(ticker_data),
@@ -397,17 +395,23 @@ def build_top_gainers(
     progress_step = max(1, progress_total // 10)
     progress_count = 0
     missing_open_count = 0
+    kline_error_count = 0
     stage_started = time.perf_counter()
     if workers == 1:
         for item in candidates:
             symbol = str(item['symbol'])
-            midnight_open = get_open_price_at_midnight(
-                symbol,
-                midnight_utc_timestamp,
-                session=session,
-                base_url=base_url,
-                rate_limiter=weight_limiter,
-            )
+            try:
+                midnight_open = get_open_price_at_midnight(
+                    symbol,
+                    midnight_utc_timestamp,
+                    session=session,
+                    base_url=base_url,
+                    rate_limiter=weight_limiter,
+                )
+            except Exception as exc:  # noqa: BLE001
+                logging.warning("Failed to load midnight open for %s: %s", symbol, exc)
+                midnight_open = None
+                kline_error_count += 1
             midnight_open_map[symbol] = midnight_open
             progress_count += 1
             if midnight_open is None:
@@ -445,6 +449,7 @@ def build_top_gainers(
                     logging.warning("Failed to load midnight open for %s: %s", symbol, exc)
                     midnight_open_map[symbol] = None
                     missing_open_count += 1
+                    kline_error_count += 1
                 progress_count += 1
                 if progress_count % progress_step == 0 or progress_count == progress_total:
                     progress_pct = (progress_count * 100.0) / max(1, progress_total)
@@ -461,6 +466,10 @@ def build_top_gainers(
         missing_open_count,
         progress_total,
     )
+    if kline_error_count >= progress_total:
+        raise MarketDataUnavailableError(
+            f"midnight kline data unavailable for all candidates ({kline_error_count}/{progress_total})"
+        )
 
     leaderboard = []
     for item in candidates:

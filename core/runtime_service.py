@@ -1,4 +1,5 @@
 import logging
+import inspect
 import threading
 import time
 from concurrent.futures import Future, ThreadPoolExecutor, wait
@@ -26,6 +27,7 @@ class ServiceRuntimeConfig:
     manager_max_catch_up_runs: int
     loop_sleep_sec: float
     run_manage_on_startup: bool
+    daily_loss_cut_grace_min: int = 30
     max_account_workers: int = 1
     account_failure_threshold: int = 3
     account_cooldown_cycles: int = 2
@@ -120,6 +122,7 @@ class StrategyRuntimeService:
             thread_name_prefix="entry",
         )
         self._entry_futures: Dict[Future, str] = {}
+        self._entry_future_trade_day_by_future: Dict[Future, date] = {}
         self._entry_future_started_at_by_account: Dict[str, float] = {}
         self._entry_future_warned_by_account: Dict[str, bool] = {}
         self._manage_executor = ThreadPoolExecutor(
@@ -132,6 +135,7 @@ class StrategyRuntimeService:
             thread_name_prefix="scheduled",
         )
         self._scheduled_futures_by_task_account: Dict[tuple[str, str], Future] = {}
+        self._scheduled_future_day_by_task_account: Dict[tuple[str, str], date] = {}
 
     def _entry_schedule_for_day(self, day: date, account_id: Optional[str] = None) -> datetime:
         account_ctx = self.account_runtimes.get(account_id or "", {})
@@ -226,6 +230,7 @@ class StrategyRuntimeService:
                 continue
 
             self._entry_futures.pop(future, None)
+            trade_day = self._entry_future_trade_day_by_future.pop(future, now_local.date())
             self._entry_future_started_at_by_account.pop(aid, None)
             self._entry_future_warned_by_account.pop(aid, None)
             try:
@@ -234,7 +239,7 @@ class StrategyRuntimeService:
                 LOGGER.warning("service entry background failed account=%s: %s", aid, exc)
                 continue
             if self._is_entry_result_complete(result):
-                self._last_entry_local_date_by_account[aid] = now_local.date()
+                self._last_entry_local_date_by_account[aid] = trade_day
             LOGGER.info("service entry background result account=%s: %s", aid, result)
 
     def _run_entry_if_due(self, now_local: datetime) -> None:
@@ -250,6 +255,7 @@ class StrategyRuntimeService:
 
         running_account_ids = set(self._entry_futures.values())
         due_account_ids = []
+        pending_wait_by_account: Dict[str, bool] = {}
         for aid in account_ids:
             if aid in running_account_ids:
                 continue
@@ -259,6 +265,7 @@ class StrategyRuntimeService:
                 and hasattr(strategy, "has_pending_entry_wait")
                 and strategy.has_pending_entry_wait()  # type: ignore[attr-defined]
             )
+            pending_wait_by_account[aid] = has_pending_wait
             if has_pending_wait or self._should_run_entry(aid, now_local):
                 due_account_ids.append(aid)
         if not due_account_ids:
@@ -271,8 +278,19 @@ class StrategyRuntimeService:
             if strategy is None:
                 LOGGER.warning("service entry skipped account=%s: strategy_missing", aid)
                 continue
-            future = self._entry_executor.submit(self._run_entry_with_shared, strategy, shared_top_gainers)
+            trade_day = now_local.date()
+            if pending_wait_by_account.get(aid, False) and hasattr(strategy, "get_pending_entry_trade_day"):
+                pending_trade_day = strategy.get_pending_entry_trade_day()  # type: ignore[attr-defined]
+                if isinstance(pending_trade_day, date):
+                    trade_day = pending_trade_day
+            future = self._entry_executor.submit(
+                self._run_entry_with_shared,
+                strategy,
+                shared_top_gainers,
+                trade_day,
+            )
             self._entry_futures[future] = aid
+            self._entry_future_trade_day_by_future[future] = trade_day
             self._entry_future_started_at_by_account[aid] = time.monotonic()
             self._entry_future_warned_by_account[aid] = False
             submitted.append(aid)
@@ -307,13 +325,26 @@ class StrategyRuntimeService:
         self,
         strategy: object,
         shared_top_gainers: Optional[List[Dict[str, Any]]],
+        trade_day: date,
     ) -> Dict[str, object]:
         run_entry = getattr(strategy, "run_entry", None)
         if run_entry is None:
             raise RuntimeError("strategy_missing")
-        if shared_top_gainers is None:
-            return run_entry()  # type: ignore[misc]
-        return run_entry(shared_top_gainers=shared_top_gainers)  # type: ignore[misc]
+        kwargs: Dict[str, object] = {}
+        try:
+            parameters = inspect.signature(run_entry).parameters
+            accepts_kwargs = any(parameter.kind == inspect.Parameter.VAR_KEYWORD for parameter in parameters.values())
+            if "trade_day_utc" in parameters or accepts_kwargs:
+                kwargs["trade_day_utc"] = trade_day.isoformat()
+            if shared_top_gainers is not None:
+                kwargs["shared_top_gainers"] = shared_top_gainers
+        except (TypeError, ValueError):
+            # Builtin/mock callables may not expose a signature; actual strategies
+            # accept both keywords, so keep the complete call as the fallback.
+            kwargs = {"trade_day_utc": trade_day.isoformat()}
+            if shared_top_gainers is not None:
+                kwargs["shared_top_gainers"] = shared_top_gainers
+        return run_entry(**kwargs)  # type: ignore[misc]
 
     def _build_shared_top_gainers(self, account_ids: List[str]) -> Optional[List[Dict[str, Any]]]:
         if len(account_ids) <= 1:
@@ -397,6 +428,7 @@ class StrategyRuntimeService:
         self,
         calls: Dict[str, Callable[[], object]],
         task_name: str,
+        task_day: Optional[date] = None,
     ) -> Dict[str, object]:
         if not calls:
             return {}
@@ -410,13 +442,25 @@ class StrategyRuntimeService:
                     results[aid] = {"slow": True, "running": True}
                     continue
                 self._scheduled_futures_by_task_account.pop(key, None)
+                existing_day = self._scheduled_future_day_by_task_account.pop(key, None)
                 try:
-                    results[aid] = existing.result()
+                    existing_result = existing.result()
                 except Exception as exc:  # noqa: BLE001
-                    results[aid] = {"error": str(exc)}
-                continue
+                    existing_result = {"error": str(exc)}
+                if task_day is None or existing_day is None or existing_day == task_day:
+                    results[aid] = existing_result
+                    continue
+                LOGGER.warning(
+                    "Discard completed stale scheduled task result and submit current day: task=%s account=%s previous_day=%s current_day=%s",
+                    task_name,
+                    aid,
+                    existing_day,
+                    task_day,
+                )
             future = self._scheduled_executor.submit(call)
             self._scheduled_futures_by_task_account[key] = future
+            if task_day is not None:
+                self._scheduled_future_day_by_task_account[key] = task_day
             futures[future] = aid
         if not futures:
             return results
@@ -425,6 +469,7 @@ class StrategyRuntimeService:
         for future in done:
             aid = futures[future]
             self._scheduled_futures_by_task_account.pop((task_name, aid), None)
+            self._scheduled_future_day_by_task_account.pop((task_name, aid), None)
             try:
                 results[aid] = future.result()
             except Exception as exc:  # noqa: BLE001
@@ -453,33 +498,32 @@ class StrategyRuntimeService:
         )
 
     def _run_daily_loss_cut_if_due(self, now_local: datetime) -> None:
-        if not self.cfg.daily_loss_cut_enabled:
-            return
         today = now_local.date()
         if self._last_loss_cut_local_date == today:
             return
         target = self._loss_cut_schedule_for_day(today)
         if now_local < target:
             return
-        window_end = target + timedelta(minutes=1)
+        window_minutes = max(1, int(getattr(self.cfg, "daily_loss_cut_grace_min", 30)))
+        window_end = target + timedelta(minutes=window_minutes)
         if now_local >= window_end:
             if self._last_loss_cut_skipped_date != today:
                 LOGGER.warning(
-                    "Daily loss-cut missed strict window, skip for today: now=%s target=%s window=1min",
+                    "Daily loss-cut missed execution window, skip for today: now=%s target=%s window=%smin",
                     now_local.isoformat(timespec="seconds"),
                     target.isoformat(timespec="seconds"),
+                    window_minutes,
                 )
                 self._last_loss_cut_skipped_date = today
             self._last_loss_cut_local_date = today
             return
 
-        self._last_loss_cut_local_date = today
         account_ids = []
         for aid, ctx in self.account_runtimes.items():
             mode = str(ctx.get("mode", "full")).strip().lower()
             if mode not in {"full", "loss_cut_only"}:
                 continue
-            enabled_raw = ctx.get("daily_loss_cut_enabled", True)
+            enabled_raw = ctx.get("daily_loss_cut_enabled", self.cfg.daily_loss_cut_enabled)
             if isinstance(enabled_raw, str):
                 enabled = enabled_raw.strip().lower() in {"1", "true", "yes", "on"}
             else:
@@ -489,6 +533,7 @@ class StrategyRuntimeService:
             account_ids.append(aid)
         if not account_ids:
             LOGGER.warning("service daily loss-cut skipped: no account is enabled")
+            self._last_loss_cut_local_date = today
             return
 
         results: Dict[str, object] = {}
@@ -499,7 +544,13 @@ class StrategyRuntimeService:
                 results[aid] = {"error": "manager_missing"}
             else:
                 calls[aid] = manager.run_daily_loss_cut  # type: ignore[attr-defined]
-        results.update(self._run_account_task_calls(calls, "daily-loss-cut"))
+        results.update(self._run_account_task_calls(calls, "daily-loss-cut", task_day=today))
+        if len(results) == len(account_ids) and all(
+            self._account_task_succeeded(results.get(aid)) for aid in account_ids
+        ):
+            self._last_loss_cut_local_date = today
+        else:
+            LOGGER.warning("service daily loss-cut not fully successful, will retry in the same window: %s", results)
         LOGGER.info("service daily loss-cut result: %s", results)
 
     def _noon_protection_schedule_for_day(self, day: date) -> datetime:
@@ -515,8 +566,6 @@ class StrategyRuntimeService:
         )
 
     def _run_noon_protection_if_due(self, now_local: datetime) -> None:
-        if not self.cfg.noon_protection_enabled:
-            return
         today = now_local.date()
         target = self._noon_protection_schedule_for_day(today)
         if self._noon_protection_retry_local_date != today:
@@ -551,11 +600,17 @@ class StrategyRuntimeService:
         if is_retry:
             account_ids = list(self._noon_protection_pending_symbols_by_account)
         else:
-            account_ids = [
-                aid
-                for aid, ctx in self.account_runtimes.items()
-                if str(ctx.get("mode", "full")).strip().lower() in {"full", "loss_cut_only"}
-            ]
+            account_ids = []
+            for aid, ctx in self.account_runtimes.items():
+                if str(ctx.get("mode", "full")).strip().lower() not in {"full", "loss_cut_only"}:
+                    continue
+                enabled_raw = ctx.get("noon_protection_enabled", self.cfg.noon_protection_enabled)
+                if isinstance(enabled_raw, str):
+                    enabled = enabled_raw.strip().lower() in {"1", "true", "yes", "on"}
+                else:
+                    enabled = bool(enabled_raw)
+                if enabled:
+                    account_ids.append(aid)
         self._last_noon_protection_local_date = today
         if not account_ids:
             LOGGER.warning("service noon protection skipped: no account is enabled")
@@ -584,7 +639,7 @@ class StrategyRuntimeService:
                         day_start_utc=day_start_utc,
                         noon_time_utc=noon_time_utc,
                     )
-        results.update(self._run_account_task_calls(calls, "noon-protection"))
+        results.update(self._run_account_task_calls(calls, "noon-protection", task_day=today))
         LOGGER.info("service noon protection result: %s", results)
 
         pending_symbols_by_account: Dict[str, Optional[Set[str]]] = {}
@@ -1013,17 +1068,22 @@ class StrategyRuntimeService:
             self.cfg.entry_misfire_grace_min,
             "on" if self.cfg.entry_catchup_enabled else "off",
         )
-        while not stopper.is_set():
-            try:
-                self.run_cycle()
-            except Exception as exc:  # noqa: BLE001
-                LOGGER.exception("runtime service cycle failed: %s", exc)
-            stopper.wait(timeout=max(0.2, self.cfg.loop_sleep_sec))
-        for ctx in self.account_runtimes.values():
-            strategy = ctx.get("strategy")
-            if strategy is not None and hasattr(strategy, "request_entry_wait_stop"):
-                strategy.request_entry_wait_stop()  # type: ignore[attr-defined]
-        self._entry_executor.shutdown(wait=True, cancel_futures=True)
-        self._manage_executor.shutdown(wait=True, cancel_futures=True)
-        self._scheduled_executor.shutdown(wait=True, cancel_futures=True)
-        LOGGER.info("runtime service stopped")
+        try:
+            while not stopper.is_set():
+                try:
+                    self.run_cycle()
+                except Exception as exc:  # noqa: BLE001
+                    LOGGER.exception("runtime service cycle failed: %s", exc)
+                stopper.wait(timeout=max(0.2, self.cfg.loop_sleep_sec))
+        finally:
+            for ctx in self.account_runtimes.values():
+                strategy = ctx.get("strategy")
+                if strategy is not None and hasattr(strategy, "request_entry_wait_stop"):
+                    try:
+                        strategy.request_entry_wait_stop()  # type: ignore[attr-defined]
+                    except Exception as exc:  # noqa: BLE001
+                        LOGGER.warning("failed to stop entry wait during service shutdown: %s", exc)
+            self._entry_executor.shutdown(wait=True, cancel_futures=True)
+            self._manage_executor.shutdown(wait=True, cancel_futures=True)
+            self._scheduled_executor.shutdown(wait=True, cancel_futures=True)
+            LOGGER.info("runtime service stopped")

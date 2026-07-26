@@ -606,6 +606,31 @@ class StrategyRebalanceTest(unittest.TestCase):
         self.assertEqual(state["run_id"], "run-1")
         self.assertIn("deadline_utc", state)
 
+    def test_bearish_wait_restore_drops_symbol_that_is_already_active(self) -> None:
+        client = MagicMock()
+        state = {}
+        store = MagicMock()
+        store.get_lock_state.side_effect = lambda _name: dict(state)
+        store.set_lock_state.side_effect = lambda _name, payload: (state.clear(), state.update(payload))
+        store.list_active_symbols.return_value = set()
+        strategy = self._build_strategy(
+            client,
+            store,
+            rebalance_enabled=False,
+            entry_wait_bearish_hour_enabled=True,
+        )
+        candidates = strategy._build_ranked_entries(
+            [{"symbol": "AAAUSDT", "change": "15", "current_price": "10", "volume": "100"}]
+        )
+        signal_time = datetime.fromisoformat("2026-07-11T00:10:00+00:00")
+        strategy._restore_or_create_entry_wait(candidates, signal_time, "run-1", "2026-07-11")
+
+        store.list_active_symbols.return_value = {"AAAUSDT"}
+        restored = strategy._restore_or_create_entry_wait([], signal_time, "run-1", "2026-07-11")
+
+        self.assertEqual(restored, {})
+        self.assertEqual(state, {})
+
     def test_post_noon_entry_structure_uses_previous_and_trigger_hour_high(self) -> None:
         client = MagicMock()
         client.get_klines.return_value = [

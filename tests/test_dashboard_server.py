@@ -777,6 +777,40 @@ class DashboardServerTest(unittest.TestCase):
         self.assertAlmostEqual(stats["max_drawdown"], 5.0)
         self.assertAlmostEqual(stats["max_drawdown_pct"], 5.0)
 
+    def test_invalid_wallet_snapshot_does_not_poison_dashboard_equity(self) -> None:
+        now = datetime.now(timezone.utc).replace(microsecond=0)
+        self.store.add_wallet_snapshot(
+            (now - timedelta(minutes=1)).isoformat(),
+            1000.0,
+            source="API",
+        )
+        self.store.add_wallet_snapshot(
+            now.isoformat(),
+            1200.0,
+            source="API",
+            error="position_risk: network down",
+        )
+
+        provider = DashboardDataProvider(
+            db_path=self.db_path,
+            log_file=self.log_file,
+            timezone_name="UTC",
+            entry_hour=7,
+            entry_minute=40,
+        )
+        snapshot = provider.snapshot(
+            log_lines=0,
+            window_hours=24,
+            include_details=False,
+            include_log=False,
+            include_curves=True,
+            include_balance_curve=True,
+            include_trade_stats=False,
+        )
+
+        self.assertEqual(snapshot["wallet"]["balance_usdt"], 1000.0)
+        self.assertEqual(snapshot["balance_curve"][-1]["equity"], 1000.0)
+
     def test_strategy_equity_ignores_cashflow(self) -> None:
         self.store.add_wallet_snapshot("2026-02-13T00:00:00+00:00", 100.0, source="API")
         self.store.add_wallet_snapshot("2026-02-13T00:01:00+00:00", 130.0, source="API")

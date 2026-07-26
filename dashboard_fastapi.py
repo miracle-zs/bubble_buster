@@ -287,7 +287,11 @@ def create_dashboard_context(config_path: str) -> DashboardRuntimeContext:
             )
 
     schema_path = str((Path(__file__).parent / "schema.sql").resolve())
-    StateStore(db_path=db_path, schema_path=schema_path).init_schema()
+    StateStore(
+        db_path=db_path,
+        schema_path=schema_path,
+        account_id=default_account_id,
+    ).init_schema()
 
     provider = DashboardDataProvider(
         db_path=db_path,

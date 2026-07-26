@@ -6,7 +6,7 @@ from functools import wraps
 import hashlib
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
-from datetime import datetime, time as dt_time, timedelta, timezone
+from datetime import date, datetime, time as dt_time, timedelta, timezone
 from typing import Any, Callable, Dict, Iterator, List, Optional, Set, Tuple
 from uuid import uuid4
 from zoneinfo import ZoneInfo
@@ -220,6 +220,39 @@ class Top10ShortStrategy:
                 self._clear_entry_wait_state()
                 return False
         return True
+
+    def get_pending_entry_trade_day(self) -> Optional[date]:
+        """Return the persisted trade day used by an in-flight entry wait."""
+        state = self._load_entry_wait_state()
+        pending = state.get("pending")
+        if not isinstance(pending, dict) or not pending:
+            return None
+        raw_trade_day = str(state.get("trade_day_utc") or "").strip()
+        if not raw_trade_day:
+            run_id = str(state.get("run_id") or "").strip()
+            if run_id:
+                try:
+                    run_state = self.store.get_run(run_id)
+                except Exception as exc:  # noqa: BLE001
+                    LOGGER.warning(
+                        "Failed to load entry run while resolving pending trade day: account=%s run_id=%s error=%s",
+                        self.account_id,
+                        run_id,
+                        exc,
+                    )
+                    run_state = None
+                raw_trade_day = str(getattr(run_state, "trade_day_utc", "") or "").strip()
+        if not raw_trade_day:
+            return None
+        try:
+            return date.fromisoformat(raw_trade_day[:10])
+        except ValueError:
+            LOGGER.warning(
+                "Invalid persisted entry wait trade day: account=%s trade_day=%s",
+                self.account_id,
+                raw_trade_day,
+            )
+            return None
 
     def request_entry_wait_stop(self) -> None:
         self._entry_wait_stop_event.set()
@@ -1014,6 +1047,21 @@ class Top10ShortStrategy:
     ) -> Dict[int, Dict[str, object]]:
         existing = self._load_entry_wait_state()
         raw_pending = existing.get("pending")
+        active_symbols: Set[str] = set()
+        try:
+            raw_active_symbols = self.store.list_active_symbols()
+            if isinstance(raw_active_symbols, (set, list, tuple)):
+                active_symbols = {
+                    str(symbol or "").strip().upper()
+                    for symbol in raw_active_symbols
+                    if str(symbol or "").strip()
+                }
+        except Exception as exc:  # noqa: BLE001
+            LOGGER.warning(
+                "Failed to load active symbols while restoring entry wait: account=%s error=%s",
+                self.account_id,
+                exc,
+            )
         if run_id and str(existing.get("run_id") or "") == run_id and isinstance(raw_pending, dict):
             restored: Dict[int, Dict[str, object]] = {}
             for idx, item in enumerate(raw_pending.values()):
@@ -1030,12 +1078,38 @@ class Top10ShortStrategy:
                     hour_open = self._parse_iso_utc(str(item["hour_open_utc"]))
                 except (KeyError, TypeError, ValueError):
                     continue
+                if entry.symbol.strip().upper() in active_symbols:
+                    LOGGER.warning(
+                        "Drop already-active symbol from persisted entry wait: account=%s symbol=%s run_id=%s",
+                        self.account_id,
+                        entry.symbol,
+                        run_id,
+                    )
+                    continue
                 restored[idx] = {"entry": entry, "signal_time": signal_time, "hour_open": hour_open}
             if restored:
+                if len(restored) != len(raw_pending):
+                    self._persist_entry_wait_pending(
+                        pending=restored,
+                        run_id=run_id,
+                        trade_day_utc=str(existing.get("trade_day_utc") or trade_day_utc or ""),
+                        signal_base_time_utc=signal_base_time_utc,
+                    )
                 return restored
 
         pending: Dict[int, Dict[str, object]] = {}
-        for idx, entry in enumerate(candidates):
+        next_idx = 0
+        for entry in candidates:
+            if entry.symbol.strip().upper() in active_symbols:
+                LOGGER.warning(
+                    "Skip already-active symbol while creating entry wait: account=%s symbol=%s run_id=%s",
+                    self.account_id,
+                    entry.symbol,
+                    run_id,
+                )
+                continue
+            idx = next_idx
+            next_idx += 1
             signal_time = signal_base_time_utc + timedelta(seconds=idx * self.entry_symbol_interval_sec)
             pending[idx] = {
                 "entry": entry,

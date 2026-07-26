@@ -33,17 +33,19 @@ class WalletSnapshotSampler:
         balances = self.client.get_balance()
         wallet_balance_usdt = self._extract_balance(balances)
         unrealized_pnl_usdt = 0.0
+        snapshot_error: Optional[str] = None
         try:
             position_rows = self.client.get_position_risk()
             unrealized_pnl_usdt = self._extract_unrealized_pnl(position_rows)
         except Exception as exc:  # noqa: BLE001
             LOGGER.warning("Failed to fetch position risk for equity snapshot, fallback wallet balance only: %s", exc)
+            snapshot_error = f"position_risk: {exc}"
         equity_usdt = wallet_balance_usdt + unrealized_pnl_usdt
         snapshot_id = self.store.add_wallet_snapshot(
             captured_at_utc=captured_at,
             balance_usdt=equity_usdt,
             source="API",
-            error=None,
+            error=snapshot_error,
         )
         cashflow_added = 0
         if self.sync_cashflows:
@@ -85,51 +87,59 @@ class WalletSnapshotSampler:
         if not self.cashflow_income_types:
             return 0
 
-        start_ms = self._resolve_cashflow_start_ms()
         inserted = 0
-        guard = 0
-        while guard < 20:
-            guard += 1
-            rows = self.client.get_income_history(start_time=start_ms, limit=1000)
-            if not rows:
-                break
-            rows_sorted = sorted(rows, key=lambda x: int(x.get("time") or 0))
-            max_time = start_ms
-            for row in rows_sorted:
-                income_type = str(row.get("incomeType", "")).upper().strip()
-                if income_type not in self.cashflow_income_types:
-                    continue
-                asset = str(row.get("asset", "")).upper().strip()
-                if asset != self.asset:
-                    continue
-                event_ts_ms = int(row.get("time") or 0)
-                if event_ts_ms <= 0:
-                    continue
-                event_time_utc = datetime.fromtimestamp(event_ts_ms / 1000, tz=timezone.utc).replace(
-                    microsecond=0
-                ).isoformat()
-                amount = float(row.get("income") or 0.0)
-                created = self.store.add_cashflow_event(
-                    event_time_utc=event_time_utc,
-                    asset=asset,
-                    amount=amount,
-                    income_type=income_type,
-                    symbol=str(row.get("symbol") or "").upper().strip() or None,
-                    tran_id=str(row.get("tranId") or "").strip() or None,
-                    info=str(row.get("info") or "").strip() or None,
-                    raw_json=row,
+        for requested_income_type in self.cashflow_income_types:
+            start_ms = self._resolve_cashflow_start_ms(income_type=requested_income_type)
+            guard = 0
+            while guard < 20:
+                guard += 1
+                rows = self.client.get_income_history(
+                    income_type=requested_income_type,
+                    start_time=start_ms,
+                    limit=1000,
                 )
-                if created:
-                    inserted += 1
-                if event_ts_ms > max_time:
-                    max_time = event_ts_ms
-            if len(rows_sorted) < 1000 or max_time <= start_ms:
-                break
-            start_ms = max_time + 1
+                if not rows:
+                    break
+                rows_sorted = sorted(rows, key=lambda x: int(x.get("time") or 0))
+                # Advance from every returned row, including types/assets that are
+                # not persisted. Otherwise a mixed page can pin the cursor forever.
+                page_max_time = max((int(row.get("time") or 0) for row in rows_sorted), default=start_ms)
+                for row in rows_sorted:
+                    income_type = str(row.get("incomeType", "")).upper().strip()
+                    if income_type != requested_income_type or income_type not in self.cashflow_income_types:
+                        continue
+                    asset = str(row.get("asset", "")).upper().strip()
+                    if asset != self.asset:
+                        continue
+                    event_ts_ms = int(row.get("time") or 0)
+                    if event_ts_ms <= 0:
+                        continue
+                    event_time_utc = datetime.fromtimestamp(event_ts_ms / 1000, tz=timezone.utc).replace(
+                        microsecond=0
+                    ).isoformat()
+                    amount = float(row.get("income") or 0.0)
+                    created = self.store.add_cashflow_event(
+                        event_time_utc=event_time_utc,
+                        asset=asset,
+                        amount=amount,
+                        income_type=income_type,
+                        symbol=str(row.get("symbol") or "").upper().strip() or None,
+                        tran_id=str(row.get("tranId") or "").strip() or None,
+                        info=str(row.get("info") or "").strip() or None,
+                        raw_json=row,
+                    )
+                    if created:
+                        inserted += 1
+                if len(rows_sorted) < 1000 or page_max_time <= start_ms:
+                    break
+                start_ms = page_max_time + 1
         return inserted
 
-    def _resolve_cashflow_start_ms(self) -> int:
-        latest_cashflow = self.store.get_latest_cashflow_event_time(asset=self.asset)
+    def _resolve_cashflow_start_ms(self, income_type: Optional[str] = None) -> int:
+        latest_cashflow = self.store.get_latest_cashflow_event_time(
+            asset=self.asset,
+            income_type=income_type,
+        )
         if latest_cashflow:
             dt = _parse_iso_utc(latest_cashflow)
             return max(0, int(dt.timestamp() * 1000) - 60_000)

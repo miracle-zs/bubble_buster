@@ -968,7 +968,7 @@ class DashboardDataProvider:
                     """
                     SELECT id, account_id, captured_at_utc, balance_usdt, source, error, created_at_utc
                     FROM wallet_snapshots
-                    WHERE account_id = ?
+                    WHERE account_id = ? AND error IS NULL
                     ORDER BY id DESC
                     LIMIT 1
                     """,
@@ -979,6 +979,7 @@ class DashboardDataProvider:
                     """
                     SELECT id, account_id, captured_at_utc, balance_usdt, source, error, created_at_utc
                     FROM wallet_snapshots
+                    WHERE error IS NULL
                     ORDER BY id DESC
                     LIMIT 1
                     """
@@ -1081,7 +1082,7 @@ class DashboardDataProvider:
         account_id: Optional[str] = None,
     ) -> List[Dict[str, Any]]:
         params: List[Any] = []
-        where_sql = "WHERE 1=1"
+        where_sql = "WHERE error IS NULL"
         if account_id:
             where_sql += " AND account_id = ?"
             params.append(account_id)
@@ -1105,9 +1106,9 @@ class DashboardDataProvider:
         account_id: Optional[str] = None,
     ) -> Dict[str, float]:
         params: List[Any] = []
-        where_sql = ""
+        where_sql = "WHERE error IS NULL"
         if account_id:
-            where_sql = "WHERE account_id = ?"
+            where_sql += " AND account_id = ?"
             params.append(account_id)
         first_row = conn.execute(
             f"""
@@ -1945,6 +1946,7 @@ class DashboardDataProvider:
                             INNER JOIN (
                                 SELECT account_id, MAX(id) AS max_id
                                 FROM wallet_snapshots
+                                WHERE error IS NULL
                                 GROUP BY account_id
                             ) x ON x.account_id = ws.account_id AND x.max_id = ws.id
                         )
@@ -2083,7 +2085,7 @@ class DashboardDataProvider:
                 """
                 SELECT balance_usdt
                 FROM wallet_snapshots
-                WHERE account_id = ?
+                WHERE account_id = ? AND error IS NULL
                 ORDER BY id DESC
                 LIMIT 1
                 """,

@@ -352,6 +352,31 @@ class RuntimeServiceTest(unittest.TestCase):
         service.run_cycle(now_local=missed, now_monotonic=2.0)
         self.assertEqual(manager.daily_loss_calls, 0)
 
+    def test_daily_loss_cut_retries_after_failure_before_grace_expires(self):
+        service, _, manager, _ = self._create_service(
+            run_manage_on_startup=False,
+            manager_interval_sec=3600,
+            daily_loss_cut_enabled=True,
+            daily_loss_cut_hour=11,
+            daily_loss_cut_minute=55,
+            entry_hour=23,
+            entry_minute=59,
+        )
+        manager.run_daily_loss_cut = MagicMock(
+            side_effect=[
+                {"total": 1, "closed_loss_cut": 0, "errors": 1},
+                {"total": 1, "closed_loss_cut": 1, "errors": 0},
+            ]
+        )
+        first = datetime(2026, 2, 13, 11, 55, tzinfo=ZoneInfo("UTC"))
+        second = first + timedelta(minutes=1)
+
+        service.run_cycle(now_local=first, now_monotonic=1.0)
+        service.run_cycle(now_local=second, now_monotonic=2.0)
+
+        self.assertEqual(manager.run_daily_loss_cut.call_count, 2)
+        self.assertEqual(service._last_loss_cut_local_date, first.date())
+
     def test_daily_loss_cut_skips_accounts_with_daily_loss_cut_disabled(self):
         class StrategyStub:
             def run_entry(self):
@@ -1046,6 +1071,113 @@ def test_scheduled_task_timeout_does_not_submit_duplicate_for_same_account() -> 
     completed = service._run_account_task_calls({"acc01": blocking_call}, "morning-protection")
     assert completed["acc01"]["total"] == 1
     assert calls == 1
+
+
+def test_completed_scheduled_task_from_previous_day_does_not_swallow_current_day() -> None:
+    started = Event()
+    release = Event()
+    calls = 0
+
+    def blocking_first_then_fast_call():
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            started.set()
+            release.wait(timeout=5)
+        return {"run": calls, "errors": 0}
+
+    service, _, _, _ = RuntimeServiceTest()._create_service(account_task_timeout_sec=0.05)
+    previous_day = datetime(2026, 2, 13, tzinfo=ZoneInfo("UTC")).date()
+    current_day = datetime(2026, 2, 14, tzinfo=ZoneInfo("UTC")).date()
+
+    first = service._run_account_task_calls(
+        {"acc01": blocking_first_then_fast_call},
+        "daily-loss-cut",
+        task_day=previous_day,
+    )
+    assert started.wait(timeout=1)
+    assert first["acc01"]["running"] is True
+
+    release.set()
+    assert _wait_until(
+        lambda: service._scheduled_futures_by_task_account[("daily-loss-cut", "acc01")].done()
+    )
+    current = service._run_account_task_calls(
+        {"acc01": blocking_first_then_fast_call},
+        "daily-loss-cut",
+        task_day=current_day,
+    )
+
+    assert current["acc01"]["run"] == 2
+    assert calls == 2
+
+
+def test_entry_completion_uses_submitted_trade_day_across_midnight() -> None:
+    class StrategyStub:
+        def __init__(self):
+            self.pending = True
+            self.trade_days = []
+
+        def has_pending_entry_wait(self):
+            return self.pending
+
+        def get_pending_entry_trade_day(self):
+            return datetime(2026, 2, 13, tzinfo=ZoneInfo("UTC")).date()
+
+        def run_entry(self, trade_day_utc=None):
+            self.trade_days.append(trade_day_utc)
+            self.pending = False
+            return {"status": "SUCCESS"}
+
+    class ManagerStub:
+        def run_once(self):
+            return {"total": 0}
+
+        def run_daily_loss_cut(self):
+            return {"total": 0, "errors": 0}
+
+    strategy = StrategyStub()
+    manager = ManagerStub()
+    cfg = ServiceRuntimeConfig(
+        timezone_name="UTC",
+        entry_hour=7,
+        entry_minute=40,
+        entry_misfire_grace_min=120,
+        entry_catchup_enabled=True,
+        daily_loss_cut_enabled=False,
+        daily_loss_cut_hour=23,
+        daily_loss_cut_minute=59,
+        manager_interval_sec=3600,
+        manager_max_catch_up_runs=1,
+        loop_sleep_sec=1.0,
+        run_manage_on_startup=False,
+    )
+    service = StrategyRuntimeService(
+        strategy=strategy,
+        manager=manager,
+        cfg=cfg,
+        now_monotonic=0.0,
+        account_runtimes={
+            "acc01": {
+                "mode": "full",
+                "strategy": strategy,
+                "manager": manager,
+                "balance_sampler": None,
+            }
+        },
+    )
+    service._get_entry_ranking = MagicMock(return_value=None)
+    next_day = datetime(2026, 2, 14, 7, 40, tzinfo=ZoneInfo("UTC"))
+    previous_day = datetime(2026, 2, 13, tzinfo=ZoneInfo("UTC")).date()
+
+    service.run_cycle(now_local=next_day, now_monotonic=1.0)
+    assert _wait_until(lambda: (service._collect_entry_futures(next_day) or not service._entry_futures))
+    assert strategy.trade_days == ["2026-02-13"]
+    assert service._last_entry_local_date_by_account["acc01"] == previous_day
+
+    service.run_cycle(now_local=next_day, now_monotonic=2.0)
+    assert _wait_until(lambda: (service._collect_entry_futures(next_day) or not service._entry_futures))
+    assert strategy.trade_days == ["2026-02-13", "2026-02-14"]
 
 
 def test_entry_uses_shared_ranking_once_for_multi_accounts() -> None:

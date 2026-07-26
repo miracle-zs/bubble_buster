@@ -53,6 +53,7 @@ entry_catchup_enabled = true
 daily_loss_cut_enabled = false
 daily_loss_cut_hour = 11
 daily_loss_cut_minute = 55
+daily_loss_cut_grace_min = 30
 daily_loss_cut_scope = exchange
 morning_protection_enabled = true
 morning_protection_hour = 7

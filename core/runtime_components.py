@@ -236,6 +236,7 @@ def _build_single_account_components(
         "cooling_off_retry_count": max(0, runtime_cfg.getint("cooling_off_retry_count", fallback=0)),
         "cooling_off_retry_delay_sec": max(0, runtime_cfg.getint("cooling_off_retry_delay_sec", fallback=0)),
         "daily_loss_cut_enabled": runtime_cfg.getboolean("daily_loss_cut_enabled", fallback=True),
+        "noon_protection_enabled": runtime_cfg.getboolean("noon_protection_enabled", fallback=True),
         "morning_protection_enabled": runtime_cfg.getboolean("morning_protection_enabled", fallback=False),
         "morning_protection_hour": runtime_cfg.getint("morning_protection_hour", fallback=7),
         "morning_protection_minute": runtime_cfg.getint("morning_protection_minute", fallback=55),
@@ -275,7 +276,6 @@ def create_components(
     default_account_id = runtime_global.get("default_account_id", fallback="default").strip() or "default"
     root_store = StateStore(db_path=db_path, schema_path=schema_path, account_id=default_account_id)
     root_store.init_schema()
-    root_store.migrate_to_multi_account(default_account_id=default_account_id)
 
     account_runtimes: Dict[str, Dict[str, object]] = {}
     if cfg.has_section("accounts"):
@@ -322,6 +322,10 @@ def create_components(
         daily_loss_cut_enabled=runtime_cfg_selected.getboolean("daily_loss_cut_enabled", fallback=True),
         daily_loss_cut_hour=runtime_cfg_selected.getint("daily_loss_cut_hour", fallback=11),
         daily_loss_cut_minute=runtime_cfg_selected.getint("daily_loss_cut_minute", fallback=55),
+        daily_loss_cut_grace_min=max(
+            1,
+            runtime_cfg_selected.getint("daily_loss_cut_grace_min", fallback=30),
+        ),
         noon_protection_enabled=runtime_cfg_selected.getboolean("noon_protection_enabled", fallback=True),
         noon_protection_hour=runtime_cfg_selected.getint("noon_protection_hour", fallback=12),
         noon_protection_minute=runtime_cfg_selected.getint("noon_protection_minute", fallback=0),
