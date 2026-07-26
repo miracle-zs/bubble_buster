@@ -2417,7 +2417,7 @@ DASHBOARD_HTML = """<!doctype html>
 
     .title {
       margin: 0;
-      font-size: clamp(1.15rem, 2.2vw, 1.5rem);
+      font-size: clamp(1.25rem, 2.4vw, 1.7rem);
       font-weight: 650;
       line-height: 1.2;
       letter-spacing: 0;
@@ -2425,7 +2425,7 @@ DASHBOARD_HTML = """<!doctype html>
 
     .subtitle {
       margin-top: 6px;
-      font-size: 0.82rem;
+      font-size: 0.86rem;
       color: var(--muted);
     }
 
@@ -2443,7 +2443,7 @@ DASHBOARD_HTML = """<!doctype html>
       background: var(--surface-2);
       padding: 6px 10px;
       border-radius: var(--radius);
-      font-size: 0.78rem;
+      font-size: 0.82rem;
       white-space: nowrap;
     }
 
@@ -2481,7 +2481,7 @@ DASHBOARD_HTML = """<!doctype html>
     }
 
     .k {
-      font-size: 0.72rem;
+      font-size: 0.76rem;
       color: var(--muted);
       font-weight: 650;
       text-transform: uppercase;
@@ -2491,7 +2491,7 @@ DASHBOARD_HTML = """<!doctype html>
     .v {
       margin-top: 8px;
       font-family: var(--font-mono);
-      font-size: 1.3rem;
+      font-size: 1.34rem;
       font-weight: 650;
       font-variant-numeric: tabular-nums;
       line-height: 1.15;
@@ -2520,7 +2520,7 @@ DASHBOARD_HTML = """<!doctype html>
 
     .panel h2 {
       margin: 0;
-      font-size: 0.82rem;
+      font-size: 0.88rem;
       font-weight: 650;
       letter-spacing: 0;
       color: var(--text);
@@ -2537,12 +2537,12 @@ DASHBOARD_HTML = """<!doctype html>
       width: 100%;
       border-collapse: collapse;
       min-width: 600px;
-      font-size: 0.8rem;
+      font-size: 0.84rem;
     }
 
     th, td {
       text-align: left;
-      padding: 7px 12px;
+      padding: 8px 12px;
       border-bottom: 1px solid var(--line-muted);
       white-space: nowrap;
     }
@@ -2567,7 +2567,7 @@ DASHBOARD_HTML = """<!doctype html>
 
     .mono {
       font-family: var(--font-mono);
-      font-size: 0.76rem;
+      font-size: 0.8rem;
     }
 
     .log {
@@ -2577,7 +2577,7 @@ DASHBOARD_HTML = """<!doctype html>
       padding: 10px 14px;
       background: var(--surface-2);
       color: #c9d1d9;
-      font-size: 0.74rem;
+      font-size: 0.78rem;
       line-height: 1.5;
     }
 
@@ -2594,7 +2594,7 @@ DASHBOARD_HTML = """<!doctype html>
     }
 
     .chart-title {
-      font-size: 0.8rem;
+      font-size: 0.84rem;
       color: var(--muted);
       letter-spacing: 0;
     }
@@ -2619,7 +2619,7 @@ DASHBOARD_HTML = """<!doctype html>
       color: var(--muted);
       border-radius: var(--radius);
       padding: 4px 10px;
-      font-size: 0.75rem;
+      font-size: 0.8rem;
       font-family: inherit;
       cursor: pointer;
       transition: border-color 120ms ease, color 120ms ease, background-color 120ms ease;
@@ -2648,7 +2648,7 @@ DASHBOARD_HTML = """<!doctype html>
       display: grid;
       grid-template-columns: repeat(2, minmax(0, 1fr));
       gap: 0 24px;
-      font-size: 0.8rem;
+      font-size: 0.84rem;
     }
 
     .stat-item {
@@ -2663,7 +2663,7 @@ DASHBOARD_HTML = """<!doctype html>
     .stat-item span:first-child {
       color: var(--muted);
       font-family: var(--font-ui);
-      font-size: 0.76rem;
+      font-size: 0.8rem;
     }
 
     .stat-item span:last-child {
@@ -3175,9 +3175,14 @@ DASHBOARD_HTML = """<!doctype html>
       return;
     }
 
-    var lineColor = "#58a6ff";
-    var areaTop = "rgba(88, 166, 255, 0.22)";
-    var areaBottom = "rgba(88, 166, 255, 0)";
+    var firstEquity = points[0].equity;
+    var lastEquity = points[points.length - 1].equity;
+    var curveDelta = lastEquity - firstEquity;
+    var lineColor = curveDelta > 0 ? "#3fb950" : (curveDelta < 0 ? "#f85149" : "#58a6ff");
+    var areaTop = curveDelta > 0 ? "rgba(63, 185, 80, 0.22)"
+      : (curveDelta < 0 ? "rgba(248, 81, 73, 0.22)" : "rgba(88, 166, 255, 0.22)");
+    var areaBottom = curveDelta > 0 ? "rgba(63, 185, 80, 0)"
+      : (curveDelta < 0 ? "rgba(248, 81, 73, 0)" : "rgba(88, 166, 255, 0)");
     equityChart.setOption({
       animation: false,
       grid: { left: 54, right: 20, top: 16, bottom: 26 },
@@ -3634,16 +3639,16 @@ ACCOUNTS_OVERVIEW_HTML = """<!doctype html>
     * { box-sizing: border-box; }
     body { margin:0; font-family:var(--font-ui); color:var(--text); background:var(--bg); }
     .wrap { max-width: 1200px; margin: 0 auto; padding: 24px; }
-    .title { font-size: 22px; font-weight: 700; margin: 0 0 6px; letter-spacing: 0; }
-    .sub { color: var(--muted); font-size: 13px; margin: 0 0 18px; }
-    .section-title { margin: 22px 0 10px; color:var(--text); font-size:15px; font-weight:650; letter-spacing:0; }
+    .title { font-size: 24px; font-weight: 700; margin: 0 0 6px; letter-spacing: 0; }
+    .sub { color: var(--muted); font-size: 13.5px; margin: 0 0 18px; }
+    .section-title { margin: 22px 0 10px; color:var(--text); font-size:16px; font-weight:650; letter-spacing:0; }
     .grid { display: grid; grid-template-columns: repeat(auto-fit,minmax(240px,1fr)); gap: 12px; }
     .card { background: var(--surface); border:1px solid var(--line); border-radius:var(--radius); padding:14px; min-width:0; }
     .row { display:flex; align-items:center; justify-content:space-between; margin-top: 8px; }
     .row.note { align-items:flex-start; margin-top: 6px; }
-    .aid { font-size:16px; font-weight:700; color: var(--accent); }
-    .label { color: var(--muted); font-size: 12px; }
-    .val { font-family: var(--font-mono); font-size: 12.5px; font-variant-numeric: tabular-nums; }
+    .aid { font-size:17px; font-weight:700; color: var(--accent); }
+    .label { color: var(--muted); font-size: 12.5px; }
+    .val { font-family: var(--font-mono); font-size: 13px; font-variant-numeric: tabular-nums; }
     .val.text { font-family: var(--font-ui); text-align: right; white-space: normal; max-width: 62%; line-height: 1.35; font-size: 11px; font-weight: 500; color: var(--muted); display:flex; flex-direction:column; gap:2px; }
     .note-line { display:block; }
     .status-ok { color: var(--ok); }
@@ -3652,6 +3657,9 @@ ACCOUNTS_OVERVIEW_HTML = """<!doctype html>
     .spark-block { margin-top: 10px; padding-top: 10px; border-top:1px solid var(--line-muted); }
     .spark-title { display:flex; justify-content:space-between; align-items:center; margin-bottom:6px; }
     .spark-box { height:76px; border:1px solid var(--line-muted); border-radius:var(--radius); background:var(--surface-2); overflow:hidden; }
+    .spark-box.spark-up { --spark:var(--ok); --spark-fill:rgba(63,185,80,0.14); }
+    .spark-box.spark-down { --spark:var(--bad); --spark-fill:rgba(248,81,73,0.14); }
+    .spark-box.spark-flat { --spark:var(--accent); --spark-fill:var(--accent-soft); }
     .spark-svg { width:100%; height:100%; display:block; }
     .spark-path { fill:none; stroke:var(--spark); stroke-width:1.8; vector-effect:non-scaling-stroke; stroke-linejoin:round; stroke-linecap:round; }
     .spark-area { fill:var(--spark-fill); }
@@ -3685,18 +3693,18 @@ ACCOUNTS_OVERVIEW_HTML = """<!doctype html>
     .task-row-main { min-height: 32px; }
     .task-col-h { color:var(--muted); font-size:10px; letter-spacing:0.06em; text-transform:uppercase; }
     .task-name-wrap { display:flex; flex-direction:column; gap:3px; min-width:0; }
-    .task-name { color:var(--text); font-size:12.5px; font-weight:600; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
-    .task-task-tag { color:var(--muted); font-size:11px; }
+    .task-name { color:var(--text); font-size:13px; font-weight:600; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+    .task-task-tag { color:var(--muted); font-size:11.5px; }
     .task-result { min-width:0; }
     .task-result-lines { display:flex; flex-direction:column; gap:4px; }
-    .task-stat-line, .task-symbol-line { color:var(--muted); font-size:11px; line-height:1.4; }
-    .task-stat-line { color:#c9d1d9; font-family:var(--font-mono); font-size:10.5px; }
+    .task-stat-line, .task-symbol-line { color:var(--muted); font-size:11.5px; line-height:1.45; }
+    .task-stat-line { color:#c9d1d9; font-family:var(--font-mono); font-size:11px; }
     .task-symbol-line { display:flex; align-items:flex-start; gap:6px; }
     .task-symbol-label { color:var(--muted); flex:0 0 auto; }
     .task-symbol-text { min-width:0; word-break:break-word; color:#c9d1d9; }
     .task-meta { display:flex; align-items:center; justify-content:flex-start; }
     .task-badge { border:1px solid var(--line); border-radius:999px; padding:3px 8px; font-size:11px; font-weight:700; line-height:1.2; min-width:72px; justify-content:center; display:inline-flex; color:var(--muted); }
-    .task-time { color:var(--muted); font-size:11px; font-family:var(--font-mono); padding-top:4px; white-space:nowrap; }
+    .task-time { color:var(--muted); font-size:11.5px; font-family:var(--font-mono); padding-top:4px; white-space:nowrap; }
     .task-badge.status-ok { border-color:rgba(63,185,80,0.45); background:rgba(63,185,80,0.14); }
     .task-badge.status-warn { border-color:rgba(210,153,34,0.45); background:rgba(210,153,34,0.14); }
     .task-badge.status-bad { border-color:rgba(248,81,73,0.45); background:rgba(248,81,73,0.14); }
@@ -3719,42 +3727,42 @@ ACCOUNTS_OVERVIEW_HTML = """<!doctype html>
     .entry-progress-panel { margin-top:22px; }
     .entry-progress-heading { display:flex; align-items:flex-end; justify-content:space-between; gap:16px; margin-bottom:10px; }
     .entry-progress-heading .section-title { margin:0; }
-    .entry-progress-updated { color:var(--muted); font-size:12px; }
+    .entry-progress-updated { color:var(--muted); font-size:12.5px; }
     .entry-progress-shell { border:1px solid var(--line); border-radius:var(--radius); background:var(--surface); overflow:hidden; }
     .entry-progress-overview { display:flex; align-items:center; gap:28px; min-height:62px; padding:10px 16px; border-bottom:1px solid var(--line-muted); }
     .entry-progress-overview-primary { min-width:170px; }
     .entry-progress-overview-primary strong { display:block; color:var(--text); font-size:19px; line-height:1.2; font-variant-numeric:tabular-nums; }
-    .entry-progress-overview-primary span { color:var(--muted); font-size:11px; }
-    .entry-progress-stat { display:flex; align-items:baseline; gap:6px; color:var(--muted); font-size:11px; }
+    .entry-progress-overview-primary span { color:var(--muted); font-size:11.5px; }
+    .entry-progress-stat { display:flex; align-items:baseline; gap:6px; color:var(--muted); font-size:11.5px; }
     .entry-progress-stat strong { color:var(--text); font-size:15px; font-variant-numeric:tabular-nums; }
     .entry-progress-stat.ok strong { color:var(--ok); }
     .entry-progress-stat.warn strong { color:var(--warn); }
     .entry-progress-stat.bad strong { color:var(--bad); }
     .entry-progress-timeline { display:grid; grid-template-columns:110px minmax(0,1fr); gap:14px; padding:13px 16px 14px; border-bottom:1px solid var(--line-muted); }
-    .entry-progress-timeline-label { color:var(--muted); font-size:11px; padding-top:2px; }
+    .entry-progress-timeline-label { color:var(--muted); font-size:11.5px; padding-top:2px; }
     .entry-progress-timeline-track { display:flex; align-items:flex-start; gap:0; min-width:0; }
     .entry-progress-timeline-event { position:relative; flex:1 1 0; min-width:0; padding:0 14px 0 18px; border-left:1px solid var(--line); }
     .entry-progress-timeline-event::before { content:""; position:absolute; left:-4px; top:4px; width:7px; height:7px; border-radius:50%; background:var(--accent); box-shadow:0 0 0 3px var(--surface); }
     .entry-progress-timeline-event time { display:block; color:var(--text); font-size:12px; font-weight:650; margin-bottom:4px; font-family:var(--font-mono); }
-    .entry-progress-timeline-event span { display:block; color:var(--muted); font-size:10px; line-height:1.45; word-break:break-word; }
+    .entry-progress-timeline-event span { display:block; color:var(--muted); font-size:10.5px; line-height:1.45; word-break:break-word; }
     .entry-progress-header, .entry-progress-row { display:grid; grid-template-columns:110px minmax(230px,0.85fr) 130px 150px minmax(210px,1fr); column-gap:18px; align-items:center; }
-    .entry-progress-header { min-height:34px; padding:0 16px; color:var(--muted); background:var(--surface-2); font-size:10px; font-weight:650; text-transform:uppercase; letter-spacing:0.06em; }
+    .entry-progress-header { min-height:34px; padding:0 16px; color:var(--muted); background:var(--surface-2); font-size:10.5px; font-weight:650; text-transform:uppercase; letter-spacing:0.06em; }
     .entry-progress-row { min-height:68px; padding:10px 16px; border-top:1px solid var(--line-muted); }
     .entry-progress-account { display:flex; flex-direction:column; gap:3px; }
     .entry-progress-account strong { color:var(--accent); font-size:14px; }
-    .entry-progress-account span { color:var(--muted); font-size:10px; }
+    .entry-progress-account span { color:var(--muted); font-size:10.5px; }
     .entry-progress-meter-wrap { min-width:0; }
-    .entry-progress-counts { display:flex; align-items:baseline; gap:10px; margin-bottom:6px; color:var(--muted); font-size:10px; }
+    .entry-progress-counts { display:flex; align-items:baseline; gap:10px; margin-bottom:6px; color:var(--muted); font-size:10.5px; }
     .entry-progress-counts strong { color:var(--text); font-size:16px; font-variant-numeric:tabular-nums; }
     .entry-progress-meter { display:flex; width:100%; height:4px; border-radius:2px; overflow:hidden; background:var(--line-muted); }
     .entry-progress-meter-opened { background:var(--ok); }
     .entry-progress-meter-waiting { background:var(--warn); }
     .entry-progress-meter-failed { background:var(--bad); }
     .entry-progress-state { display:flex; flex-direction:column; align-items:flex-start; gap:3px; }
-    .entry-progress-status { font-size:11px; font-weight:700; }
+    .entry-progress-status { font-size:11.5px; font-weight:700; }
     .entry-progress-status.status-warn { color:var(--warn); }
-    .entry-progress-next, .entry-progress-window { color:var(--muted); font-size:10px; line-height:1.4; }
-    .entry-progress-detail { color:var(--muted); font-size:10.5px; line-height:1.5; word-break:break-word; }
+    .entry-progress-next, .entry-progress-window { color:var(--muted); font-size:10.5px; line-height:1.4; }
+    .entry-progress-detail { color:var(--muted); font-size:11px; line-height:1.5; word-break:break-word; }
     .entry-progress-detail.ok { color:var(--muted); }
     .entry-progress-detail.warn { color:var(--warn); }
     .entry-progress-detail.bad { color:var(--bad); }
@@ -4341,6 +4349,7 @@ ACCOUNTS_OVERVIEW_HTML = """<!doctype html>
     if (!box || !deltaEl) return;
     var cached = curveCache[aid];
     if (!cached || !cached.values || cached.values.length < 2) {
+      box.className = "spark-box";
       box.innerHTML = '<div class="spark-empty">暂无曲线</div>';
       deltaEl.textContent = "--";
       deltaEl.className = "val spark-delta";
@@ -4352,6 +4361,7 @@ ACCOUNTS_OVERVIEW_HTML = """<!doctype html>
     var height = 74;
     var points = polylinePoints(vals, width, height);
     if (!points) {
+      box.className = "spark-box";
       box.innerHTML = '<div class="spark-empty">暂无曲线</div>';
       return;
     }
@@ -4359,6 +4369,8 @@ ACCOUNTS_OVERVIEW_HTML = """<!doctype html>
     var last = vals[vals.length - 1];
     var changePct = first ? ((last - first) / first) * 100 : 0;
     var deltaCls = changePct >= 0 ? "spark-up" : "spark-down";
+    var curveCls = changePct > 0 ? "spark-up" : (changePct < 0 ? "spark-down" : "spark-flat");
+    box.className = "spark-box " + curveCls;
     deltaEl.textContent = (changePct >= 0 ? "+" : "") + fmt(changePct, 2) + "%";
     deltaEl.className = "val spark-delta " + deltaCls;
     deltaEl.setAttribute("data-account-id", aid);
