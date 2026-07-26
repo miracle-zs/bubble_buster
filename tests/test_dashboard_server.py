@@ -475,6 +475,46 @@ class DashboardServerTest(unittest.TestCase):
             ["BTCUSDT", "ETHUSDT"],
         )
 
+    def test_entry_progress_uses_entry_cycle_instead_of_calendar_day(self) -> None:
+        run_id, _ = self.store.create_run("2026-07-24", account_id="acc01")
+        with sqlite3.connect(self.db_path) as conn:
+            conn.execute(
+                """
+                UPDATE runs
+                SET started_at_utc = ?, completed_at_utc = ?, status = ?, message = ?
+                WHERE run_id = ?
+                """,
+                (
+                    "2026-07-24T23:40:00+00:00",
+                    "2026-07-25T07:00:00+00:00",
+                    "SUCCESS",
+                    "opened=10, failed=0, entry_failed=0, exit_setup_failed=0, skipped_existing=0",
+                    run_id,
+                ),
+            )
+
+        provider = DashboardDataProvider(
+            db_path=self.db_path,
+            log_file=self.log_file,
+            timezone_name="Asia/Shanghai",
+            entry_hour=7,
+            entry_minute=40,
+        )
+        with provider._connect_ctx() as conn:
+            before_next_entry = provider._entry_progresses_from_db(
+                conn,
+                ["acc01"],
+                now_local=datetime(2026, 7, 26, 1, 30, tzinfo=provider.local_tz),
+            )
+            after_next_entry = provider._entry_progresses_from_db(
+                conn,
+                ["acc01"],
+                now_local=datetime(2026, 7, 26, 7, 40, tzinfo=provider.local_tz),
+            )
+
+        self.assertTrue(before_next_entry["acc01"]["is_today"])
+        self.assertFalse(after_next_entry["acc01"]["is_today"])
+
     def test_accounts_summary_finds_morning_entry_result_in_large_current_log(self) -> None:
         self.store.create_run("2026-06-29", account_id="acc01")
         self._backdate_runs()

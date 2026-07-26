@@ -121,6 +121,17 @@ class DashboardDataProvider:
             target += timedelta(days=1)
         return target
 
+    def _entry_cycle_date(self, now_local: datetime) -> str:
+        cycle_start = now_local.replace(
+            hour=self.entry_hour,
+            minute=self.entry_minute,
+            second=0,
+            microsecond=0,
+        )
+        if now_local < cycle_start:
+            cycle_start -= timedelta(days=1)
+        return cycle_start.date().isoformat()
+
     def _tail_log(self, lines: int = 80) -> List[str]:
         if lines <= 0:
             return []
@@ -535,6 +546,7 @@ class DashboardDataProvider:
         self,
         conn: sqlite3.Connection,
         account_ids: List[str],
+        now_local: Optional[datetime] = None,
     ) -> Dict[str, Dict[str, Any]]:
         if not account_ids:
             return {}
@@ -578,6 +590,7 @@ class DashboardDataProvider:
                 positions_by_run.setdefault(str(position.get("run_id") or ""), []).append(position)
 
         wait_states = self._entry_wait_states_from_db(conn, account_ids)
+        current_cycle_date = self._entry_cycle_date(now_local or datetime.now(self.local_tz))
         progress_by_account: Dict[str, Dict[str, Any]] = {}
         for run in run_rows:
             account_id = str(run.get("account_id") or "").strip()
@@ -664,7 +677,7 @@ class DashboardDataProvider:
             started_at_local = self._format_utc_as_local(run.get("started_at_utc"))
             is_today = bool(
                 started_at_local
-                and started_at_local[:10] == datetime.now(self.local_tz).date().isoformat()
+                and started_at_local[:10] == current_cycle_date
             )
             progress_by_account[account_id] = {
                 "run_id": run_id,
