@@ -36,7 +36,10 @@ class PositionManager:
     MORNING_PROTECTION_LOCK_NAME = "morning_protection_stop_caps_v1"
     HOURLY_EXCHANGE_TP_LOCK_NAME = "hourly_exchange_take_profit_v1"
     ORPHAN_EXIT_ORDER_CLEANUP_LOCK_NAME = "orphan_exit_order_cleanup_v1"
-    NOON_PROTECTION_UNTRACKED_START_OFFSET = timedelta(hours=8)
+    NOON_PROTECTION_PRE_ENTRY_HOURS = 2
+    # An untracked position has no fill timestamp; assume the normal 08:00 entry
+    # and include the two completed hourly candles immediately before it.
+    NOON_PROTECTION_UNTRACKED_ENTRY_OFFSET = timedelta(hours=8)
 
     def __init__(
         self,
@@ -580,17 +583,27 @@ class PositionManager:
                 if tracked_pos is not None:
                     opened_at_raw = str(tracked_pos.get("opened_at_utc") or "")
                     opened_at_utc = self._parse_iso_utc(opened_at_raw) if opened_at_raw else day_start
-                    start_utc = opened_at_utc if opened_at_utc > day_start else day_start
+                    start_utc = self._noon_protection_window_start(
+                        opened_at_utc=opened_at_utc,
+                        day_start_utc=day_start,
+                        noon_time_utc=noon_time,
+                    )
                 else:
-                    start_utc = day_start + self.NOON_PROTECTION_UNTRACKED_START_OFFSET
+                    assumed_opened_at_utc = day_start + self.NOON_PROTECTION_UNTRACKED_ENTRY_OFFSET
+                    start_utc = self._noon_protection_window_start(
+                        opened_at_utc=assumed_opened_at_utc,
+                        day_start_utc=day_start,
+                        noon_time_utc=noon_time,
+                    )
                 if start_utc >= noon_time:
                     summary["skipped"] += 1
                     continue
 
-                highest_price, lowest_price = self._fetch_symbol_extremes_between(
+                highest_price, lowest_price = self._fetch_noon_protection_extremes(
                     symbol=symbol,
-                    start_utc=start_utc,
-                    end_utc=noon_time,
+                    opened_at_utc=opened_at_utc if tracked_pos is not None else assumed_opened_at_utc,
+                    day_start_utc=day_start,
+                    noon_time_utc=noon_time,
                 )
                 noon_ref_price = highest_price if close_side == "BUY" else lowest_price
                 if not noon_ref_price:
@@ -683,7 +696,8 @@ class PositionManager:
                 details["updated_sl"].append(
                     (
                         f"{symbol}(cap={cap_key}, old_sl={old_sl_price}, "
-                        f"noon_ref={noon_ref_price}, new_sl={merged_sl_price}, side={close_side})"
+                        f"window_start={start_utc.isoformat()}, noon_ref={noon_ref_price}, "
+                        f"new_sl={merged_sl_price}, side={close_side})"
                     )
                 )
             except Exception as exc:  # noqa: BLE001
@@ -2113,10 +2127,11 @@ class PositionManager:
             position_amt=position_amt,
             position_side=str(risk.get("positionSide") or "BOTH"),
         )
-        highest_price, lowest_price = self._fetch_symbol_extremes_between(
+        highest_price, lowest_price = self._fetch_noon_protection_extremes(
             symbol=symbol,
-            start_utc=max(opened_at, day_start),
-            end_utc=noon_time,
+            opened_at_utc=opened_at,
+            day_start_utc=day_start,
+            noon_time_utc=noon_time,
         )
         noon_ref_price = highest_price if close_side == "BUY" else lowest_price
         if not noon_ref_price:
@@ -2132,6 +2147,70 @@ class PositionManager:
         self._noon_protection_caps_cache[str(position_id)] = cap_price
         self._persist_noon_protection_caps(self._noon_protection_caps_cache)
         return cap_price
+
+    @classmethod
+    def _noon_protection_window_start(
+        cls,
+        opened_at_utc: datetime,
+        day_start_utc: datetime,
+        noon_time_utc: datetime,
+    ) -> datetime:
+        """Return the start of the two-completed-hour-plus-to-noon reference window."""
+        opened_at = opened_at_utc.astimezone(timezone.utc)
+        day_start = day_start_utc.astimezone(timezone.utc)
+        noon_time = noon_time_utc.astimezone(timezone.utc)
+        if opened_at >= noon_time:
+            return noon_time
+        if opened_at < day_start:
+            # For a position carried into today, use the two complete hours
+            # immediately before today's noon instead of the old entry day.
+            return noon_time - timedelta(hours=cls.NOON_PROTECTION_PRE_ENTRY_HOURS)
+        entry_hour_start = opened_at.replace(minute=0, second=0, microsecond=0)
+        return entry_hour_start - timedelta(hours=cls.NOON_PROTECTION_PRE_ENTRY_HOURS)
+
+    def _fetch_noon_protection_extremes(
+        self,
+        symbol: str,
+        opened_at_utc: datetime,
+        day_start_utc: datetime,
+        noon_time_utc: datetime,
+    ) -> tuple[Optional[float], Optional[float]]:
+        """Fetch the prior two full hours plus the post-fill part of today's noon window."""
+        opened_at = opened_at_utc.astimezone(timezone.utc)
+        day_start = day_start_utc.astimezone(timezone.utc)
+        noon_time = noon_time_utc.astimezone(timezone.utc)
+        if opened_at >= noon_time:
+            return None, None
+
+        if opened_at < day_start:
+            return self._fetch_symbol_extremes_between(
+                symbol=symbol,
+                start_utc=noon_time - timedelta(hours=self.NOON_PROTECTION_PRE_ENTRY_HOURS),
+                end_utc=noon_time,
+            )
+
+        entry_hour_start = opened_at.replace(minute=0, second=0, microsecond=0)
+        previous_start = entry_hour_start - timedelta(hours=self.NOON_PROTECTION_PRE_ENTRY_HOURS)
+        if opened_at == entry_hour_start:
+            return self._fetch_symbol_extremes_between(
+                symbol=symbol,
+                start_utc=previous_start,
+                end_utc=noon_time,
+            )
+
+        previous_high, previous_low = self._fetch_symbol_extremes_between(
+            symbol=symbol,
+            start_utc=previous_start,
+            end_utc=entry_hour_start,
+        )
+        post_entry_high, post_entry_low = self._fetch_symbol_extremes_between(
+            symbol=symbol,
+            start_utc=opened_at,
+            end_utc=noon_time,
+        )
+        highs = [price for price in (previous_high, post_entry_high) if price is not None]
+        lows = [price for price in (previous_low, post_entry_low) if price is not None]
+        return (max(highs) if highs else None, min(lows) if lows else None)
 
     def _load_morning_protection_caps(self) -> Dict[str, float]:
         state = self.store.get_lock_state(self.MORNING_PROTECTION_LOCK_NAME) or {}

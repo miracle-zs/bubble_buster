@@ -84,6 +84,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--output-summary", default="reports/wait_1h_bearish_strategy_replay_summary.json")
     parser.add_argument("--account", action="append", help="Limit to one or more accounts.")
     parser.add_argument("--tp-drop-pct", type=float, default=20.0)
+    parser.add_argument("--profit-floor-trigger-pct", type=float, default=0.0)
+    parser.add_argument("--profit-floor-lock-pct", type=float, default=0.0)
+    parser.add_argument("--hard-stop-loss-pct", type=float, default=0.0)
     parser.add_argument("--max-hold-hours", type=float, default=47.5)
     parser.add_argument("--lookahead-hours", type=float, default=120.0)
     return parser.parse_args()
@@ -453,12 +456,33 @@ def high_between(candles: List[Candle], start: datetime, end: datetime) -> Optio
     return max(highs) if highs else None
 
 
+def noon_protection_window_start(entry_time: datetime, noon_time: datetime) -> datetime:
+    entry_local_date = entry_time.astimezone(LOCAL_TZ).date()
+    noon_local_date = noon_time.astimezone(LOCAL_TZ).date()
+    if entry_local_date != noon_local_date:
+        return noon_time - timedelta(hours=2)
+    entry_hour_start = entry_time.astimezone(timezone.utc).replace(minute=0, second=0, microsecond=0)
+    return entry_hour_start - timedelta(hours=2)
+
+
+def noon_protection_reference_high(
+    candles: List[Candle],
+    entry_time: datetime,
+    noon_time: datetime,
+) -> Optional[float]:
+    ref_start = noon_protection_window_start(entry_time, noon_time)
+    return high_between(candles, ref_start, noon_time)
+
+
 def replay_delayed(
     sample: PositionSample,
     entry_candles: List[Candle],
     exit_candles: List[Candle],
     tp_drop_pct: float,
     max_hold_hours: float,
+    profit_floor_trigger_pct: float = 0.0,
+    profit_floor_lock_pct: float = 0.0,
+    hard_stop_loss_pct: float = 0.0,
 ) -> ReplayResult:
     entry_time, entry_price = find_delayed_entry(sample, entry_candles)
     if entry_time is None or entry_price is None:
@@ -468,6 +492,10 @@ def replay_delayed(
     tp_threshold = entry_price * (1.0 - tp_drop_pct / 100.0)
     tp_eligible = False
     stop_price: Optional[float] = None
+    profit_floor_active = False
+    profit_floor_trigger_price = entry_price * (1.0 - profit_floor_trigger_pct / 100.0)
+    profit_floor_stop_price = entry_price * (1.0 - profit_floor_lock_pct / 100.0)
+    hard_stop_price = entry_price * (1.0 + hard_stop_loss_pct / 100.0)
     next_noons = list(local_noon_between(entry_time, max_hold_time + timedelta(hours=24)))
     noon_idx = 0
 
@@ -477,25 +505,46 @@ def replay_delayed(
 
         while noon_idx < len(next_noons) and next_noons[noon_idx] <= candle.open_dt:
             noon_time = next_noons[noon_idx]
-            local_day_start = noon_time.astimezone(LOCAL_TZ).replace(hour=0, minute=0, second=0, microsecond=0).astimezone(timezone.utc)
-            ref_start = max(local_day_start, entry_time)
-            ref_high = high_between(exit_candles, ref_start, noon_time)
+            ref_high = noon_protection_reference_high(exit_candles, entry_time, noon_time)
             if ref_high is not None:
                 stop_price = ref_high if stop_price is None else min(stop_price, ref_high)
             noon_idx += 1
 
-        if stop_price is not None and candle.high_price >= stop_price:
+        active_stops = []
+        if stop_price is not None:
+            active_stops.append(("NOON_PROTECTION_STOP", stop_price))
+        if profit_floor_active:
+            active_stops.append(("PROFIT_FLOOR_STOP", profit_floor_stop_price))
+        if hard_stop_loss_pct > 0:
+            active_stops.append(("HARD_STOP_LOSS", hard_stop_price))
+        effective_stop = min(active_stops, key=lambda item: item[1]) if active_stops else None
+        if effective_stop is not None and candle.high_price >= effective_stop[1]:
             return ReplayResult(
                 True,
                 entry_time,
                 entry_price,
                 candle.close_dt,
-                stop_price,
-                "NOON_PROTECTION_STOP",
-                short_pnl(entry_price, stop_price, sample.qty),
-                short_return_pct(entry_price, stop_price),
+                effective_stop[1],
+                effective_stop[0],
+                short_pnl(entry_price, effective_stop[1], sample.qty),
+                short_return_pct(entry_price, effective_stop[1]),
                 (entry_time - sample.opened_at_utc).total_seconds() / 3600.0,
             )
+
+        if profit_floor_trigger_pct > 0 and candle.low_price <= profit_floor_trigger_price:
+            if candle.close_price >= profit_floor_stop_price:
+                return ReplayResult(
+                    True,
+                    entry_time,
+                    entry_price,
+                    candle.close_dt,
+                    candle.close_price,
+                    "PROFIT_FLOOR_IMMEDIATE_CLOSE",
+                    short_pnl(entry_price, candle.close_price, sample.qty),
+                    short_return_pct(entry_price, candle.close_price),
+                    (entry_time - sample.opened_at_utc).total_seconds() / 3600.0,
+                )
+            profit_floor_active = True
 
         if candle.low_price <= tp_threshold:
             tp_eligible = True
@@ -621,7 +670,16 @@ def main() -> None:
             actual_return = short_return_pct(sample.actual_entry_price, actual_exit_price)
 
         if entry_candles and exit_candles:
-            replay = replay_delayed(sample, entry_candles, exit_candles, args.tp_drop_pct, args.max_hold_hours)
+            replay = replay_delayed(
+                sample,
+                entry_candles,
+                exit_candles,
+                args.tp_drop_pct,
+                args.max_hold_hours,
+                args.profit_floor_trigger_pct,
+                args.profit_floor_lock_pct,
+                args.hard_stop_loss_pct,
+            )
         else:
             replay = ReplayResult(False, None, None, None, None, "NO_KLINES", None, None, None)
         delta_pnl = ""
@@ -670,6 +728,9 @@ def main() -> None:
     summary = summarize(rows, account_equity_pnl)
     summary["entry_interval"] = args.entry_interval
     summary["exit_interval"] = args.exit_interval
+    summary["profit_floor_trigger_pct"] = args.profit_floor_trigger_pct
+    summary["profit_floor_lock_pct"] = args.profit_floor_lock_pct
+    summary["hard_stop_loss_pct"] = args.hard_stop_loss_pct
     summary["entry_cache_dir"] = str(entry_cache_dir)
     summary["exit_cache_dir"] = str(exit_cache_dir)
     output_summary = Path(args.output_summary)

@@ -33,6 +33,15 @@ class PositionManagerTest(unittest.TestCase):
         self.assertLessEqual(len(client_id), 36)
         self.assertRegex(client_id, r"^[.A-Z:/a-z0-9_-]{1,36}$")
 
+    def test_noon_protection_window_for_carried_position_uses_two_hours_before_noon(self) -> None:
+        start = PositionManager._noon_protection_window_start(
+            opened_at_utc=datetime(2026, 2, 12, 23, 30, tzinfo=timezone.utc),
+            day_start_utc=datetime(2026, 2, 13, 0, 0, tzinfo=timezone.utc),
+            noon_time_utc=datetime(2026, 2, 13, 4, 0, tzinfo=timezone.utc),
+        )
+
+        self.assertEqual(start, datetime(2026, 2, 13, 2, 0, tzinfo=timezone.utc))
+
     def test_dynamic_stop_never_widens_existing_live_stop(self) -> None:
         position_id = self._insert_open_position(
             symbol="BTCUSDT",
@@ -867,7 +876,7 @@ class PositionManagerTest(unittest.TestCase):
         self.assertEqual(title, "【Top10做空】11:55浮亏止损汇总")
         self.assertIn("| closed_loss_cut | 2 |", content)
 
-    def test_noon_protection_tightens_stop_using_max_of_day_start_and_opened_at(self) -> None:
+    def test_noon_protection_uses_two_completed_hours_before_entry(self) -> None:
         opened_at = datetime(2026, 2, 13, 8, 30, tzinfo=timezone.utc)
         noon_utc = datetime(2026, 2, 13, 12, 0, tzinfo=timezone.utc)
         day_start_utc = datetime(2026, 2, 13, 0, 0, tzinfo=timezone.utc)
@@ -933,11 +942,17 @@ class PositionManagerTest(unittest.TestCase):
         self.assertEqual(summary["updated_sl"], 1)
         self.assertEqual(summary["errors"], 0)
 
-        klines_kwargs = client.get_klines.call_args.kwargs
-        self.assertEqual(klines_kwargs["symbol"], "DENTUSDT")
-        self.assertEqual(klines_kwargs["interval"], "1m")
-        self.assertEqual(klines_kwargs["start_time"], int(opened_at.timestamp() * 1000))
-        self.assertEqual(klines_kwargs["end_time"], int(noon_utc.timestamp() * 1000))
+        self.assertEqual(client.get_klines.call_count, 2)
+        previous_kwargs = client.get_klines.call_args_list[0].kwargs
+        post_entry_kwargs = client.get_klines.call_args_list[1].kwargs
+        self.assertEqual(previous_kwargs["symbol"], "DENTUSDT")
+        self.assertEqual(previous_kwargs["interval"], "1m")
+        expected_start = datetime(2026, 2, 13, 6, 0, tzinfo=timezone.utc)
+        self.assertEqual(previous_kwargs["start_time"], int(expected_start.timestamp() * 1000))
+        entry_hour_start = opened_at.replace(minute=0, second=0, microsecond=0)
+        self.assertEqual(previous_kwargs["end_time"], int(entry_hour_start.timestamp() * 1000))
+        self.assertEqual(post_entry_kwargs["start_time"], int(opened_at.timestamp() * 1000))
+        self.assertEqual(post_entry_kwargs["end_time"], int(noon_utc.timestamp() * 1000))
 
         row = self._get_position(position_id)
         self.assertAlmostEqual(float(row["sl_price"]), 0.0017, places=10)
@@ -1131,7 +1146,8 @@ class PositionManagerTest(unittest.TestCase):
 
         self.assertEqual(summary["updated_sl"], 1)
         klines_kwargs = client.get_klines.call_args.kwargs
-        self.assertEqual(klines_kwargs["start_time"], int(opened_at.timestamp() * 1000))
+        expected_start = datetime(2026, 7, 1, 0, 0, tzinfo=timezone.utc)
+        self.assertEqual(klines_kwargs["start_time"], int(expected_start.timestamp() * 1000))
         self.assertEqual(klines_kwargs["end_time"], int(noon.timestamp() * 1000))
         row = self._get_position(position_id)
         self.assertAlmostEqual(float(row["sl_price"]), 0.90)
@@ -1534,7 +1550,7 @@ class PositionManagerTest(unittest.TestCase):
         klines_kwargs = client.get_klines.call_args.kwargs
         self.assertEqual(
             klines_kwargs["start_time"],
-            int((day_start_utc + timedelta(hours=8)).timestamp() * 1000),
+            int((day_start_utc + timedelta(hours=6)).timestamp() * 1000),
         )
 
     def test_noon_protection_does_not_skip_untracked_exchange_position_from_cached_cap(self) -> None:
