@@ -200,6 +200,10 @@ CRON_TZ=Asia/Shanghai
 - `entry_wait_max_hours`：等待首根 1h 阴线的最长时间，同时不会跨过本地自然日；等待状态会持久化并在重启后恢复。
 - 12:00 后才等到首根 1h 阴线时，初始止损取前一根非阴线与触发阴线两小时最高价，并包含阴线收盘到实际成交之间的价格；保护状态按仓位持久化。
 - `entry_catchup_enabled`：错过是否补跑。
+- `portfolio_loss_cut_enabled`：是否启用按账号计算的日内组合止损。启用后以本地时间 `portfolio_loss_cut_hour:portfolio_loss_cut_minute` 后的第一条有效权益快照为当日基准。
+- `portfolio_loss_cut_pct`：组合权益相对当日基准的最大允许跌幅；例如 `3.5` 表示权益降至基准的 `96.5%` 或以下时，平掉该账号当时已存在的全部非保护白名单仓位。尚未开仓、仍在等待 1h 阴线的 symbol 不会被取消。
+- `portfolio_loss_cut_hour` / `portfolio_loss_cut_minute`：组合止损的日切换时间，默认北京时间 `08:00`。触发、平仓完成和失败重试状态持久化在 `locks` 表，服务重启后不会重复发送同一次触发通知。
+- 组合止损与 `daily_loss_cut_enabled` 可同时启用；前者处理组合权益跌幅，后者继续在 11:55 检查当时仍持有的亏损仓位。
 - `entry_initial_delay_sec`：账户 entry 启动前的额外等待秒数。
 - `entry_symbol_interval_sec`：账户 entry 每个 symbol 之间的额外等待秒数。
 - `cooling_off_retry_count` / `cooling_off_retry_delay_sec`：

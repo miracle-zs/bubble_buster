@@ -28,6 +28,10 @@ class ServiceRuntimeConfig:
     loop_sleep_sec: float
     run_manage_on_startup: bool
     daily_loss_cut_grace_min: int = 30
+    portfolio_loss_cut_enabled: bool = False
+    portfolio_loss_cut_pct: float = 3.5
+    portfolio_loss_cut_hour: int = 8
+    portfolio_loss_cut_minute: int = 0
     max_account_workers: int = 1
     account_failure_threshold: int = 3
     account_cooldown_cycles: int = 2
@@ -188,6 +192,29 @@ class StrategyRuntimeService:
             return False
 
         return True
+
+    @staticmethod
+    def _as_bool(value: object) -> bool:
+        if isinstance(value, str):
+            return value.strip().lower() in {"1", "true", "yes", "on"}
+        return bool(value)
+
+    def _portfolio_loss_cut_settings(self, account_id: str) -> tuple[bool, float, int, int]:
+        ctx = self.account_runtimes.get(account_id, {})
+        enabled = self._as_bool(ctx.get("portfolio_loss_cut_enabled", self.cfg.portfolio_loss_cut_enabled))
+        try:
+            loss_pct = float(ctx.get("portfolio_loss_cut_pct", self.cfg.portfolio_loss_cut_pct))
+        except (TypeError, ValueError):
+            loss_pct = float(self.cfg.portfolio_loss_cut_pct)
+        try:
+            reset_hour = int(ctx.get("portfolio_loss_cut_hour", self.cfg.portfolio_loss_cut_hour))
+        except (TypeError, ValueError):
+            reset_hour = int(self.cfg.portfolio_loss_cut_hour)
+        try:
+            reset_minute = int(ctx.get("portfolio_loss_cut_minute", self.cfg.portfolio_loss_cut_minute))
+        except (TypeError, ValueError):
+            reset_minute = int(self.cfg.portfolio_loss_cut_minute)
+        return enabled, min(100.0, max(0.001, loss_pct)), reset_hour % 24, reset_minute % 60
 
     @staticmethod
     def _is_entry_result_complete(result: object) -> bool:
@@ -809,13 +836,13 @@ class StrategyRuntimeService:
         if results:
             LOGGER.info("service hourly exchange take-profit result: %s", results)
 
-    def _run_manage_if_due(self, now_monotonic: float) -> None:
+    def _run_manage_if_due(self, now_monotonic: float, now_local: Optional[datetime] = None) -> None:
         if now_monotonic < self._next_manage_monotonic:
             return
 
         run_count = 0
         while now_monotonic >= self._next_manage_monotonic and run_count < max(1, self.cfg.manager_max_catch_up_runs):
-            summary = self.run_manage_tick()
+            summary = self.run_manage_tick(now_local=now_local)
             run_count += 1
             LOGGER.info("service manage summary: %s", summary)
             self._next_manage_monotonic += self.cfg.manager_interval_sec
@@ -829,11 +856,18 @@ class StrategyRuntimeService:
                 self.cfg.manager_interval_sec,
             )
 
-    def _run_manage_for_account(self, account_id: str) -> Dict[str, object]:
+    def _run_manage_for_account(
+        self,
+        account_id: str,
+        now_local: Optional[datetime] = None,
+    ) -> Dict[str, object]:
         ctx = self.account_runtimes[account_id]
         manager = ctx["manager"]
         strategy = ctx.get("strategy")
         balance_sampler = ctx.get("balance_sampler")
+        local_dt = now_local or datetime.now(self.timezone)
+        wallet_summary: Optional[Dict[str, object]] = None
+        portfolio_result: Optional[Dict[str, object]] = None
 
         pending_entry_recovery = None
         if strategy is not None and hasattr(strategy, "recover_pending_entries"):
@@ -854,10 +888,38 @@ class StrategyRuntimeService:
         summary = manager.run_once()  # type: ignore[attr-defined]
         if balance_sampler is not None:
             try:
-                wallet_summary = balance_sampler.run_once()  # type: ignore[attr-defined]
+                sampled = balance_sampler.run_once()  # type: ignore[attr-defined]
+                if isinstance(sampled, dict):
+                    wallet_summary = sampled
                 LOGGER.info("service wallet snapshot account=%s: %s", account_id, wallet_summary)
             except Exception as exc:  # noqa: BLE001
                 LOGGER.warning("service wallet snapshot failed account=%s: %s", account_id, exc)
+
+        enabled, loss_pct, reset_hour, reset_minute = self._portfolio_loss_cut_settings(account_id)
+        if enabled and hasattr(manager, "run_portfolio_loss_cut"):
+            equity = wallet_summary.get("equity") if wallet_summary is not None else None
+            if equity is None:
+                portfolio_result = {"status": "SKIPPED", "reason": "NO_CURRENT_EQUITY_SNAPSHOT"}
+            else:
+                try:
+                    result = manager.run_portfolio_loss_cut(  # type: ignore[attr-defined]
+                        current_equity_usdt=float(equity),
+                        now_local=local_dt,
+                        loss_pct=loss_pct,
+                        reset_hour=reset_hour,
+                        reset_minute=reset_minute,
+                    )
+                    if isinstance(result, dict):
+                        portfolio_result = result
+                        if bool(result.get("triggered")):
+                            LOGGER.warning(
+                                "service portfolio loss-cut account=%s result=%s",
+                                account_id,
+                                result,
+                            )
+                except Exception as exc:  # noqa: BLE001
+                    portfolio_result = {"status": "ERROR", "error": str(exc)}
+                    LOGGER.exception("service portfolio loss-cut failed account=%s: %s", account_id, exc)
 
         if strategy is not None and hasattr(strategy, "run_equity_recovery_take_profit"):
             try:
@@ -872,6 +934,8 @@ class StrategyRuntimeService:
             "summary": summary,
             "pending_entry_recovery": pending_entry_recovery,
             "pending_recovery": pending_recovery,
+            "wallet_summary": wallet_summary,
+            "portfolio_loss_cut": portfolio_result,
         }
 
     def _record_account_failure(self, account_id: str, error_text: str) -> None:
@@ -898,7 +962,7 @@ class StrategyRuntimeService:
                 error_text,
             )
 
-    def run_manage_tick(self) -> Dict[str, Dict[str, object]]:
+    def run_manage_tick(self, now_local: Optional[datetime] = None) -> Dict[str, Dict[str, object]]:
         self.cycle_no += 1
         account_ids = [
             aid
@@ -938,7 +1002,7 @@ class StrategyRuntimeService:
 
         submitted: Dict[Future, str] = {}
         for aid in eligible_accounts:
-            future = self._manage_executor.submit(self._run_manage_for_account, aid)
+            future = self._manage_executor.submit(self._run_manage_for_account, aid, now_local)
             self._manage_futures_by_account[aid] = future
             submitted[future] = aid
 
@@ -1026,7 +1090,7 @@ class StrategyRuntimeService:
         self._run_morning_protection_if_due(local_dt)
         self._run_hourly_exchange_take_profit_if_due(local_dt)
         self._run_orphan_exit_order_cleanup_if_due(local_dt)
-        self._run_manage_if_due(mono)
+        self._run_manage_if_due(mono, now_local=local_dt)
         self._run_balance_snapshot_for_readonly_accounts(mono)
 
     def _run_balance_snapshot_for_readonly_accounts(self, now_monotonic: float) -> None:

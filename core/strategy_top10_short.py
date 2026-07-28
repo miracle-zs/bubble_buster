@@ -264,6 +264,9 @@ class Top10ShortStrategy:
     ) -> Dict[str, object]:
         trade_day = (trade_day_utc or "").strip() or datetime.now(timezone.utc).date().isoformat()
         trade_day_utc = trade_day
+        # A portfolio-loss stop can interrupt a bearish-hour wait. The event is
+        # scoped to that entry run; a new trade day must be allowed to wait again.
+        self._entry_wait_stop_event.clear()
         pending_entry_recovery = self.recover_pending_entries()
         if int(pending_entry_recovery.get("total", 0) or 0) > 0:
             LOGGER.warning(
@@ -540,6 +543,9 @@ class Top10ShortStrategy:
                 trade_day_utc=trade_day_utc,
             )
             for idx, ready_entry in enumerate(ready_entries):
+                if self._entry_wait_stop_event.is_set():
+                    self._entry_wait_interrupted = True
+                    break
                 entry = ready_entry.entry
                 reference_price = ready_entry.reference_price
                 position_id: Optional[int] = None

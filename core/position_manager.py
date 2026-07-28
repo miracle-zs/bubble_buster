@@ -2,7 +2,7 @@ import logging
 import hashlib
 import threading
 from collections import deque
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from functools import wraps
 from typing import Any, Dict, List, Optional, Set
 from uuid import uuid4
@@ -36,6 +36,7 @@ class PositionManager:
     MORNING_PROTECTION_LOCK_NAME = "morning_protection_stop_caps_v1"
     HOURLY_EXCHANGE_TP_LOCK_NAME = "hourly_exchange_take_profit_v1"
     ORPHAN_EXIT_ORDER_CLEANUP_LOCK_NAME = "orphan_exit_order_cleanup_v1"
+    PORTFOLIO_LOSS_CUT_LOCK_NAME = "portfolio_loss_cut_v1"
     NOON_PROTECTION_PRE_ENTRY_HOURS = 2
     # An untracked position has no fill timestamp; assume the normal 08:00 entry
     # and include the two completed hourly candles immediately before it.
@@ -489,6 +490,230 @@ class PositionManager:
         if self.daily_loss_cut_scope == self.DAILY_LOSS_CUT_SCOPE_EXCHANGE:
             return self._run_daily_loss_cut_exchange_positions()
         return self._run_daily_loss_cut_tracked_positions()
+
+    @staticmethod
+    def _portfolio_loss_cut_cycle_window(
+        now_local: datetime,
+        reset_hour: int,
+        reset_minute: int,
+    ) -> tuple[date, datetime, bool]:
+        local_dt = now_local
+        if local_dt.tzinfo is None:
+            local_dt = local_dt.replace(tzinfo=timezone.utc)
+        reset_today = local_dt.replace(
+            hour=reset_hour % 24,
+            minute=reset_minute % 60,
+            second=0,
+            microsecond=0,
+        )
+        if local_dt >= reset_today:
+            return local_dt.date(), reset_today, True
+        previous_reset = reset_today - timedelta(days=1)
+        return previous_reset.date(), previous_reset, False
+
+    @_serialized_account_mutation
+    def run_portfolio_loss_cut(
+        self,
+        current_equity_usdt: float,
+        now_local: datetime,
+        loss_pct: float = 3.5,
+        reset_hour: int = 8,
+        reset_minute: int = 0,
+    ) -> Dict[str, object]:
+        """Monitor and enforce the per-account daily portfolio loss stop.
+
+        The baseline is the first valid wallet snapshot at or after the local
+        reset time. Once the equity falls by ``loss_pct`` from that baseline,
+        every non-exempt exchange position is market-closed and the account is
+        latched until the next reset cycle. The latch is persisted so a service
+        restart cannot reopen the account on the same day.
+        """
+        cycle_date, cycle_start_local, active = self._portfolio_loss_cut_cycle_window(
+            now_local=now_local,
+            reset_hour=reset_hour,
+            reset_minute=reset_minute,
+        )
+        cycle_key = cycle_date.isoformat()
+        if not active:
+            return {
+                "status": "PRE_RESET",
+                "cycle_date": cycle_key,
+                "reset_at_local": cycle_start_local.isoformat(timespec="seconds"),
+            }
+
+        current_equity = self._safe_float(current_equity_usdt, default=0.0)
+        if current_equity <= 0:
+            return {"status": "SKIPPED", "reason": "INVALID_EQUITY", "cycle_date": cycle_key}
+
+        normalized_loss_pct = min(100.0, max(0.001, float(loss_pct)))
+        state = self.store.get_lock_state(self.PORTFOLIO_LOSS_CUT_LOCK_NAME) or {}
+        if str(state.get("cycle_date") or "") != cycle_key:
+            cycle_start_utc = cycle_start_local.astimezone(timezone.utc).replace(microsecond=0).isoformat()
+            snapshot = self.store.get_wallet_snapshot_first_since(
+                start_captured_at_utc=cycle_start_utc,
+                end_captured_at_utc=now_local.astimezone(timezone.utc).replace(microsecond=0).isoformat(),
+            )
+            baseline_equity = self._safe_float(
+                snapshot.get("balance_usdt") if snapshot else current_equity,
+                default=current_equity,
+            )
+            if baseline_equity <= 0:
+                baseline_equity = current_equity
+            threshold_equity = baseline_equity * (1.0 - normalized_loss_pct / 100.0)
+            state = {
+                "cycle_date": cycle_key,
+                "baseline_equity_usdt": baseline_equity,
+                "baseline_captured_at_utc": (
+                    str(snapshot.get("captured_at_utc") or "").strip() if snapshot else None
+                ),
+                "threshold_equity_usdt": threshold_equity,
+                "loss_pct": normalized_loss_pct,
+                "triggered": False,
+                "close_complete": False,
+                "notification_sent": False,
+                "updated_at_utc": self._utc_now_iso(),
+            }
+            self.store.set_lock_state(self.PORTFOLIO_LOSS_CUT_LOCK_NAME, state)
+
+        baseline_equity = self._safe_float(state.get("baseline_equity_usdt"), default=0.0)
+        threshold_equity = self._safe_float(state.get("threshold_equity_usdt"), default=0.0)
+        if baseline_equity <= 0 or threshold_equity <= 0:
+            return {"status": "SKIPPED", "reason": "INVALID_BASELINE", "cycle_date": cycle_key}
+
+        state["current_equity_usdt"] = current_equity
+        state["updated_at_utc"] = self._utc_now_iso()
+        already_triggered = bool(state.get("triggered"))
+        threshold_eps = max(1e-9, abs(threshold_equity) * 1e-12)
+        if not already_triggered and current_equity + threshold_eps > threshold_equity:
+            self.store.set_lock_state(self.PORTFOLIO_LOSS_CUT_LOCK_NAME, state)
+            return {
+                "status": "MONITORING",
+                "cycle_date": cycle_key,
+                "baseline_equity": round(baseline_equity, 8),
+                "current_equity": round(current_equity, 8),
+                "threshold_equity": round(threshold_equity, 8),
+            }
+
+        if not already_triggered:
+            state["triggered"] = True
+            state["close_complete"] = False
+            state["triggered_at_utc"] = self._utc_now_iso()
+            self.store.set_lock_state(self.PORTFOLIO_LOSS_CUT_LOCK_NAME, state)
+
+        if bool(state.get("close_complete")):
+            self.store.set_lock_state(self.PORTFOLIO_LOSS_CUT_LOCK_NAME, state)
+            return {
+                "status": "ALREADY_TRIGGERED",
+                "triggered": True,
+                "close_complete": True,
+                "cycle_date": cycle_key,
+                "baseline_equity": round(baseline_equity, 8),
+                "current_equity": round(current_equity, 8),
+                "threshold_equity": round(threshold_equity, 8),
+            }
+
+        close_summary = self._close_all_exchange_positions_for_portfolio_loss_cut()
+        close_complete = int(close_summary.get("errors", 0) or 0) == 0
+        state["close_complete"] = close_complete
+        state["last_close_summary"] = close_summary
+        if not bool(state.get("notification_sent")):
+            try:
+                self.notifier.send(
+                    f"【Top10做空】组合止损 -{normalized_loss_pct:.2f}%",
+                    self._build_portfolio_loss_cut_notification(
+                        close_summary,
+                        baseline_equity=baseline_equity,
+                        current_equity=current_equity,
+                        threshold_equity=threshold_equity,
+                        cycle_date=cycle_key,
+                    ),
+                )
+                state["notification_sent"] = True
+            except Exception as exc:  # noqa: BLE001
+                LOGGER.warning("Portfolio loss-cut notification failed account=%s: %s", self.account_id, exc)
+        self.store.set_lock_state(self.PORTFOLIO_LOSS_CUT_LOCK_NAME, state)
+
+        return {
+            "status": "TRIGGERED" if not already_triggered else "TRIGGERED_RETRY",
+            "triggered": True,
+            "close_complete": close_complete,
+            "cycle_date": cycle_key,
+            "baseline_equity": round(baseline_equity, 8),
+            "current_equity": round(current_equity, 8),
+            "threshold_equity": round(threshold_equity, 8),
+            **close_summary,
+        }
+
+    def _close_all_exchange_positions_for_portfolio_loss_cut(self) -> Dict[str, object]:
+        summary: Dict[str, object] = {
+            "total": 0,
+            "closed_loss_cut": 0,
+            "errors": 0,
+            "closed_symbols": [],
+            "failed_symbols": [],
+        }
+        details: Dict[str, List[str]] = {"closed_loss_cut": [], "errors": []}
+        closed_symbols: List[str] = []
+        failed_symbols: List[str] = []
+        try:
+            risks = self.client.get_position_risk()
+        except Exception as exc:  # noqa: BLE001
+            LOGGER.exception("Portfolio loss-cut failed to query exchange positions: %s", exc)
+            summary["errors"] = 1
+            details["errors"].append(f"fetch_position_risk_failed: {exc}")
+            summary["closed_symbols"] = closed_symbols
+            summary["failed_symbols"] = failed_symbols
+            summary["details"] = details
+            return summary
+
+        for risk in risks:
+            symbol = str(risk.get("symbol") or "").strip().upper()
+            if not symbol or self._is_protection_exempt(symbol):
+                continue
+            position_amt = self._safe_float(risk.get("positionAmt"), default=0.0)
+            if abs(position_amt) <= 1e-12:
+                continue
+            summary["total"] = int(summary["total"]) + 1
+            position_side = str(risk.get("positionSide") or "BOTH").strip().upper() or "BOTH"
+            close_side, use_reduce_only = self._resolve_close_side_for_exchange_position(
+                position_amt=position_amt,
+                position_side=position_side,
+            )
+            tracked_pos = self._find_open_position_for_exchange_symbol(symbol)
+            tracked_position_id = int(tracked_pos["id"]) if tracked_pos is not None else None
+            try:
+                close_info = self._close_daily_loss_cut(
+                    symbol=symbol,
+                    qty=abs(position_amt),
+                    side=close_side,
+                    position_id=tracked_position_id,
+                    cancel_pos=tracked_pos,
+                    position_side=position_side if position_side in {"LONG", "SHORT"} else None,
+                    use_reduce_only=use_reduce_only,
+                    close_status="CLOSED_PORTFOLIO_LOSS_CUT",
+                    close_reason="PORTFOLIO_EQUITY_LOSS_CUT",
+                    client_id_tag="plc",
+                )
+                summary["closed_loss_cut"] = int(summary["closed_loss_cut"]) + 1
+                details["closed_loss_cut"].append(
+                    f"{symbol}(qty={close_info['qty']}, side={close_side}, "
+                    f"position_side={position_side}, reduce_only={use_reduce_only}, "
+                    f"close_order_id={close_info['close_order_id']})"
+                )
+                closed_symbols.append(symbol)
+            except Exception as exc:  # noqa: BLE001
+                summary["errors"] = int(summary["errors"]) + 1
+                LOGGER.exception("Portfolio loss-cut failed for exchange position symbol=%s: %s", symbol, exc)
+                details["errors"].append(
+                    f"{symbol}(qty={abs(position_amt)}, side={close_side}, "
+                    f"position_side={position_side}): {exc}"
+                )
+                failed_symbols.append(symbol)
+
+        summary["closed_symbols"] = closed_symbols
+        summary["failed_symbols"] = failed_symbols
+        summary["details"] = details
+        return summary
 
     @_serialized_account_mutation
     def run_noon_protection_stop(
@@ -1473,13 +1698,14 @@ class PositionManager:
         use_reduce_only: bool = True,
         close_status: str = "CLOSED_DAILY_LOSS_CUT",
         close_reason: str = "DAILY_FLOATING_LOSS_CHECK",
+        client_id_tag: str = "dl",
     ) -> Dict[str, object]:
         create_order_params: Dict[str, object] = {
             "symbol": symbol,
             "side": side,
             "type": "MARKET",
             "quantity": self.client.format_order_qty(symbol, qty),
-            "newClientOrderId": self._new_client_id("dl", symbol),
+            "newClientOrderId": self._new_client_id(client_id_tag, symbol),
             "newOrderRespType": "RESULT",
         }
         if use_reduce_only:
@@ -1951,6 +2177,45 @@ class PositionManager:
             if block:
                 lines.extend(["", block])
 
+        return "\n".join(lines)
+
+    @staticmethod
+    def _build_portfolio_loss_cut_notification(
+        summary: Dict[str, object],
+        baseline_equity: float,
+        current_equity: float,
+        threshold_equity: float,
+        cycle_date: str,
+    ) -> str:
+        rows = [
+            ("cycle_date", cycle_date),
+            ("baseline_equity_usdt", f"{baseline_equity:.8f}"),
+            ("current_equity_usdt", f"{current_equity:.8f}"),
+            ("threshold_equity_usdt", f"{threshold_equity:.8f}"),
+            ("open_positions", int(summary.get("total", 0) or 0)),
+            ("closed_positions", int(summary.get("closed_loss_cut", 0) or 0)),
+            ("errors", int(summary.get("errors", 0) or 0)),
+        ]
+        lines = [
+            "### Top10 做空组合止损汇总",
+            "",
+            f"- 触发周期(本地日期): `{cycle_date}`",
+            f"- 触发时间(UTC): `{datetime.now(timezone.utc).replace(microsecond=0).isoformat()}`",
+            "",
+            "### 摘要",
+            "",
+            format_markdown_kv_table(rows),
+        ]
+        details = summary.get("details")
+        if isinstance(details, dict):
+            for key, title in [
+                ("closed_loss_cut", "组合止损平仓明细"),
+                ("errors", "错误明细"),
+            ]:
+                values = [item for item in details.get(key, []) if item]
+                block = format_markdown_list_section(title, values, max_items=20)
+                if block:
+                    lines.extend(["", block])
         return "\n".join(lines)
 
     @staticmethod

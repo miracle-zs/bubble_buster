@@ -236,6 +236,15 @@ def _build_single_account_components(
         "cooling_off_retry_count": max(0, runtime_cfg.getint("cooling_off_retry_count", fallback=0)),
         "cooling_off_retry_delay_sec": max(0, runtime_cfg.getint("cooling_off_retry_delay_sec", fallback=0)),
         "daily_loss_cut_enabled": runtime_cfg.getboolean("daily_loss_cut_enabled", fallback=True),
+        "portfolio_loss_cut_enabled": runtime_cfg.getboolean(
+            "portfolio_loss_cut_enabled", fallback=False
+        ),
+        "portfolio_loss_cut_pct": min(
+            100.0,
+            max(0.001, runtime_cfg.getfloat("portfolio_loss_cut_pct", fallback=3.5)),
+        ),
+        "portfolio_loss_cut_hour": runtime_cfg.getint("portfolio_loss_cut_hour", fallback=8),
+        "portfolio_loss_cut_minute": runtime_cfg.getint("portfolio_loss_cut_minute", fallback=0),
         "noon_protection_enabled": runtime_cfg.getboolean("noon_protection_enabled", fallback=True),
         "morning_protection_enabled": runtime_cfg.getboolean("morning_protection_enabled", fallback=False),
         "morning_protection_hour": runtime_cfg.getint("morning_protection_hour", fallback=7),
@@ -326,6 +335,15 @@ def create_components(
             1,
             runtime_cfg_selected.getint("daily_loss_cut_grace_min", fallback=30),
         ),
+        portfolio_loss_cut_enabled=runtime_cfg_selected.getboolean(
+            "portfolio_loss_cut_enabled", fallback=False
+        ),
+        portfolio_loss_cut_pct=min(
+            100.0,
+            max(0.001, runtime_cfg_selected.getfloat("portfolio_loss_cut_pct", fallback=3.5)),
+        ),
+        portfolio_loss_cut_hour=runtime_cfg_selected.getint("portfolio_loss_cut_hour", fallback=8),
+        portfolio_loss_cut_minute=runtime_cfg_selected.getint("portfolio_loss_cut_minute", fallback=0),
         noon_protection_enabled=runtime_cfg_selected.getboolean("noon_protection_enabled", fallback=True),
         noon_protection_hour=runtime_cfg_selected.getint("noon_protection_hour", fallback=12),
         noon_protection_minute=runtime_cfg_selected.getint("noon_protection_minute", fallback=0),
