@@ -24,6 +24,10 @@ class DashboardFastAPITest(unittest.TestCase):
 timezone = UTC
 entry_hour = 7
 entry_minute = 40
+portfolio_loss_cut_enabled = true
+portfolio_loss_cut_pct = 3.5
+portfolio_loss_cut_hour = 8
+portfolio_loss_cut_minute = 0
 dashboard_refresh_sec = 9
 run_service_with_dashboard = false
 db_path = data/state.db
@@ -48,6 +52,10 @@ strategy_note.acc02 = TP 9% / 清仓100% / 浮亏砍仓ON
         ctx = create_dashboard_context(str(self.config_path))
         self.assertEqual(ctx.timezone_name, "UTC")
         self.assertEqual(ctx.refresh_sec, 15)
+        self.assertTrue(ctx.portfolio_loss_cut_enabled)
+        self.assertEqual(ctx.portfolio_loss_cut_pct, 3.5)
+        self.assertEqual(ctx.portfolio_loss_cut_hour, 8)
+        self.assertEqual(ctx.portfolio_loss_cut_minute, 0)
         self.assertTrue(ctx.db_path.endswith("data/state.db"))
         self.assertTrue(ctx.log_file.endswith("logs/strategy.log"))
         self.assertTrue(Path(ctx.db_path).exists())
@@ -58,6 +66,7 @@ strategy_note.acc02 = TP 9% / 清仓100% / 浮亏砍仓ON
             overview = client.get("/")
             self.assertEqual(overview.status_code, 200)
             self.assertIn("账户总览", overview.text)
+            self.assertIn("组合止损 -3.5% 已启用", overview.text)
 
             compact = client.get("/account/acc01/")
             self.assertEqual(compact.status_code, 200)

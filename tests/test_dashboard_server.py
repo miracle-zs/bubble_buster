@@ -1217,7 +1217,31 @@ class DashboardServerTest(unittest.TestCase):
         self.assertNotIn('id="winRate"', html)
 
     def test_render_overview_uses_readable_task_layout(self) -> None:
-        html = render_accounts_overview_html(refresh_sec=5)
+        html = render_accounts_overview_html(
+            refresh_sec=5,
+            portfolio_loss_cut_enabled=True,
+            portfolio_loss_cut_pct=3.5,
+        )
+        self.assertIn('class="command-bar"', html)
+        self.assertIn("组合止损 -3.5% 已启用", html)
+        self.assertIn('class="managed-grid"', html)
+        self.assertIn('class="readonly-strip"', html)
+        self.assertIn('class="strategy-popover"', html)
+        self.assertIn('class="strategy-trigger"', html)
+        self.assertIn("策略配置", html)
+        self.assertIn("formatStrategyNote(r.strategy_note)", html)
+        self.assertIn("strategy-tag-primary", html)
+        self.assertIn("strategy-tag-protection", html)
+        self.assertIn("strategy-tag-off", html)
+        self.assertIn("closeStrategyPopovers", html)
+        self.assertIn('event.key !== "Escape"', html)
+        self.assertIn("近30日盈亏", html)
+        self.assertIn("盈亏比", html)
+        self.assertIn("mode === \"readonly\"", html)
+        self.assertIn("? (payload.balance_curve || payload.equity_curve || [])", html)
+        self.assertIn("entry-progress-details", html)
+        self.assertIn('id="entry-progress-toggle"', html)
+        self.assertIn("暂无异常", html)
         self.assertIn('id="entry-progress-board"', html)
         self.assertIn('id="entry-progress-updated"', html)
         self.assertIn("今日开单进度", html)
@@ -1264,7 +1288,8 @@ class DashboardServerTest(unittest.TestCase):
         html = render_accounts_overview_html(refresh_sec=5)
         self.assertIn('<span id="refresh">15</span>', html)
         self.assertIn("setInterval(fetchSummary, Math.max(15, refreshSec) * 1000)", html)
-        self.assertIn("?window_hours=24&curve_points=100&log_lines=0", html)
+        self.assertIn('/curve"', html)
+        self.assertIn("?window_hours=24&curve_points=160", html)
 
     def test_safe_query_int_handles_invalid_values(self) -> None:
         self.assertEqual(_safe_query_int("abc", default=80, min_value=0, max_value=300), 80)

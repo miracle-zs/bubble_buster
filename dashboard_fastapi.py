@@ -39,6 +39,12 @@ class DashboardRuntimeContext:
     db_path: str
     log_file: str
     timezone_name: str
+    entry_hour: int
+    entry_minute: int
+    portfolio_loss_cut_enabled: bool
+    portfolio_loss_cut_pct: float
+    portfolio_loss_cut_hour: int
+    portfolio_loss_cut_minute: int
     refresh_sec: int
     echarts_src: str
     provider: DashboardDataProvider
@@ -101,6 +107,15 @@ def create_dashboard_context(config_path: str) -> DashboardRuntimeContext:
     timezone_name = runtime_cfg.get("timezone", "Asia/Shanghai").strip()
     entry_hour = int(runtime_cfg.get("entry_hour", 7))
     entry_minute = int(runtime_cfg.get("entry_minute", 40))
+    portfolio_loss_cut_enabled = str(
+        runtime_cfg.get("portfolio_loss_cut_enabled", "false")
+    ).strip().lower() in {"1", "true", "yes", "on"}
+    portfolio_loss_cut_pct = min(
+        100.0,
+        max(0.001, float(runtime_cfg.get("portfolio_loss_cut_pct", 3.5))),
+    )
+    portfolio_loss_cut_hour = int(runtime_cfg.get("portfolio_loss_cut_hour", 8)) % 24
+    portfolio_loss_cut_minute = int(runtime_cfg.get("portfolio_loss_cut_minute", 0)) % 60
     refresh_sec = max(15, int(runtime_cfg.get("dashboard_refresh_sec", 15)))
     curve_points = max(100, int(runtime_cfg.get("dashboard_curve_points", 600)))
     balance_refresh_sec = max(5, int(runtime_cfg.get("manager_interval_sec", 60)))
@@ -318,6 +333,12 @@ def create_dashboard_context(config_path: str) -> DashboardRuntimeContext:
         db_path=db_path,
         log_file=log_file,
         timezone_name=timezone_name,
+        entry_hour=entry_hour,
+        entry_minute=entry_minute,
+        portfolio_loss_cut_enabled=portfolio_loss_cut_enabled,
+        portfolio_loss_cut_pct=portfolio_loss_cut_pct,
+        portfolio_loss_cut_hour=portfolio_loss_cut_hour,
+        portfolio_loss_cut_minute=portfolio_loss_cut_minute,
         refresh_sec=refresh_sec,
         echarts_src=echarts_src,
         provider=provider,
@@ -526,7 +547,17 @@ def create_app(config_path: Optional[str] = None) -> FastAPI:
     @app.get("/", response_class=HTMLResponse)
     def overview_page(request: Request):
         ctx: DashboardRuntimeContext = request.app.state.ctx
-        return HTMLResponse(render_accounts_overview_html(ctx.refresh_sec))
+        return HTMLResponse(
+            render_accounts_overview_html(
+                ctx.refresh_sec,
+                entry_hour=ctx.entry_hour,
+                entry_minute=ctx.entry_minute,
+                portfolio_loss_cut_enabled=ctx.portfolio_loss_cut_enabled,
+                portfolio_loss_cut_pct=ctx.portfolio_loss_cut_pct,
+                portfolio_loss_cut_hour=ctx.portfolio_loss_cut_hour,
+                portfolio_loss_cut_minute=ctx.portfolio_loss_cut_minute,
+            )
+        )
 
     @app.get("/account/{account_id}/", response_class=HTMLResponse)
     def account_detail_page(
