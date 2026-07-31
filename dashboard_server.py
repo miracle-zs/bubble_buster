@@ -3944,6 +3944,9 @@ ACCOUNTS_OVERVIEW_HTML = """<!doctype html>
     .accounts-area { margin-top:14px; }
     .managed-grid {
       display:grid;
+      width:100%;
+      max-width:1540px;
+      margin:0 auto;
       grid-template-columns:repeat(4,minmax(0,1fr));
       gap:14px;
     }

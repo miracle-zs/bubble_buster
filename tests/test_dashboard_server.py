@@ -1225,6 +1225,7 @@ class DashboardServerTest(unittest.TestCase):
         self.assertIn('class="command-bar"', html)
         self.assertIn("组合止损 -3.5% 已启用", html)
         self.assertIn('class="managed-grid"', html)
+        self.assertIn("max-width:1540px", html)
         self.assertIn('class="readonly-strip"', html)
         self.assertIn('class="strategy-popover"', html)
         self.assertIn('class="strategy-trigger"', html)
