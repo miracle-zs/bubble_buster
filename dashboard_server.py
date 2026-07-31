@@ -4191,11 +4191,6 @@ ACCOUNTS_OVERVIEW_HTML = """<!doctype html>
       background:#0a151e;
       overflow:hidden;
     }
-    .spark-grid-line {
-      stroke:#17303f;
-      stroke-width:1;
-      vector-effect:non-scaling-stroke;
-    }
     .spark-zero-line {
       stroke:#294757;
       stroke-width:1;
@@ -4230,6 +4225,8 @@ ACCOUNTS_OVERVIEW_HTML = """<!doctype html>
     }
     .stop-meter-fill.status-warn { background:var(--warn); }
     .stop-meter-fill.status-bad { background:var(--bad); }
+    .stop-meter-label.status-warn { color:var(--warn); }
+    .stop-meter-label.status-bad { color:var(--bad); }
     .readonly-strip {
       margin-top:14px;
       min-height:96px;
@@ -5252,8 +5249,6 @@ ACCOUNTS_OVERVIEW_HTML = """<!doctype html>
     box.className = "spark-box " + deltaCls;
     box.innerHTML = ''
       + '<svg class="spark-svg" viewBox="0 0 ' + width + " " + height + '" preserveAspectRatio="none">'
-      + '<line class="spark-grid-line" x1="0" x2="' + width + '" y1="' + (height * 0.25).toFixed(2) + '" y2="' + (height * 0.25).toFixed(2) + '"></line>'
-      + '<line class="spark-grid-line" x1="0" x2="' + width + '" y1="' + (height * 0.75).toFixed(2) + '" y2="' + (height * 0.75).toFixed(2) + '"></line>'
       + '<line class="spark-zero-line" x1="0" x2="' + width + '" y1="' + geometry.zeroY.toFixed(2) + '" y2="' + geometry.zeroY.toFixed(2) + '"></line>'
       + (includeStop ? '<line class="spark-stop-line" x1="0" x2="' + width + '" y1="' + geometry.stopY.toFixed(2) + '" y2="' + geometry.stopY.toFixed(2) + '"></line>' : "")
       + '<polyline class="spark-area" points="' + area + '"></polyline>'
@@ -5265,17 +5260,29 @@ ACCOUNTS_OVERVIEW_HTML = """<!doctype html>
     if (mode === "readonly") return;
 
     setAccountMetric("current-drawdown", aid, fmt(metrics.currentDrawdownPct, 2) + "%", drawdownClass(metrics.currentDrawdownPct));
+    var meterLabel = accountElement("stop-meter-label", aid);
     if (!portfolioStopEnabled) {
       setAccountMetric("stop-distance", aid, "未启用", "status-warn");
       setAccountMetric("risk-state", aid, "组合止损未启用", "status-warn");
+      if (meterLabel) {
+        meterLabel.textContent = "未启用";
+        meterLabel.className = "stop-meter-label status-warn";
+      }
       return;
     }
 
     var distance = metrics.stopDistancePct;
     var riskCls = distance <= 0 ? "status-bad" : (distance <= 1 ? "status-warn" : "status-ok");
     var riskText = distance <= 0 ? "已触发组合止损" : (distance <= 1 ? "接近组合止损" : "正常");
-    setAccountMetric("stop-distance", aid, fmt(distance, 2) + "%", riskCls);
+    var stopDistanceText = distance <= 0 ? "已超出 " + fmt(Math.abs(distance), 2) + "%" : fmt(distance, 2) + "%";
+    setAccountMetric("stop-distance", aid, stopDistanceText, riskCls);
     setAccountMetric("risk-state", aid, riskText, riskCls);
+    if (meterLabel) {
+      meterLabel.textContent = distance <= 0
+        ? "已超出 " + fmt(Math.abs(distance), 2) + "%"
+        : (distance <= 1 ? "接近阈值" : "安全距离");
+      meterLabel.className = "stop-meter-label " + riskCls;
+    }
     var meter = accountElement("stop-meter-fill", aid);
     if (meter) {
       var meterPct = Math.max(0, Math.min(100, distance / (portfolioStopPct * 2) * 100));
@@ -5406,7 +5413,7 @@ ACCOUNTS_OVERVIEW_HTML = """<!doctype html>
           + '<div class="spark-block">'
           + '<div class="spark-title"><span class="label">本周期策略权益曲线</span><span class="label">' + (portfolioStopEnabled ? ("止损阈值 -" + fmt(portfolioStopPct, 2) + "%") : "组合止损未启用") + '</span></div>'
           + '<div class="spark-box" data-account-id="' + safeAid + '"><div class="spark-empty">加载中...</div></div>'
-          + '<div class="stop-meter"><span>-' + fmt(portfolioStopPct, 2) + '%</span><span class="stop-meter-track"><span class="stop-meter-fill" data-account-id="' + safeAid + '"></span></span><span>安全距离</span></div>'
+          + '<div class="stop-meter"><span>-' + fmt(portfolioStopPct, 2) + '%</span><span class="stop-meter-track"><span class="stop-meter-fill" data-account-id="' + safeAid + '"></span></span><span class="stop-meter-label" data-account-id="' + safeAid + '">计算中</span></div>'
           + "</div></div>"
           + "</article>";
       }
