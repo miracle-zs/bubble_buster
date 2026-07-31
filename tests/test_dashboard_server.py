@@ -1233,6 +1233,8 @@ class DashboardServerTest(unittest.TestCase):
         self.assertIn("strategy-tag-primary", html)
         self.assertIn("strategy-tag-protection", html)
         self.assertIn("strategy-tag-off", html)
+        self.assertIn("距周期高点回撤", html)
+        self.assertIn('if (value < 0) return "status-warn";', html)
         self.assertIn("closeStrategyPopovers", html)
         self.assertIn('event.key !== "Escape"', html)
         self.assertIn("近30日盈亏", html)

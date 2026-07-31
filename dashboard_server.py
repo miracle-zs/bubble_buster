@@ -3715,8 +3715,8 @@ ACCOUNTS_OVERVIEW_HTML = """<!doctype html>
     .spark-block { margin-top: 10px; padding-top: 10px; border-top:1px dashed #1e3e52; }
     .spark-title { display:flex; justify-content:space-between; align-items:center; margin-bottom:6px; }
     .spark-box { height:76px; border:1px solid #1d3f53; border-radius:8px; background:linear-gradient(180deg,rgba(11,23,33,0.75) 0%, rgba(9,18,27,0.88) 100%); overflow:hidden; }
-    .spark-box.spark-up { --spark:var(--ok); --spark-fill:rgba(38,208,124,0.14); }
-    .spark-box.spark-down { --spark:var(--bad); --spark-fill:rgba(255,93,93,0.14); }
+    .spark-box.spark-up { --spark:var(--ok); --spark-fill:rgba(38,208,124,0.11); }
+    .spark-box.spark-down { --spark:var(--bad); --spark-fill:rgba(255,93,93,0.07); }
     .spark-box.spark-flat { --spark:var(--accent); --spark-fill:rgba(78,193,255,0.12); }
     .spark-svg { width:100%; height:100%; display:block; }
     .spark-path { fill:none; stroke:var(--spark); stroke-width:2; vector-effect:non-scaling-stroke; stroke-linejoin:round; stroke-linecap:round; }
@@ -3866,8 +3866,8 @@ ACCOUNTS_OVERVIEW_HTML = """<!doctype html>
       grid-template-columns:minmax(290px,1.5fr) repeat(4,minmax(130px,0.72fr)) minmax(210px,0.9fr);
       align-items:center;
       border:1px solid #24485d;
-      border-radius:7px;
-      background:#0c1822;
+      border-radius:12px;
+      background:linear-gradient(135deg,#0d1b26,#0b1720);
       overflow:hidden;
     }
     .command-brand {
@@ -3941,34 +3941,35 @@ ACCOUNTS_OVERVIEW_HTML = """<!doctype html>
       background:currentColor;
       vertical-align:1px;
     }
-    .accounts-area { margin-top:10px; }
+    .accounts-area { margin-top:14px; }
     .managed-grid {
       display:grid;
       grid-template-columns:repeat(4,minmax(0,1fr));
-      gap:8px;
+      gap:14px;
     }
     .account-card {
       min-width:0;
       position:relative;
       z-index:1;
       border:1px solid #24485d;
-      border-radius:7px;
-      background:#0d1923;
+      border-radius:14px;
+      background:linear-gradient(165deg,#101d28,#0d1923);
+      box-shadow:0 8px 22px rgba(0,0,0,0.22);
       overflow:visible;
     }
     .account-card:hover,
     .account-card:focus-within { z-index:8; }
     .account-card-head {
       position:relative;
-      min-height:44px;
-      padding:0 14px;
+      min-height:50px;
+      padding:0 16px;
       display:flex;
       align-items:center;
       justify-content:space-between;
       gap:10px;
-      border-bottom:1px solid #1f3e51;
-      border-radius:6px 6px 0 0;
-      background:#0d1923;
+      border-bottom:1px solid rgba(55,101,127,0.56);
+      border-radius:13px 13px 0 0;
+      background:rgba(13,25,35,0.72);
     }
     .account-card-head .aid {
       font-size:17px;
@@ -3977,12 +3978,12 @@ ACCOUNTS_OVERVIEW_HTML = """<!doctype html>
     .account-head-actions {
       display:flex;
       align-items:center;
-      gap:10px;
+      gap:12px;
       min-width:0;
     }
     .venue-state {
       color:#8ba8b9;
-      font-size:11px;
+      font-size:10px;
       white-space:nowrap;
     }
     .venue-state.status-ok,
@@ -3995,7 +3996,7 @@ ACCOUNTS_OVERVIEW_HTML = """<!doctype html>
       color:#a9c9db;
       text-decoration:none;
       font-size:11px;
-      border-left:1px solid #29495b;
+      border-left:1px solid rgba(53,91,111,0.7);
       padding-left:10px;
     }
     .detail-link:hover { color:var(--accent); }
@@ -4029,9 +4030,9 @@ ACCOUNTS_OVERVIEW_HTML = """<!doctype html>
       width:290px;
       padding:10px;
       border:1px solid #35657d;
-      border-radius:6px;
+      border-radius:9px;
       background:#09141d;
-      box-shadow:0 16px 36px rgba(0,0,0,0.46);
+      box-shadow:0 16px 36px rgba(0,0,0,0.38);
       opacity:0;
       visibility:hidden;
       transform:translateY(-4px);
@@ -4113,100 +4114,101 @@ ACCOUNTS_OVERVIEW_HTML = """<!doctype html>
       padding-left:0;
     }
     .account-card-body {
-      padding:13px 14px 12px;
-      border-radius:0 0 6px 6px;
-      background:#0d1923;
+      padding:17px 16px 15px;
+      border-radius:0 0 13px 13px;
+      background:rgba(13,25,35,0.72);
     }
     .account-primary {
       display:grid;
       grid-template-columns:minmax(0,1.25fr) minmax(0,1fr);
-      gap:18px;
+      gap:24px;
       align-items:end;
-      padding-bottom:12px;
+      padding-bottom:16px;
     }
     .metric-label {
       display:block;
       color:#7899ac;
-      font-size:11px;
+      font-size:12px;
       line-height:1.25;
-      margin-bottom:5px;
+      margin-bottom:6px;
     }
     .metric-value {
       display:block;
       color:#edf7fd;
       font-family:ui-monospace,Menlo,Monaco,Consolas,monospace;
-      font-size:21px;
+      font-size:22px;
       line-height:1.15;
       font-weight:700;
       white-space:nowrap;
     }
-    .metric-value.return-value { font-size:22px; }
+    .metric-value.return-value { font-size:23px; }
     .metric-value.status-ok { color:var(--ok); }
     .metric-value.status-warn { color:var(--warn); }
     .metric-value.status-bad { color:var(--bad); }
     .account-secondary {
       display:grid;
       grid-template-columns:repeat(3,minmax(0,1fr));
-      border-top:1px solid #1d394b;
-      border-bottom:1px solid #1d394b;
+      border-top:1px solid rgba(55,101,127,0.56);
+      border-bottom:0;
+      background:rgba(7,20,29,0.22);
     }
     .account-secondary .metric {
       min-width:0;
-      padding:10px 8px 9px 0;
+      padding:12px 10px 11px 0;
     }
     .account-secondary .metric + .metric {
       padding-left:10px;
-      border-left:1px solid #1d394b;
+      border-left:1px solid rgba(55,101,127,0.42);
     }
-    .account-secondary .metric-value { font-size:15px; }
+    .account-secondary .metric-value { font-size:16px; }
     .risk-summary {
-      min-height:42px;
+      min-height:48px;
       display:flex;
       align-items:center;
       justify-content:space-between;
       gap:12px;
       color:#8ba8b9;
-      font-size:11px;
+      font-size:12px;
     }
     .risk-summary strong {
       color:#dcebf4;
-      font-size:12px;
+      font-size:13px;
     }
     .risk-summary strong.status-ok { color:var(--ok); }
     .risk-summary strong.status-warn { color:var(--warn); }
     .risk-summary strong.status-bad { color:var(--bad); }
     .spark-block {
       margin-top:0;
-      padding-top:10px;
-      border-top:1px solid #1d394b;
+      padding-top:13px;
+      border-top:1px solid rgba(55,101,127,0.42);
     }
-    .spark-title { margin-bottom:7px; }
-    .spark-title .label { font-size:11px; }
+    .spark-title { margin-bottom:8px; }
+    .spark-title .label { font-size:12px; }
     .spark-box {
-      height:128px;
+      height:124px;
       border:0;
       border-radius:0;
       background:#0a151e;
       overflow:hidden;
     }
     .spark-grid-line {
-      stroke:#1c3545;
+      stroke:#17303f;
       stroke-width:1;
       vector-effect:non-scaling-stroke;
     }
     .spark-zero-line {
-      stroke:#2a4a5d;
+      stroke:#294757;
       stroke-width:1;
       vector-effect:non-scaling-stroke;
     }
     .spark-stop-line {
-      stroke:var(--bad);
+      stroke:rgba(255,93,93,0.62);
       stroke-width:1;
       stroke-dasharray:4 3;
       vector-effect:non-scaling-stroke;
     }
     .stop-meter {
-      margin-top:9px;
+      margin-top:11px;
       display:grid;
       grid-template-columns:auto minmax(60px,1fr) auto;
       align-items:center;
@@ -4215,7 +4217,7 @@ ACCOUNTS_OVERVIEW_HTML = """<!doctype html>
       font-size:10px;
     }
     .stop-meter-track {
-      height:4px;
+      height:3px;
       background:#213440;
       overflow:hidden;
     }
@@ -4229,23 +4231,24 @@ ACCOUNTS_OVERVIEW_HTML = """<!doctype html>
     .stop-meter-fill.status-warn { background:var(--warn); }
     .stop-meter-fill.status-bad { background:var(--bad); }
     .readonly-strip {
-      margin-top:8px;
-      min-height:82px;
+      margin-top:14px;
+      min-height:96px;
       display:grid;
       grid-template-columns:minmax(190px,1.25fr) repeat(5,minmax(105px,0.85fr)) minmax(280px,2.3fr) auto;
       align-items:center;
       border:1px solid #584561;
-      border-radius:7px;
-      background:#111824;
+      border-radius:14px;
+      background:linear-gradient(165deg,#121b29,#101722);
+      box-shadow:0 8px 22px rgba(0,0,0,0.18);
       overflow:hidden;
     }
     .readonly-identity,
     .readonly-metric,
     .readonly-chart,
-    .readonly-action { min-width:0; padding:12px 14px; }
+    .readonly-action { min-width:0; padding:15px 16px; }
     .readonly-metric,
     .readonly-chart,
-    .readonly-action { border-left:1px solid #302b3c; }
+    .readonly-action { border-left:1px solid rgba(74,59,89,0.72); }
     .readonly-id {
       color:#d7a0f0;
       font-size:17px;
@@ -4328,7 +4331,7 @@ ACCOUNTS_OVERVIEW_HTML = """<!doctype html>
     }
     .entry-progress-shell {
       border:1px solid #24485d;
-      border-radius:7px;
+      border-radius:12px;
       background:#0b1721;
       overflow:hidden;
     }
@@ -4369,7 +4372,7 @@ ACCOUNTS_OVERVIEW_HTML = """<!doctype html>
     .task-filter-chip { border-color:transparent; }
     .task-board-list {
       border:1px solid #24485d;
-      border-radius:7px;
+      border-radius:12px;
       background:#0b1721;
       overflow:hidden;
     }
@@ -5129,7 +5132,7 @@ ACCOUNTS_OVERVIEW_HTML = """<!doctype html>
 
   function drawdownClass(value) {
     if (value <= -(portfolioStopPct * 0.7)) return "status-bad";
-    if (value <= -(portfolioStopPct * 0.35)) return "status-warn";
+    if (value < 0) return "status-warn";
     return "status-ok";
   }
 
@@ -5396,7 +5399,7 @@ ACCOUNTS_OVERVIEW_HTML = """<!doctype html>
           + '</div>'
           + '<div class="account-secondary">'
           + '<div class="metric"><span class="metric-label">持仓数量</span><strong class="metric-value">' + fmt(r.open_positions, 0) + '</strong></div>'
-          + '<div class="metric"><span class="metric-label">当前回撤</span><strong class="metric-value current-drawdown" data-account-id="' + safeAid + '">--</strong></div>'
+          + '<div class="metric"><span class="metric-label">距周期高点回撤</span><strong class="metric-value current-drawdown" data-account-id="' + safeAid + '">--</strong></div>'
           + '<div class="metric"><span class="metric-label">距组合止损</span><strong class="metric-value stop-distance" data-account-id="' + safeAid + '">--</strong></div>'
           + '</div>'
           + '<div class="risk-summary"><span>风险状态</span><strong class="risk-state" data-account-id="' + safeAid + '">计算中</strong></div>'
