@@ -3856,7 +3856,7 @@ ACCOUNTS_OVERVIEW_HTML = """<!doctype html>
     button, a { font:inherit; }
     .wrap {
       width:100%;
-      max-width:1800px;
+      max-width:1680px;
       margin:0 auto;
       padding:12px 16px 28px;
     }
@@ -3945,8 +3945,8 @@ ACCOUNTS_OVERVIEW_HTML = """<!doctype html>
     .managed-grid {
       display:grid;
       width:100%;
-      max-width:1540px;
-      margin:0 auto;
+      max-width:none;
+      margin:0;
       grid-template-columns:repeat(4,minmax(0,1fr));
       gap:14px;
     }
