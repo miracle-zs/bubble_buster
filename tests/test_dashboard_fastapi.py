@@ -72,7 +72,12 @@ strategy_note.acc02 = TP 9% / 清仓100% / 浮亏砍仓ON
             self.assertEqual(compact.status_code, 200)
             self.assertIn("acc01", compact.text)
             self.assertIn('var accountId = "acc01";', compact.text)
+            self.assertIn('var accountMode = "full";', compact.text)
             self.assertIn("encodeURIComponent(accountId)", compact.text)
+            self.assertIn("TP 9% / 减仓50% / 浮亏砍仓ON", compact.text)
+            self.assertIn('var portfolioStopEnabled = true;', compact.text)
+            self.assertIn('class="account-command-bar"', compact.text)
+            self.assertIn("周期风险", compact.text)
 
             health = client.get("/healthz")
             self.assertEqual(health.status_code, 200)

@@ -1206,15 +1206,48 @@ class DashboardServerTest(unittest.TestCase):
         html = render_account_dashboard_html(
             refresh_sec=5,
             account_id='acc01";alert(1);//',
+            account_mode="full",
+            strategy_note="TP 9% / 减仓50% / 浮亏砍仓ON",
+            portfolio_loss_cut_enabled=True,
+            portfolio_loss_cut_pct=3.5,
+            portfolio_loss_cut_hour=8,
+            portfolio_loss_cut_minute=0,
         )
         self.assertIn("encodeURIComponent(accountId)", html)
         self.assertNotIn('/api/account/acc01";alert(1);//', html)
-        self.assertIn("All-time Equity Change", html)
-        self.assertIn("Window Cashflow", html)
+        self.assertIn('class="account-command-bar"', html)
+        self.assertIn('class="summary-rail"', html)
+        self.assertIn('class="surface risk-panel"', html)
+        self.assertIn('class="surface section-block positions-panel"', html)
+        self.assertIn('class="activity-tabs"', html)
+        self.assertIn('class="diagnostics-panel"', html)
+        self.assertIn("max-width: 1680px", html)
+        self.assertIn("距组合止损", html)
+        self.assertIn("当前持仓", html)
+        self.assertIn("账户活动", html)
+        self.assertIn("诊断信息", html)
+        self.assertIn('var accountMode = "full";', html)
+        self.assertIn('var portfolioStopEnabled = true;', html)
+        self.assertIn('var portfolioStopPct = Number("3.5")', html)
+        self.assertIn("TP 9% / 减仓50% / 浮亏砍仓ON", html)
+        self.assertNotIn("Bubble Buster Runtime Console", html)
+        self.assertNotIn("All-time Equity Change", html)
+        self.assertNotIn("Window Cashflow", html)
         self.assertNotIn("Recorded Exchange Realized PnL", html)
         self.assertNotIn("Gross Profit", html)
         self.assertNotIn("Profit Factor", html)
         self.assertNotIn('id="winRate"', html)
+
+    def test_render_account_dashboard_html_blocks_inline_script_termination(self) -> None:
+        html = render_account_dashboard_html(
+            refresh_sec=5,
+            account_id="</script><script>alert(1)</script>",
+            strategy_note="</script><script>alert(2)</script>",
+        )
+
+        self.assertEqual(html.count("</script>"), 1)
+        self.assertNotIn("<script>alert", html)
+        self.assertIn("\\u003c/script\\u003e", html)
 
     def test_render_overview_uses_readable_task_layout(self) -> None:
         html = render_accounts_overview_html(

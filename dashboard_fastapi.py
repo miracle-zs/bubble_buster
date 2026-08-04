@@ -570,6 +570,12 @@ def create_app(config_path: Optional[str] = None) -> FastAPI:
                 ctx.refresh_sec,
                 account_id=account_id,
                 echarts_src=ctx.echarts_src,
+                account_mode=ctx.provider.account_modes.get(account_id, "full"),
+                strategy_note=ctx.provider.account_strategy_notes.get(account_id, ""),
+                portfolio_loss_cut_enabled=ctx.portfolio_loss_cut_enabled,
+                portfolio_loss_cut_pct=ctx.portfolio_loss_cut_pct,
+                portfolio_loss_cut_hour=ctx.portfolio_loss_cut_hour,
+                portfolio_loss_cut_minute=ctx.portfolio_loss_cut_minute,
             )
         )
 

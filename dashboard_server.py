@@ -2104,33 +2104,76 @@ class DashboardDataProvider:
         return rows
 
 
+def _inline_script_json(value: Any) -> str:
+    """Serialize a value for an inline script without allowing tag termination."""
+    return (
+        json.dumps(value, ensure_ascii=False)
+        .replace("<", "\\u003c")
+        .replace(">", "\\u003e")
+        .replace("&", "\\u0026")
+    )
+
+
+def _render_dashboard_template(
+    refresh_sec: int,
+    echarts_src: str,
+    *,
+    account_id: str = "",
+    account_mode: str = "full",
+    strategy_note: str = "",
+    portfolio_loss_cut_enabled: bool = False,
+    portfolio_loss_cut_pct: float = 3.5,
+    portfolio_loss_cut_hour: int = 8,
+    portfolio_loss_cut_minute: int = 0,
+) -> str:
+    safe_stop_pct = min(100.0, max(0.001, float(portfolio_loss_cut_pct)))
+    return (
+        DASHBOARD_HTML.replace("__REFRESH_SEC__", str(max(2, refresh_sec)))
+        .replace("__ECHARTS_SRC__", echarts_src or "https://cdn.jsdelivr.net/npm/echarts@5/dist/echarts.min.js")
+        .replace("__ACCOUNT_ID_JSON__", _inline_script_json(account_id))
+        .replace("__ACCOUNT_MODE_JSON__", _inline_script_json(account_mode))
+        .replace("__STRATEGY_NOTE_JSON__", _inline_script_json(strategy_note))
+        .replace("__PORTFOLIO_STOP_ENABLED__", "true" if portfolio_loss_cut_enabled else "false")
+        .replace("__PORTFOLIO_STOP_PCT__", f"{safe_stop_pct:g}")
+        .replace("__PORTFOLIO_STOP_HOUR__", str(int(portfolio_loss_cut_hour) % 24))
+        .replace("__PORTFOLIO_STOP_MINUTE__", str(int(portfolio_loss_cut_minute) % 60))
+    )
+
+
 def render_dashboard_html(
     refresh_sec: int,
     echarts_src: str = "https://cdn.jsdelivr.net/npm/echarts@5/dist/echarts.min.js",
 ) -> str:
-    return (
-        DASHBOARD_HTML.replace("__REFRESH_SEC__", str(max(2, refresh_sec)))
-        .replace("__ECHARTS_SRC__", echarts_src or "https://cdn.jsdelivr.net/npm/echarts@5/dist/echarts.min.js")
-    )
+    return _render_dashboard_template(refresh_sec, echarts_src)
 
 
 def render_account_dashboard_html(
     refresh_sec: int,
     account_id: str,
     echarts_src: str = "https://cdn.jsdelivr.net/npm/echarts@5/dist/echarts.min.js",
+    account_mode: str = "full",
+    strategy_note: str = "",
+    portfolio_loss_cut_enabled: bool = False,
+    portfolio_loss_cut_pct: float = 3.5,
+    portfolio_loss_cut_hour: int = 8,
+    portfolio_loss_cut_minute: int = 0,
 ) -> str:
     safe_account_id = (account_id or "").strip()
     if not safe_account_id:
         return render_dashboard_html(refresh_sec, echarts_src=echarts_src)
-    account_json = json.dumps(safe_account_id, ensure_ascii=False)
-    api_expr = (
-        'var apiBase = pathPrefix.replace(/\\/legacy$/, "").replace(/\\/account\\/[^/]+$/, "");\n'
-        f"  var accountId = {account_json};\n"
-        '  var api = apiBase + "/api/account/" + encodeURIComponent(accountId);'
-    )
-    return (
-        render_dashboard_html(refresh_sec, echarts_src=echarts_src)
-        .replace('var api = pathPrefix + "/api/dashboard";', api_expr)
+    safe_account_mode = (account_mode or "full").strip().lower()
+    if safe_account_mode not in {"full", "readonly", "loss_cut_only"}:
+        safe_account_mode = "full"
+    return _render_dashboard_template(
+        refresh_sec,
+        echarts_src,
+        account_id=safe_account_id,
+        account_mode=safe_account_mode,
+        strategy_note=(strategy_note or "").strip(),
+        portfolio_loss_cut_enabled=portfolio_loss_cut_enabled,
+        portfolio_loss_cut_pct=portfolio_loss_cut_pct,
+        portfolio_loss_cut_hour=portfolio_loss_cut_hour,
+        portfolio_loss_cut_minute=portfolio_loss_cut_minute,
     )
 
 
@@ -2780,161 +2823,656 @@ DASHBOARD_HTML = """<!doctype html>
       }
     }
   </style>
+  <style>
+    /* Account detail — restrained operations sheet, shared with the overview. */
+    html { background: #071019; }
+    body {
+      min-height: 100vh;
+      color: #eaf6ff;
+      background:
+        linear-gradient(rgba(17, 39, 53, 0.11) 1px, transparent 1px),
+        #071019;
+      background-size: 100% 48px;
+      letter-spacing: 0;
+    }
+    body::before { display: none; }
+    button, a, summary { font: inherit; }
+    button, summary { -webkit-tap-highlight-color: transparent; }
+
+    .detail-shell {
+      width: 100%;
+      max-width: 1680px;
+      margin: 0 auto;
+      padding: 12px 16px 32px;
+    }
+    .account-command-bar {
+      min-height: 72px;
+      display: grid;
+      grid-template-columns: minmax(360px, 1.65fr) repeat(3, minmax(150px, 0.62fr));
+      align-items: stretch;
+      border: 1px solid #24485d;
+      border-radius: 12px 12px 0 0;
+      background: #0c1923;
+      overflow: hidden;
+    }
+    .account-command-main {
+      min-width: 0;
+      display: flex;
+      align-items: center;
+      gap: 16px;
+      padding: 12px 18px;
+    }
+    .overview-link {
+      flex: 0 0 auto;
+      display: inline-flex;
+      align-items: center;
+      min-height: 30px;
+      padding-right: 15px;
+      border-right: 1px solid #24485d;
+      color: #8fb1c4;
+      text-decoration: none;
+      font-size: 12px;
+      font-weight: 700;
+    }
+    .overview-link:hover,
+    .overview-link:focus-visible { color: #4ec1ff; outline: none; }
+    .account-heading { min-width: 0; }
+    .account-title-row { display: flex; align-items: center; flex-wrap: wrap; gap: 9px; }
+    .account-title {
+      margin: 0;
+      color: #f2f8fc;
+      font-size: 21px;
+      line-height: 1.2;
+      letter-spacing: 0;
+    }
+    .mode-badge {
+      display: inline-flex;
+      align-items: center;
+      min-height: 22px;
+      padding: 2px 7px;
+      border: 1px solid #31586d;
+      border-radius: 4px;
+      color: #bad5e4;
+      background: #10232f;
+      font-size: 10px;
+      font-weight: 800;
+    }
+    .mode-badge.mode-readonly { border-color: #654c6f; color: #e1b8f1; background: #211726; }
+    .mode-badge.mode-loss-cut { border-color: #7c5c28; color: #f1cc87; background: #241d12; }
+    .account-meta {
+      margin-top: 5px;
+      color: #7798ab;
+      font-size: 11px;
+      line-height: 1.35;
+    }
+    .command-cell {
+      min-width: 0;
+      padding: 12px 16px;
+      border-left: 1px solid #203b4c;
+      display: flex;
+      flex-direction: column;
+      justify-content: center;
+      gap: 4px;
+    }
+    .command-cell-label { color: #7899ac; font-size: 10px; }
+    .command-cell-value {
+      color: #dcebf4;
+      font-size: 13px;
+      font-weight: 800;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    .command-cell-value.ok, .status-ok { color: #26d07c; }
+    .command-cell-value.warn, .status-warn { color: #ffb340; }
+    .command-cell-value.bad, .status-bad { color: #ff6b6b; }
+    .strategy-strip {
+      min-height: 42px;
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      padding: 7px 18px;
+      border: 1px solid #24485d;
+      border-top: 0;
+      border-radius: 0 0 12px 12px;
+      background: #09151e;
+    }
+    .strategy-strip-label {
+      flex: 0 0 auto;
+      color: #7899ac;
+      font-size: 10px;
+      font-weight: 800;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+    }
+    .strategy-tags { min-width: 0; display: flex; align-items: center; flex-wrap: wrap; gap: 5px; }
+    .strategy-chip {
+      display: inline-flex;
+      align-items: center;
+      min-height: 22px;
+      padding: 2px 7px;
+      border: 1px solid #2b4b5c;
+      border-radius: 4px;
+      color: #9db8c8;
+      background: #0f202b;
+      font-size: 10px;
+      font-weight: 700;
+    }
+    .strategy-chip.primary { border-color: #316b89; color: #c9eaff; background: #102939; }
+    .strategy-chip.off { border-color: #744146; color: #ff9a9a; background: #29191d; }
+    .refresh-note { margin-left: auto; color: #66889b; font-size: 10px; white-space: nowrap; }
+
+    .summary-rail {
+      display: grid;
+      grid-template-columns: 1.3fr repeat(3, minmax(0, 1fr)) 0.78fr 0.95fr;
+      margin-top: 14px;
+      border: 1px solid #24485d;
+      border-radius: 12px;
+      background: #0c1923;
+      overflow: hidden;
+    }
+    .summary-metric {
+      min-width: 0;
+      min-height: 94px;
+      padding: 15px 16px;
+      border-left: 1px solid #203b4c;
+      display: flex;
+      flex-direction: column;
+      justify-content: center;
+      gap: 7px;
+    }
+    .summary-metric:first-child { border-left: 0; }
+    .summary-metric.primary { background: #0e1e29; box-shadow: inset 3px 0 0 #4ec1ff; }
+    .summary-label { color: #7899ac; font-size: 11px; }
+    .summary-value {
+      color: #edf7fd;
+      font-family: ui-monospace, Menlo, Monaco, Consolas, monospace;
+      font-size: 21px;
+      line-height: 1.1;
+      font-weight: 750;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    .summary-metric.primary .summary-value { font-size: 27px; }
+    .summary-help { color: #628397; font-size: 9px; line-height: 1.35; }
+
+    .analytics-grid {
+      display: grid;
+      grid-template-columns: minmax(0, 2fr) minmax(340px, 0.82fr);
+      gap: 14px;
+      margin-top: 14px;
+    }
+    .surface {
+      min-width: 0;
+      border: 1px solid #24485d;
+      border-radius: 12px;
+      background: #0b1822;
+      overflow: hidden;
+    }
+    .surface-head {
+      min-height: 49px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 14px;
+      padding: 9px 14px;
+      border-bottom: 1px solid #203b4c;
+      background: #0d1c27;
+    }
+    .surface-heading { min-width: 0; }
+    .surface-title { margin: 0; color: #dcebf4; font-size: 14px; line-height: 1.25; }
+    .surface-subtitle { margin-top: 3px; color: #6f91a4; font-size: 10px; }
+    .surface-count {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      min-width: 24px;
+      min-height: 20px;
+      padding: 1px 7px;
+      border: 1px solid #315469;
+      border-radius: 999px;
+      color: #9db8c8;
+      font-size: 10px;
+      font-weight: 800;
+    }
+    .chart-toolbar { display: flex; align-items: center; flex-wrap: wrap; justify-content: flex-end; gap: 12px; }
+    .tab-row, .window-row { display: flex; align-items: center; gap: 4px; flex-wrap: wrap; }
+    .window-row { margin: 0; }
+    .tab-btn {
+      min-height: 27px;
+      padding: 3px 9px;
+      border: 1px solid #29495b;
+      border-radius: 4px;
+      color: #8eacbd;
+      background: #0a1720;
+      font-size: 10px;
+      font-weight: 750;
+      cursor: pointer;
+    }
+    .tab-btn:hover, .tab-btn:focus-visible { color: #eaf6ff; border-color: #4e829e; outline: none; }
+    .tab-btn.active {
+      color: #06131b;
+      border-color: #69c8f3;
+      background: #69c8f3;
+      box-shadow: none;
+    }
+    .chart-stage { position: relative; padding: 12px 14px 14px; }
+    .chart-canvas {
+      width: 100%;
+      height: 348px;
+      border: 0;
+      border-radius: 0;
+      background: #08141d;
+    }
+    .chart-empty {
+      position: absolute;
+      inset: 12px 14px 14px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      color: #67889b;
+      background: #08141d;
+      font-size: 12px;
+      pointer-events: none;
+    }
+    .chart-empty[hidden] { display: none; }
+
+    .risk-panel { display: flex; flex-direction: column; }
+    .risk-body { flex: 1 1 auto; padding: 18px; display: flex; flex-direction: column; }
+    .risk-state-line { display: flex; align-items: flex-start; justify-content: space-between; gap: 14px; }
+    .risk-state-copy { min-width: 0; }
+    .risk-eyebrow { color: #6f91a4; font-size: 10px; }
+    .risk-state {
+      display: block;
+      margin-top: 5px;
+      color: #dcebf4;
+      font-size: 22px;
+      line-height: 1.2;
+      font-weight: 800;
+    }
+    .risk-threshold {
+      flex: 0 0 auto;
+      padding: 5px 8px;
+      border: 1px solid #684044;
+      border-radius: 4px;
+      color: #ff9a9a;
+      background: #24171b;
+      font-family: ui-monospace, Menlo, Monaco, Consolas, monospace;
+      font-size: 10px;
+      font-weight: 800;
+    }
+    .risk-description { min-height: 34px; margin: 13px 0 0; color: #8ba8b9; font-size: 11px; line-height: 1.55; }
+    .risk-meter { margin-top: 17px; }
+    .risk-meter-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; color: #7899ac; font-size: 10px; }
+    .risk-meter-track { position: relative; height: 7px; margin-top: 8px; background: #1b303d; overflow: hidden; }
+    .risk-meter-fill { display: block; width: 0; height: 100%; background: #26d07c; transition: width 180ms ease; }
+    .risk-meter-fill.warn { background: #ffb340; }
+    .risk-meter-fill.bad { background: #ff5d5d; }
+    .risk-meter-scale { display: flex; justify-content: space-between; margin-top: 6px; color: #59798c; font-size: 9px; }
+    .risk-facts {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      margin-top: 20px;
+      border-top: 1px solid #203b4c;
+      border-left: 1px solid #203b4c;
+    }
+    .risk-fact { min-width: 0; min-height: 66px; padding: 11px; border-right: 1px solid #203b4c; border-bottom: 1px solid #203b4c; }
+    .risk-fact-label { display: block; color: #6f91a4; font-size: 9px; }
+    .risk-fact-value { display: block; margin-top: 6px; color: #dcebf4; font-family: ui-monospace, Menlo, Monaco, Consolas, monospace; font-size: 13px; font-weight: 800; }
+
+    .section-block { margin-top: 14px; }
+    .table-wrap {
+      width: 100%;
+      max-height: 430px;
+      overflow: auto;
+      background: #09151e;
+      scrollbar-color: #31566c #0a1720;
+      scrollbar-width: thin;
+    }
+    .detail-table {
+      width: 100%;
+      min-width: 820px;
+      border-collapse: collapse;
+      table-layout: auto;
+      color: #cfe1eb;
+      font-size: 12px;
+    }
+    .detail-table th, .detail-table td {
+      padding: 10px 13px;
+      border-bottom: 1px solid rgba(42, 76, 96, 0.62);
+      text-align: left;
+      vertical-align: top;
+      white-space: nowrap;
+    }
+    .detail-table th {
+      position: sticky;
+      top: 0;
+      z-index: 2;
+      color: #7899ac;
+      background: #0e202b;
+      font-size: 10px;
+      font-weight: 750;
+      letter-spacing: 0.03em;
+    }
+    .detail-table tbody tr:nth-child(odd) { background: rgba(15, 33, 45, 0.34); }
+    .detail-table tbody tr:hover { background: rgba(31, 65, 84, 0.35); }
+    .detail-table td.numeric { font-family: ui-monospace, Menlo, Monaco, Consolas, monospace; font-variant-numeric: tabular-nums; }
+    .symbol-cell strong { display: block; color: #edf7fd; font-size: 12px; }
+    .symbol-cell small { display: block; margin-top: 3px; color: #5e8093; font-family: ui-monospace, Menlo, Monaco, Consolas, monospace; font-size: 9px; }
+    .cell-muted { color: #7899ac; }
+    .status-badge {
+      display: inline-flex;
+      align-items: center;
+      min-height: 22px;
+      padding: 2px 7px;
+      border: 1px solid #315469;
+      border-radius: 999px;
+      color: #9db8c8;
+      background: #0f202b;
+      font-size: 9px;
+      font-weight: 850;
+    }
+    .status-badge.ok { border-color: #236944; color: #65dfa0; background: #10271e; }
+    .status-badge.warn { border-color: #755822; color: #ffc86d; background: #271f10; }
+    .status-badge.bad { border-color: #74383b; color: #ff8989; background: #291719; }
+    .error-cell { max-width: 320px; white-space: normal !important; color: #ff8989; line-height: 1.45; }
+    .empty-row { padding: 24px 13px !important; color: #68899b; text-align: center !important; }
+
+    .activity-tabs {
+      display: flex;
+      align-items: center;
+      gap: 2px;
+      padding: 8px 10px 0;
+      border-bottom: 1px solid #203b4c;
+      background: #0d1c27;
+    }
+    .activity-tab {
+      position: relative;
+      min-height: 36px;
+      padding: 6px 12px 9px;
+      border: 0;
+      color: #7899ac;
+      background: transparent;
+      font-size: 11px;
+      font-weight: 800;
+      cursor: pointer;
+    }
+    .activity-tab::after { content: ""; position: absolute; left: 10px; right: 10px; bottom: -1px; height: 2px; background: transparent; }
+    .activity-tab:hover, .activity-tab:focus-visible { color: #dcebf4; outline: none; }
+    .activity-tab.active { color: #eaf6ff; }
+    .activity-tab.active::after { background: #4ec1ff; }
+    .tab-count { margin-left: 5px; color: #66889b; font-family: ui-monospace, Menlo, Monaco, Consolas, monospace; font-size: 9px; }
+    .activity-view[hidden] { display: none; }
+    .message-cell { min-width: 360px; max-width: 760px; white-space: normal !important; }
+    .message-summary { color: #a9c1cf; line-height: 1.45; }
+    .row-details { margin-top: 5px; }
+    .row-details summary { color: #628ca3; font-size: 9px; cursor: pointer; list-style: none; }
+    .row-details summary::-webkit-details-marker { display: none; }
+    .row-details summary::before { content: "+ "; }
+    .row-details[open] summary::before { content: "− "; }
+    .raw-message { margin-top: 6px; padding: 8px; color: #7596a8; background: #07131b; font-family: ui-monospace, Menlo, Monaco, Consolas, monospace; font-size: 9px; line-height: 1.45; word-break: break-word; }
+
+    .diagnostics-panel { margin-top: 14px; border: 1px solid #263f4f; border-radius: 12px; background: #09151e; overflow: hidden; }
+    .diagnostics-panel > summary {
+      min-height: 48px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 14px;
+      padding: 9px 14px;
+      color: #a8bfcc;
+      background: #0b1923;
+      font-size: 12px;
+      font-weight: 800;
+      cursor: pointer;
+      list-style: none;
+    }
+    .diagnostics-panel > summary::-webkit-details-marker { display: none; }
+    .diagnostics-panel > summary::after { content: "展开"; color: #68899b; font-size: 9px; font-weight: 700; }
+    .diagnostics-panel[open] > summary::after { content: "收起"; }
+    .diagnostics-intro { color: #66889b; font-size: 10px; font-weight: 500; }
+    .diagnostics-grid { display: grid; grid-template-columns: minmax(0, 1.15fr) minmax(0, 0.85fr); border-top: 1px solid #203b4c; }
+    .diagnostic-block { min-width: 0; }
+    .diagnostic-block + .diagnostic-block { border-left: 1px solid #203b4c; }
+    .diagnostic-title { margin: 0; padding: 10px 13px; border-bottom: 1px solid #203b4c; color: #8facbd; background: #0c1a24; font-size: 10px; }
+    .log {
+      margin: 0;
+      height: 322px;
+      max-height: none;
+      overflow: auto;
+      padding: 11px 13px;
+      border: 0;
+      color: #8eacbd;
+      background: #07131b;
+      font-size: 10px;
+      line-height: 1.55;
+    }
+    .mono { font-family: ui-monospace, Menlo, Monaco, Consolas, monospace; font-size: inherit; }
+
+    @media (max-width: 1180px) {
+      .account-command-bar { grid-template-columns: minmax(340px, 1.4fr) repeat(3, minmax(130px, 0.62fr)); }
+      .summary-rail { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+      .summary-metric:nth-child(4) { border-left: 0; border-top: 1px solid #203b4c; }
+      .summary-metric:nth-child(n+5) { border-top: 1px solid #203b4c; }
+      .analytics-grid { grid-template-columns: 1fr; }
+      .risk-facts { grid-template-columns: repeat(4, 1fr); }
+    }
+    @media (max-width: 820px) {
+      .detail-shell { padding: 10px 10px 24px; }
+      .account-command-bar { grid-template-columns: 1fr 1fr; }
+      .account-command-main { grid-column: 1 / -1; border-bottom: 1px solid #203b4c; }
+      .command-cell:nth-child(2) { border-left: 0; }
+      .command-cell:nth-child(4) { grid-column: 1 / -1; border-left: 0; border-top: 1px solid #203b4c; }
+      .strategy-strip { align-items: flex-start; flex-wrap: wrap; }
+      .refresh-note { width: 100%; margin-left: 0; }
+      .summary-rail { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      .summary-metric { min-height: 82px; border-top: 1px solid #203b4c; }
+      .summary-metric:nth-child(odd) { border-left: 0; }
+      .summary-metric:nth-child(-n+2) { border-top: 0; }
+      .summary-metric.primary { grid-column: auto; }
+      .surface-head { align-items: flex-start; flex-direction: column; }
+      .chart-toolbar { width: 100%; justify-content: space-between; }
+      .chart-canvas { height: 280px; }
+      .risk-facts { grid-template-columns: 1fr 1fr; }
+      .diagnostics-grid { grid-template-columns: 1fr; }
+      .diagnostic-block + .diagnostic-block { border-left: 0; border-top: 1px solid #203b4c; }
+    }
+    @media (max-width: 540px) {
+      .account-command-main { align-items: flex-start; flex-direction: column; gap: 9px; }
+      .overview-link { min-height: 20px; padding-right: 0; border-right: 0; }
+      .account-title { font-size: 19px; }
+      .command-cell { min-height: 62px; padding: 10px 12px; }
+      .strategy-strip { padding: 9px 12px; }
+      .summary-metric { padding: 13px 12px; }
+      .summary-value { font-size: 17px; }
+      .summary-metric.primary .summary-value { font-size: 22px; }
+      .chart-toolbar { align-items: flex-start; flex-direction: column; }
+      .chart-canvas { height: 246px; }
+      .chart-stage { padding: 9px; }
+      .chart-empty { inset: 9px; }
+      .risk-body { padding: 14px; }
+      .risk-state { font-size: 19px; }
+      .activity-tabs { overflow-x: auto; }
+      .activity-tab { flex: 0 0 auto; }
+      .detail-table th, .detail-table td { padding: 9px 10px; }
+    }
+    @media (prefers-reduced-motion: reduce) {
+      *, *::before, *::after { scroll-behavior: auto !important; transition: none !important; animation: none !important; }
+    }
+  </style>
 </head>
 <body>
-  <main class="shell">
-    <section class="header">
-      <div>
-        <h1 class="title">Bubble Buster Runtime Console</h1>
-        <div class="subtitle" id="meta">loading...</div>
+  <main class="detail-shell">
+    <header class="account-command-bar">
+      <div class="account-command-main">
+        <a class="overview-link" id="overviewLink" href="/">← 账户总览</a>
+        <div class="account-heading">
+          <div class="account-title-row">
+            <h1 class="account-title" id="accountTitle">账户详情</h1>
+            <span class="mode-badge" id="accountMode">加载中</span>
+          </div>
+          <div class="account-meta" id="meta">正在读取账户状态...</div>
+        </div>
       </div>
-      <div class="pill-row">
-        <div class="pill">Auto refresh: <span id="refresh">__REFRESH_SEC__</span>s</div>
-        <div class="pill">Next entry: <span id="nextEntry">--</span></div>
-        <div class="pill">Service: <span id="serviceState">--</span></div>
+      <div class="command-cell">
+        <span class="command-cell-label">服务状态</span>
+        <strong class="command-cell-value" id="serviceState">检测中</strong>
       </div>
+      <div class="command-cell">
+        <span class="command-cell-label">下次开单</span>
+        <strong class="command-cell-value mono" id="nextEntry">--</strong>
+      </div>
+      <div class="command-cell">
+        <span class="command-cell-label">数据更新时间</span>
+        <strong class="command-cell-value mono" id="updatedAt">--</strong>
+      </div>
+    </header>
+
+    <section class="strategy-strip" aria-label="账户策略配置">
+      <span class="strategy-strip-label">Strategy</span>
+      <div class="strategy-tags" id="strategyTags"><span class="strategy-chip">未配置策略说明</span></div>
+      <span class="refresh-note">自动刷新 <span id="refresh">__REFRESH_SEC__</span>s · 页面只读</span>
     </section>
 
-    <section class="cards cards-runtime">
-      <article class="card">
-        <div class="k">Open Positions</div>
-        <div class="v" id="openCount">0</div>
+    <section class="summary-rail" aria-label="账户核心指标">
+      <article class="summary-metric primary">
+        <span class="summary-label">策略权益 (USDT)</span>
+        <strong class="summary-value" id="walletBalance">--</strong>
+        <span class="summary-help">扣除窗口内出入金影响</span>
       </article>
-      <article class="card">
-        <div class="k">Open Symbols</div>
-        <div class="v" id="symbolCount">0</div>
+      <article class="summary-metric">
+        <span class="summary-label" id="cycleReturnLabel">周期收益</span>
+        <strong class="summary-value" id="cycleReturn">--</strong>
+        <span class="summary-help" id="cycleReturnHelp">按组合止损周期计算</span>
       </article>
-      <article class="card">
-        <div class="k">Recent Errors</div>
-        <div class="v" id="errorCount">0</div>
+      <article class="summary-metric">
+        <span class="summary-label">距周期高点回撤</span>
+        <strong class="summary-value" id="currentDrawdown">--</strong>
+        <span class="summary-help">当前权益相对周期内高点</span>
       </article>
-      <article class="card">
-        <div class="k">Last Run Status</div>
-        <div class="v" id="lastRunStatus">--</div>
+      <article class="summary-metric">
+        <span class="summary-label">距组合止损</span>
+        <strong class="summary-value" id="stopDistance">--</strong>
+        <span class="summary-help" id="stopDistanceHelp">阈值计算中</span>
       </article>
-    </section>
-
-    <section class="cards cards-performance">
-      <article class="card">
-        <div class="k">Account Equity (USDT)</div>
-        <div class="v" id="walletBalance">--</div>
+      <article class="summary-metric">
+        <span class="summary-label">持仓</span>
+        <strong class="summary-value" id="openCount">0</strong>
+        <span class="summary-help"><span id="symbolCount">0</span> 个交易对</span>
       </article>
-      <article class="card">
-        <div class="k">Equity Change (USDT)</div>
-        <div class="v" id="realizedPnl">--</div>
-      </article>
-      <article class="card">
-        <div class="k">Max Drawdown</div>
-        <div class="v" id="maxDrawdown">--</div>
-      </article>
-      <article class="card">
-        <div class="k">Window Cashflow (USDT)</div>
-        <div class="v" id="netCashflow">--</div>
+      <article class="summary-metric">
+        <span class="summary-label">最近任务</span>
+        <strong class="summary-value" id="lastRunStatus">--</strong>
+        <span class="summary-help"><span id="errorCount">0</span> 个近期异常</span>
       </article>
     </section>
 
-    <section class="grid">
-      <section class="panel">
-        <h2>Equity Curve (USDT)</h2>
-        <div class="chart-wrap">
-          <div class="chart-head">
-            <div class="chart-title" id="curveTitle">策略权益曲线（不含出入金）</div>
-            <div class="tab-row">
-              <button class="tab-btn active" id="tabStrategy" type="button">策略权益</button>
-              <button class="tab-btn" id="tabBalance" type="button">账户权益</button>
+    <section class="analytics-grid">
+      <section class="surface chart-surface" aria-labelledby="curveHeading">
+        <header class="surface-head">
+          <div class="surface-heading">
+            <h2 class="surface-title" id="curveHeading">权益曲线</h2>
+            <div class="surface-subtitle" id="curveTitle">策略权益（不含出入金）</div>
+          </div>
+          <div class="chart-toolbar">
+            <div class="tab-row" aria-label="权益口径">
+              <button class="tab-btn active" id="tabStrategy" type="button" aria-pressed="true">策略权益</button>
+              <button class="tab-btn" id="tabBalance" type="button" aria-pressed="false">账户权益</button>
+            </div>
+            <div class="window-row" id="windowRow" aria-label="曲线时间范围">
+              <button class="tab-btn" data-window-hours="1" type="button">1H</button>
+              <button class="tab-btn active" data-window-hours="24" type="button">1D</button>
+              <button class="tab-btn" data-window-hours="168" type="button">1W</button>
+              <button class="tab-btn" data-window-hours="720" type="button">1M</button>
+              <button class="tab-btn" data-window-hours="8760" type="button">1Y</button>
             </div>
           </div>
-          <div class="window-row" id="windowRow">
-            <button class="tab-btn" data-window-hours="1" type="button">1H</button>
-            <button class="tab-btn active" data-window-hours="24" type="button">1D</button>
-            <button class="tab-btn" data-window-hours="168" type="button">1W</button>
-            <button class="tab-btn" data-window-hours="720" type="button">1M</button>
-            <button class="tab-btn" data-window-hours="8760" type="button">1Y</button>
-          </div>
+        </header>
+        <div class="chart-stage">
           <div class="chart-canvas" id="equityChart"></div>
+          <div class="chart-empty" id="chartEmpty">曲线加载中...</div>
         </div>
       </section>
 
-      <section class="panel">
-        <h2>Drawdown Stats</h2>
-        <div class="stats-wrap mono" id="drawdownStats"></div>
-      </section>
-
-      <section class="panel">
-        <h2>Open Positions</h2>
-        <div class="table-wrap">
-          <table>
-            <thead>
-              <tr>
-                <th>ID</th><th>Symbol</th><th>Qty</th><th>Entry</th><th>TP</th><th>SL</th><th>Expire</th><th>Error</th>
-              </tr>
-            </thead>
-            <tbody id="positionsBody"></tbody>
-          </table>
+      <aside class="surface risk-panel" aria-labelledby="riskHeading">
+        <header class="surface-head">
+          <div class="surface-heading">
+            <h2 class="surface-title" id="riskHeading">周期风险</h2>
+            <div class="surface-subtitle" id="riskCycleStart">按每日止损周期计算</div>
+          </div>
+        </header>
+        <div class="risk-body">
+          <div class="risk-state-line">
+            <div class="risk-state-copy">
+              <span class="risk-eyebrow">当前状态</span>
+              <strong class="risk-state" id="riskState">计算中</strong>
+            </div>
+            <span class="risk-threshold" id="riskThreshold">-3.5%</span>
+          </div>
+          <p class="risk-description" id="riskDescription">正在根据周期权益曲线计算风险距离。</p>
+          <div class="risk-meter">
+            <div class="risk-meter-head"><span>止损预算使用</span><strong id="riskMeterLabel">--</strong></div>
+            <div class="risk-meter-track"><span class="risk-meter-fill" id="riskMeterFill"></span></div>
+            <div class="risk-meter-scale"><span>周期起点</span><span id="riskMeterLimit">止损 -3.5%</span></div>
+          </div>
+          <div class="risk-facts" id="drawdownStats"></div>
         </div>
-      </section>
-
-      <section class="panel">
-        <h2>Recent Runs</h2>
-        <div class="table-wrap">
-          <table>
-            <thead>
-              <tr>
-                <th>Trade Day</th><th>Status</th><th>Started(UTC)</th><th>Message</th>
-              </tr>
-            </thead>
-            <tbody id="runsBody"></tbody>
-          </table>
-        </div>
-      </section>
-
-      <section class="panel">
-        <h2>Recent Order Events</h2>
-        <div class="table-wrap">
-          <table>
-            <thead>
-              <tr>
-                <th>ID</th><th>Symbol</th><th>Type</th><th>Side</th><th>Status</th><th>Time(UTC)</th>
-              </tr>
-            </thead>
-            <tbody id="eventsBody"></tbody>
-          </table>
-        </div>
-      </section>
-
-      <section class="panel">
-        <h2>Recent Cashflow Events</h2>
-        <div class="table-wrap">
-          <table>
-            <thead>
-              <tr>
-                <th>ID</th><th>Type</th><th>Amount</th><th>Asset</th><th>Symbol</th><th>Time(UTC)</th>
-              </tr>
-            </thead>
-            <tbody id="cashflowBody"></tbody>
-          </table>
-        </div>
-      </section>
-
-      <section class="panel">
-        <h2>Closed w/o Fill Price</h2>
-        <div class="table-wrap">
-          <table>
-            <thead>
-              <tr>
-                <th>ID</th><th>Symbol</th><th>Status</th><th>Close Reason</th><th>Detect</th><th>Order ID</th><th>Closed(UTC)</th>
-              </tr>
-            </thead>
-            <tbody id="unpricedBody"></tbody>
-          </table>
-        </div>
-      </section>
-
-      <section class="panel">
-        <h2>Strategy Log Tail</h2>
-        <pre class="log mono" id="logTail"></pre>
-      </section>
+      </aside>
     </section>
+
+    <section class="surface section-block positions-panel" aria-labelledby="positionsHeading">
+      <header class="surface-head">
+        <div class="surface-heading">
+          <h2 class="surface-title" id="positionsHeading">当前持仓</h2>
+          <div class="surface-subtitle">按到期时间排序，异常信息优先显示</div>
+        </div>
+        <span class="surface-count" id="positionsCount">0</span>
+      </header>
+      <div class="table-wrap">
+        <table class="detail-table positions-table">
+          <thead><tr><th>交易对 / ID</th><th>数量</th><th>入场价</th><th>止盈价</th><th>止损价</th><th>到期时间</th><th>状态</th></tr></thead>
+          <tbody id="positionsBody"><tr><td colspan="7" class="empty-row">持仓加载中...</td></tr></tbody>
+        </table>
+      </div>
+    </section>
+
+    <section class="surface section-block activity-panel" aria-labelledby="activityHeading">
+      <header class="surface-head">
+        <div class="surface-heading">
+          <h2 class="surface-title" id="activityHeading">账户活动</h2>
+          <div class="surface-subtitle">运行、订单与资金变动按同一时区展示</div>
+        </div>
+      </header>
+      <div class="activity-tabs" role="tablist" aria-label="账户活动分类">
+        <button class="activity-tab active" type="button" role="tab" aria-selected="true" data-activity-target="activity-runs">运行记录 <span class="tab-count" id="runsCount">0</span></button>
+        <button class="activity-tab" type="button" role="tab" aria-selected="false" data-activity-target="activity-events">订单事件 <span class="tab-count" id="eventsCount">0</span></button>
+        <button class="activity-tab" type="button" role="tab" aria-selected="false" data-activity-target="activity-cashflow">资金流水 <span class="tab-count" id="cashflowCount">0</span></button>
+      </div>
+      <div class="activity-view" id="activity-runs" role="tabpanel">
+        <div class="table-wrap"><table class="detail-table"><thead><tr><th>交易日</th><th>状态</th><th>开始时间</th><th>执行摘要</th></tr></thead><tbody id="runsBody"></tbody></table></div>
+      </div>
+      <div class="activity-view" id="activity-events" role="tabpanel" hidden>
+        <div class="table-wrap"><table class="detail-table"><thead><tr><th>时间</th><th>交易对</th><th>订单类型</th><th>方向</th><th>状态</th><th>事件 ID</th></tr></thead><tbody id="eventsBody"></tbody></table></div>
+      </div>
+      <div class="activity-view" id="activity-cashflow" role="tabpanel" hidden>
+        <div class="table-wrap"><table class="detail-table"><thead><tr><th>时间</th><th>类型</th><th>金额</th><th>资产</th><th>交易对</th><th>事件 ID</th></tr></thead><tbody id="cashflowBody"></tbody></table></div>
+      </div>
+    </section>
+
+    <details class="diagnostics-panel">
+      <summary><span>诊断信息 <span class="diagnostics-intro">仅在核对异常时展开</span></span><span class="surface-count" id="unpricedCount">0</span></summary>
+      <div class="diagnostics-grid">
+        <section class="diagnostic-block">
+          <h2 class="diagnostic-title">待核对平仓</h2>
+          <div class="table-wrap"><table class="detail-table"><thead><tr><th>交易对 / ID</th><th>状态</th><th>平仓原因</th><th>检测结果</th><th>订单 ID</th><th>平仓时间</th></tr></thead><tbody id="unpricedBody"></tbody></table></div>
+        </section>
+        <section class="diagnostic-block">
+          <h2 class="diagnostic-title">策略日志尾部</h2>
+          <pre class="log mono" id="logTail">日志按需加载...</pre>
+        </section>
+      </div>
+    </details>
   </main>
 
 <script>
@@ -2942,6 +3480,13 @@ DASHBOARD_HTML = """<!doctype html>
   var refreshNode = document.getElementById("refresh");
   var REFRESH_SEC = Number((refreshNode && refreshNode.textContent) || "5");
   var ECHARTS_SRC = "__ECHARTS_SRC__";
+  var accountId = __ACCOUNT_ID_JSON__;
+  var accountMode = __ACCOUNT_MODE_JSON__;
+  var accountStrategyNote = __STRATEGY_NOTE_JSON__;
+  var portfolioStopEnabled = __PORTFOLIO_STOP_ENABLED__;
+  var portfolioStopPct = Number("__PORTFOLIO_STOP_PCT__") || 3.5;
+  var portfolioStopHour = Number("__PORTFOLIO_STOP_HOUR__") || 0;
+  var portfolioStopMinute = Number("__PORTFOLIO_STOP_MINUTE__") || 0;
   var isMobile = !!(window.matchMedia && window.matchMedia("(max-width: 900px)").matches);
   var pathPrefix = "/";
   if (window && window.location && typeof window.location.pathname === "string") {
@@ -2949,10 +3494,15 @@ DASHBOARD_HTML = """<!doctype html>
   }
   pathPrefix = pathPrefix.replace(/\\/+$/, "");
   if (!pathPrefix) pathPrefix = "";
-  var api = pathPrefix + "/api/dashboard";
+  var apiBase = pathPrefix.replace(/\\/legacy$/, "").replace(/\\/account\\/[^/]+$/, "");
+  var api = accountId
+    ? apiBase + "/api/account/" + encodeURIComponent(accountId)
+    : pathPrefix + "/api/dashboard";
   var equityChart = null;
-  var currentCurveTab = "strategy";
+  var currentCurveTab = accountMode === "readonly" ? "balance" : "strategy";
   var currentWindowHours = 24;
+  var displayTimeZone = "Asia/Shanghai";
+  var riskSnapshot = null;
   var latestData = null;
   var refreshTick = 0;
   var fullLoadedOnce = false;
@@ -2960,7 +3510,12 @@ DASHBOARD_HTML = """<!doctype html>
   var detailsInFlight = false;
 
   var el = {
+    overviewLink: document.getElementById("overviewLink"),
+    accountTitle: document.getElementById("accountTitle"),
+    accountMode: document.getElementById("accountMode"),
     meta: document.getElementById("meta"),
+    updatedAt: document.getElementById("updatedAt"),
+    strategyTags: document.getElementById("strategyTags"),
     nextEntry: document.getElementById("nextEntry"),
     serviceState: document.getElementById("serviceState"),
     openCount: document.getElementById("openCount"),
@@ -2968,15 +3523,31 @@ DASHBOARD_HTML = """<!doctype html>
     errorCount: document.getElementById("errorCount"),
     lastRunStatus: document.getElementById("lastRunStatus"),
     walletBalance: document.getElementById("walletBalance"),
-    realizedPnl: document.getElementById("realizedPnl"),
-    maxDrawdown: document.getElementById("maxDrawdown"),
-    netCashflow: document.getElementById("netCashflow"),
+    cycleReturn: document.getElementById("cycleReturn"),
+    cycleReturnLabel: document.getElementById("cycleReturnLabel"),
+    cycleReturnHelp: document.getElementById("cycleReturnHelp"),
+    currentDrawdown: document.getElementById("currentDrawdown"),
+    stopDistance: document.getElementById("stopDistance"),
+    stopDistanceHelp: document.getElementById("stopDistanceHelp"),
     curveTitle: document.getElementById("curveTitle"),
     tabStrategy: document.getElementById("tabStrategy"),
     tabBalance: document.getElementById("tabBalance"),
     windowRow: document.getElementById("windowRow"),
     equityChart: document.getElementById("equityChart"),
+    chartEmpty: document.getElementById("chartEmpty"),
+    riskCycleStart: document.getElementById("riskCycleStart"),
+    riskState: document.getElementById("riskState"),
+    riskThreshold: document.getElementById("riskThreshold"),
+    riskDescription: document.getElementById("riskDescription"),
+    riskMeterLabel: document.getElementById("riskMeterLabel"),
+    riskMeterFill: document.getElementById("riskMeterFill"),
+    riskMeterLimit: document.getElementById("riskMeterLimit"),
     drawdownStats: document.getElementById("drawdownStats"),
+    positionsCount: document.getElementById("positionsCount"),
+    runsCount: document.getElementById("runsCount"),
+    eventsCount: document.getElementById("eventsCount"),
+    cashflowCount: document.getElementById("cashflowCount"),
+    unpricedCount: document.getElementById("unpricedCount"),
     positionsBody: document.getElementById("positionsBody"),
     runsBody: document.getElementById("runsBody"),
     eventsBody: document.getElementById("eventsBody"),
@@ -3001,12 +3572,123 @@ DASHBOARD_HTML = """<!doctype html>
       .replace(/'/g, "&#39;");
   }
 
+  function formatStrategyNote(note) {
+    var raw = String(note || "").trim();
+    if (!raw) return '<span class="strategy-chip">未配置策略说明</span>';
+    var parts = raw.split("/").map(function (part) {
+      return String(part || "").trim();
+    }).filter(Boolean);
+    var html = "";
+    for (var i = 0; i < parts.length; i += 1) {
+      var part = parts[i];
+      var upper = part.toUpperCase();
+      var cls = "strategy-chip";
+      if (upper.indexOf("OFF") >= 0) {
+        cls += " off";
+      } else if (
+        upper.indexOf("TP") >= 0
+        || part.indexOf("减仓") >= 0
+        || part.indexOf("清仓") >= 0
+        || part.indexOf("组合止盈") >= 0
+      ) {
+        cls += " primary";
+      }
+      html += '<span class="' + cls + '">' + escapeHtml(part) + "</span>";
+    }
+    return html || '<span class="strategy-chip">未配置策略说明</span>';
+  }
+
+  function applyAccountContext() {
+    var displayId = accountId || "运行账户";
+    var modeText = "完整策略";
+    var modeClass = "mode-badge";
+    if (accountMode === "readonly") {
+      modeText = "只读监控";
+      modeClass += " mode-readonly";
+    } else if (accountMode === "loss_cut_only") {
+      modeText = "止损监控";
+      modeClass += " mode-loss-cut";
+    }
+    setText(el.accountTitle, displayId + " 账户详情");
+    if (el.accountMode) {
+      el.accountMode.textContent = modeText;
+      el.accountMode.className = modeClass;
+    }
+    if (el.strategyTags) el.strategyTags.innerHTML = formatStrategyNote(accountStrategyNote);
+    if (el.overviewLink) el.overviewLink.href = (apiBase || "") + "/";
+    document.title = displayId + " · Bubble Buster";
+
+    var cycleText = String(portfolioStopHour).padStart(2, "0") + ":" + String(portfolioStopMinute).padStart(2, "0");
+    if (accountMode === "readonly") {
+      setText(el.cycleReturnLabel, "窗口收益");
+      setText(el.cycleReturnHelp, "跟随所选曲线范围");
+      setText(el.stopDistanceHelp, "只读账户不执行组合止损");
+      setText(el.riskCycleStart, "只读账户 · 仅观察余额与交易结果");
+      setText(el.riskThreshold, "不适用");
+      setText(el.riskMeterLimit, "不适用");
+      if (el.tabStrategy) el.tabStrategy.hidden = true;
+    } else {
+      setText(el.cycleReturnLabel, cycleText + " 以来收益");
+      setText(el.cycleReturnHelp, "按 Asia/Shanghai 止损周期计算");
+      setText(el.stopDistanceHelp, portfolioStopEnabled ? "距离 -" + portfolioStopPct + "% 阈值" : "组合止损未启用");
+      setText(el.riskCycleStart, "每日 " + cycleText + " 重置 · Asia/Shanghai");
+      setText(el.riskThreshold, portfolioStopEnabled ? "-" + portfolioStopPct + "%" : "未启用");
+      setText(el.riskMeterLimit, portfolioStopEnabled ? "止损 -" + portfolioStopPct + "%" : "未启用");
+    }
+  }
+
   function clsForStatus(status) {
     var s = (status || "").toUpperCase();
     if (s.indexOf("SUCCESS") >= 0 || s.indexOf("CLOSED_TP") >= 0) return "ok";
     if (s.indexOf("RUNNING") >= 0 || s.indexOf("SKIPPED") >= 0) return "warn";
     if (s.indexOf("FAILED") >= 0 || s.indexOf("ERROR") >= 0 || s.indexOf("CLOSED_SL") >= 0) return "bad";
     return "";
+  }
+
+  function statusLabel(status) {
+    var s = String(status || "").toUpperCase();
+    var labels = {
+      SUCCESS: "成功",
+      RUNNING: "运行中",
+      FAILED: "失败",
+      PARTIAL: "部分完成",
+      SKIPPED: "已跳过",
+      NEW: "挂单中",
+      FILLED: "已成交",
+      CANCELED: "已撤销",
+      CANCELLED: "已撤销",
+      EXPIRED: "已过期",
+      REJECTED: "已拒绝",
+      CLOSED_TP: "止盈平仓",
+      CLOSED_SL: "止损平仓",
+      CLOSED_TIMEOUT: "到期平仓",
+      CLOSED_EXTERNAL: "外部平仓"
+    };
+    return labels[s] || s || "--";
+  }
+
+  function statusBadge(status) {
+    var cls = clsForStatus(status);
+    return '<span class="status-badge ' + cls + '">' + escapeHtml(statusLabel(status)) + "</span>";
+  }
+
+  function orderTypeLabel(value) {
+    var s = String(value || "").toUpperCase();
+    var labels = { MARKET: "市价", LIMIT: "限价", STOP: "止损", STOP_MARKET: "止损市价", TAKE_PROFIT: "止盈", TAKE_PROFIT_MARKET: "止盈市价" };
+    return labels[s] || s || "--";
+  }
+
+  function sideLabel(value) {
+    var s = String(value || "").toUpperCase();
+    if (s === "BUY") return "买入";
+    if (s === "SELL") return "卖出";
+    return s || "--";
+  }
+
+  function cashflowTypeLabel(value) {
+    var s = String(value || "").toUpperCase();
+    var labels = { TRANSFER: "划转", REALIZED_PNL: "已实现盈亏", COMMISSION: "手续费", FUNDING_FEE: "资金费", INSURANCE_CLEAR: "保险清算" };
+    return labels[s] || s || "--";
   }
 
   function setText(node, value) {
@@ -3035,46 +3717,55 @@ DASHBOARD_HTML = """<!doctype html>
     return prefix + n.toFixed(digits);
   }
 
-  function fmtAxisTime(isoText) {
+  function trimFixed(value, digits) {
+    var n = toNum(value);
+    if (n === null) return "--";
+    return n.toFixed(digits).replace(/(\\.\\d*?[1-9])0+$/, "$1").replace(/\\.0+$/, "");
+  }
+
+  function fmtAdaptive(value) {
+    var n = toNum(value);
+    if (n === null) return "--";
+    var magnitude = Math.abs(n);
+    var digits = magnitude >= 100 ? 2 : (magnitude >= 1 ? 4 : (magnitude >= 0.01 ? 6 : 8));
+    return trimFixed(n, digits);
+  }
+
+  function fmtQuantity(value) {
+    var n = toNum(value);
+    if (n === null) return "--";
+    var digits = Math.abs(n) >= 100 ? 2 : (Math.abs(n) >= 1 ? 4 : 8);
+    return trimFixed(n, digits);
+  }
+
+  function zonedFormat(isoText, options, fallbackSlice) {
     var raw = txt(isoText);
     if (raw === "--") return raw;
     var d = new Date(raw);
-    if (Number.isNaN(d.getTime())) return raw.slice(5, 16).replace("T", " ");
-    var mm = String(d.getMonth() + 1).padStart(2, "0");
-    var dd = String(d.getDate()).padStart(2, "0");
-    var hh = String(d.getHours()).padStart(2, "0");
-    var mi = String(d.getMinutes()).padStart(2, "0");
-    return mm + "-" + dd + " " + hh + ":" + mi;
+    if (Number.isNaN(d.getTime())) return raw.slice(0, fallbackSlice || 16).replace("T", " ");
+    try {
+      return new Intl.DateTimeFormat("zh-CN", Object.assign({ timeZone: displayTimeZone, hour12: false }, options)).format(d).replace(/\\//g, "-");
+    } catch (err) {
+      return raw.slice(5, fallbackSlice || 16).replace("T", " ");
+    }
+  }
+
+  function fmtAxisTime(isoText) {
+    return zonedFormat(isoText, { month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" }, 16);
   }
 
   function fmtMetaTime(isoText) {
-    var raw = txt(isoText);
-    if (raw === "--") return raw;
-    var d = new Date(raw);
-    if (Number.isNaN(d.getTime())) return raw.slice(5, 19).replace("T", " ");
-    var mm = String(d.getMonth() + 1).padStart(2, "0");
-    var dd = String(d.getDate()).padStart(2, "0");
-    var hh = String(d.getHours()).padStart(2, "0");
-    var mi = String(d.getMinutes()).padStart(2, "0");
-    var ss = String(d.getSeconds()).padStart(2, "0");
-    return mm + "-" + dd + " " + hh + ":" + mi + ":" + ss;
+    return zonedFormat(isoText, { month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", second: "2-digit" }, 19);
   }
 
   function fmtDateOnly(isoText) {
-    var raw = txt(isoText);
-    if (raw === "--") return raw;
-    var d = new Date(raw);
-    if (Number.isNaN(d.getTime())) return raw.slice(0, 10);
-    var yyyy = String(d.getFullYear());
-    var mm = String(d.getMonth() + 1).padStart(2, "0");
-    var dd = String(d.getDate()).padStart(2, "0");
-    return yyyy + "-" + mm + "-" + dd;
+    return zonedFormat(isoText, { year: "numeric", month: "2-digit", day: "2-digit" }, 10);
   }
 
   function renderRows(target, rows, mapper, emptyCols) {
     if (!target) return;
     if (!rows || rows.length === 0) {
-      target.innerHTML = '<tr><td colspan="' + emptyCols + '" class="mono">No data</td></tr>';
+      target.innerHTML = '<tr><td colspan="' + emptyCols + '" class="empty-row">暂无数据</td></tr>';
       return;
     }
     var html = "";
@@ -3194,9 +3885,16 @@ DASHBOARD_HTML = """<!doctype html>
     applyTradeOutcomeStats();
   }
 
+  function showChartEmpty(message) {
+    if (!el.chartEmpty) return;
+    el.chartEmpty.textContent = message || "暂无曲线";
+    el.chartEmpty.hidden = false;
+  }
+
   function renderEquityChart(curve) {
     if (!el.equityChart) return;
     if (typeof window.echarts === "undefined") {
+      showChartEmpty("图表组件加载中...");
       return;
     }
     if (!equityChart) {
@@ -3208,6 +3906,7 @@ DASHBOARD_HTML = """<!doctype html>
 
     if (!curve || curve.length === 0) {
       equityChart.clear();
+      showChartEmpty("所选范围暂无权益曲线");
       return;
     }
 
@@ -3232,33 +3931,35 @@ DASHBOARD_HTML = """<!doctype html>
 
     if (points.length === 0) {
       equityChart.clear();
+      showChartEmpty("所选范围暂无有效数据");
       return;
     }
+    if (el.chartEmpty) el.chartEmpty.hidden = true;
 
     var first = points[0];
     var last = points[points.length - 1];
     var lineColor = last.equity >= first.equity ? "#26d07c" : "#ff5d5d";
 
-    var areaTop = last.equity >= first.equity ? "rgba(38,208,124,0.28)" : "rgba(255,93,93,0.24)";
-    var areaBottom = last.equity >= first.equity ? "rgba(38,208,124,0.03)" : "rgba(255,93,93,0.03)";
+    var areaTop = last.equity >= first.equity ? "rgba(38,208,124,0.20)" : "rgba(255,93,93,0.17)";
+    var areaBottom = last.equity >= first.equity ? "rgba(38,208,124,0.01)" : "rgba(255,93,93,0.01)";
     equityChart.setOption({
       animation: false,
-      grid: { left: 54, right: 20, top: 16, bottom: 26 },
+      grid: { left: 58, right: 18, top: 18, bottom: 30 },
       tooltip: {
         trigger: "axis",
-        axisPointer: { type: "cross" },
-        backgroundColor: "rgba(8, 20, 29, 0.96)",
-        borderColor: "#173244",
-        textStyle: { color: "#d7eefd", fontSize: 12 },
+        axisPointer: { type: "line", lineStyle: { color: "#426b80" } },
+        backgroundColor: "rgba(7, 19, 27, 0.97)",
+        borderColor: "#31566c",
+        textStyle: { color: "#d7eefd", fontSize: 11 },
         formatter: function (params) {
           if (!params || params.length === 0) return "";
           var idx = params[0].dataIndex;
           var p = points[idx] || {};
           return [
             "<div>" + escapeHtml(fmtAxisTime(p.t || "--")) + "</div>",
-            "<div>Equity: " + escapeHtml(fmtNum(p.equity, 4)) + "</div>",
-            "<div>CumPnL: " + escapeHtml(fmtSigned(p.cumPnl, 4)) + "</div>",
-            "<div>DD: " + escapeHtml(fmtNum(p.ddPct, 2)) + "%</div>"
+            "<div>权益：" + escapeHtml(fmtNum(p.equity, 4)) + " USDT</div>",
+            "<div>窗口变化：" + escapeHtml(fmtSigned(p.cumPnl, 4)) + " USDT</div>",
+            "<div>回撤：" + escapeHtml(fmtNum(p.ddPct, 2)) + "%</div>"
           ].join("");
         }
       },
@@ -3268,30 +3969,30 @@ DASHBOARD_HTML = """<!doctype html>
         data: xData,
         boundaryGap: false,
         axisLabel: {
-          color: "#8db0c4",
+          color: "#6f91a4",
           hideOverlap: true,
           fontSize: 10,
           margin: 12,
           formatter: function (value) { return fmtAxisTime(value); }
         },
-        axisLine: { lineStyle: { color: "#1a3647" } },
+        axisLine: { lineStyle: { color: "#234354" } },
         axisTick: { show: false },
         splitNumber: 6
       },
       yAxis: {
         type: "value",
         scale: true,
-        axisLabel: { color: "#8db0c4" },
+        axisLabel: { color: "#6f91a4", formatter: function (value) { return fmtAdaptive(value); } },
         axisLine: { show: false },
-        splitLine: { lineStyle: { color: "rgba(39, 73, 95, 0.46)" } }
+        splitLine: { lineStyle: { color: "rgba(42, 76, 96, 0.42)" } }
       },
       series: [
         {
-          name: "Equity",
+          name: "权益",
           type: "line",
           showSymbol: points.length <= 1,
           symbolSize: 6,
-          smooth: 0.18,
+          smooth: 0.12,
           data: yData,
           lineStyle: { width: 2.4, color: lineColor },
           areaStyle: {
@@ -3328,6 +4029,7 @@ DASHBOARD_HTML = """<!doctype html>
     };
     script.onerror = function () {
       window.__bb_echarts_loading = false;
+      showChartEmpty("图表组件加载失败");
     };
     document.head.appendChild(script);
   }
@@ -3348,17 +4050,149 @@ DASHBOARD_HTML = """<!doctype html>
     return data.strategy_equity_curve || data.equity_curve || [];
   }
 
+  function setSummaryMetric(node, value, cls) {
+    if (!node) return;
+    node.textContent = value;
+    node.className = "summary-value" + (cls ? " " + cls : "");
+  }
+
+  function cycleStartMs(referenceMs) {
+    var shanghaiOffsetMs = 8 * 60 * 60 * 1000;
+    var local = new Date(referenceMs + shanghaiOffsetMs);
+    var start = Date.UTC(
+      local.getUTCFullYear(),
+      local.getUTCMonth(),
+      local.getUTCDate(),
+      portfolioStopHour,
+      portfolioStopMinute
+    ) - shanghaiOffsetMs;
+    if (referenceMs < start) start -= 24 * 60 * 60 * 1000;
+    return start;
+  }
+
+  function calculateCurveMetrics(rawCurve, useCycle) {
+    var points = (rawCurve || []).filter(function (point) {
+      return point && Number.isFinite(Number(point.equity));
+    });
+    if (points.length < 2) return null;
+    var startIndex = 0;
+    if (useCycle) {
+      var latestMs = new Date(points[points.length - 1].t || "").getTime();
+      if (!Number.isFinite(latestMs)) return null;
+      var targetMs = cycleStartMs(latestMs);
+      var beforeIndex = -1;
+      var afterIndex = -1;
+      for (var i = 0; i < points.length; i += 1) {
+        var pointMs = new Date(points[i].t || "").getTime();
+        if (!Number.isFinite(pointMs)) continue;
+        if (pointMs <= targetMs) beforeIndex = i;
+        if (afterIndex < 0 && pointMs >= targetMs) afterIndex = i;
+      }
+      if (beforeIndex >= 0) {
+        startIndex = beforeIndex;
+      } else if (afterIndex >= 0) {
+        var afterMs = new Date(points[afterIndex].t || "").getTime();
+        if (!Number.isFinite(afterMs) || afterMs - targetMs > 15 * 60 * 1000) return null;
+        startIndex = afterIndex;
+      } else {
+        return null;
+      }
+    }
+    var scoped = points.slice(startIndex);
+    if (scoped.length < 2) return null;
+    var baseline = Number(scoped[0].equity);
+    if (!Number.isFinite(baseline) || baseline === 0) return null;
+    var currentEquity = Number(scoped[scoped.length - 1].equity);
+    var peakEquity = baseline;
+    for (var j = 1; j < scoped.length; j += 1) {
+      var candidate = Number(scoped[j].equity);
+      if (Number.isFinite(candidate) && candidate > peakEquity) peakEquity = candidate;
+    }
+    var currentReturnPct = ((currentEquity - baseline) / baseline) * 100;
+    var currentDrawdownPct = peakEquity > 0 ? ((currentEquity - peakEquity) / peakEquity) * 100 : 0;
+    return {
+      currentReturnPct: currentReturnPct,
+      currentDrawdownPct: currentDrawdownPct,
+      stopDistancePct: currentReturnPct + portfolioStopPct
+    };
+  }
+
+  function renderRiskMetrics(data) {
+    var useCycle = accountMode !== "readonly";
+    var sourceCurve = useCycle
+      ? ((data && data.strategy_equity_curve) || [])
+      : activeCurve(data || {});
+    var calculated = calculateCurveMetrics(sourceCurve, useCycle);
+    if (calculated) riskSnapshot = calculated;
+    var metrics = calculated || riskSnapshot;
+    if (!metrics) return;
+
+    var returnCls = metrics.currentReturnPct > 0 ? "ok" : (metrics.currentReturnPct < 0 ? "warn" : "");
+    var drawdownCls = metrics.currentDrawdownPct <= -(portfolioStopPct * 0.7) ? "bad" : (metrics.currentDrawdownPct < 0 ? "warn" : "ok");
+    setSummaryMetric(el.cycleReturn, fmtSigned(metrics.currentReturnPct, 2) + "%", returnCls);
+    setSummaryMetric(el.currentDrawdown, fmtSigned(metrics.currentDrawdownPct, 2) + "%", drawdownCls);
+
+    if (accountMode === "readonly") {
+      setSummaryMetric(el.stopDistance, "不适用", "");
+      if (el.riskState) el.riskState.className = "risk-state";
+      setText(el.riskState, "只读监控");
+      setText(el.riskDescription, "该账户不执行自动开仓与组合止损，当前页面仅用于观察余额、交易结果与账户活动。");
+      setText(el.riskMeterLabel, "不适用");
+      if (el.riskMeterFill) {
+        el.riskMeterFill.style.width = "0%";
+        el.riskMeterFill.className = "risk-meter-fill";
+      }
+      return;
+    }
+
+    if (!portfolioStopEnabled) {
+      setSummaryMetric(el.stopDistance, "未启用", "warn");
+      if (el.riskState) el.riskState.className = "risk-state warn";
+      setText(el.riskState, "组合止损未启用");
+      setText(el.riskDescription, "周期收益与回撤仍会持续计算，但当前账户不会按组合阈值触发整体平仓。");
+      setText(el.riskMeterLabel, "未启用");
+      if (el.riskMeterFill) {
+        el.riskMeterFill.style.width = "0%";
+        el.riskMeterFill.className = "risk-meter-fill warn";
+      }
+      return;
+    }
+
+    var distance = metrics.stopDistancePct;
+    var riskCls = distance <= 0 ? "bad" : (distance <= 1 ? "warn" : "ok");
+    var distanceText = distance <= 0 ? "已超出 " + fmtNum(Math.abs(distance), 2) + "%" : fmtNum(distance, 2) + "%";
+    var stateText = distance <= 0 ? "已触发组合止损" : (distance <= 1 ? "接近组合止损" : "风险正常");
+    var description = distance <= 0
+      ? "当前周期收益已低于组合止损阈值，请结合持仓开仓时间与任务记录核对后续状态。"
+      : "当前周期收益 " + fmtSigned(metrics.currentReturnPct, 2) + "% ，距离 -" + fmtNum(portfolioStopPct, 2) + "% 止损阈值仍有 " + fmtNum(distance, 2) + " 个百分点。";
+    setSummaryMetric(el.stopDistance, distanceText, riskCls);
+    if (el.riskState) el.riskState.className = "risk-state " + riskCls;
+    setText(el.riskState, stateText);
+    setText(el.riskDescription, description);
+
+    var usedPct = metrics.currentReturnPct < 0
+      ? Math.min(100, Math.abs(metrics.currentReturnPct) / portfolioStopPct * 100)
+      : 0;
+    setText(el.riskMeterLabel, usedPct <= 0 ? "未消耗" : fmtNum(usedPct, 0) + "%");
+    if (el.riskMeterFill) {
+      el.riskMeterFill.style.width = usedPct.toFixed(2) + "%";
+      el.riskMeterFill.className = "risk-meter-fill " + riskCls;
+    }
+  }
+
   function renderCurveTabState() {
     if (el.tabStrategy) {
       el.tabStrategy.classList.toggle("active", currentCurveTab === "strategy");
+      el.tabStrategy.setAttribute("aria-pressed", currentCurveTab === "strategy" ? "true" : "false");
     }
     if (el.tabBalance) {
       el.tabBalance.classList.toggle("active", currentCurveTab === "balance");
+      el.tabBalance.setAttribute("aria-pressed", currentCurveTab === "balance" ? "true" : "false");
     }
     if (el.curveTitle) {
       el.curveTitle.textContent = currentCurveTab === "strategy"
-        ? "策略权益曲线（不含出入金）"
-        : "账户权益曲线（含未实现盈亏/出入金）";
+        ? "策略权益（不含出入金）"
+        : "账户权益（含未实现盈亏与出入金）";
     }
     if (el.windowRow) {
       var buttons = el.windowRow.querySelectorAll("[data-window-hours]");
@@ -3366,6 +4200,7 @@ DASHBOARD_HTML = """<!doctype html>
         var b = buttons[i];
         var h = Number(b.getAttribute("data-window-hours"));
         b.classList.toggle("active", h === currentWindowHours);
+        b.setAttribute("aria-pressed", h === currentWindowHours ? "true" : "false");
       }
     }
   }
@@ -3380,23 +4215,9 @@ DASHBOARD_HTML = """<!doctype html>
     var walletDisplay = stats.wallet_balance_usdt;
     if (walletDisplay === null || walletDisplay === undefined) walletDisplay = wallet.balance_usdt;
     setText(el.walletBalance, fmtNum(walletDisplay, 4));
-    setText(el.realizedPnl, fmtSigned(stats.total_realized_pnl, 4));
-    setText(el.maxDrawdown, fmtNum(stats.max_drawdown_pct, 2) + "%");
-    setText(el.netCashflow, fmtSigned(stats.net_cashflow_usdt, 4));
-    if (el.realizedPnl) {
-      var pnl = toNum(stats.total_realized_pnl);
-      el.realizedPnl.className = "v " + (pnl === null ? "" : (pnl > 0 ? "ok" : (pnl < 0 ? "bad" : "warn")));
-    }
-    if (el.maxDrawdown) {
-      var dd = toNum(stats.max_drawdown_pct);
-      el.maxDrawdown.className = "v " + (dd && dd > 0 ? "bad" : "");
-    }
-    if (el.netCashflow) {
-      var cf = toNum(stats.net_cashflow_usdt);
-      el.netCashflow.className = "v " + (cf === null ? "" : (cf > 0 ? "warn" : (cf < 0 ? "bad" : "ok")));
-    }
     renderCurveTabState();
     renderEquityChart(activeCurve(d));
+    renderRiskMetrics(d);
     renderDrawdownStats(stats, wallet);
     setText(el.openCount, txt(summary.open_positions));
     setText(el.symbolCount, txt(summary.open_symbols));
@@ -3407,23 +4228,16 @@ DASHBOARD_HTML = """<!doctype html>
     if (!el.drawdownStats) return;
     var s = stats || {};
     var w = wallet || {};
-    var walletBalance = toNum(s.wallet_balance_usdt);
-    if (walletBalance === null) walletBalance = toNum(w.balance_usdt);
-
     var rows = [
-      ["Account Equity", walletBalance === null ? "--" : fmtNum(walletBalance, 4) + " USDT"],
-      ["Equity Change", fmtSigned(s.total_realized_pnl, 4) + " USDT"],
-      ["All-time Equity Change", fmtSigned(s.all_time_account_pnl, 4) + " USDT"],
-      ["Window Cashflow", fmtSigned(s.net_cashflow_usdt, 4) + " USDT"],
-      ["Max Drawdown", fmtNum(s.max_drawdown, 4) + " (" + fmtNum(s.max_drawdown_pct, 2) + "%)"],
-      ["Current Drawdown", fmtNum(s.current_drawdown, 4) + " (" + fmtNum(s.current_drawdown_pct, 2) + "%)"],
-      ["Closed w/o Exchange PnL", txt(s.unpriced_closed_positions)],
-      ["Balance Source", txt(w.source)]
+      ["窗口权益变化", fmtSigned(s.total_realized_pnl, 4) + " USDT"],
+      ["全部权益变化", fmtSigned(s.all_time_account_pnl, 4) + " USDT"],
+      ["窗口最大回撤", fmtNum(s.max_drawdown_pct, 2) + "%"],
+      ["窗口出入金", fmtSigned(s.net_cashflow_usdt, 4) + " USDT"]
     ];
 
     var html = "";
     for (var i = 0; i < rows.length; i += 1) {
-      html += '<div class="stat-item"><span>' + escapeHtml(rows[i][0]) + '</span><span>' + escapeHtml(rows[i][1]) + '</span></div>';
+      html += '<div class="risk-fact"><span class="risk-fact-label">' + escapeHtml(rows[i][0]) + '</span><strong class="risk-fact-value">' + escapeHtml(rows[i][1]) + '</strong></div>';
     }
     el.drawdownStats.innerHTML = html;
   }
@@ -3433,7 +4247,7 @@ DASHBOARD_HTML = """<!doctype html>
     var lite = !!opts.lite;
     fetchDashboard(api + "/core", { lite: lite }, function (err, d) {
       if (err) {
-        setText(el.meta, "dashboard fetch error: " + err);
+        setText(el.meta, "账户数据加载失败：" + err);
         return;
       }
 
@@ -3443,6 +4257,7 @@ DASHBOARD_HTML = """<!doctype html>
       var wallet = d.wallet || {};
       var stats = activeStats(d);
       var svc = d.service || {};
+      if (d.timezone) displayTimeZone = String(d.timezone);
       var svcStatus = "DISABLED";
       if (svc.enabled) {
         if (svc.running) {
@@ -3456,25 +4271,25 @@ DASHBOARD_HTML = """<!doctype html>
 
       setText(
         el.meta,
-        "Updated " + fmtMetaTime(d.generated_at_utc) +
-          " · TZ " + txt(d.timezone) +
-          " · Balance " + txt(wallet.source)
+        "Binance Futures · " + txt(d.timezone) + " · 余额来源 " + txt(wallet.source)
       );
+      setText(el.updatedAt, fmtMetaTime(d.generated_at_utc));
       setText(el.nextEntry, fmtAxisTime(d.next_entry_local));
-      setText(el.serviceState, svcStatus);
+      var svcLabel = svcStatus === "RUNNING" ? "运行中" : (svcStatus === "DISABLED" ? "未启用" : (svcStatus === "STOPPED" ? "已停止" : "异常"));
+      setText(el.serviceState, svcLabel);
       if (el.serviceState) {
         var svcClass = "";
         if (svcStatus.indexOf("RUNNING") >= 0) svcClass = "ok";
         else if (svcStatus.indexOf("ERROR") >= 0) svcClass = "bad";
         else if (svcStatus.indexOf("STOPPED") >= 0 || svcStatus.indexOf("DISABLED") >= 0) svcClass = "warn";
-        el.serviceState.className = svcClass;
+        el.serviceState.className = "command-cell-value " + svcClass;
       }
       setText(el.openCount, txt(summary.open_positions));
       setText(el.symbolCount, txt(summary.open_symbols));
       setText(el.errorCount, txt(summary.recent_errors));
-      setText(el.lastRunStatus, txt(summary.last_run_status));
+      setText(el.lastRunStatus, statusLabel(summary.last_run_status));
       if (el.lastRunStatus) {
-        el.lastRunStatus.className = "v " + clsForStatus(summary.last_run_status);
+        el.lastRunStatus.className = "summary-value " + clsForStatus(summary.last_run_status);
       }
       rerenderFromLatest();
 
@@ -3488,87 +4303,120 @@ DASHBOARD_HTML = """<!doctype html>
         return;
       }
       mergeCurveOnly(d);
-      renderCurveTabState();
-      renderEquityChart(activeCurve(latestData || d));
+      rerenderFromLatest();
     });
   }
 
+  function summarizeRunMessage(message) {
+    var raw = String(message || "").trim();
+    if (!raw) return "无执行摘要";
+    var values = {};
+    raw.split(",").forEach(function (part) {
+      var text = String(part || "").trim();
+      var eq = text.indexOf("=");
+      if (eq <= 0) return;
+      values[text.slice(0, eq)] = text.slice(eq + 1);
+    });
+    var items = [];
+    if (values.opened !== undefined) items.push("开仓 " + values.opened);
+    if (values.failed !== undefined) items.push("失败 " + values.failed);
+    if (values.entry_failed !== undefined && Number(values.entry_failed) > 0) items.push("入场失败 " + values.entry_failed);
+    if (values.skipped_existing !== undefined && Number(values.skipped_existing) > 0) items.push("已有持仓 " + values.skipped_existing);
+    if (values.planned !== undefined) items.push("计划 " + values.planned);
+    if (values.adjusted !== undefined) items.push("调整 " + values.adjusted);
+    if (values.errors !== undefined && Number(values.errors) > 0) items.push("异常 " + values.errors);
+    return items.length ? items.join(" · ") : raw.slice(0, 140);
+  }
+
   function renderDetails(d) {
-      renderRows(el.positionsBody, d.open_positions || [], function (p) {
-        var errClass = p.last_error ? " bad" : "";
+      var positions = d.open_positions || [];
+      var runs = d.runs || [];
+      var events = d.events || [];
+      var cashflows = d.cashflow_events || [];
+      var unpriced = d.unpriced_closed_details || [];
+      setText(el.positionsCount, String(positions.length));
+      setText(el.runsCount, String(runs.length));
+      setText(el.eventsCount, String(events.length));
+      setText(el.cashflowCount, String(cashflows.length));
+      setText(el.unpricedCount, String(unpriced.length));
+
+      renderRows(el.positionsBody, positions, function (p) {
+        var errorText = String(p.last_error || "").trim();
+        var stateHtml = errorText
+          ? '<span class="status-badge bad">异常</span><div class="error-cell">' + escapeHtml(errorText) + "</div>"
+          : '<span class="status-badge ok">正常</span>';
         return (
           "<tr>" +
-          '<td class="mono">' + escapeHtml(p.id) + "</td>" +
-          "<td>" + escapeHtml(p.symbol) + "</td>" +
-          "<td>" + escapeHtml(p.qty) + "</td>" +
-          "<td>" + escapeHtml(p.entry_price) + "</td>" +
-          "<td>" + escapeHtml(p.tp_price) + "</td>" +
-          "<td>" + escapeHtml(p.sl_price) + "</td>" +
-          '<td class="mono">' + escapeHtml(fmtAxisTime(p.expire_at_utc)) + "</td>" +
-          '<td class="mono' + errClass + '">' + escapeHtml(p.last_error) + "</td>" +
+          '<td class="symbol-cell"><strong>' + escapeHtml(p.symbol) + '</strong><small>#' + escapeHtml(p.id) + "</small></td>" +
+          '<td class="numeric">' + escapeHtml(fmtQuantity(p.qty)) + "</td>" +
+          '<td class="numeric">' + escapeHtml(fmtAdaptive(p.entry_price)) + "</td>" +
+          '<td class="numeric">' + escapeHtml(fmtAdaptive(p.tp_price)) + "</td>" +
+          '<td class="numeric">' + escapeHtml(fmtAdaptive(p.sl_price)) + "</td>" +
+          '<td class="numeric">' + escapeHtml(fmtAxisTime(p.expire_at_utc)) + "</td>" +
+          "<td>" + stateHtml + "</td>" +
           "</tr>"
         );
-      }, 8);
+      }, 7);
 
-      renderRows(el.runsBody, d.runs || [], function (r) {
+      renderRows(el.runsBody, runs, function (r) {
+        var rawMessage = String(r.message || "");
         return (
           "<tr>" +
-          '<td class="mono">' + escapeHtml(fmtDateOnly(r.trade_day_utc)) + "</td>" +
-          '<td class="' + clsForStatus(r.status) + '">' + escapeHtml(r.status) + "</td>" +
-          '<td class="mono">' + escapeHtml(fmtAxisTime(r.started_at_utc)) + "</td>" +
-          "<td>" + escapeHtml(r.message) + "</td>" +
+          '<td class="numeric">' + escapeHtml(fmtDateOnly(r.trade_day_utc)) + "</td>" +
+          "<td>" + statusBadge(r.status) + "</td>" +
+          '<td class="numeric">' + escapeHtml(fmtAxisTime(r.started_at_utc)) + "</td>" +
+          '<td class="message-cell"><div class="message-summary">' + escapeHtml(summarizeRunMessage(rawMessage)) + '</div><details class="row-details"><summary>原始记录</summary><div class="raw-message">' + escapeHtml(rawMessage) + "</div></details></td>" +
           "</tr>"
         );
       }, 4);
 
-      renderRows(el.eventsBody, d.events || [], function (e) {
+      renderRows(el.eventsBody, events, function (e) {
         return (
           "<tr>" +
-          '<td class="mono">' + escapeHtml(e.id) + "</td>" +
+          '<td class="numeric">' + escapeHtml(fmtAxisTime(e.event_time_utc)) + "</td>" +
           "<td>" + escapeHtml(e.symbol) + "</td>" +
-          "<td>" + escapeHtml(e.type) + "</td>" +
-          "<td>" + escapeHtml(e.side) + "</td>" +
-          '<td class="' + clsForStatus(e.status) + '">' + escapeHtml(e.status) + "</td>" +
-          '<td class="mono">' + escapeHtml(fmtAxisTime(e.event_time_utc)) + "</td>" +
+          "<td>" + escapeHtml(orderTypeLabel(e.type)) + "</td>" +
+          "<td>" + escapeHtml(sideLabel(e.side)) + "</td>" +
+          "<td>" + statusBadge(e.status) + "</td>" +
+          '<td class="numeric cell-muted">#' + escapeHtml(e.id) + "</td>" +
           "</tr>"
         );
       }, 6);
 
-      renderRows(el.cashflowBody, d.cashflow_events || [], function (c) {
+      renderRows(el.cashflowBody, cashflows, function (c) {
         var amount = toNum(c.amount);
         var amountClass = amount === null ? "" : (amount > 0 ? "ok" : (amount < 0 ? "bad" : "warn"));
         return (
           "<tr>" +
-          '<td class="mono">' + escapeHtml(c.id) + "</td>" +
-          "<td>" + escapeHtml(c.income_type) + "</td>" +
-          '<td class="' + amountClass + '">' + escapeHtml(fmtSigned(c.amount, 4)) + "</td>" +
+          '<td class="numeric">' + escapeHtml(fmtAxisTime(c.event_time_utc)) + "</td>" +
+          "<td>" + escapeHtml(cashflowTypeLabel(c.income_type)) + "</td>" +
+          '<td class="numeric ' + amountClass + '">' + escapeHtml(fmtSigned(c.amount, 4)) + "</td>" +
           "<td>" + escapeHtml(c.asset) + "</td>" +
           "<td>" + escapeHtml(c.symbol) + "</td>" +
-          '<td class="mono">' + escapeHtml(fmtAxisTime(c.event_time_utc)) + "</td>" +
+          '<td class="numeric cell-muted">#' + escapeHtml(c.id) + "</td>" +
           "</tr>"
         );
       }, 6);
 
-      renderRows(el.unpricedBody, d.unpriced_closed_details || [], function (u) {
+      renderRows(el.unpricedBody, unpriced, function (u) {
         return (
           "<tr>" +
-          '<td class="mono">' + escapeHtml(u.id) + "</td>" +
-          "<td>" + escapeHtml(u.symbol) + "</td>" +
-          '<td class="' + clsForStatus(u.status) + '">' + escapeHtml(u.status) + "</td>" +
+          '<td class="symbol-cell"><strong>' + escapeHtml(u.symbol) + '</strong><small>#' + escapeHtml(u.id) + "</small></td>" +
+          "<td>" + statusBadge(u.status) + "</td>" +
           "<td>" + escapeHtml(u.close_reason) + "</td>" +
           "<td>" + escapeHtml(u.detected_reason) + "</td>" +
-          '<td class="mono">' + escapeHtml(u.close_order_id) + "</td>" +
-          '<td class="mono">' + escapeHtml(fmtAxisTime(u.closed_at_utc)) + "</td>" +
+          '<td class="numeric">' + escapeHtml(u.close_order_id) + "</td>" +
+          '<td class="numeric">' + escapeHtml(fmtAxisTime(u.closed_at_utc)) + "</td>" +
           "</tr>"
         );
-      }, 7);
+      }, 6);
 
       if (el.logTail) {
         var logLines = d.log_tail || [];
         if (Object.prototype.toString.call(logLines) !== "[object Array]") {
           logLines = [];
         }
-        el.logTail.textContent = logLines.join("\\n") || "No log lines";
+        el.logTail.textContent = logLines.join("\\n") || "暂无日志";
       }
       fullLoadedOnce = true;
   }
@@ -3580,7 +4428,7 @@ DASHBOARD_HTML = """<!doctype html>
       detailsInFlight = false;
       if (err) {
         if (el.positionsBody) {
-          el.positionsBody.innerHTML = '<tr><td colspan="8" class="mono bad">详情加载失败，请稍后重试</td></tr>';
+          el.positionsBody.innerHTML = '<tr><td colspan="7" class="empty-row bad">详情加载失败，请稍后重试</td></tr>';
         }
         return;
       }
@@ -3592,11 +4440,11 @@ DASHBOARD_HTML = """<!doctype html>
   function setupDetailsLazyLoad() {
     var targets = [];
     if (el.positionsBody && el.positionsBody.closest) {
-      var panel = el.positionsBody.closest(".panel");
+      var panel = el.positionsBody.closest(".positions-panel");
       if (panel) targets.push(panel);
     }
     if (el.logTail && el.logTail.closest) {
-      var logPanel = el.logTail.closest(".panel");
+      var logPanel = el.logTail.closest(".diagnostics-panel");
       if (logPanel) targets.push(logPanel);
     }
 
@@ -3633,6 +4481,27 @@ DASHBOARD_HTML = """<!doctype html>
     }, isMobile ? 4500 : 3500);
   }
 
+  function setupActivityTabs() {
+    var tabs = document.querySelectorAll("[data-activity-target]");
+    for (var i = 0; i < tabs.length; i += 1) {
+      tabs[i].addEventListener("click", function (evt) {
+        var targetId = evt.currentTarget.getAttribute("data-activity-target");
+        if (!targetId) return;
+        for (var j = 0; j < tabs.length; j += 1) {
+          var tab = tabs[j];
+          var active = tab.getAttribute("data-activity-target") === targetId;
+          tab.classList.toggle("active", active);
+          tab.setAttribute("aria-selected", active ? "true" : "false");
+          var view = document.getElementById(tab.getAttribute("data-activity-target"));
+          if (view) view.hidden = !active;
+        }
+      });
+    }
+  }
+
+  applyAccountContext();
+  setupActivityTabs();
+  renderCurveTabState();
   refreshCurveFast();
   refreshCore({ lite: true });
   ensureEcharts();
