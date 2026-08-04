@@ -152,6 +152,7 @@ def create_dashboard_context(config_path: str) -> DashboardRuntimeContext:
 
     balance_fetcher = None
     close_price_fetcher = None
+    live_position_clients = {}
     # If runtime service is enabled, wallet snapshots are persisted in background.
     # In that mode dashboard reads DB snapshots and skips direct balance polling.
     if cfg.has_section("binance"):
@@ -171,6 +172,7 @@ def create_dashboard_context(config_path: str) -> DashboardRuntimeContext:
                 http_pool_maxsize=default_pool_size,
                 proxies=build_proxies(cfg),
             )
+            live_position_clients[default_account_id] = client
 
             def _fetch_wallet_balance_usdt() -> float:
                 balances = client.get_balance()
@@ -293,6 +295,7 @@ def create_dashboard_context(config_path: str) -> DashboardRuntimeContext:
                 http_pool_maxsize=32,
                 proxies=build_proxies(cfg),
             )
+            live_position_clients[aid] = readonly_client
             trade_stats_fetchers[aid] = TradeStatsFetcher(client=readonly_client, cache_ttl_sec=300)
         except Exception as exc:  # noqa: BLE001
             logging.getLogger(__name__).warning(
@@ -324,6 +327,7 @@ def create_dashboard_context(config_path: str) -> DashboardRuntimeContext:
         overview_account_ids=overview_account_ids,
         live_wallet_account_id=default_account_id,
         trade_stats_fetchers=trade_stats_fetchers,
+        live_position_clients=live_position_clients,
     )
 
     echarts_src = _ensure_local_echarts_asset()
@@ -469,6 +473,16 @@ def _startup_background_service(app: FastAPI, config_path: str) -> None:
             cfg=service_cfg,
             balance_sampler=wallet_sampler,
             account_runtimes=account_runtimes,
+        )
+        app.state.ctx.provider.set_live_position_clients(
+            {
+                aid: runtime_ctx.get("manager").client
+                if runtime_ctx.get("manager") is not None
+                else runtime_ctx.get("balance_sampler").client
+                if runtime_ctx.get("balance_sampler") is not None
+                else None
+                for aid, runtime_ctx in account_runtimes.items()
+            }
         )
         stop_event = threading.Event()
         thread = threading.Thread(

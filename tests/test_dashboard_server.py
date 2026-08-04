@@ -4,6 +4,7 @@ import sqlite3
 from datetime import datetime, timedelta, timezone
 from typing import Dict
 from pathlib import Path
+from unittest.mock import Mock
 
 from dashboard_server import (
     DashboardDataProvider,
@@ -98,6 +99,62 @@ class DashboardServerTest(unittest.TestCase):
         self.assertIn("cashflow_events", snapshot)
         self.assertIn("unpriced_closed_details", snapshot)
         self.assertIn("net_cashflow_usdt", snapshot["summary"])
+
+    def test_snapshot_enriches_positions_from_live_exchange_data(self) -> None:
+        run_id, _ = self.store.create_run("2026-02-13")
+        now = datetime.now(timezone.utc).replace(microsecond=0)
+        self.store.insert_position(
+            run_id=run_id,
+            symbol="BTCUSDT",
+            side="SHORT",
+            qty=0.01,
+            entry_price=50000.0,
+            liq_price_open=60000.0,
+            tp_price=40000.0,
+            sl_price=59000.0,
+            tp_order_id=1001,
+            sl_order_id=1002,
+            tp_client_order_id="tp-x",
+            sl_client_order_id="sl-x",
+            opened_at_utc=now.isoformat(),
+            expire_at_utc=now.isoformat(),
+            status="OPEN",
+        )
+
+        live_client = Mock()
+        live_client.get_position_risk.return_value = [
+            {
+                "symbol": "BTCUSDT",
+                "positionAmt": "-0.01",
+                "positionSide": "BOTH",
+                "markPrice": "51000",
+                "unRealizedProfit": "-10",
+                "liquidationPrice": "60000",
+                "isolatedMargin": "100",
+            }
+        ]
+        live_client.get_open_orders.return_value = [
+            {"symbol": "BTCUSDT", "orderId": 1001, "clientOrderId": "tp-x", "status": "NEW"},
+            {"symbol": "BTCUSDT", "orderId": 1002, "clientOrderId": "sl-x", "status": "NEW"},
+        ]
+
+        provider = DashboardDataProvider(
+            db_path=self.db_path,
+            log_file=self.log_file,
+            timezone_name="UTC",
+            entry_hour=7,
+            entry_minute=40,
+            live_position_clients={"default": live_client},
+        )
+
+        row = provider.snapshot(log_lines=0)["open_positions"][0]
+
+        self.assertTrue(row["live_data_available"])
+        self.assertEqual(row["mark_price"], 51000.0)
+        self.assertEqual(row["unrealized_pnl"], -10.0)
+        self.assertEqual(row["unrealized_pnl_pct"], -10.0)
+        self.assertEqual(row["tp_order_status"], "NEW")
+        self.assertEqual(row["sl_order_status"], "NEW")
 
     def test_snapshot_without_trade_stats_still_returns_curve_stats(self) -> None:
         now = datetime.now(timezone.utc).replace(microsecond=0)

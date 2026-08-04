@@ -78,6 +78,10 @@ strategy_note.acc02 = TP 9% / 清仓100% / 浮亏砍仓ON
             self.assertIn('var portfolioStopEnabled = true;', compact.text)
             self.assertIn('class="account-command-bar"', compact.text)
             self.assertIn("周期风险", compact.text)
+            self.assertIn("入场价 / 标记价", compact.text)
+            self.assertIn("未实现盈亏", compact.text)
+            self.assertIn("止盈 / 止损", compact.text)
+            self.assertIn("实时读取，不写入数据库", compact.text)
 
             health = client.get("/healthz")
             self.assertEqual(health.status_code, 200)

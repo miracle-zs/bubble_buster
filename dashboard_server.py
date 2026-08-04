@@ -49,6 +49,7 @@ class DashboardDataProvider:
         overview_account_ids: Optional[List[str]] = None,
         live_wallet_account_id: str = "default",
         trade_stats_fetchers: Optional[Dict[str, Any]] = None,
+        live_position_clients: Optional[Dict[str, Any]] = None,
     ):
         self.db_path = db_path
         self.log_file = log_file
@@ -80,6 +81,11 @@ class DashboardDataProvider:
         self.overview_account_ids: Optional[Set[str]] = set(overview_ids) if overview_ids else None
         self.live_wallet_account_id = (live_wallet_account_id or "").strip() or "default"
         self.trade_stats_fetchers = trade_stats_fetchers or {}
+        self.live_position_clients = {
+            str(k).strip(): v
+            for k, v in (live_position_clients or {}).items()
+            if str(k).strip() and v is not None
+        }
         self._balance_cache_value: Optional[float] = None
         self._balance_cache_at: Optional[datetime] = None
         self._balance_last_attempt_at: Optional[datetime] = None
@@ -89,6 +95,119 @@ class DashboardDataProvider:
         except Exception:  # noqa: BLE001
             LOGGER.warning("Invalid dashboard timezone=%s, fallback UTC", timezone_name)
             self.local_tz = timezone.utc
+
+    def set_live_position_clients(self, clients: Optional[Dict[str, Any]]) -> None:
+        """Attach account-scoped exchange clients without persisting live risk data."""
+        self.live_position_clients = {
+            str(k).strip(): v
+            for k, v in (clients or {}).items()
+            if str(k).strip() and v is not None
+        }
+
+    @staticmethod
+    def _live_order_status(
+        orders: List[Dict[str, Any]],
+        order_id: Any,
+        client_order_id: Any,
+        configured: bool,
+    ) -> str:
+        if not configured:
+            return "NOT_SET"
+
+        wanted_id = str(order_id).strip() if order_id not in (None, "") else ""
+        wanted_client_id = str(client_order_id).strip() if client_order_id not in (None, "") else ""
+        for order in orders:
+            current_id = str(order.get("orderId") or order.get("algoId") or "").strip()
+            current_client_id = str(
+                order.get("clientOrderId") or order.get("clientAlgoId") or ""
+            ).strip()
+            if (wanted_id and current_id == wanted_id) or (
+                wanted_client_id and current_client_id == wanted_client_id
+            ):
+                return str(order.get("status") or "UNKNOWN").strip().upper() or "UNKNOWN"
+        return "MISSING"
+
+    def _enrich_open_positions_with_live_data(
+        self,
+        positions: List[Dict[str, Any]],
+        account_id: Optional[str],
+    ) -> None:
+        if not positions or not account_id:
+            return
+
+        client = self.live_position_clients.get(str(account_id).strip())
+        if client is None:
+            return
+
+        try:
+            risks = client.get_position_risk()
+        except Exception as exc:  # noqa: BLE001
+            LOGGER.warning("Live position risk fetch failed account=%s: %s", account_id, exc)
+            for position in positions:
+                position["live_data_available"] = False
+                position["live_data_error"] = "实时仓位暂不可用"
+            return
+
+        order_fetch_error = None
+        try:
+            open_orders = client.get_open_orders()
+        except Exception as exc:  # noqa: BLE001
+            LOGGER.warning("Live open order fetch failed account=%s: %s", account_id, exc)
+            open_orders = []
+            order_fetch_error = "实时挂单暂不可用"
+
+        risk_by_symbol: Dict[str, Dict[str, Any]] = {}
+        risk_by_symbol_side: Dict[Tuple[str, str], Dict[str, Any]] = {}
+        for risk in risks or []:
+            symbol = str(risk.get("symbol") or "").strip().upper()
+            if symbol:
+                risk_by_symbol[symbol] = risk
+                position_side = str(risk.get("positionSide") or "").strip().upper()
+                if position_side:
+                    risk_by_symbol_side[(symbol, position_side)] = risk
+
+        orders_by_symbol: Dict[str, List[Dict[str, Any]]] = {}
+        for order in open_orders or []:
+            symbol = str(order.get("symbol") or "").strip().upper()
+            if symbol:
+                orders_by_symbol.setdefault(symbol, []).append(order)
+
+        captured_at = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+        for position in positions:
+            symbol = str(position.get("symbol") or "").strip().upper()
+            configured_side = str(position.get("side") or "").strip().upper()
+            risk = risk_by_symbol_side.get((symbol, configured_side)) or risk_by_symbol.get(symbol)
+            symbol_orders = orders_by_symbol.get(symbol, [])
+            position["live_data_as_of_utc"] = captured_at
+            position["live_data_available"] = risk is not None
+            position["live_data_error"] = None if risk is not None else "交易所未返回该仓位"
+            position["order_data_error"] = order_fetch_error
+            position["tp_order_status"] = self._live_order_status(
+                symbol_orders,
+                position.get("tp_order_id", position.get("_tp_order_id")),
+                position.get("tp_client_order_id", position.get("_tp_client_order_id")),
+                configured=position.get("tp_price") not in (None, ""),
+            )
+            position["sl_order_status"] = self._live_order_status(
+                symbol_orders,
+                position.get("sl_order_id", position.get("_sl_order_id")),
+                position.get("sl_client_order_id", position.get("_sl_client_order_id")),
+                configured=position.get("sl_price") not in (None, ""),
+            )
+            if risk is None:
+                continue
+
+            position["position_side"] = str(risk.get("positionSide") or position.get("side") or "").upper()
+            position["mark_price"] = self._safe_float(risk.get("markPrice"))
+            position["unrealized_pnl"] = self._safe_float(risk.get("unRealizedProfit"))
+            position["live_liq_price"] = self._safe_float(risk.get("liquidationPrice"))
+            isolated_margin = self._safe_float(risk.get("isolatedMargin"))
+            pnl = self._safe_float(risk.get("unRealizedProfit"))
+            position["unrealized_pnl_pct"] = (
+                round(pnl / isolated_margin * 100.0, 4)
+                if pnl is not None and isolated_margin is not None and isolated_margin > 0
+                else None
+            )
 
     def _connect(self) -> sqlite3.Connection:
         conn = sqlite3.connect(self.db_path, timeout=SQLITE_BUSY_TIMEOUT_MS / 1000)
@@ -1797,8 +1916,13 @@ class DashboardDataProvider:
                     data["open_positions"] = self._query_rows(
                         conn,
                         """
-                        SELECT p.id, p.run_id, p.symbol, p.side, p.qty, p.entry_price,
+                        SELECT p.id, p.run_id, r.account_id AS _live_account_id,
+                               p.symbol, p.side, p.qty, p.entry_price,
                                p.liq_price_latest, p.tp_price, p.sl_price,
+                               p.tp_order_id AS _tp_order_id,
+                               p.sl_order_id AS _sl_order_id,
+                               p.tp_client_order_id AS _tp_client_order_id,
+                               p.sl_client_order_id AS _sl_client_order_id,
                                p.opened_at_utc, p.expire_at_utc, p.status, p.last_error
                         FROM positions p
                         LEFT JOIN runs r ON r.run_id = p.run_id
@@ -1809,6 +1933,30 @@ class DashboardDataProvider:
                         """,
                         (scoped_account, scoped_account),
                     )
+                    if scoped_account:
+                        self._enrich_open_positions_with_live_data(
+                            data["open_positions"],
+                            account_id=scoped_account,
+                        )
+                    else:
+                        positions_by_account: Dict[str, List[Dict[str, Any]]] = {}
+                        for position in data["open_positions"]:
+                            position_account_id = str(
+                                position.get("_live_account_id") or self.live_wallet_account_id or ""
+                            ).strip()
+                            if position_account_id:
+                                positions_by_account.setdefault(position_account_id, []).append(position)
+                        for position_account_id, positions in positions_by_account.items():
+                            self._enrich_open_positions_with_live_data(
+                                positions,
+                                account_id=position_account_id,
+                            )
+                    for position in data["open_positions"]:
+                        position.pop("_live_account_id", None)
+                        position.pop("_tp_order_id", None)
+                        position.pop("_sl_order_id", None)
+                        position.pop("_tp_client_order_id", None)
+                        position.pop("_sl_client_order_id", None)
 
                     data["events"] = self._query_rows(
                         conn,
@@ -3160,6 +3308,26 @@ DASHBOARD_HTML = """<!doctype html>
     .detail-table td.numeric { font-family: ui-monospace, Menlo, Monaco, Consolas, monospace; font-variant-numeric: tabular-nums; }
     .symbol-cell strong { display: block; color: #edf7fd; font-size: 12px; }
     .symbol-cell small { display: block; margin-top: 3px; color: #5e8093; font-family: ui-monospace, Menlo, Monaco, Consolas, monospace; font-size: 9px; }
+    .position-stack { display: flex; flex-direction: column; gap: 3px; min-width: 92px; }
+    .position-primary { color: #dcebf4; font-weight: 750; }
+    .position-secondary { color: #6f91a4; font-size: 10px; }
+    .position-secondary strong { color: #a9c5d5; font-weight: 700; }
+    .live-pnl { min-width: 104px; }
+    .live-pnl.positive .position-primary { color: #65dfa0; }
+    .live-pnl.negative .position-primary { color: #ff8989; }
+    .live-pnl.neutral .position-primary { color: #dcebf4; }
+    .live-unavailable { color: #6f91a4; font-size: 10px; }
+    .exit-stack { display: flex; flex-direction: column; gap: 4px; min-width: 138px; }
+    .exit-line { display: flex; align-items: center; gap: 5px; min-height: 20px; }
+    .exit-key { width: 20px; color: #7899ac; font-size: 9px; font-weight: 850; }
+    .exit-key.tp { color: #65dfa0; }
+    .exit-key.sl { color: #ff8989; }
+    .exit-price { min-width: 56px; color: #cfe1eb; font-family: ui-monospace, Menlo, Monaco, Consolas, monospace; font-size: 10px; }
+    .order-state { display: inline-flex; align-items: center; min-height: 18px; padding: 1px 5px; border: 1px solid #315469; border-radius: 999px; color: #9db8c8; background: #0f202b; font-size: 8px; font-weight: 800; }
+    .order-state.ok { border-color: #236944; color: #65dfa0; background: #10271e; }
+    .order-state.warn { border-color: #755822; color: #ffc86d; background: #271f10; }
+    .order-state.bad { border-color: #74383b; color: #ff8989; background: #291719; }
+    .live-sync { display: block; margin-top: 4px; color: #5e8093; font-size: 9px; }
     .cell-muted { color: #7899ac; }
     .status-badge {
       display: inline-flex;
@@ -3425,13 +3593,13 @@ DASHBOARD_HTML = """<!doctype html>
       <header class="surface-head">
         <div class="surface-heading">
           <h2 class="surface-title" id="positionsHeading">当前持仓</h2>
-          <div class="surface-subtitle">按到期时间排序，异常信息优先显示</div>
+          <div class="surface-subtitle">行情、浮盈与止盈止损状态实时读取，不写入数据库</div>
         </div>
         <span class="surface-count" id="positionsCount">0</span>
       </header>
       <div class="table-wrap">
         <table class="detail-table positions-table">
-          <thead><tr><th>交易对 / ID</th><th>数量</th><th>入场价</th><th>止盈价</th><th>止损价</th><th>到期时间</th><th>状态</th></tr></thead>
+          <thead><tr><th>交易对 / 方向</th><th>数量</th><th>入场价 / 标记价</th><th>未实现盈亏</th><th>止盈 / 止损</th><th>到期时间</th><th>状态</th></tr></thead>
           <tbody id="positionsBody"><tr><td colspan="7" class="empty-row">持仓加载中...</td></tr></tbody>
         </table>
       </div>
@@ -3682,7 +3850,40 @@ DASHBOARD_HTML = """<!doctype html>
     var s = String(value || "").toUpperCase();
     if (s === "BUY") return "买入";
     if (s === "SELL") return "卖出";
+    if (s === "SHORT") return "空单";
+    if (s === "LONG") return "多单";
+    if (s === "BOTH") return "双向";
     return s || "--";
+  }
+
+  function liveOrderLabel(value) {
+    var s = String(value || "").toUpperCase();
+    var labels = {
+      ACTIVE: "挂单中",
+      NEW: "挂单中",
+      PARTIALLY_FILLED: "部分成交",
+      FILLED: "已成交",
+      CANCELED: "已撤销",
+      CANCELLED: "已撤销",
+      EXPIRED: "已过期",
+      REJECTED: "已拒绝",
+      MISSING: "缺失",
+      NOT_SET: "未设置"
+    };
+    return labels[s] || s || "待同步";
+  }
+
+  function liveOrderClass(value) {
+    var s = String(value || "").toUpperCase();
+    if (s === "NEW" || s === "ACTIVE" || s === "PARTIALLY_FILLED") return "ok";
+    if (s === "MISSING" || s === "CANCELED" || s === "CANCELLED" || s === "EXPIRED" || s === "REJECTED") return "bad";
+    return "warn";
+  }
+
+  function liveOrderBadge(value) {
+    var label = liveOrderLabel(value);
+    var cls = liveOrderClass(value);
+    return '<span class="order-state ' + cls + '">' + escapeHtml(label) + "</span>";
   }
 
   function cashflowTypeLabel(value) {
@@ -4342,16 +4543,28 @@ DASHBOARD_HTML = """<!doctype html>
 
       renderRows(el.positionsBody, positions, function (p) {
         var errorText = String(p.last_error || "").trim();
+        var liveAvailable = p.live_data_available === true;
+        var liveError = String(p.live_data_error || p.order_data_error || "").trim();
+        var pnl = toNum(p.unrealized_pnl);
+        var pnlPct = toNum(p.unrealized_pnl_pct);
+        var pnlClass = pnl === null ? "neutral" : (pnl > 0 ? "positive" : (pnl < 0 ? "negative" : "neutral"));
+        var pnlMain = pnl === null ? "实时不可用" : fmtSigned(pnl, 2) + " USDT";
+        var pnlSub = pnlPct === null ? "收益率 --" : "收益率 " + fmtSigned(pnlPct, 2) + "%";
         var stateHtml = errorText
           ? '<span class="status-badge bad">异常</span><div class="error-cell">' + escapeHtml(errorText) + "</div>"
           : '<span class="status-badge ok">正常</span>';
+        if (liveError) {
+          stateHtml += '<small class="live-unavailable">' + escapeHtml(liveError) + "</small>";
+        } else if (liveAvailable) {
+          stateHtml += '<small class="live-sync">实时已同步</small>';
+        }
         return (
           "<tr>" +
-          '<td class="symbol-cell"><strong>' + escapeHtml(p.symbol) + '</strong><small>#' + escapeHtml(p.id) + "</small></td>" +
+          '<td class="symbol-cell"><strong>' + escapeHtml(p.symbol) + '</strong><small>' + escapeHtml(sideLabel(p.side)) + ' · #' + escapeHtml(p.id) + "</small></td>" +
           '<td class="numeric">' + escapeHtml(fmtQuantity(p.qty)) + "</td>" +
-          '<td class="numeric">' + escapeHtml(fmtAdaptive(p.entry_price)) + "</td>" +
-          '<td class="numeric">' + escapeHtml(fmtAdaptive(p.tp_price)) + "</td>" +
-          '<td class="numeric">' + escapeHtml(fmtAdaptive(p.sl_price)) + "</td>" +
+          '<td class="numeric"><div class="position-stack"><strong class="position-primary">' + escapeHtml(fmtAdaptive(p.entry_price)) + '</strong><small class="position-secondary">标记 <strong>' + escapeHtml(liveAvailable ? fmtAdaptive(p.mark_price) : "--") + "</strong></small></div></td>" +
+          '<td class="numeric live-pnl ' + pnlClass + '"><div class="position-stack"><strong class="position-primary">' + escapeHtml(pnlMain) + '</strong><small class="position-secondary">' + escapeHtml(pnlSub) + "</small></div></td>" +
+          '<td><div class="exit-stack"><div class="exit-line"><span class="exit-key tp">TP</span><span class="exit-price">' + escapeHtml(fmtAdaptive(p.tp_price)) + '</span>' + liveOrderBadge(p.tp_order_status) + '</div><div class="exit-line"><span class="exit-key sl">SL</span><span class="exit-price">' + escapeHtml(fmtAdaptive(p.sl_price)) + '</span>' + liveOrderBadge(p.sl_order_status) + "</div></div></td>" +
           '<td class="numeric">' + escapeHtml(fmtAxisTime(p.expire_at_utc)) + "</td>" +
           "<td>" + stateHtml + "</td>" +
           "</tr>"
