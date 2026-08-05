@@ -723,6 +723,64 @@ class StrategyRebalanceTest(unittest.TestCase):
         self.assertEqual(result["status"], "SUCCESS")
         store.finalize_run.assert_called_once_with("run-1", "SUCCESS", "No ranked symbols")
 
+    def test_resumed_run_summary_accumulates_persisted_opened_positions(self) -> None:
+        client = MagicMock()
+        client.get_available_balance.return_value = 500.0
+        client.diagnose_order_qty.return_value = {"normalized_qty": 1.0}
+
+        store = MagicMock()
+        store.create_run.return_value = ("run-1", False)
+        store.get_run.return_value = RunState(
+            run_id="run-1",
+            account_id="acc01",
+            trade_day_utc="2026-07-18",
+            started_at_utc="2026-07-18T00:00:00+00:00",
+            completed_at_utc=None,
+            status="RUNNING",
+            reason=None,
+        )
+        store.get_lock_state.return_value = {}
+        store.list_active_symbols.return_value = set()
+        store.count_run_opened_positions.return_value = 9
+        store.insert_position.return_value = 1001
+
+        strategy = self._build_strategy(client, store, rebalance_enabled=False)
+        strategy.top_n = 1
+        strategy._load_short_position = MagicMock(
+            return_value={
+                "symbol": "NEWUSDT",
+                "entryPrice": "10",
+                "liquidationPrice": "12",
+                "positionAmt": "-1",
+            }
+        )
+        strategy._place_market_short_with_shrink_retry = MagicMock(
+            return_value=(
+                {
+                    "orderId": 2001,
+                    "clientOrderId": "ent-new-1",
+                    "status": "FILLED",
+                    "origQty": "1",
+                    "side": "SELL",
+                    "type": "MARKET",
+                    "symbol": "NEWUSDT",
+                },
+                0,
+            )
+        )
+        strategy._place_exit_orders = MagicMock()
+
+        result = strategy.run_entry(
+            trade_day_utc="2026-07-18",
+            shared_top_gainers=[
+                {"symbol": "NEWUSDT", "change": "15", "current_price": "10", "volume": "100"},
+            ],
+        )
+
+        self.assertEqual(result["opened"], 10)
+        finalize_message = store.finalize_run.call_args.args[2]
+        self.assertIn("opened=10", finalize_message)
+
     def test_run_entry_applies_structure_stop_immediately_after_fill(self) -> None:
         client = MagicMock()
         client.get_available_balance.return_value = 500.0

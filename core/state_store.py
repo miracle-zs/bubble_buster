@@ -164,6 +164,26 @@ class StateStore:
                 reason=row["message"],
             )
 
+    def count_run_opened_positions(self, run_id: str) -> int:
+        """Count positions that reached an exchange-backed entry state for a run.
+
+        A resumed entry run can create positions across several invocations.  A
+        pending entry or an entry explicitly marked as failed is not counted,
+        while open, pending-exit-setup, and closed positions represent an entry
+        that did complete.
+        """
+        with self._connect_ctx() as conn:
+            row = conn.execute(
+                """
+                SELECT COUNT(*) AS opened_count
+                FROM positions
+                WHERE run_id = ?
+                  AND status NOT IN ('PENDING_ENTRY', 'ENTRY_FAILED')
+                """,
+                (run_id,),
+            ).fetchone()
+            return int(row["opened_count"] or 0) if row is not None else 0
+
     def migrate_to_multi_account(self, default_account_id: str) -> None:
         default_account_id = (default_account_id or "").strip()
         if not default_account_id:

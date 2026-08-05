@@ -327,6 +327,8 @@ class Top10ShortStrategy:
                 }
 
         opened_count = 0
+        if not created:
+            opened_count = self.store.count_run_opened_positions(run_id)
         self._entry_wait_interrupted = False
         entry_failed_count = 0
         exit_setup_failed_count = 0

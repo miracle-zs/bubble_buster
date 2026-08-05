@@ -66,6 +66,31 @@ class StateStoreTest(unittest.TestCase):
         symbols_after = self.store.list_open_symbols()
         self.assertNotIn("BTCUSDT", symbols_after)
 
+    def test_count_run_opened_positions_excludes_unresolved_entries(self) -> None:
+        run_id, _ = self.store.create_run("2026-02-13")
+        common = {
+            "run_id": run_id,
+            "side": "SHORT",
+            "qty": 1.0,
+            "entry_price": 10.0,
+            "liq_price_open": 12.0,
+            "tp_price": None,
+            "sl_price": None,
+            "tp_order_id": None,
+            "sl_order_id": None,
+            "tp_client_order_id": None,
+            "sl_client_order_id": None,
+            "opened_at_utc": "2026-02-13T00:00:00+00:00",
+            "expire_at_utc": "2026-02-14T23:30:00+00:00",
+        }
+        self.store.insert_position(symbol="PENDINGUSDT", status="PENDING_ENTRY", **common)
+        self.store.insert_position(symbol="FAILEDUSDT", status="ENTRY_FAILED", **common)
+        self.store.insert_position(symbol="SETUPUSDT", status="PENDING_EXIT_SETUP", **common)
+        self.store.insert_position(symbol="OPENUSDT", status="OPEN", **common)
+        self.store.insert_position(symbol="CLOSEDUSDT", status="CLOSED_TP", **common)
+
+        self.assertEqual(self.store.count_run_opened_positions(run_id), 3)
+
     def test_pending_exit_setup_position_is_not_listed_until_marked_open(self) -> None:
         run_id, _ = self.store.create_run("2026-02-13")
         position_id = self.store.insert_position(
