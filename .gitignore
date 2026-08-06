@@ -28,4 +28,7 @@ htmlcov/
 
 .worktrees/
 
+# Local session handoff
+/docs/HANDOFF.md
+
 .worktrees/
