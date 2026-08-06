@@ -2,7 +2,7 @@ import importlib.util
 import sys
 import types
 import unittest
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from unittest.mock import MagicMock, patch
 
 if importlib.util.find_spec("requests") is None:
@@ -79,6 +79,7 @@ class StrategyRebalanceTest(unittest.TestCase):
             entry_wait_close_grace_sec=overrides.get("entry_wait_close_grace_sec", 1),
             entry_wait_close_retry_sec=overrides.get("entry_wait_close_retry_sec", 1.0),
             entry_wait_close_retry_count=overrides.get("entry_wait_close_retry_count", 5),
+            entry_preclose_sec=overrides.get("entry_preclose_sec", 0),
         )
 
     @staticmethod
@@ -602,6 +603,82 @@ class StrategyRebalanceTest(unittest.TestCase):
         self.assertEqual(result, candle)
         self.assertEqual(strategy._fetch_hour_candle.call_count, 2)
         strategy._entry_wait_stop_event.wait.assert_called_once_with(timeout=0.25)
+
+    def test_preclose_snapshot_can_ready_entry_before_hour_boundary(self) -> None:
+        client = MagicMock()
+        store = MagicMock()
+        store.list_active_symbols.return_value = set()
+        strategy = self._build_strategy(
+            client,
+            store,
+            entry_wait_bearish_hour_enabled=True,
+            entry_preclose_sec=10,
+        )
+        hour_open = datetime(2025, 12, 1, 7, tzinfo=timezone.utc)
+        preclose_time = datetime(2025, 12, 1, 7, 59, 50, tzinfo=timezone.utc)
+        strategy._utc_now_datetime = MagicMock(return_value=preclose_time)
+        client.get_klines.return_value = [
+            [
+                int(hour_open.timestamp() * 1000),
+                "100",
+                "101",
+                "94",
+                "95",
+                "0",
+                int((hour_open + timedelta(hours=1)).timestamp() * 1000) - 1,
+            ]
+        ]
+
+        ready = next(
+            strategy._iter_ready_entries_after_bearish_hour(
+                candidates=[RankEntry("AAAUSDT", 15.0, 100.0, 100.0)],
+                signal_base_time_utc=datetime(2025, 12, 1, 7, 40, tzinfo=timezone.utc),
+                run_id="run-1",
+                trade_day_utc="2025-12-01",
+            )
+        )
+
+        self.assertTrue(ready.preclose_entry)
+        self.assertEqual(ready.reference_price, 95.0)
+        self.assertIsNone(ready.bearish_close_time_utc)
+        self.assertEqual(ready.preclose_time_utc, preclose_time)
+        self.assertEqual(ready.signal_hour_open_utc, hour_open)
+        self.assertEqual(client.get_klines.call_args.kwargs["end_time"], int(preclose_time.timestamp() * 1000))
+
+    def test_preclose_audit_records_final_candle_direction(self) -> None:
+        client = MagicMock()
+        store = MagicMock()
+        strategy = self._build_strategy(client, store, entry_preclose_sec=10)
+        final_time = datetime(2025, 12, 1, 8, 0, 2, tzinfo=timezone.utc)
+        hour_open = datetime(2025, 12, 1, 7, tzinfo=timezone.utc)
+        strategy._utc_now_datetime = MagicMock(return_value=final_time)
+        strategy._fetch_hour_candle_with_retry = MagicMock(
+            return_value=(100.0, 101.0, datetime(2025, 12, 1, 8, tzinfo=timezone.utc))
+        )
+
+        strategy._finalize_preclose_entry_audits(
+            [
+                {
+                    "order_event_id": 12,
+                    "position_id": 34,
+                    "symbol": "AAAUSDT",
+                    "hour_open_utc": hour_open,
+                    "order_payload": {
+                        "orderId": 99,
+                        "symbol": "AAAUSDT",
+                        "side": "SELL",
+                        "type": "MARKET",
+                        "status": "FILLED",
+                        "entry_audit": {"entry_mode": "PRECLOSE", "filled_at_utc": final_time.isoformat()},
+                    },
+                }
+            ]
+        )
+
+        audit = store.update_order_event.call_args.kwargs["order_payload"]["entry_audit"]
+        self.assertTrue(audit["final_candle_available"])
+        self.assertFalse(audit["final_candle_bearish"])
+        self.assertEqual(audit["final_candle_close_price"], 101.0)
 
     def test_bearish_wait_state_roundtrips_for_restart_recovery(self) -> None:
         client = MagicMock()

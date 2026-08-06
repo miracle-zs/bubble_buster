@@ -28,6 +28,7 @@ entry_wait_close_grace_sec = 1
 entry_wait_close_retry_sec = 1
 entry_wait_close_retry_count = 5
 entry_wait_max_hours = 16
+entry_preclose_sec = 10
 ranker_max_workers = 24
 ranker_weight_limit_per_minute = 1000
 ranker_min_request_interval_ms = 20

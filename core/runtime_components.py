@@ -195,6 +195,7 @@ def _build_single_account_components(
         entry_wait_close_retry_sec=max(0.1, strategy_cfg.getfloat("entry_wait_close_retry_sec", fallback=1.0)),
         entry_wait_close_retry_count=max(1, strategy_cfg.getint("entry_wait_close_retry_count", fallback=5)),
         entry_wait_max_hours=max(1.0, strategy_cfg.getfloat("entry_wait_max_hours", fallback=16.0)),
+        entry_preclose_sec=min(59.0, max(0.0, strategy_cfg.getfloat("entry_preclose_sec", fallback=10.0))),
         cooling_off_retry_count=max(0, runtime_cfg.getint("cooling_off_retry_count", fallback=0)),
         cooling_off_retry_delay_sec=max(0, runtime_cfg.getint("cooling_off_retry_delay_sec", fallback=0)),
         runtime_timezone=runtime_cfg.get("timezone", fallback="Asia/Shanghai").strip(),
@@ -243,6 +244,9 @@ def _build_single_account_components(
         ),
         "entry_wait_close_retry_count": max(
             1, strategy_cfg.getint("entry_wait_close_retry_count", fallback=5)
+        ),
+        "entry_preclose_sec": min(
+            59.0, max(0.0, strategy_cfg.getfloat("entry_preclose_sec", fallback=10.0))
         ),
         "cooling_off_retry_count": max(0, runtime_cfg.getint("cooling_off_retry_count", fallback=0)),
         "cooling_off_retry_delay_sec": max(0, runtime_cfg.getint("cooling_off_retry_delay_sec", fallback=0)),

@@ -60,6 +60,11 @@ class ReadyEntry:
     reference_price: float
     signal_time_utc: datetime
     bearish_close_time_utc: Optional[datetime]
+    preclose_entry: bool = False
+    preclose_time_utc: Optional[datetime] = None
+    signal_hour_open_utc: Optional[datetime] = None
+    provisional_open_price: Optional[float] = None
+    provisional_close_price: Optional[float] = None
 
 
 @dataclass(frozen=True)
@@ -137,6 +142,7 @@ class Top10ShortStrategy:
         entry_wait_close_retry_sec: float = 1.0,
         entry_wait_close_retry_count: int = 5,
         entry_wait_max_hours: float = 16.0,
+        entry_preclose_sec: float = 0.0,
         cooling_off_retry_count: int = 0,
         cooling_off_retry_delay_sec: int = 0,
         runtime_timezone: str = "Asia/Shanghai",
@@ -185,6 +191,7 @@ class Top10ShortStrategy:
         self.entry_wait_close_retry_sec = max(0.1, float(entry_wait_close_retry_sec))
         self.entry_wait_close_retry_count = max(1, int(entry_wait_close_retry_count))
         self.entry_wait_max_hours = max(1.0, float(entry_wait_max_hours))
+        self.entry_preclose_sec = min(59.0, max(0.0, float(entry_preclose_sec)))
         self.cooling_off_retry_count = max(0, int(cooling_off_retry_count))
         self.cooling_off_retry_delay_sec = max(0, int(cooling_off_retry_delay_sec))
         self.runtime_timezone_name = (runtime_timezone or "").strip() or "UTC"
@@ -344,6 +351,7 @@ class Top10ShortStrategy:
         exit_setup_failure_details: List[str] = []
         risk_off_details: List[str] = []
         shrink_retry_details: List[str] = []
+        preclose_audit_pending: List[Dict[str, Any]] = []
         pre_rebalance_summary: Optional[Dict[str, object]] = None
         post_rebalance_summary: Optional[Dict[str, object]] = None
 
@@ -675,18 +683,42 @@ class Top10ShortStrategy:
                         0.0,
                         (opened_at - intent_opened_at).total_seconds() * 1000.0,
                     )
+                    is_preclose_entry = bool(getattr(ready_entry, "preclose_entry", False))
+                    preclose_time = getattr(ready_entry, "preclose_time_utc", None)
+                    signal_hour_open = getattr(ready_entry, "signal_hour_open_utc", None)
+                    preclose_to_fill_ms = None
+                    if is_preclose_entry and isinstance(preclose_time, datetime):
+                        preclose_to_fill_ms = max(
+                            0.0,
+                            (opened_at - preclose_time).total_seconds() * 1000.0,
+                        )
                     entry_audit = {
+                        "entry_mode": "PRECLOSE" if is_preclose_entry else "CONFIRMED_CLOSE",
                         "reference_price": reference_price_float,
                         "fill_price": entry_price,
                         "adverse_slippage_pct": adverse_slippage_pct,
                         "close_to_fill_ms": close_to_fill_ms,
                         "submit_to_fill_ms": submit_to_fill_ms,
+                        "preclose_to_fill_ms": preclose_to_fill_ms,
                         "retry_count": retry_count_used,
                         "bearish_close_time_utc": (
                             bearish_close_time.isoformat()
                             if isinstance(bearish_close_time, datetime)
                             else None
                         ),
+                        "preclose_time_utc": (
+                            preclose_time.isoformat() if isinstance(preclose_time, datetime) else None
+                        ),
+                        "signal_hour_open_utc": (
+                            signal_hour_open.isoformat() if isinstance(signal_hour_open, datetime) else None
+                        ),
+                        "provisional_open_price": getattr(ready_entry, "provisional_open_price", None),
+                        "provisional_close_price": getattr(ready_entry, "provisional_close_price", None),
+                        "final_candle_available": None,
+                        "final_candle_bearish": None,
+                        "final_candle_open_price": None,
+                        "final_candle_close_price": None,
+                        "final_candle_close_time_utc": None,
                         "filled_at_utc": opened_at.isoformat(),
                     }
                     LOGGER.info(
@@ -701,11 +733,11 @@ class Top10ShortStrategy:
                         f"{close_to_fill_ms:.1f}" if close_to_fill_ms is not None else "n/a",
                         f"{submit_to_fill_ms:.1f}",
                     )
+                    audited_order = dict(open_order)
+                    audited_order["entry_audit"] = entry_audit
                     update_order_event = getattr(self.store, "update_order_event", None)
                     if callable(update_order_event) and entry_event_id:
                         try:
-                            audited_order = dict(open_order)
-                            audited_order["entry_audit"] = entry_audit
                             update_order_event(
                                 order_event_id=entry_event_id,
                                 symbol=plan.symbol,
@@ -720,6 +752,18 @@ class Top10ShortStrategy:
                                 position_id,
                                 plan.symbol,
                                 audit_exc,
+                            )
+                    if is_preclose_entry and entry_event_id:
+                        signal_hour_open_value = signal_hour_open
+                        if isinstance(signal_hour_open_value, datetime):
+                            preclose_audit_pending.append(
+                                {
+                                    "order_event_id": entry_event_id,
+                                    "position_id": position_id,
+                                    "symbol": plan.symbol,
+                                    "hour_open_utc": signal_hour_open_value.astimezone(timezone.utc),
+                                    "order_payload": audited_order,
+                                }
                             )
 
                     opened_symbols.append(plan.symbol)
@@ -825,6 +869,8 @@ class Top10ShortStrategy:
                         self.entry_symbol_interval_sec,
                     )
                     time.sleep(self.entry_symbol_interval_sec)
+
+            self._finalize_preclose_entry_audits(preclose_audit_pending)
 
             for symbol in self._last_entry_wait_expired_symbols:
                 entry_failed_count += 1
@@ -984,6 +1030,82 @@ class Top10ShortStrategy:
                 exc,
             )
 
+    def _finalize_preclose_entry_audits(self, audits: List[Dict[str, Any]]) -> None:
+        """Attach the final candle outcome to entries submitted before the close."""
+        if not audits:
+            return
+        update_order_event = getattr(self.store, "update_order_event", None)
+        for audit in audits:
+            symbol = str(audit.get("symbol") or "").strip().upper()
+            hour_open = audit.get("hour_open_utc")
+            order_event_id = audit.get("order_event_id")
+            payload = dict(audit.get("order_payload") or {})
+            entry_audit = dict(payload.get("entry_audit") or {})
+            if not symbol or not isinstance(hour_open, datetime):
+                continue
+
+            final_available_at = hour_open + timedelta(hours=1, seconds=self.entry_wait_close_grace_sec)
+            now = self._utc_now_datetime()
+            if now < final_available_at and not self._entry_wait_stop_event.is_set():
+                wait_sec = max(0.0, (final_available_at - now).total_seconds())
+                LOGGER.info(
+                    "Waiting for final candle audit: account=%s symbol=%s wait_sec=%.3f",
+                    self.account_id,
+                    symbol,
+                    wait_sec,
+                )
+                self._entry_wait_stop_event.wait(timeout=wait_sec)
+
+            if self._entry_wait_stop_event.is_set():
+                entry_audit["final_candle_available"] = False
+                entry_audit["final_candle_status"] = "SKIPPED_INTERRUPTED"
+            else:
+                final_candle = self._fetch_hour_candle_with_retry(symbol, hour_open)
+                if final_candle is None:
+                    entry_audit["final_candle_available"] = False
+                    entry_audit["final_candle_status"] = "UNAVAILABLE"
+                else:
+                    open_price, close_price, close_time = final_candle
+                    entry_audit["final_candle_available"] = True
+                    entry_audit["final_candle_status"] = "OK"
+                    entry_audit["final_candle_bearish"] = close_price < open_price
+                    entry_audit["final_candle_open_price"] = open_price
+                    entry_audit["final_candle_close_price"] = close_price
+                    entry_audit["final_candle_close_time_utc"] = close_time.isoformat()
+                    try:
+                        provisional_close = float(entry_audit.get("provisional_close_price") or 0.0)
+                    except (TypeError, ValueError):
+                        provisional_close = 0.0
+                    if provisional_close > 0:
+                        entry_audit["final_vs_provisional_close_pct"] = (
+                            (close_price - provisional_close) / provisional_close * 100.0
+                        )
+
+            payload["entry_audit"] = entry_audit
+            if callable(update_order_event) and order_event_id:
+                try:
+                    update_order_event(
+                        order_event_id=order_event_id,
+                        symbol=symbol,
+                        position_id=audit.get("position_id"),
+                        event_time_utc=str(entry_audit.get("filled_at_utc") or self._utc_now_iso()),
+                        order_payload=payload,
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    LOGGER.warning(
+                        "Failed to persist final preclose candle audit: account=%s symbol=%s error=%s",
+                        self.account_id,
+                        symbol,
+                        exc,
+                    )
+            LOGGER.info(
+                "Preclose entry final candle audit: account=%s symbol=%s final_available=%s final_bearish=%s",
+                self.account_id,
+                symbol,
+                entry_audit.get("final_candle_available"),
+                entry_audit.get("final_candle_bearish"),
+            )
+
     def _iter_ready_entries_after_bearish_hour(
         self,
         candidates: List[RankEntry],
@@ -1035,25 +1157,114 @@ class Top10ShortStrategy:
             ready_this_round: List[Tuple[int, ReadyEntry]] = []
             next_check_times: List[datetime] = []
 
-            due_states: List[Tuple[int, RankEntry, datetime]] = []
+            due_preclose_states: List[Tuple[int, RankEntry, datetime]] = []
+            due_final_states: List[Tuple[int, RankEntry, datetime]] = []
             for idx, state in list(pending.items()):
                 entry = state.get("entry")
                 hour_open = state.get("hour_open")
                 if not isinstance(entry, RankEntry) or not isinstance(hour_open, datetime):
                     continue
                 hour_close = hour_open + timedelta(hours=1)
+                preclose_checked = bool(state.get("preclose_checked", False))
+                if self.entry_preclose_sec > 0 and not preclose_checked:
+                    available_at = hour_close - timedelta(seconds=self.entry_preclose_sec)
+                    if now < available_at:
+                        next_check_times.append(available_at)
+                        continue
+                    final_available_at = hour_close + timedelta(seconds=self.entry_wait_close_grace_sec)
+                    if now >= final_available_at:
+                        due_final_states.append((idx, entry, hour_open))
+                        continue
+                    due_preclose_states.append((idx, entry, hour_open))
+                    continue
+
                 available_at = hour_close + timedelta(seconds=self.entry_wait_close_grace_sec)
                 if now < available_at:
                     next_check_times.append(available_at)
                     continue
-                due_states.append((idx, entry, hour_open))
+                due_final_states.append((idx, entry, hour_open))
 
-            candle_results = self._fetch_hour_candles_parallel(due_states)
-            for idx, entry, hour_open in due_states:
+            due_states = due_preclose_states + due_final_states
+            preclose_candle_results = self._fetch_hour_candles_parallel(
+                due_preclose_states,
+                snapshot_as_of_utc=now,
+            )
+            final_candle_results = self._fetch_hour_candles_parallel(due_final_states)
+            retry_round_pause_sec = min(
+                float(self.entry_wait_poll_sec),
+                max(
+                    self.entry_wait_close_retry_sec,
+                    self.entry_wait_close_retry_sec * self.entry_wait_close_retry_count,
+                ),
+            )
+
+            for idx, entry, hour_open in due_preclose_states:
                 state = pending.get(idx)
                 if state is None:
                     continue
-                candle = candle_results.get(idx)
+                candle = preclose_candle_results.get(idx)
+                if candle is None:
+                    LOGGER.warning(
+                        "Entry preclose snapshot unavailable after retries: account=%s symbol=%s "
+                        "hour_open=%s retry_count=%s retry_sec=%s",
+                        self.account_id,
+                        entry.symbol,
+                        hour_open.isoformat(timespec="seconds"),
+                        self.entry_wait_close_retry_count,
+                        self.entry_wait_close_retry_sec,
+                    )
+                    next_check_times.append(now + timedelta(seconds=retry_round_pause_sec))
+                    continue
+
+                open_price, close_price, _snapshot_time = candle
+                state["preclose_checked"] = True
+                self._persist_entry_wait_pending(
+                    pending=pending,
+                    run_id=run_id,
+                    trade_day_utc=trade_day_utc,
+                    signal_base_time_utc=signal_base_time_utc,
+                )
+                hour_close = hour_open + timedelta(hours=1)
+                if close_price < open_price:
+                    ready_entry = ReadyEntry(
+                        entry=entry,
+                        reference_price=close_price,
+                        signal_time_utc=state["signal_time"] if isinstance(state["signal_time"], datetime) else signal_base_time_utc,
+                        bearish_close_time_utc=None,
+                        preclose_entry=True,
+                        preclose_time_utc=now,
+                        signal_hour_open_utc=hour_open,
+                        provisional_open_price=open_price,
+                        provisional_close_price=close_price,
+                    )
+                    ready_this_round.append((idx, ready_entry))
+                    LOGGER.info(
+                        "Entry preclose ready: account=%s symbol=%s trigger=%s hour_open=%s "
+                        "open=%.10f provisional_close=%.10f",
+                        self.account_id,
+                        entry.symbol,
+                        now.isoformat(timespec="seconds"),
+                        hour_open.isoformat(timespec="seconds"),
+                        open_price,
+                        close_price,
+                    )
+                else:
+                    LOGGER.info(
+                        "Entry preclose not bearish; wait for final candle: account=%s symbol=%s "
+                        "trigger=%s open=%.10f provisional_close=%.10f",
+                        self.account_id,
+                        entry.symbol,
+                        now.isoformat(timespec="seconds"),
+                        open_price,
+                        close_price,
+                    )
+                    next_check_times.append(hour_close + timedelta(seconds=self.entry_wait_close_grace_sec))
+
+            for idx, entry, hour_open in due_final_states:
+                state = pending.get(idx)
+                if state is None:
+                    continue
+                candle = final_candle_results.get(idx)
                 if candle is None:
                     LOGGER.warning(
                         "Entry bearish-hour wait missing kline after second-level retries: "
@@ -1065,13 +1276,6 @@ class Top10ShortStrategy:
                         self.entry_wait_close_retry_sec,
                     )
                     state["hour_open"] = hour_open
-                    retry_round_pause_sec = min(
-                        float(self.entry_wait_poll_sec),
-                        max(
-                            self.entry_wait_close_retry_sec,
-                            self.entry_wait_close_retry_sec * self.entry_wait_close_retry_count,
-                        ),
-                    )
                     next_check_times.append(now + timedelta(seconds=retry_round_pause_sec))
                     continue
 
@@ -1082,6 +1286,7 @@ class Top10ShortStrategy:
                         reference_price=close_price,
                         signal_time_utc=state["signal_time"] if isinstance(state["signal_time"], datetime) else signal_base_time_utc,
                         bearish_close_time_utc=close_time,
+                        signal_hour_open_utc=hour_open,
                     )
                     ready_this_round.append((idx, ready_entry))
                     LOGGER.info(
@@ -1104,6 +1309,7 @@ class Top10ShortStrategy:
                     close_price,
                 )
                 state["hour_open"] = hour_open + timedelta(hours=1)
+                state["preclose_checked"] = False
                 self._persist_entry_wait_pending(
                     pending=pending,
                     run_id=run_id,
@@ -1227,7 +1433,12 @@ class Top10ShortStrategy:
                         run_id,
                     )
                     continue
-                restored[idx] = {"entry": entry, "signal_time": signal_time, "hour_open": hour_open}
+                restored[idx] = {
+                    "entry": entry,
+                    "signal_time": signal_time,
+                    "hour_open": hour_open,
+                    "preclose_checked": bool(item.get("preclose_checked", False)),
+                }
             if restored:
                 if len(restored) != len(raw_pending):
                     self._persist_entry_wait_pending(
@@ -1256,6 +1467,7 @@ class Top10ShortStrategy:
                 "entry": entry,
                 "signal_time": signal_time,
                 "hour_open": self._floor_to_utc_hour(signal_time),
+                "preclose_checked": False,
             }
         self._persist_entry_wait_pending(
             pending=pending,
@@ -1300,6 +1512,7 @@ class Top10ShortStrategy:
                 "quote_volume": entry.quote_volume,
                 "signal_time_utc": signal_time.astimezone(timezone.utc).isoformat(),
                 "hour_open_utc": hour_open.astimezone(timezone.utc).isoformat(),
+                "preclose_checked": bool(state.get("preclose_checked", False)),
             }
         self.store.set_lock_state(
             self.ENTRY_WAIT_LOCK_NAME,
@@ -1317,20 +1530,26 @@ class Top10ShortStrategy:
         self,
         symbol: str,
         hour_open_utc: datetime,
+        snapshot_as_of_utc: Optional[datetime] = None,
     ) -> Optional[Tuple[float, float, datetime]]:
-        """Fetch a just-closed hourly candle with a short REST retry burst."""
+        """Fetch a candle snapshot or just-closed candle with short REST retries."""
         last_error: Optional[Exception] = None
         for attempt in range(1, self.entry_wait_close_retry_count + 1):
             try:
-                candle = self._fetch_hour_candle(symbol, hour_open_utc)
+                candle = (
+                    self._fetch_hour_candle_snapshot(symbol, hour_open_utc, snapshot_as_of_utc)
+                    if snapshot_as_of_utc is not None
+                    else self._fetch_hour_candle(symbol, hour_open_utc)
+                )
             except Exception as exc:  # noqa: BLE001
                 last_error = exc
                 candle = None
             if candle is not None:
                 if attempt > 1:
                     LOGGER.info(
-                        "Entry bearish-hour kline recovered after retry: account=%s symbol=%s "
+                        "Entry %s kline recovered after retry: account=%s symbol=%s "
                         "hour_open=%s attempt=%s/%s",
+                        "preclose snapshot" if snapshot_as_of_utc is not None else "bearish-hour",
                         self.account_id,
                         symbol,
                         hour_open_utc.isoformat(timespec="seconds"),
@@ -1346,8 +1565,9 @@ class Top10ShortStrategy:
 
         if last_error is not None:
             LOGGER.warning(
-                "Entry bearish-hour kline fetch failed after retries: account=%s symbol=%s "
+                "Entry %s kline fetch failed after retries: account=%s symbol=%s "
                 "hour_open=%s attempts=%s error=%s",
+                "preclose snapshot" if snapshot_as_of_utc is not None else "bearish-hour",
                 self.account_id,
                 symbol,
                 hour_open_utc.isoformat(timespec="seconds"),
@@ -1359,19 +1579,31 @@ class Top10ShortStrategy:
     def _fetch_hour_candles_parallel(
         self,
         due_states: List[Tuple[int, RankEntry, datetime]],
+        snapshot_as_of_utc: Optional[datetime] = None,
     ) -> Dict[int, Optional[Tuple[float, float, datetime]]]:
-        """Fetch all boundary candles due in this round through the REST pool."""
+        """Fetch all due candle snapshots through the REST connection pool."""
         if not due_states:
             return {}
         if len(due_states) == 1:
             idx, entry, hour_open = due_states[0]
-            return {idx: self._fetch_hour_candle_with_retry(entry.symbol, hour_open)}
+            return {
+                idx: self._fetch_hour_candle_with_retry(
+                    entry.symbol,
+                    hour_open,
+                    snapshot_as_of_utc=snapshot_as_of_utc,
+                )
+            }
 
         workers = min(len(due_states), max(1, min(10, self.ranker_max_workers)))
         results: Dict[int, Optional[Tuple[float, float, datetime]]] = {}
         with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="entry-kline") as executor:
             futures = {
-                idx: executor.submit(self._fetch_hour_candle_with_retry, entry.symbol, hour_open)
+                idx: executor.submit(
+                    self._fetch_hour_candle_with_retry,
+                    entry.symbol,
+                    hour_open,
+                    snapshot_as_of_utc,
+                )
                 for idx, entry, hour_open in due_states
             }
             for idx, future in futures.items():
@@ -1386,6 +1618,44 @@ class Top10ShortStrategy:
                     )
                     results[idx] = None
         return results
+
+    def _fetch_hour_candle_snapshot(
+        self,
+        symbol: str,
+        hour_open_utc: datetime,
+        as_of_utc: datetime,
+    ) -> Optional[Tuple[float, float, datetime]]:
+        """Read the still-forming hourly candle as of a preclose timestamp."""
+        hour_open_utc = self._floor_to_utc_hour(hour_open_utc)
+        start_ms = int(hour_open_utc.timestamp() * 1000)
+        boundary_ms = int((hour_open_utc + timedelta(hours=1)).timestamp() * 1000)
+        as_of_ms = min(max(start_ms, int(as_of_utc.timestamp() * 1000)), boundary_ms - 1)
+        rows = self.client.get_klines(
+            symbol=symbol,
+            interval="1h",
+            start_time=start_ms,
+            end_time=as_of_ms,
+            limit=1,
+        )
+        for row in rows or []:
+            if len(row) < 5:
+                continue
+            try:
+                row_open_ms = int(row[0])
+            except (TypeError, ValueError):
+                continue
+            if row_open_ms != start_ms:
+                continue
+            open_price = self._safe_positive_float(row[1])
+            close_price = self._safe_positive_float(row[4])
+            if open_price is None or close_price is None:
+                continue
+            return (
+                open_price,
+                close_price,
+                datetime.fromtimestamp(as_of_ms / 1000, tz=timezone.utc),
+            )
+        return None
 
     def _fetch_hour_candle(self, symbol: str, hour_open_utc: datetime) -> Optional[Tuple[float, float, datetime]]:
         hour_open_utc = self._floor_to_utc_hour(hour_open_utc)
