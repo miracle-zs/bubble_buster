@@ -177,6 +177,15 @@ class BinanceFuturesClient:
         )
         return self._server_time_offset_ms
 
+    def sync_server_time(self) -> int:
+        """Synchronize the local signing timestamp with Binance.
+
+        Entry preparation uses this public wrapper so the strategy can warm
+        the signed REST path before the market-order window opens without
+        reaching into the client's private implementation.
+        """
+        return self._sync_server_time()
+
     def _is_order_not_found_error(self, err: BinanceAPIError) -> bool:
         code = self._safe_error_code(err)
         return code in self.ORDER_NOT_FOUND_CODES
@@ -804,6 +813,76 @@ class BinanceFuturesClient:
     def ensure_isolated_and_leverage(self, symbol: str, leverage: int) -> None:
         self.set_margin_type(symbol, "ISOLATED")
         self.set_leverage(symbol, leverage)
+
+    def prewarm_entry(
+        self,
+        symbols: List[str],
+        leverage: int,
+        target_notional: float,
+        reference_prices: Dict[str, float],
+    ) -> Dict[str, Dict[str, Any]]:
+        """Warm REST, exchange rules, leverage and quantity calculation paths.
+
+        Preparation is deliberately best-effort per symbol.  A transient
+        failure here must not prevent the normal ready-to-trade path from
+        retrying the same operation immediately before an order is submitted.
+        """
+        started = time.monotonic()
+        try:
+            self.sync_server_time()
+        except Exception as exc:  # noqa: BLE001
+            LOGGER.warning("Entry prewarm server-time sync failed: %s", exc)
+
+        try:
+            self.get_symbol_rules()
+        except Exception as exc:  # noqa: BLE001
+            LOGGER.warning("Entry prewarm exchange-info fetch failed: %s", exc)
+
+        diagnostics: Dict[str, Dict[str, Any]] = {}
+        normalized_reference_prices = {
+            str(symbol or "").strip().upper(): float(price or 0.0)
+            for symbol, price in reference_prices.items()
+        }
+        for raw_symbol in symbols:
+            symbol = str(raw_symbol or "").strip().upper()
+            if not symbol:
+                continue
+            leverage_ready = True
+            try:
+                self.ensure_isolated_and_leverage(symbol, leverage)
+            except Exception as exc:  # noqa: BLE001
+                leverage_ready = False
+                LOGGER.warning(
+                    "Entry prewarm leverage setup failed: symbol=%s leverage=%s error=%s",
+                    symbol,
+                    leverage,
+                    exc,
+                )
+            price = normalized_reference_prices.get(symbol, 0.0)
+            if price <= 0:
+                continue
+            try:
+                diagnostic = self.diagnose_order_qty(
+                    symbol=symbol,
+                    notional=target_notional,
+                    price=price,
+                )
+                diagnostic["prewarm_leverage_ready"] = leverage_ready
+                diagnostics[symbol] = diagnostic
+            except Exception as exc:  # noqa: BLE001
+                LOGGER.warning(
+                    "Entry prewarm quantity diagnosis failed: symbol=%s error=%s",
+                    symbol,
+                    exc,
+                )
+
+        LOGGER.info(
+            "Entry REST prewarm completed symbols=%s elapsed_ms=%s diagnosed=%s",
+            len(diagnostics),
+            int(max(0.0, (time.monotonic() - started) * 1000)),
+            len(diagnostics),
+        )
+        return diagnostics
 
     def diagnose_order_qty(self, symbol: str, notional: float, price: float) -> Dict[str, Any]:
         rules = self.get_symbol_rules().get(symbol)

@@ -191,7 +191,9 @@ def _build_single_account_components(
         entry_symbol_interval_sec=max(0, runtime_cfg.getint("entry_symbol_interval_sec", fallback=0)),
         entry_wait_bearish_hour_enabled=strategy_cfg.getboolean("entry_wait_bearish_hour_enabled", fallback=True),
         entry_wait_poll_sec=max(1, strategy_cfg.getint("entry_wait_poll_sec", fallback=30)),
-        entry_wait_close_grace_sec=max(0, strategy_cfg.getint("entry_wait_close_grace_sec", fallback=5)),
+        entry_wait_close_grace_sec=max(0.0, strategy_cfg.getfloat("entry_wait_close_grace_sec", fallback=1.0)),
+        entry_wait_close_retry_sec=max(0.1, strategy_cfg.getfloat("entry_wait_close_retry_sec", fallback=1.0)),
+        entry_wait_close_retry_count=max(1, strategy_cfg.getint("entry_wait_close_retry_count", fallback=5)),
         entry_wait_max_hours=max(1.0, strategy_cfg.getfloat("entry_wait_max_hours", fallback=16.0)),
         cooling_off_retry_count=max(0, runtime_cfg.getint("cooling_off_retry_count", fallback=0)),
         cooling_off_retry_delay_sec=max(0, runtime_cfg.getint("cooling_off_retry_delay_sec", fallback=0)),
@@ -233,6 +235,15 @@ def _build_single_account_components(
         "entry_minute": runtime_cfg.getint("entry_minute", fallback=40),
         "entry_initial_delay_sec": max(0, runtime_cfg.getint("entry_initial_delay_sec", fallback=0)),
         "entry_symbol_interval_sec": max(0, runtime_cfg.getint("entry_symbol_interval_sec", fallback=0)),
+        "entry_wait_close_grace_sec": max(
+            0.0, strategy_cfg.getfloat("entry_wait_close_grace_sec", fallback=1.0)
+        ),
+        "entry_wait_close_retry_sec": max(
+            0.1, strategy_cfg.getfloat("entry_wait_close_retry_sec", fallback=1.0)
+        ),
+        "entry_wait_close_retry_count": max(
+            1, strategy_cfg.getint("entry_wait_close_retry_count", fallback=5)
+        ),
         "cooling_off_retry_count": max(0, runtime_cfg.getint("cooling_off_retry_count", fallback=0)),
         "cooling_off_retry_delay_sec": max(0, runtime_cfg.getint("cooling_off_retry_delay_sec", fallback=0)),
         "daily_loss_cut_enabled": runtime_cfg.getboolean("daily_loss_cut_enabled", fallback=True),

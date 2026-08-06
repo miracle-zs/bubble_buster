@@ -2,6 +2,7 @@ import logging
 import math
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from functools import wraps
 import hashlib
 from dataclasses import dataclass
@@ -132,7 +133,9 @@ class Top10ShortStrategy:
         entry_symbol_interval_sec: int = 0,
         entry_wait_bearish_hour_enabled: bool = False,
         entry_wait_poll_sec: int = 30,
-        entry_wait_close_grace_sec: int = 5,
+        entry_wait_close_grace_sec: float = 1.0,
+        entry_wait_close_retry_sec: float = 1.0,
+        entry_wait_close_retry_count: int = 5,
         entry_wait_max_hours: float = 16.0,
         cooling_off_retry_count: int = 0,
         cooling_off_retry_delay_sec: int = 0,
@@ -178,7 +181,9 @@ class Top10ShortStrategy:
         self.entry_symbol_interval_sec = max(0, int(entry_symbol_interval_sec))
         self.entry_wait_bearish_hour_enabled = bool(entry_wait_bearish_hour_enabled)
         self.entry_wait_poll_sec = max(1, int(entry_wait_poll_sec))
-        self.entry_wait_close_grace_sec = max(0, int(entry_wait_close_grace_sec))
+        self.entry_wait_close_grace_sec = max(0.0, float(entry_wait_close_grace_sec))
+        self.entry_wait_close_retry_sec = max(0.1, float(entry_wait_close_retry_sec))
+        self.entry_wait_close_retry_count = max(1, int(entry_wait_close_retry_count))
         self.entry_wait_max_hours = max(1.0, float(entry_wait_max_hours))
         self.cooling_off_retry_count = max(0, int(cooling_off_retry_count))
         self.cooling_off_retry_delay_sec = max(0, int(cooling_off_retry_delay_sec))
@@ -195,6 +200,7 @@ class Top10ShortStrategy:
         }
         self._entry_wait_stop_event = threading.Event()
         self._entry_wait_interrupted = False
+        self._entry_prewarmed_leverage_symbols: Set[str] = set()
         self._entry_structure_protection_state = EntryStructureProtectionState(store)
         self._market_fill_reconciler = MarketFillReconciler(client, store)
         self._mutation_lock = mutation_lock or threading.RLock()
@@ -522,6 +528,11 @@ class Top10ShortStrategy:
 
             failed_notional = 0.0
 
+            self._prewarm_entry_candidates(
+                candidates=candidates,
+                target_notional=target_notional,
+            )
+
             if self.entry_initial_delay_sec > 0 and not resumed_wait:
                 LOGGER.info(
                     "Entry initial delay: account=%s wait_sec=%s",
@@ -556,7 +567,9 @@ class Top10ShortStrategy:
                     entry_structure_window = self._prepare_entry_structure_window(ready_entry)
                     self._mutation_lock.acquire()
                     mutation_acquired = True
-                    self.client.ensure_isolated_and_leverage(entry.symbol, self.leverage)
+                    normalized_entry_symbol = entry.symbol.strip().upper()
+                    if normalized_entry_symbol not in self._entry_prewarmed_leverage_symbols:
+                        self.client.ensure_isolated_and_leverage(entry.symbol, self.leverage)
                     qty_diagnostic = self.client.diagnose_order_qty(entry.symbol, target_notional, reference_price)
                     qty = float(qty_diagnostic["normalized_qty"])
                     plan = PlannedOrder(
@@ -617,10 +630,11 @@ class Top10ShortStrategy:
                     )
                     if retry_count_used > 0:
                         shrink_retry_details.append(f"{plan.symbol}: 缩量重试{retry_count_used}次后成功")
-                    self.store.add_order_event(
+                    entry_event_time = self._utc_now_iso()
+                    entry_event_id = self.store.add_order_event(
                         symbol=plan.symbol,
                         position_id=position_id,
-                        event_time_utc=self._utc_now_iso(),
+                        event_time_utc=entry_event_time,
                         order_payload=open_order,
                     )
 
@@ -643,6 +657,70 @@ class Top10ShortStrategy:
                         opened_at_utc=opened_at.isoformat(),
                         expire_at_utc=expire_at.isoformat(),
                     )
+
+                    reference_price_float = float(reference_price or 0.0)
+                    bearish_close_time = getattr(ready_entry, "bearish_close_time_utc", None)
+                    adverse_slippage_pct = (
+                        ((reference_price_float - entry_price) / reference_price_float) * 100.0
+                        if reference_price_float > 0
+                        else None
+                    )
+                    close_to_fill_ms = None
+                    if isinstance(bearish_close_time, datetime):
+                        close_to_fill_ms = max(
+                            0.0,
+                            (opened_at - bearish_close_time).total_seconds() * 1000.0,
+                        )
+                    submit_to_fill_ms = max(
+                        0.0,
+                        (opened_at - intent_opened_at).total_seconds() * 1000.0,
+                    )
+                    entry_audit = {
+                        "reference_price": reference_price_float,
+                        "fill_price": entry_price,
+                        "adverse_slippage_pct": adverse_slippage_pct,
+                        "close_to_fill_ms": close_to_fill_ms,
+                        "submit_to_fill_ms": submit_to_fill_ms,
+                        "retry_count": retry_count_used,
+                        "bearish_close_time_utc": (
+                            bearish_close_time.isoformat()
+                            if isinstance(bearish_close_time, datetime)
+                            else None
+                        ),
+                        "filled_at_utc": opened_at.isoformat(),
+                    }
+                    LOGGER.info(
+                        "Entry fill audit: account=%s position_id=%s symbol=%s reference_price=%.10f "
+                        "fill_price=%.10f adverse_slippage_pct=%s close_to_fill_ms=%s submit_to_fill_ms=%s",
+                        self.account_id,
+                        position_id,
+                        plan.symbol,
+                        reference_price_float,
+                        entry_price,
+                        f"{adverse_slippage_pct:.6f}" if adverse_slippage_pct is not None else "n/a",
+                        f"{close_to_fill_ms:.1f}" if close_to_fill_ms is not None else "n/a",
+                        f"{submit_to_fill_ms:.1f}",
+                    )
+                    update_order_event = getattr(self.store, "update_order_event", None)
+                    if callable(update_order_event) and entry_event_id:
+                        try:
+                            audited_order = dict(open_order)
+                            audited_order["entry_audit"] = entry_audit
+                            update_order_event(
+                                order_event_id=entry_event_id,
+                                symbol=plan.symbol,
+                                position_id=position_id,
+                                event_time_utc=opened_at.isoformat(),
+                                order_payload=audited_order,
+                            )
+                        except Exception as audit_exc:  # noqa: BLE001
+                            LOGGER.warning(
+                                "Failed to persist entry audit fields: account=%s position_id=%s symbol=%s error=%s",
+                                self.account_id,
+                                position_id,
+                                plan.symbol,
+                                audit_exc,
+                            )
 
                     opened_symbols.append(plan.symbol)
                     opened_count += 1
@@ -857,6 +935,55 @@ class Top10ShortStrategy:
                 symbols.append(symbol)
         return symbols
 
+    def _prewarm_entry_candidates(
+        self,
+        candidates: List[RankEntry],
+        target_notional: float,
+    ) -> None:
+        """Prepare the REST trading path before the boundary candle closes.
+
+        The concrete Binance client owns the details of time synchronization,
+        exchange-rule caching, leverage setup and quantity diagnosis.  Keeping
+        this as a capability check lets lightweight test/fake clients continue
+        to work, while a transient warm-up failure remains non-fatal because
+        the normal entry path repeats the checks immediately before submitting.
+        """
+        prewarm = getattr(self.client, "prewarm_entry", None)
+        if not callable(prewarm):
+            return
+        symbols = [entry.symbol for entry in candidates]
+        reference_prices = {entry.symbol.strip().upper(): entry.last_price for entry in candidates}
+        started = time.monotonic()
+        self._entry_prewarmed_leverage_symbols = set()
+        try:
+            result = prewarm(
+                symbols=symbols,
+                leverage=self.leverage,
+                target_notional=target_notional,
+                reference_prices=reference_prices,
+            )
+            diagnosed = len(result) if isinstance(result, dict) else 0
+            if isinstance(result, dict):
+                self._entry_prewarmed_leverage_symbols = {
+                    str(symbol).strip().upper()
+                    for symbol, diagnostic in result.items()
+                    if isinstance(diagnostic, dict) and diagnostic.get("prewarm_leverage_ready") is True
+                }
+            LOGGER.info(
+                "Entry candidate prewarm finished: account=%s candidates=%s diagnosed=%s leverage_ready=%s elapsed_ms=%s",
+                self.account_id,
+                len(symbols),
+                diagnosed,
+                len(self._entry_prewarmed_leverage_symbols),
+                int(max(0.0, (time.monotonic() - started) * 1000)),
+            )
+        except Exception as exc:  # noqa: BLE001
+            LOGGER.warning(
+                "Entry candidate prewarm failed; continue with just-in-time checks: account=%s error=%s",
+                self.account_id,
+                exc,
+            )
+
     def _iter_ready_entries_after_bearish_hour(
         self,
         candidates: List[RankEntry],
@@ -908,82 +1035,81 @@ class Top10ShortStrategy:
             ready_this_round: List[Tuple[int, ReadyEntry]] = []
             next_check_times: List[datetime] = []
 
+            due_states: List[Tuple[int, RankEntry, datetime]] = []
             for idx, state in list(pending.items()):
-                entry = state["entry"]
-                if not isinstance(entry, RankEntry):
+                entry = state.get("entry")
+                hour_open = state.get("hour_open")
+                if not isinstance(entry, RankEntry) or not isinstance(hour_open, datetime):
                     continue
-                hour_open = state["hour_open"]
-                if not isinstance(hour_open, datetime):
+                hour_close = hour_open + timedelta(hours=1)
+                available_at = hour_close + timedelta(seconds=self.entry_wait_close_grace_sec)
+                if now < available_at:
+                    next_check_times.append(available_at)
                     continue
+                due_states.append((idx, entry, hour_open))
 
-                while True:
-                    hour_close = hour_open + timedelta(hours=1)
-                    available_at = hour_close + timedelta(seconds=self.entry_wait_close_grace_sec)
-                    if now < available_at:
-                        next_check_times.append(available_at)
-                        state["hour_open"] = hour_open
-                        break
-
-                    try:
-                        candle = self._fetch_hour_candle(entry.symbol, hour_open)
-                    except Exception as exc:  # noqa: BLE001
-                        LOGGER.warning(
-                            "Entry bearish-hour kline fetch failed, retry same candle: account=%s symbol=%s hour_open=%s error=%s",
-                            self.account_id,
-                            entry.symbol,
-                            hour_open.isoformat(timespec="seconds"),
-                            exc,
-                        )
-                        next_check_times.append(now + timedelta(seconds=self.entry_wait_poll_sec))
-                        state["hour_open"] = hour_open
-                        break
-                    if candle is None:
-                        LOGGER.warning(
-                            "Entry bearish-hour wait missing kline, retry same candle: account=%s symbol=%s hour_open=%s",
-                            self.account_id,
-                            entry.symbol,
-                            hour_open.isoformat(timespec="seconds"),
-                        )
-                        next_check_times.append(now + timedelta(seconds=self.entry_wait_poll_sec))
-                        state["hour_open"] = hour_open
-                        break
-
-                    open_price, close_price, close_time = candle
-                    if close_price < open_price:
-                        ready_entry = ReadyEntry(
-                            entry=entry,
-                            reference_price=close_price,
-                            signal_time_utc=state["signal_time"] if isinstance(state["signal_time"], datetime) else signal_base_time_utc,
-                            bearish_close_time_utc=close_time,
-                        )
-                        ready_this_round.append((idx, ready_entry))
-                        LOGGER.info(
-                            "Entry bearish-hour ready: account=%s symbol=%s signal=%s close=%s open=%.10f close_price=%.10f",
-                            self.account_id,
-                            entry.symbol,
-                            ready_entry.signal_time_utc.isoformat(timespec="seconds"),
-                            close_time.isoformat(timespec="seconds"),
-                            open_price,
-                            close_price,
-                        )
-                        break
-
-                    LOGGER.info(
-                        "Entry bearish-hour still waiting: account=%s symbol=%s hour_open=%s open=%.10f close=%.10f",
+            candle_results = self._fetch_hour_candles_parallel(due_states)
+            for idx, entry, hour_open in due_states:
+                state = pending.get(idx)
+                if state is None:
+                    continue
+                candle = candle_results.get(idx)
+                if candle is None:
+                    LOGGER.warning(
+                        "Entry bearish-hour wait missing kline after second-level retries: "
+                        "account=%s symbol=%s hour_open=%s retry_count=%s retry_sec=%s",
                         self.account_id,
                         entry.symbol,
                         hour_open.isoformat(timespec="seconds"),
+                        self.entry_wait_close_retry_count,
+                        self.entry_wait_close_retry_sec,
+                    )
+                    state["hour_open"] = hour_open
+                    retry_round_pause_sec = min(
+                        float(self.entry_wait_poll_sec),
+                        max(
+                            self.entry_wait_close_retry_sec,
+                            self.entry_wait_close_retry_sec * self.entry_wait_close_retry_count,
+                        ),
+                    )
+                    next_check_times.append(now + timedelta(seconds=retry_round_pause_sec))
+                    continue
+
+                open_price, close_price, close_time = candle
+                if close_price < open_price:
+                    ready_entry = ReadyEntry(
+                        entry=entry,
+                        reference_price=close_price,
+                        signal_time_utc=state["signal_time"] if isinstance(state["signal_time"], datetime) else signal_base_time_utc,
+                        bearish_close_time_utc=close_time,
+                    )
+                    ready_this_round.append((idx, ready_entry))
+                    LOGGER.info(
+                        "Entry bearish-hour ready: account=%s symbol=%s signal=%s close=%s open=%.10f close_price=%.10f",
+                        self.account_id,
+                        entry.symbol,
+                        ready_entry.signal_time_utc.isoformat(timespec="seconds"),
+                        close_time.isoformat(timespec="seconds"),
                         open_price,
                         close_price,
                     )
-                    hour_open += timedelta(hours=1)
-                    state["hour_open"] = hour_open
-                    self._persist_entry_wait_pending(
-                        pending=pending,
-                        run_id=run_id,
-                        trade_day_utc=trade_day_utc,
-                        signal_base_time_utc=signal_base_time_utc,
-                    )
+                    continue
+
+                LOGGER.info(
+                    "Entry bearish-hour still waiting: account=%s symbol=%s hour_open=%s open=%.10f close=%.10f",
+                    self.account_id,
+                    entry.symbol,
+                    hour_open.isoformat(timespec="seconds"),
+                    open_price,
+                    close_price,
+                )
+                state["hour_open"] = hour_open + timedelta(hours=1)
+                self._persist_entry_wait_pending(
+                    pending=pending,
+                    run_id=run_id,
+                    trade_day_utc=trade_day_utc,
+                    signal_base_time_utc=signal_base_time_utc,
+                )
 
             if ready_this_round:
                 for _idx, item in sorted(
@@ -1001,16 +1127,23 @@ class Top10ShortStrategy:
                         trade_day_utc=trade_day_utc,
                         signal_base_time_utc=signal_base_time_utc,
                     )
-                continue
 
             if not pending:
                 break
-            sleep_sec = self.entry_wait_poll_sec
+            # A due candle that was confirmed bullish advances to the next
+            # hour.  Re-evaluate that state immediately instead of falling
+            # back to the coarse pre-close heartbeat.
+            sleep_sec = 0.0 if due_states and not next_check_times else float(self.entry_wait_poll_sec)
             if next_check_times:
                 wait_until = min(next_check_times)
-                sleep_sec = max(1, min(self.entry_wait_poll_sec, int((wait_until - now).total_seconds())))
+                sleep_sec = min(
+                    sleep_sec,
+                    max(0.0, (wait_until - now).total_seconds()),
+                )
+            if sleep_sec <= 0:
+                continue
             LOGGER.info(
-                "Entry bearish-hour wait sleep: account=%s pending=%s wait_sec=%s",
+                "Entry bearish-hour wait sleep: account=%s pending=%s wait_sec=%.3f",
                 self.account_id,
                 len(pending),
                 sleep_sec,
@@ -1179,6 +1312,80 @@ class Top10ShortStrategy:
                 "updated_at_utc": self._utc_now_iso(),
             },
         )
+
+    def _fetch_hour_candle_with_retry(
+        self,
+        symbol: str,
+        hour_open_utc: datetime,
+    ) -> Optional[Tuple[float, float, datetime]]:
+        """Fetch a just-closed hourly candle with a short REST retry burst."""
+        last_error: Optional[Exception] = None
+        for attempt in range(1, self.entry_wait_close_retry_count + 1):
+            try:
+                candle = self._fetch_hour_candle(symbol, hour_open_utc)
+            except Exception as exc:  # noqa: BLE001
+                last_error = exc
+                candle = None
+            if candle is not None:
+                if attempt > 1:
+                    LOGGER.info(
+                        "Entry bearish-hour kline recovered after retry: account=%s symbol=%s "
+                        "hour_open=%s attempt=%s/%s",
+                        self.account_id,
+                        symbol,
+                        hour_open_utc.isoformat(timespec="seconds"),
+                        attempt,
+                        self.entry_wait_close_retry_count,
+                    )
+                return candle
+            if attempt >= self.entry_wait_close_retry_count:
+                break
+            if self._entry_wait_stop_event.wait(timeout=self.entry_wait_close_retry_sec):
+                self._entry_wait_interrupted = True
+                return None
+
+        if last_error is not None:
+            LOGGER.warning(
+                "Entry bearish-hour kline fetch failed after retries: account=%s symbol=%s "
+                "hour_open=%s attempts=%s error=%s",
+                self.account_id,
+                symbol,
+                hour_open_utc.isoformat(timespec="seconds"),
+                self.entry_wait_close_retry_count,
+                last_error,
+            )
+        return None
+
+    def _fetch_hour_candles_parallel(
+        self,
+        due_states: List[Tuple[int, RankEntry, datetime]],
+    ) -> Dict[int, Optional[Tuple[float, float, datetime]]]:
+        """Fetch all boundary candles due in this round through the REST pool."""
+        if not due_states:
+            return {}
+        if len(due_states) == 1:
+            idx, entry, hour_open = due_states[0]
+            return {idx: self._fetch_hour_candle_with_retry(entry.symbol, hour_open)}
+
+        workers = min(len(due_states), max(1, min(10, self.ranker_max_workers)))
+        results: Dict[int, Optional[Tuple[float, float, datetime]]] = {}
+        with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="entry-kline") as executor:
+            futures = {
+                idx: executor.submit(self._fetch_hour_candle_with_retry, entry.symbol, hour_open)
+                for idx, entry, hour_open in due_states
+            }
+            for idx, future in futures.items():
+                try:
+                    results[idx] = future.result()
+                except Exception as exc:  # noqa: BLE001
+                    LOGGER.warning(
+                        "Entry bearish-hour parallel kline fetch failed: account=%s idx=%s error=%s",
+                        self.account_id,
+                        idx,
+                        exc,
+                    )
+                    results[idx] = None
+        return results
 
     def _fetch_hour_candle(self, symbol: str, hour_open_utc: datetime) -> Optional[Tuple[float, float, datetime]]:
         hour_open_utc = self._floor_to_utc_hour(hour_open_utc)

@@ -18,6 +18,42 @@ from infra.binance_futures_client import (
 
 
 class ClientUtilsTest(unittest.TestCase):
+    def test_entry_prewarm_warms_signed_path_rules_leverage_and_qty(self) -> None:
+        client = BinanceFuturesClient(
+            api_key="k",
+            api_secret="s",
+            retry_count=1,
+        )
+        client.sync_server_time = MagicMock(return_value=0)  # type: ignore[method-assign]
+        client.get_symbol_rules = MagicMock(return_value={})  # type: ignore[method-assign]
+        client.ensure_isolated_and_leverage = MagicMock()  # type: ignore[method-assign]
+        client.diagnose_order_qty = MagicMock(  # type: ignore[method-assign]
+            side_effect=lambda **kwargs: {"symbol": kwargs["symbol"], "normalized_qty": 1.0}
+        )
+
+        result = client.prewarm_entry(
+            symbols=["BTCUSDT", "ETHUSDT"],
+            leverage=2,
+            target_notional=100.0,
+            reference_prices={"BTCUSDT": 100.0, "ETHUSDT": 0.0},
+        )
+
+        client.sync_server_time.assert_called_once_with()
+        client.get_symbol_rules.assert_called_once_with()
+        self.assertEqual(
+            client.ensure_isolated_and_leverage.call_args_list,
+            [
+                unittest.mock.call("BTCUSDT", 2),
+                unittest.mock.call("ETHUSDT", 2),
+            ],
+        )
+        client.diagnose_order_qty.assert_called_once_with(
+            symbol="BTCUSDT",
+            notional=100.0,
+            price=100.0,
+        )
+        self.assertEqual(result["BTCUSDT"]["normalized_qty"], 1.0)
+
     def test_signed_request_refreshes_timestamp_and_signature_on_retry(self) -> None:
         client = BinanceFuturesClient(
             api_key="k",

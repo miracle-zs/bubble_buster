@@ -76,7 +76,9 @@ class StrategyRebalanceTest(unittest.TestCase):
             cooling_off_retry_delay_sec=overrides.get("cooling_off_retry_delay_sec", 0),
             entry_wait_bearish_hour_enabled=overrides.get("entry_wait_bearish_hour_enabled", False),
             entry_wait_poll_sec=overrides.get("entry_wait_poll_sec", 30),
-            entry_wait_close_grace_sec=overrides.get("entry_wait_close_grace_sec", 5),
+            entry_wait_close_grace_sec=overrides.get("entry_wait_close_grace_sec", 1),
+            entry_wait_close_retry_sec=overrides.get("entry_wait_close_retry_sec", 1.0),
+            entry_wait_close_retry_count=overrides.get("entry_wait_close_retry_count", 5),
         )
 
     @staticmethod
@@ -502,11 +504,16 @@ class StrategyRebalanceTest(unittest.TestCase):
         client = MagicMock()
         client.get_available_balance.return_value = 500.0
         client.diagnose_order_qty.side_effect = [{"normalized_qty": 1.0}, {"normalized_qty": 1.0}]
-        client.get_klines.side_effect = [
-            [[1764547200000, "100", "105", "99", "101", "0", 1764550799999]],  # AAA 00:00 bullish
-            [[1764550800000, "101", "102", "90", "95", "0", 1764554399999]],  # AAA 01:00 bearish
-            [[1764547200000, "200", "201", "180", "190", "0", 1764550799999]],  # BBB 00:00 bearish
-        ]
+
+        def get_klines(**kwargs):
+            rows = {
+                ("AAAUSDT", 1764547200000): [[1764547200000, "100", "105", "99", "101", "0", 1764550799999]],
+                ("AAAUSDT", 1764550800000): [[1764550800000, "101", "102", "90", "95", "0", 1764554399999]],
+                ("BBBUSDT", 1764547200000): [[1764547200000, "200", "201", "180", "190", "0", 1764550799999]],
+            }
+            return rows.get((kwargs["symbol"], kwargs["start_time"]), [])
+
+        client.get_klines.side_effect = get_klines
 
         store = MagicMock()
         store.create_run.return_value = ("run-1", True)
@@ -575,6 +582,26 @@ class StrategyRebalanceTest(unittest.TestCase):
             ],
             [190.0, 95.0],
         )
+
+    def test_closed_hour_kline_retry_uses_second_level_interval(self) -> None:
+        strategy = self._build_strategy(
+            MagicMock(),
+            MagicMock(),
+            entry_wait_close_retry_sec=0.25,
+            entry_wait_close_retry_count=3,
+        )
+        candle = (100.0, 95.0, datetime(2025, 12, 1, 1, tzinfo=timezone.utc))
+        strategy._fetch_hour_candle = MagicMock(side_effect=[None, candle])
+        strategy._entry_wait_stop_event.wait = MagicMock(return_value=False)
+
+        result = strategy._fetch_hour_candle_with_retry(
+            symbol="AAAUSDT",
+            hour_open_utc=datetime(2025, 12, 1, 0, tzinfo=timezone.utc),
+        )
+
+        self.assertEqual(result, candle)
+        self.assertEqual(strategy._fetch_hour_candle.call_count, 2)
+        strategy._entry_wait_stop_event.wait.assert_called_once_with(timeout=0.25)
 
     def test_bearish_wait_state_roundtrips_for_restart_recovery(self) -> None:
         client = MagicMock()

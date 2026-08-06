@@ -190,6 +190,9 @@ CRON_TZ=Asia/Shanghai
 - `equity_recovery_lookback_hours`：反弹判定窗口（小时）。
 - `equity_recovery_trigger_pct`：触发阈值，当前权益 >= 窗口最低权益 * (1 + 阈值) 时触发。
 - `equity_recovery_reduce_ratio`：触发后组合减仓比例（按每个持仓当前仓位比例减仓）。
+- `entry_wait_close_grace_sec`：整点 K 线收盘后的最短确认缓冲，默认 `1` 秒。
+- `entry_wait_close_retry_sec` / `entry_wait_close_retry_count`：收盘 K 线尚未可读或请求失败时的秒级重试间隔与每轮次数，默认 `1` 秒 / `5` 次；一轮耗尽后按短间隔再次尝试，不再退回 30 秒轮询。
+- `entry_wait_poll_sec`：收盘前的粗粒度唤醒间隔；收盘后的 K 线读取不使用这个 30 秒间隔。
 - 组合止盈时间窗口：按 `runtime.timezone` 的本地时间判断，`07:30` 到 `12:00`（含边界）内不会触发。
 
 ### `[runtime]`
@@ -206,6 +209,8 @@ CRON_TZ=Asia/Shanghai
 - 组合止损与 `daily_loss_cut_enabled` 可同时启用；前者处理组合权益跌幅，后者继续在 11:55 检查当时仍持有的亏损仓位。
 - `entry_initial_delay_sec`：账户 entry 启动前的额外等待秒数。
 - `entry_symbol_interval_sec`：账户 entry 每个 symbol 之间的额外等待秒数。
+- 入场开始前会预热 Binance REST 会话、服务器时间、交易规则、逐币杠杆和数量诊断；整点已收盘的候选币会通过 HTTP 连接池并发读取 1h K 线。
+- 成交后会记录参考价、成交价、空单不利滑点、收盘到成交延迟和提交到成交延迟；审计字段写入对应的开仓订单事件原始 JSON，不新增交易业务表。
 - `cooling_off_retry_count` / `cooling_off_retry_delay_sec`：
   - 账户级冷静期重试参数，默认 `0` 表示关闭。
   - 仅对增加空头敞口的下单生效：初始开仓、失败资金再分配、post-entry rebalance 的 `SELL` 补单。
