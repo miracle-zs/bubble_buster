@@ -3746,13 +3746,14 @@ class Top10ShortStrategy:
                 code = int(exc.code)
             except (TypeError, ValueError):
                 code = None
-            if code != -4120:
+            if code not in {-4120, -4130}:
                 raise
 
             LOGGER.warning(
-                "Fallback to reduceOnly conditional order for %s/%s due to -4120",
+                "Fallback to reduceOnly conditional order for %s/%s due to Binance error code=%s",
                 symbol,
                 order_type,
+                code,
             )
             return self.client.create_order(
                 symbol=symbol,

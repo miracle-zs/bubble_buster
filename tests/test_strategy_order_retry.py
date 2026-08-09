@@ -402,6 +402,42 @@ class StrategyOrderRetryTest(unittest.TestCase):
         self.assertEqual(client.create_order.call_args.kwargs["stopPrice"], "105")
         self.assertEqual(store.update_position_orders.call_args.kwargs["sl_price"], 105.0)
 
+    def test_exit_order_falls_back_to_reduce_only_when_close_position_already_exists(self) -> None:
+        client = MagicMock()
+        client.format_order_qty.return_value = "2"
+        client.create_order.side_effect = [
+            BinanceAPIError(
+                -4130,
+                "An open stop or take profit order with GTE and closePosition in the direction is existing.",
+            ),
+            {
+                "orderId": 333,
+                "clientOrderId": "sl-structure",
+                "type": "STOP_MARKET",
+                "side": "BUY",
+                "origQty": "2",
+                "status": "NEW",
+            },
+        ]
+        strategy = self._build_strategy(client)
+
+        order = strategy._create_exit_order_with_fallback(
+            symbol="ABCUSDT",
+            order_type="STOP_MARKET",
+            stop_price="105",
+            qty=2.0,
+            client_order_id="sl-structure",
+        )
+
+        self.assertEqual(order["orderId"], 333)
+        self.assertEqual(client.create_order.call_count, 2)
+        first_call = client.create_order.call_args_list[0].kwargs
+        fallback_call = client.create_order.call_args_list[1].kwargs
+        self.assertTrue(first_call["closePosition"])
+        self.assertNotIn("closePosition", fallback_call)
+        self.assertTrue(fallback_call["reduceOnly"])
+        self.assertEqual(fallback_call["quantity"], "2")
+
 
 if __name__ == "__main__":
     unittest.main()
