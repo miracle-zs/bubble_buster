@@ -655,6 +655,17 @@ class StrategyRebalanceTest(unittest.TestCase):
         strategy._fetch_hour_candle_with_retry = MagicMock(
             return_value=(100.0, 101.0, datetime(2025, 12, 1, 8, tzinfo=timezone.utc))
         )
+        strategy._build_finalized_preclose_structure_protection = MagicMock(
+            return_value=EntryStructureProtection(
+                stop_price=105.0,
+                bearish_close_time_utc=datetime(2025, 12, 1, 8, tzinfo=timezone.utc),
+                window_start_utc=datetime(2025, 12, 1, 6, tzinfo=timezone.utc),
+                window_end_utc=datetime(2025, 12, 1, 8, tzinfo=timezone.utc),
+            )
+        )
+        strategy._apply_finalized_preclose_structure_protection = MagicMock(
+            return_value="SKIPPED_POSITION_NOT_OPEN"
+        )
 
         strategy._finalize_preclose_entry_audits(
             [
@@ -679,6 +690,209 @@ class StrategyRebalanceTest(unittest.TestCase):
         self.assertTrue(audit["final_candle_available"])
         self.assertFalse(audit["final_candle_bearish"])
         self.assertEqual(audit["final_candle_close_price"], 101.0)
+        self.assertEqual(audit["structure_stop_status"], "SKIPPED_POSITION_NOT_OPEN")
+
+    def test_preclose_finalization_replaces_fallback_stop_with_two_candle_structure_stop(self) -> None:
+        client = MagicMock()
+        store = MagicMock()
+        strategy = self._build_strategy(
+            client,
+            store,
+            entry_wait_bearish_hour_enabled=True,
+            entry_preclose_sec=10,
+        )
+        hour_open = datetime(2025, 12, 1, 7, tzinfo=timezone.utc)
+        hour_close = hour_open + timedelta(hours=1)
+        strategy._utc_now_datetime = MagicMock(
+            return_value=hour_close + timedelta(seconds=2)
+        )
+        strategy._fetch_hour_candle_with_retry = MagicMock(
+            return_value=(100.0, 95.0, hour_close - timedelta(milliseconds=1))
+        )
+        client.get_klines.return_value = [
+            [
+                int((hour_open - timedelta(hours=1)).timestamp() * 1000),
+                "105",
+                "108",
+                "99",
+                "104",
+                "0",
+                int(hour_open.timestamp() * 1000) - 1,
+            ],
+            [
+                int(hour_open.timestamp() * 1000),
+                "100",
+                "112",
+                "90",
+                "95",
+                "0",
+                int(hour_close.timestamp() * 1000) - 1,
+            ],
+        ]
+        client.normalize_trigger_price.side_effect = (
+            lambda _symbol, price, round_up=False: float(price)
+        )
+        client.format_trigger_price.side_effect = (
+            lambda _symbol, price, round_up=False: str(float(price))
+        )
+        call_order = []
+
+        def create_order(**_kwargs):
+            call_order.append("create")
+            return {
+                "orderId": 333,
+                "clientOrderId": "sl-structure-new",
+                "status": "NEW",
+                "type": "STOP_MARKET",
+            }
+
+        def cancel_order(**_kwargs):
+            call_order.append("cancel")
+            return {}
+
+        client.create_order.side_effect = create_order
+        client.cancel_order.side_effect = cancel_order
+        strategy._load_short_position = MagicMock(
+            return_value={
+                "symbol": "AAAUSDT",
+                "entryPrice": "95",
+                "liquidationPrice": "140",
+                "positionAmt": "-1",
+            }
+        )
+        store.get_position.return_value = {
+            "id": 34,
+            "symbol": "AAAUSDT",
+            "status": "OPEN",
+            "sl_price": 130.0,
+            "sl_order_id": 22,
+            "sl_client_order_id": "sl-fallback-old",
+        }
+        store.get_lock_state.return_value = {}
+
+        strategy._finalize_preclose_entry_audits(
+            [
+                {
+                    "order_event_id": 12,
+                    "position_id": 34,
+                    "symbol": "AAAUSDT",
+                    "hour_open_utc": hour_open,
+                    "order_payload": {
+                        "orderId": 99,
+                        "symbol": "AAAUSDT",
+                        "side": "SELL",
+                        "type": "MARKET",
+                        "status": "FILLED",
+                        "entry_audit": {
+                            "entry_mode": "PRECLOSE",
+                            "filled_at_utc": (
+                                hour_close - timedelta(seconds=9)
+                            ).isoformat(),
+                        },
+                    },
+                }
+            ]
+        )
+
+        create_kwargs = client.create_order.call_args.kwargs
+        self.assertEqual(create_kwargs["type"], "STOP_MARKET")
+        self.assertEqual(create_kwargs["stopPrice"], "112.0")
+        self.assertEqual(call_order, ["create", "cancel"])
+        store.update_stop_loss.assert_called_once_with(
+            position_id=34,
+            sl_order_id=333,
+            sl_client_order_id="sl-structure-new",
+            sl_price=112.0,
+            liq_price_latest=140.0,
+        )
+        protection_payload = store.set_lock_state.call_args.args[1]["positions"]["34"]
+        self.assertEqual(protection_payload["stop_price"], 112.0)
+
+    def test_preclose_structure_stop_never_widens_a_tighter_existing_stop(self) -> None:
+        client = MagicMock()
+        store = MagicMock()
+        strategy = self._build_strategy(
+            client,
+            store,
+            entry_wait_bearish_hour_enabled=True,
+            entry_preclose_sec=10,
+        )
+        client.normalize_trigger_price.side_effect = (
+            lambda _symbol, price, round_up=False: float(price)
+        )
+        strategy._load_short_position = MagicMock(
+            return_value={
+                "symbol": "AAAUSDT",
+                "liquidationPrice": "140",
+                "positionAmt": "-1",
+            }
+        )
+        store.get_position.return_value = {
+            "id": 34,
+            "symbol": "AAAUSDT",
+            "status": "OPEN",
+            "sl_price": 110.0,
+            "sl_order_id": 22,
+            "sl_client_order_id": "sl-tighter",
+        }
+        store.get_lock_state.return_value = {}
+        protection = EntryStructureProtection(
+            stop_price=112.0,
+            bearish_close_time_utc=datetime(2025, 12, 1, 8, tzinfo=timezone.utc),
+            window_start_utc=datetime(2025, 12, 1, 6, tzinfo=timezone.utc),
+            window_end_utc=datetime(2025, 12, 1, 8, tzinfo=timezone.utc),
+        )
+
+        status = strategy._apply_finalized_preclose_structure_protection(
+            position_id=34,
+            symbol="AAAUSDT",
+            protection=protection,
+        )
+
+        self.assertEqual(status, "KEPT_TIGHTER_EXISTING_STOP")
+        client.create_order.assert_not_called()
+        client.cancel_order.assert_not_called()
+        store.update_stop_loss.assert_not_called()
+        protection_payload = store.set_lock_state.call_args.args[1]["positions"]["34"]
+        self.assertEqual(protection_payload["stop_price"], 112.0)
+
+    def test_preclose_structure_recovery_replays_persisted_entry_audit(self) -> None:
+        store = MagicMock()
+        store.list_open_preclose_entry_audits_needing_structure.return_value = [
+            {
+                "order_event_id": 12,
+                "position_id": 34,
+                "symbol": "AAAUSDT",
+                "hour_open_utc": "2025-12-01T07:00:00+00:00",
+                "order_payload": {
+                    "entry_audit": {
+                        "entry_mode": "PRECLOSE",
+                        "signal_hour_open_utc": "2025-12-01T07:00:00+00:00",
+                    }
+                },
+            }
+        ]
+        strategy = self._build_strategy(
+            MagicMock(),
+            store,
+            entry_wait_bearish_hour_enabled=True,
+            entry_preclose_sec=10,
+        )
+        expected_summary = strategy._empty_preclose_structure_summary(total=1)
+        expected_summary["replaced"] = 1
+        strategy._finalize_preclose_entry_audits = MagicMock(
+            return_value=expected_summary
+        )
+
+        summary = strategy.recover_preclose_structure_protections()
+
+        self.assertEqual(summary, expected_summary)
+        replayed = strategy._finalize_preclose_entry_audits.call_args.args[0]
+        self.assertEqual(len(replayed), 1)
+        self.assertEqual(
+            replayed[0]["hour_open_utc"],
+            datetime(2025, 12, 1, 7, tzinfo=timezone.utc),
+        )
 
     def test_bearish_wait_state_roundtrips_for_restart_recovery(self) -> None:
         client = MagicMock()

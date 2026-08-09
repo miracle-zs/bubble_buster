@@ -797,6 +797,69 @@ class StateStore:
                 order_payload=order_payload,
             )
 
+    def list_open_preclose_entry_audits_needing_structure(self) -> List[Dict[str, Any]]:
+        completed_statuses = {
+            "REPLACED",
+            "REPLACED_OLD_STOP_CANCEL_FAILED",
+            "KEPT_TIGHTER_EXISTING_STOP",
+            "CLOSED_IMMEDIATE_TRIGGER",
+            "SKIPPED_EXEMPT",
+        }
+        with self._connect_ctx() as conn:
+            rows = conn.execute(
+                """
+                SELECT
+                    oe.id AS order_event_id,
+                    oe.position_id,
+                    oe.symbol,
+                    oe.raw_json
+                FROM order_events oe
+                INNER JOIN positions p ON p.id = oe.position_id
+                INNER JOIN runs r ON r.run_id = p.run_id
+                WHERE oe.account_id = ?
+                  AND r.account_id = ?
+                  AND p.status = 'OPEN'
+                  AND UPPER(COALESCE(oe.type, '')) = 'MARKET'
+                  AND UPPER(COALESCE(oe.side, '')) = 'SELL'
+                ORDER BY oe.id ASC
+                """,
+                (self.account_id, self.account_id),
+            ).fetchall()
+
+        pending: List[Dict[str, Any]] = []
+        seen_position_ids: Set[int] = set()
+        for row in rows:
+            try:
+                payload = json.loads(str(row["raw_json"] or "{}"))
+            except (TypeError, ValueError, json.JSONDecodeError):
+                continue
+            if not isinstance(payload, dict):
+                continue
+            entry_audit = payload.get("entry_audit")
+            if not isinstance(entry_audit, dict):
+                continue
+            if str(entry_audit.get("entry_mode") or "").strip().upper() != "PRECLOSE":
+                continue
+            if not str(entry_audit.get("signal_hour_open_utc") or "").strip():
+                continue
+            structure_status = str(entry_audit.get("structure_stop_status") or "").strip().upper()
+            if structure_status in completed_statuses:
+                continue
+            position_id = int(row["position_id"])
+            if position_id in seen_position_ids:
+                continue
+            seen_position_ids.add(position_id)
+            pending.append(
+                {
+                    "order_event_id": int(row["order_event_id"]),
+                    "position_id": position_id,
+                    "symbol": str(row["symbol"] or "").strip().upper(),
+                    "hour_open_utc": str(entry_audit["signal_hour_open_utc"]),
+                    "order_payload": payload,
+                }
+            )
+        return pending
+
     def find_order_event_id(
         self,
         symbol: str,

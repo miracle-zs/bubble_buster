@@ -368,6 +368,68 @@ class StateStoreTest(unittest.TestCase):
             ).fetchone()[0]
         self.assertAlmostEqual(float(realized_pnl), -8.5)
 
+    def test_lists_open_preclose_entries_until_structure_stop_is_completed(self) -> None:
+        run_id, _ = self.store.create_run("2026-02-13")
+        position_id = self.store.insert_position(
+            run_id=run_id,
+            symbol="AAAUSDT",
+            side="SHORT",
+            qty=1.0,
+            entry_price=95.0,
+            liq_price_open=140.0,
+            tp_price=None,
+            sl_price=130.0,
+            tp_order_id=None,
+            sl_order_id=22,
+            tp_client_order_id=None,
+            sl_client_order_id="sl-fallback",
+            opened_at_utc="2026-02-13T07:59:51+00:00",
+            expire_at_utc="2026-02-15T07:29:51+00:00",
+        )
+        entry_payload = {
+            "orderId": 7003,
+            "clientOrderId": "entry-preclose",
+            "type": "MARKET",
+            "side": "SELL",
+            "origQty": "1",
+            "executedQty": "1",
+            "avgPrice": "95",
+            "status": "FILLED",
+            "entry_audit": {
+                "entry_mode": "PRECLOSE",
+                "signal_hour_open_utc": "2026-02-13T07:00:00+00:00",
+                "filled_at_utc": "2026-02-13T07:59:51+00:00",
+                "final_candle_available": True,
+            },
+        }
+        event_id = self.store.add_order_event(
+            symbol="AAAUSDT",
+            position_id=position_id,
+            event_time_utc="2026-02-13T07:59:51+00:00",
+            order_payload=entry_payload,
+        )
+
+        pending = self.store.list_open_preclose_entry_audits_needing_structure()
+
+        self.assertEqual(len(pending), 1)
+        self.assertEqual(pending[0]["order_event_id"], event_id)
+        self.assertEqual(pending[0]["position_id"], position_id)
+        self.assertEqual(pending[0]["symbol"], "AAAUSDT")
+
+        entry_payload["entry_audit"]["structure_stop_status"] = "REPLACED"
+        self.store.update_order_event(
+            order_event_id=event_id,
+            symbol="AAAUSDT",
+            position_id=position_id,
+            event_time_utc="2026-02-13T07:59:51+00:00",
+            order_payload=entry_payload,
+        )
+
+        self.assertEqual(
+            self.store.list_open_preclose_entry_audits_needing_structure(),
+            [],
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

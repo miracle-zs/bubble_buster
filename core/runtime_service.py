@@ -879,6 +879,19 @@ class StrategyRuntimeService:
                     pending_entry_recovery,
                 )
 
+        preclose_structure_recovery = None
+        if strategy is not None and hasattr(strategy, "recover_preclose_structure_protections"):
+            preclose_structure_recovery = strategy.recover_preclose_structure_protections()  # type: ignore[attr-defined]
+            if (
+                isinstance(preclose_structure_recovery, dict)
+                and int(preclose_structure_recovery.get("total", 0)) > 0
+            ):
+                LOGGER.warning(
+                    "service preclose structure recovery account=%s: %s",
+                    account_id,
+                    preclose_structure_recovery,
+                )
+
         pending_recovery = None
         if strategy is not None and hasattr(strategy, "recover_pending_exit_setups"):
             pending_recovery = strategy.recover_pending_exit_setups()  # type: ignore[attr-defined]
@@ -933,6 +946,7 @@ class StrategyRuntimeService:
             "account_id": account_id,
             "summary": summary,
             "pending_entry_recovery": pending_entry_recovery,
+            "preclose_structure_recovery": preclose_structure_recovery,
             "pending_recovery": pending_recovery,
             "wallet_summary": wallet_summary,
             "portfolio_loss_cut": portfolio_result,

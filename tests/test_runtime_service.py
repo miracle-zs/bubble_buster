@@ -125,6 +125,34 @@ class RuntimeServiceTest(unittest.TestCase):
         service.run_cycle(now_local=now_local, now_monotonic=60.0)
         self.assertEqual(sampler.calls, 2)
 
+    def test_manage_recovers_preclose_structure_before_position_management(self):
+        service, _, _, _ = self._create_service()
+        call_order = []
+
+        class StrategyStub:
+            def recover_preclose_structure_protections(self):
+                call_order.append("recover_structure")
+                return {"total": 1, "replaced": 1, "errors": 0}
+
+        class ManagerStub:
+            def run_once(self):
+                call_order.append("manage")
+                return {"total": 1}
+
+        service.account_runtimes = {
+            "default": {
+                "mode": "full",
+                "strategy": StrategyStub(),
+                "manager": ManagerStub(),
+                "balance_sampler": None,
+            }
+        }
+
+        result = service._run_manage_for_account("default")
+
+        self.assertEqual(call_order, ["recover_structure", "manage"])
+        self.assertEqual(result["preclose_structure_recovery"]["replaced"], 1)
+
     def test_entry_skips_when_missed_beyond_grace(self):
         service, strategy, _, _ = self._create_service(
             entry_hour=7,

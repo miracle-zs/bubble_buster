@@ -287,6 +287,13 @@ class Top10ShortStrategy:
                 self.account_id,
                 pending_entry_recovery,
             )
+        preclose_structure_recovery = self.recover_preclose_structure_protections()
+        if int(preclose_structure_recovery.get("total", 0) or 0) > 0:
+            LOGGER.warning(
+                "Recovered preclose structure protections before entry run account=%s result=%s",
+                self.account_id,
+                preclose_structure_recovery,
+            )
         active_wait = self._load_entry_wait_state()
         active_pending = active_wait.get("pending")
         active_run_id = str(active_wait.get("run_id") or "").strip()
@@ -1030,10 +1037,58 @@ class Top10ShortStrategy:
                 exc,
             )
 
-    def _finalize_preclose_entry_audits(self, audits: List[Dict[str, Any]]) -> None:
+    @staticmethod
+    def _empty_preclose_structure_summary(total: int = 0) -> Dict[str, int]:
+        return {
+            "total": max(0, int(total)),
+            "replaced": 0,
+            "kept": 0,
+            "closed": 0,
+            "skipped": 0,
+            "unavailable": 0,
+            "errors": 0,
+        }
+
+    def recover_preclose_structure_protections(self) -> Dict[str, int]:
+        list_pending = getattr(
+            self.store,
+            "list_open_preclose_entry_audits_needing_structure",
+            None,
+        )
+        if not callable(list_pending):
+            return self._empty_preclose_structure_summary()
+
+        pending_rows = list_pending()
+        audits: List[Dict[str, Any]] = []
+        invalid = 0
+        for row in pending_rows or []:
+            audit = dict(row) if isinstance(row, dict) else {}
+            hour_open_raw = audit.get("hour_open_utc")
+            try:
+                hour_open = (
+                    hour_open_raw.astimezone(timezone.utc)
+                    if isinstance(hour_open_raw, datetime)
+                    else self._parse_iso_utc(str(hour_open_raw or ""))
+                )
+            except (TypeError, ValueError):
+                invalid += 1
+                continue
+            audit["hour_open_utc"] = hour_open
+            audits.append(audit)
+
+        summary = self._finalize_preclose_entry_audits(audits)
+        summary["total"] += invalid
+        summary["errors"] += invalid
+        return summary
+
+    def _finalize_preclose_entry_audits(
+        self,
+        audits: List[Dict[str, Any]],
+    ) -> Dict[str, int]:
         """Attach the final candle outcome to entries submitted before the close."""
+        summary = self._empty_preclose_structure_summary(total=len(audits))
         if not audits:
-            return
+            return summary
         update_order_event = getattr(self.store, "update_order_event", None)
         for audit in audits:
             symbol = str(audit.get("symbol") or "").strip().upper()
@@ -1042,6 +1097,7 @@ class Top10ShortStrategy:
             payload = dict(audit.get("order_payload") or {})
             entry_audit = dict(payload.get("entry_audit") or {})
             if not symbol or not isinstance(hour_open, datetime):
+                summary["errors"] += 1
                 continue
 
             final_available_at = hour_open + timedelta(hours=1, seconds=self.entry_wait_close_grace_sec)
@@ -1080,6 +1136,35 @@ class Top10ShortStrategy:
                         entry_audit["final_vs_provisional_close_pct"] = (
                             (close_price - provisional_close) / provisional_close * 100.0
                         )
+                    try:
+                        protection = self._build_finalized_preclose_structure_protection(
+                            symbol=symbol,
+                            final_close_time_utc=close_time,
+                        )
+                        structure_status = self._apply_finalized_preclose_structure_protection(
+                            position_id=int(audit["position_id"]),
+                            symbol=symbol,
+                            protection=protection,
+                        )
+                        entry_audit["structure_stop_status"] = structure_status
+                        entry_audit["structure_stop_price"] = protection.stop_price
+                        entry_audit["structure_window_start_utc"] = (
+                            protection.window_start_utc.isoformat()
+                        )
+                        entry_audit["structure_window_end_utc"] = (
+                            protection.window_end_utc.isoformat()
+                        )
+                    except Exception as exc:  # noqa: BLE001
+                        entry_audit["structure_stop_status"] = "ERROR"
+                        entry_audit["structure_stop_error"] = str(exc)
+                        LOGGER.exception(
+                            "Failed to apply finalized preclose structure stop: "
+                            "account=%s position_id=%s symbol=%s error=%s",
+                            self.account_id,
+                            audit.get("position_id"),
+                            symbol,
+                            exc,
+                        )
 
             payload["entry_audit"] = entry_audit
             if callable(update_order_event) and order_event_id:
@@ -1099,12 +1184,29 @@ class Top10ShortStrategy:
                         exc,
                     )
             LOGGER.info(
-                "Preclose entry final candle audit: account=%s symbol=%s final_available=%s final_bearish=%s",
+                "Preclose entry final candle audit: account=%s symbol=%s final_available=%s "
+                "final_bearish=%s structure_stop_status=%s structure_stop_price=%s",
                 self.account_id,
                 symbol,
                 entry_audit.get("final_candle_available"),
                 entry_audit.get("final_candle_bearish"),
+                entry_audit.get("structure_stop_status"),
+                entry_audit.get("structure_stop_price"),
             )
+            structure_status = str(entry_audit.get("structure_stop_status") or "").upper()
+            if structure_status.startswith("REPLACED"):
+                summary["replaced"] += 1
+            elif structure_status.startswith("KEPT_"):
+                summary["kept"] += 1
+            elif structure_status.startswith("CLOSED_"):
+                summary["closed"] += 1
+            elif structure_status == "ERROR":
+                summary["errors"] += 1
+            elif not entry_audit.get("final_candle_available"):
+                summary["unavailable"] += 1
+            else:
+                summary["skipped"] += 1
+        return summary
 
     def _iter_ready_entries_after_bearish_hour(
         self,
@@ -1712,12 +1814,23 @@ class Top10ShortStrategy:
             return None
 
         bearish_close = self._closed_hour_boundary(bearish_close_raw)
+        return self._fetch_entry_structure_window(
+            symbol=ready_entry.entry.symbol,
+            bearish_close_time_utc=bearish_close,
+        )
+
+    def _fetch_entry_structure_window(
+        self,
+        symbol: str,
+        bearish_close_time_utc: datetime,
+    ) -> EntryStructureWindow:
+        bearish_close = self._closed_hour_boundary(bearish_close_time_utc)
 
         window_start = bearish_close - timedelta(hours=2)
         start_ms = int(window_start.timestamp() * 1000)
         end_ms = int(bearish_close.timestamp() * 1000) - 1
         rows = self.client.get_klines(
-            symbol=ready_entry.entry.symbol,
+            symbol=symbol,
             interval="1h",
             start_time=start_ms,
             end_time=end_ms,
@@ -1743,7 +1856,7 @@ class Top10ShortStrategy:
         missing = expected_open_times.difference(highs_by_open)
         if missing:
             raise RuntimeError(
-                f"Missing entry structure candles for {ready_entry.entry.symbol}: "
+                f"Missing entry structure candles for {symbol}: "
                 f"expected={sorted(expected_open_times)} missing={sorted(missing)}"
             )
         return EntryStructureWindow(
@@ -1751,6 +1864,145 @@ class Top10ShortStrategy:
             window_start_utc=window_start,
             highest_price=max(highs_by_open.values()),
         )
+
+    def _build_finalized_preclose_structure_protection(
+        self,
+        symbol: str,
+        final_close_time_utc: datetime,
+    ) -> EntryStructureProtection:
+        window = self._fetch_entry_structure_window(
+            symbol=symbol,
+            bearish_close_time_utc=final_close_time_utc,
+        )
+        stop_price = self.client.normalize_trigger_price(
+            symbol,
+            window.highest_price,
+            round_up=True,
+        )
+        if stop_price <= 0:
+            raise RuntimeError(f"Invalid finalized preclose structure stop for {symbol}: {stop_price}")
+        return EntryStructureProtection(
+            stop_price=stop_price,
+            bearish_close_time_utc=window.bearish_close_time_utc,
+            window_start_utc=window.window_start_utc,
+            window_end_utc=window.bearish_close_time_utc,
+        )
+
+    @_serialized_account_mutation
+    def _apply_finalized_preclose_structure_protection(
+        self,
+        position_id: int,
+        symbol: str,
+        protection: EntryStructureProtection,
+    ) -> str:
+        if self._is_protection_exempt(symbol):
+            return "SKIPPED_EXEMPT"
+
+        position = self.store.get_position(position_id)
+        if position is None or str(position.get("status") or "").upper() != "OPEN":
+            return "SKIPPED_POSITION_NOT_OPEN"
+
+        position_risk = self._load_short_position(symbol)
+        if not position_risk:
+            return "SKIPPED_POSITION_NOT_ON_EXCHANGE"
+
+        position_amt = abs(float(position_risk.get("positionAmt", "0") or 0))
+        if position_amt <= 0:
+            return "SKIPPED_POSITION_NOT_ON_EXCHANGE"
+
+        liq_price = self._safe_positive_float(position_risk.get("liquidationPrice"))
+        stop_price = self.client.normalize_trigger_price(
+            symbol,
+            protection.stop_price,
+            round_up=True,
+        )
+        if stop_price <= 0:
+            raise RuntimeError(f"Invalid finalized preclose stop for {symbol}: {stop_price}")
+
+        normalized_protection = EntryStructureProtection(
+            stop_price=stop_price,
+            bearish_close_time_utc=protection.bearish_close_time_utc,
+            window_start_utc=protection.window_start_utc,
+            window_end_utc=protection.window_end_utc,
+        )
+        self._entry_structure_protection_state.put(
+            position_id=position_id,
+            protection=normalized_protection,
+        )
+
+        old_sl_price = self._safe_positive_float(position.get("sl_price"))
+        if old_sl_price is not None and old_sl_price <= stop_price:
+            return "KEPT_TIGHTER_EXISTING_STOP"
+
+        sl_stop_price = self.client.format_trigger_price(
+            symbol,
+            stop_price,
+            round_up=True,
+        )
+        try:
+            sl_order = self._create_exit_order_with_fallback(
+                symbol=symbol,
+                order_type="STOP_MARKET",
+                stop_price=sl_stop_price,
+                qty=position_amt,
+                client_order_id=self._new_client_id("sls", symbol),
+            )
+        except BinanceAPIError as exc:
+            try:
+                error_code = int(exc.code)
+            except (TypeError, ValueError):
+                error_code = None
+            if error_code != -2021 and "immediately trigger" not in str(exc).lower():
+                raise
+            self._force_close_position(
+                position_id=position_id,
+                symbol=symbol,
+                reason="PRECLOSE_STRUCTURE_IMMEDIATE_TRIGGER",
+            )
+            return "CLOSED_IMMEDIATE_TRIGGER"
+
+        try:
+            self.store.update_stop_loss(
+                position_id=position_id,
+                sl_order_id=sl_order.get("orderId"),
+                sl_client_order_id=sl_order.get("clientOrderId"),
+                sl_price=stop_price,
+                liq_price_latest=liq_price,
+            )
+            self.store.add_order_event(
+                symbol=symbol,
+                position_id=position_id,
+                event_time_utc=self._utc_now_iso(),
+                order_payload=sl_order,
+            )
+        except Exception:
+            self._cancel_order_after_setup_failure(
+                symbol,
+                sl_order.get("orderId"),
+                sl_order.get("clientOrderId"),
+            )
+            raise
+
+        try:
+            self._cancel_order_if_exists(
+                symbol,
+                position.get("sl_order_id"),
+                position.get("sl_client_order_id"),
+            )
+        except RuntimeError as exc:
+            self.store.set_position_error(position_id, f"preclose_structure_old_sl_cancel: {exc}")
+            LOGGER.error(
+                "Finalized preclose structure stop is live but old stop cancellation failed: "
+                "account=%s position_id=%s symbol=%s error=%s",
+                self.account_id,
+                position_id,
+                symbol,
+                exc,
+            )
+            return "REPLACED_OLD_STOP_CANCEL_FAILED"
+
+        self.store.clear_position_error(position_id)
+        return "REPLACED"
 
     def _complete_entry_structure_protection(
         self,
