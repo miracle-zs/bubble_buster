@@ -140,15 +140,31 @@ def create_dashboard_context(config_path: str) -> DashboardRuntimeContext:
     global_equity_recovery_enabled = str(
         cfg.get("strategy", "equity_recovery_take_profit_enabled", fallback="false")
     ).strip().lower() in {"1", "true", "yes", "on"}
+    global_portfolio_take_profit_enabled = str(
+        runtime_cfg.get("portfolio_take_profit_enabled", "false")
+    ).strip().lower() in {"1", "true", "yes", "on"}
     account_equity_recovery_enabled = {}
     for aid in overview_account_ids:
-        section_name = f"account.{aid}.strategy"
-        if cfg.has_option(section_name, "equity_recovery_take_profit_enabled"):
-            raw = cfg.get(section_name, "equity_recovery_take_profit_enabled", fallback="false")
-            enabled = str(raw).strip().lower() in {"1", "true", "yes", "on"}
+        strategy_section_name = f"account.{aid}.strategy"
+        if cfg.has_option(strategy_section_name, "equity_recovery_take_profit_enabled"):
+            raw = cfg.get(
+                strategy_section_name,
+                "equity_recovery_take_profit_enabled",
+                fallback="false",
+            )
+            legacy_enabled = str(raw).strip().lower() in {"1", "true", "yes", "on"}
         else:
-            enabled = global_equity_recovery_enabled
-        account_equity_recovery_enabled[aid] = enabled
+            legacy_enabled = global_equity_recovery_enabled
+
+        runtime_section_name = f"account.{aid}.runtime"
+        if cfg.has_option(runtime_section_name, "portfolio_take_profit_enabled"):
+            raw = cfg.get(runtime_section_name, "portfolio_take_profit_enabled", fallback="false")
+            daily_enabled = str(raw).strip().lower() in {"1", "true", "yes", "on"}
+        else:
+            daily_enabled = global_portfolio_take_profit_enabled
+        # Keep the existing dashboard field/API stable while representing both
+        # the legacy recovery rule and the new fixed daily-baseline rule.
+        account_equity_recovery_enabled[aid] = legacy_enabled or daily_enabled
 
     balance_fetcher = None
     close_price_fetcher = None

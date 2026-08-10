@@ -62,6 +62,11 @@ portfolio_loss_cut_enabled = true
 portfolio_loss_cut_pct = 3.5
 portfolio_loss_cut_hour = 8
 portfolio_loss_cut_minute = 0
+portfolio_take_profit_enabled = false
+portfolio_take_profit_pct = 9.0
+portfolio_take_profit_hour = 8
+portfolio_take_profit_minute = 0
+portfolio_take_profit_reduce_ratio = 1.0
 morning_protection_enabled = true
 morning_protection_hour = 7
 morning_protection_minute = 55
@@ -104,9 +109,9 @@ mode.acc03 = full
 mode.acc04 = full
 # mode.55 = loss_cut_only
 mode.readonly01 = readonly
-strategy_note.acc01 = TP 9% / 减仓50% / 组合止损3.5% / 中午保护止损ON / 早盘保护止损ON / 盈利18%回撤止盈保护
-strategy_note.acc02 = TP 9% / 清仓100% / 组合止损3.5% / 中午保护止损ON / 早盘保护止损ON / 盈利18%回撤止盈保护
-strategy_note.acc03 = TP 9% / 清仓100% / 组合止损3.5% / 中午保护止损ON / 早盘保护止损ON / 盈利18%回撤止盈保护
+strategy_note.acc01 = 每日08:00权益+9%组合减仓50% / 组合止损3.5% / 中午保护止损ON / 早盘保护止损ON / 盈利18%回撤止盈保护
+strategy_note.acc02 = 每日08:00权益+9%组合清仓 / 组合止损3.5% / 中午保护止损ON / 早盘保护止损ON / 盈利18%回撤止盈保护
+strategy_note.acc03 = 每日08:00权益+9%组合清仓 / 组合止损3.5% / 中午保护止损ON / 早盘保护止损ON / 盈利18%回撤止盈保护
 strategy_note.acc04 = 组合止盈OFF / 组合止损3.5% / 中午保护止损ON / 早盘保护止损ON / 盈利18%回撤止盈保护
 # strategy_note.55 = loss_cut_only / 中午保护止损ON / 盈利18%回撤止盈保护
 strategy_note.readonly01 = 只读监控账户 / 余额曲线 / 交易统计
@@ -139,18 +144,18 @@ api_key = REPLACE_WITH_READONLY_API_KEY
 api_secret = REPLACE_WITH_READONLY_API_SECRET
 
 [account.acc01.strategy]
-equity_recovery_take_profit_enabled = true
+equity_recovery_take_profit_enabled = false
 equity_recovery_trigger_pct = 0.09
 equity_recovery_reduce_ratio = 0.50
 
 [account.acc02.strategy]
-equity_recovery_take_profit_enabled = true
+equity_recovery_take_profit_enabled = false
 equity_recovery_trigger_pct = 0.09
 equity_recovery_reduce_ratio = 1.0
 
 
 [account.acc03.strategy]
-equity_recovery_take_profit_enabled = true
+equity_recovery_take_profit_enabled = false
 equity_recovery_trigger_pct = 0.09
 equity_recovery_reduce_ratio = 1.0
 
@@ -162,8 +167,20 @@ equity_recovery_reduce_ratio = 0.50
 [account.55.strategy]
 fixed_take_profit_enabled = false
 
+[account.acc01.runtime]
+portfolio_take_profit_enabled = true
+portfolio_take_profit_pct = 9.0
+portfolio_take_profit_hour = 8
+portfolio_take_profit_minute = 0
+portfolio_take_profit_reduce_ratio = 0.50
+
 [account.acc03.runtime]
 daily_loss_cut_enabled = true
+portfolio_take_profit_enabled = true
+portfolio_take_profit_pct = 9.0
+portfolio_take_profit_hour = 8
+portfolio_take_profit_minute = 0
+portfolio_take_profit_reduce_ratio = 1.0
 
 [account.acc02.runtime]
 entry_hour = 7
@@ -172,6 +189,14 @@ entry_initial_delay_sec = 30
 entry_symbol_interval_sec = 30
 cooling_off_retry_count = 1
 cooling_off_retry_delay_sec = 30
+portfolio_take_profit_enabled = true
+portfolio_take_profit_pct = 9.0
+portfolio_take_profit_hour = 8
+portfolio_take_profit_minute = 0
+portfolio_take_profit_reduce_ratio = 1.0
+
+[account.acc04.runtime]
+portfolio_take_profit_enabled = false
 
 
 [account.55.runtime]

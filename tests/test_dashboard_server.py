@@ -365,6 +365,7 @@ class DashboardServerTest(unittest.TestCase):
                         "2026-02-27 12:00:08,090 - INFO - core.runtime_service - service noon protection result: {'acc01': {'total': 11, 'updated_sl': 11, 'skipped': 0, 'errors': 0}, 'acc02': {'total': 6, 'updated_sl': 1, 'skipped': 0, 'errors': 5}}",
                         "2026-02-27 12:01:08,090 - INFO - core.runtime_service - service manage summary: {'acc01': {'account_id': 'acc01', 'summary': {'total': 3, 'closed_tp': 0, 'closed_sl': 0, 'closed_timeout': 0, 'closed_external': 0, 'updated_sl': 0, 'errors': 0}}, 'acc02': {'account_id': 'acc02', 'error': 'cooling-off'}}",
                         "2026-02-27 12:02:08,090 - INFO - core.runtime_service - service equity recovery take-profit account=acc01 result: {'status': 'TRIGGERED', 'adjusted': 4, 'errors': 0, 'reduced_notional': 320.5}",
+                        "2026-02-27 13:02:08,090 - WARNING - core.runtime_service - service portfolio take-profit account=acc02 result={'status': 'TRIGGERED', 'cycle_date': '2026-02-27', 'baseline_equity': 1000.0, 'current_equity': 1090.0, 'threshold_equity': 1090.0, 'actual_profit_pct': 9.0, 'closed_take_profit': 6, 'errors': 0}",
                     ]
                 )
                 + "\n"
@@ -387,6 +388,8 @@ class DashboardServerTest(unittest.TestCase):
         self.assertEqual(rows["acc02"]["tasks"]["noon_protection"]["status"], "PARTIAL")
         self.assertEqual(rows["acc02"]["tasks"]["manage"]["status"], "FAILED")
         self.assertEqual(rows["acc01"]["tasks"]["equity_recovery_take_profit"]["status"], "SUCCESS")
+        self.assertEqual(rows["acc02"]["tasks"]["equity_recovery_take_profit"]["status"], "SUCCESS")
+        self.assertIn("profit=9.00%", rows["acc02"]["tasks"]["equity_recovery_take_profit"]["summary"])
         self.assertEqual(rows["acc03"]["tasks"]["entry"]["status"], "RUNNING")
 
     def test_accounts_summary_falls_back_to_persisted_entry_run_when_log_is_missing(self) -> None:

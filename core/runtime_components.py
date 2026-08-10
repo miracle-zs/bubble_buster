@@ -260,6 +260,22 @@ def _build_single_account_components(
         ),
         "portfolio_loss_cut_hour": runtime_cfg.getint("portfolio_loss_cut_hour", fallback=8),
         "portfolio_loss_cut_minute": runtime_cfg.getint("portfolio_loss_cut_minute", fallback=0),
+        "portfolio_take_profit_enabled": runtime_cfg.getboolean(
+            "portfolio_take_profit_enabled", fallback=False
+        ),
+        "portfolio_take_profit_pct": min(
+            100.0,
+            max(0.001, runtime_cfg.getfloat("portfolio_take_profit_pct", fallback=9.0)),
+        ),
+        "portfolio_take_profit_hour": runtime_cfg.getint("portfolio_take_profit_hour", fallback=8),
+        "portfolio_take_profit_minute": runtime_cfg.getint("portfolio_take_profit_minute", fallback=0),
+        "portfolio_take_profit_reduce_ratio": min(
+            1.0,
+            max(
+                0.05,
+                runtime_cfg.getfloat("portfolio_take_profit_reduce_ratio", fallback=1.0),
+            ),
+        ),
         "noon_protection_enabled": runtime_cfg.getboolean("noon_protection_enabled", fallback=True),
         "morning_protection_enabled": runtime_cfg.getboolean("morning_protection_enabled", fallback=False),
         "morning_protection_hour": runtime_cfg.getint("morning_protection_hour", fallback=7),
@@ -359,6 +375,25 @@ def create_components(
         ),
         portfolio_loss_cut_hour=runtime_cfg_selected.getint("portfolio_loss_cut_hour", fallback=8),
         portfolio_loss_cut_minute=runtime_cfg_selected.getint("portfolio_loss_cut_minute", fallback=0),
+        portfolio_take_profit_enabled=runtime_cfg_selected.getboolean(
+            "portfolio_take_profit_enabled", fallback=False
+        ),
+        portfolio_take_profit_pct=min(
+            100.0,
+            max(0.001, runtime_cfg_selected.getfloat("portfolio_take_profit_pct", fallback=9.0)),
+        ),
+        portfolio_take_profit_hour=runtime_cfg_selected.getint("portfolio_take_profit_hour", fallback=8),
+        portfolio_take_profit_minute=runtime_cfg_selected.getint("portfolio_take_profit_minute", fallback=0),
+        portfolio_take_profit_reduce_ratio=min(
+            1.0,
+            max(
+                0.05,
+                runtime_cfg_selected.getfloat(
+                    "portfolio_take_profit_reduce_ratio",
+                    fallback=1.0,
+                ),
+            ),
+        ),
         noon_protection_enabled=runtime_cfg_selected.getboolean("noon_protection_enabled", fallback=True),
         noon_protection_hour=runtime_cfg_selected.getint("noon_protection_hour", fallback=12),
         noon_protection_minute=runtime_cfg_selected.getint("noon_protection_minute", fallback=0),

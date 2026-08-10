@@ -28,6 +28,10 @@ portfolio_loss_cut_enabled = true
 portfolio_loss_cut_pct = 3.5
 portfolio_loss_cut_hour = 8
 portfolio_loss_cut_minute = 0
+portfolio_take_profit_enabled = false
+portfolio_take_profit_pct = 9.0
+portfolio_take_profit_hour = 8
+portfolio_take_profit_minute = 0
 dashboard_refresh_sec = 9
 run_service_with_dashboard = false
 db_path = data/state.db
@@ -40,6 +44,9 @@ mode.acc02 = full
 mode.55 = loss_cut_only
 strategy_note.acc01 = TP 9% / 减仓50% / 浮亏砍仓ON
 strategy_note.acc02 = TP 9% / 清仓100% / 浮亏砍仓ON
+
+[account.acc01.runtime]
+portfolio_take_profit_enabled = true
 """.strip()
             + "\n",
             encoding="utf-8",
@@ -56,6 +63,8 @@ strategy_note.acc02 = TP 9% / 清仓100% / 浮亏砍仓ON
         self.assertEqual(ctx.portfolio_loss_cut_pct, 3.5)
         self.assertEqual(ctx.portfolio_loss_cut_hour, 8)
         self.assertEqual(ctx.portfolio_loss_cut_minute, 0)
+        self.assertTrue(ctx.provider.account_equity_recovery_enabled["acc01"])
+        self.assertFalse(ctx.provider.account_equity_recovery_enabled["acc02"])
         self.assertTrue(ctx.db_path.endswith("data/state.db"))
         self.assertTrue(ctx.log_file.endswith("logs/strategy.log"))
         self.assertTrue(Path(ctx.db_path).exists())

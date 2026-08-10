@@ -398,6 +398,34 @@ class DashboardDataProvider:
                     summary = "ok"
         elif task_key == "equity_recovery_take_profit":
             status_raw = str(payload.get("status") or "").upper()
+            if any(
+                key in payload
+                for key in ("baseline_equity", "threshold_equity", "closed_take_profit", "cycle_date")
+            ):
+                if status_raw in {"TRIGGERED", "TRIGGERED_RETRY", "ALREADY_TRIGGERED"}:
+                    status = "SUCCESS"
+                elif status_raw in {"MONITORING", "SKIPPED", "DISABLED"}:
+                    status = "SKIPPED"
+                elif status_raw in {"FAILED", "ERROR"}:
+                    status = "FAILED"
+                else:
+                    status = "UNKNOWN"
+                closed = self._safe_int(payload.get("closed_take_profit"), 0)
+                adjusted = self._safe_int(payload.get("adjusted_take_profit"), closed)
+                errors = self._safe_int(payload.get("errors"), 0)
+                current_equity = self._safe_float(payload.get("current_equity")) or 0.0
+                threshold_equity = self._safe_float(payload.get("threshold_equity")) or 0.0
+                actual_profit_pct = self._safe_float(payload.get("actual_profit_pct")) or 0.0
+                summary = (
+                    f"equity={current_equity:.2f}/{threshold_equity:.2f} "
+                    f"profit={actual_profit_pct:.2f}% adjusted={adjusted} "
+                    f"closed={closed} errors={errors}"
+                )
+                return {
+                    "status": status,
+                    "time_local": time_local,
+                    "summary": summary,
+                }
             if status_raw in {"TRIGGERED", "PARTIAL"}:
                 status = "SUCCESS"
             elif status_raw in {"NOT_TRIGGERED", "SKIPPED", "DISABLED"}:
@@ -482,9 +510,49 @@ class DashboardDataProvider:
             "noon_protection": "service noon protection result:",
             "manage": "service manage summary:",
         }
-        log_markers = tuple(markers.values()) + ("service equity recovery take-profit ",)
+        log_markers = tuple(markers.values()) + (
+            "service equity recovery take-profit ",
+            "service portfolio take-profit ",
+        )
         for path in file_paths:
             for line in self._read_task_log_lines(path, log_markers):
+                if "service portfolio take-profit " in line:
+                    time_local = self._log_time_from_line(line)
+                    matched_result = re.search(
+                        r"service portfolio take-profit account=([A-Za-z0-9_.-]+)\s+result=(\{.*\})",
+                        line,
+                    )
+                    if matched_result:
+                        aid = matched_result.group(1).strip()
+                        payload_raw = matched_result.group(2).strip()
+                        try:
+                            parsed = ast.literal_eval(payload_raw)
+                        except (SyntaxError, ValueError):
+                            parsed = None
+                        if aid and isinstance(parsed, dict):
+                            statuses.setdefault(aid, self._task_status_template())["equity_recovery_take_profit"] = (
+                                self._task_status_from_payload(
+                                    "equity_recovery_take_profit",
+                                    parsed,
+                                    time_local,
+                                )
+                            )
+                            continue
+                    matched_error = re.search(
+                        r"service portfolio take-profit failed account=([A-Za-z0-9_.-]+):\s*(.*)$",
+                        line,
+                    )
+                    if matched_error:
+                        aid = matched_error.group(1).strip()
+                        err = matched_error.group(2).strip()
+                        if aid:
+                            statuses.setdefault(aid, self._task_status_template())["equity_recovery_take_profit"] = {
+                                "status": "FAILED",
+                                "time_local": time_local,
+                                "summary": f"error={err[:80]}",
+                            }
+                        continue
+
                 if "service equity recovery take-profit " in line:
                     time_local = self._log_time_from_line(line)
                     matched_result = re.search(

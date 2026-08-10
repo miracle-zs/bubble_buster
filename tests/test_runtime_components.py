@@ -207,6 +207,75 @@ serverchan_sendkey =
     assert account_runtimes["55"]["daily_loss_cut_enabled"] is False
 
 
+def test_create_components_exposes_per_account_portfolio_take_profit_override(tmp_path) -> None:
+    cfg_path = tmp_path / "config.ini"
+    db_path = tmp_path / "state.db"
+    cfg_path.write_text(
+        f"""
+[accounts]
+enabled = acc01,acc04
+mode.acc01 = full
+mode.acc04 = full
+
+[binance]
+api_key =
+api_secret =
+
+[account.acc01.binance]
+api_key = key1
+api_secret = sec1
+
+[account.acc04.binance]
+api_key = key4
+api_secret = sec4
+
+[strategy]
+leverage = 2
+top_n = 10
+
+[runtime]
+db_path = {db_path}
+default_account_id = acc01
+timezone = Asia/Shanghai
+entry_hour = 7
+entry_minute = 40
+manager_interval_sec = 60
+portfolio_take_profit_enabled = false
+portfolio_take_profit_pct = 9.0
+portfolio_take_profit_hour = 8
+portfolio_take_profit_minute = 0
+portfolio_take_profit_reduce_ratio = 1.0
+
+[account.acc01.runtime]
+portfolio_take_profit_enabled = true
+portfolio_take_profit_reduce_ratio = 0.50
+
+[notify]
+enabled = false
+serverchan_sendkey =
+""",
+        encoding="utf-8",
+    )
+
+    cfg = configparser.ConfigParser()
+    assert cfg.read(str(cfg_path))
+
+    _, _, _, _, service_cfg, account_runtimes = create_components(
+        cfg,
+        base_dir=str(tmp_path),
+    )
+
+    assert service_cfg.portfolio_take_profit_enabled is True
+    assert service_cfg.portfolio_take_profit_pct == 9.0
+    assert service_cfg.portfolio_take_profit_hour == 8
+    assert service_cfg.portfolio_take_profit_minute == 0
+    assert service_cfg.portfolio_take_profit_reduce_ratio == 0.50
+    assert account_runtimes["acc01"]["portfolio_take_profit_enabled"] is True
+    assert account_runtimes["acc01"]["portfolio_take_profit_reduce_ratio"] == 0.50
+    assert account_runtimes["acc04"]["portfolio_take_profit_enabled"] is False
+    assert account_runtimes["acc04"]["portfolio_take_profit_reduce_ratio"] == 1.0
+
+
 def test_create_components_exposes_account_runtime_entry_schedule_override(tmp_path) -> None:
     cfg_path = tmp_path / "config.ini"
     db_path = tmp_path / "state.db"

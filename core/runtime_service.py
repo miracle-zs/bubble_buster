@@ -32,6 +32,11 @@ class ServiceRuntimeConfig:
     portfolio_loss_cut_pct: float = 3.5
     portfolio_loss_cut_hour: int = 8
     portfolio_loss_cut_minute: int = 0
+    portfolio_take_profit_enabled: bool = False
+    portfolio_take_profit_pct: float = 9.0
+    portfolio_take_profit_hour: int = 8
+    portfolio_take_profit_minute: int = 0
+    portfolio_take_profit_reduce_ratio: float = 1.0
     max_account_workers: int = 1
     account_failure_threshold: int = 3
     account_cooldown_cycles: int = 2
@@ -215,6 +220,40 @@ class StrategyRuntimeService:
         except (TypeError, ValueError):
             reset_minute = int(self.cfg.portfolio_loss_cut_minute)
         return enabled, min(100.0, max(0.001, loss_pct)), reset_hour % 24, reset_minute % 60
+
+    def _portfolio_take_profit_settings(self, account_id: str) -> tuple[bool, float, int, int, float]:
+        ctx = self.account_runtimes.get(account_id, {})
+        enabled = self._as_bool(
+            ctx.get("portfolio_take_profit_enabled", self.cfg.portfolio_take_profit_enabled)
+        )
+        try:
+            profit_pct = float(ctx.get("portfolio_take_profit_pct", self.cfg.portfolio_take_profit_pct))
+        except (TypeError, ValueError):
+            profit_pct = float(self.cfg.portfolio_take_profit_pct)
+        try:
+            reset_hour = int(ctx.get("portfolio_take_profit_hour", self.cfg.portfolio_take_profit_hour))
+        except (TypeError, ValueError):
+            reset_hour = int(self.cfg.portfolio_take_profit_hour)
+        try:
+            reset_minute = int(ctx.get("portfolio_take_profit_minute", self.cfg.portfolio_take_profit_minute))
+        except (TypeError, ValueError):
+            reset_minute = int(self.cfg.portfolio_take_profit_minute)
+        try:
+            reduce_ratio = float(
+                ctx.get(
+                    "portfolio_take_profit_reduce_ratio",
+                    self.cfg.portfolio_take_profit_reduce_ratio,
+                )
+            )
+        except (TypeError, ValueError):
+            reduce_ratio = float(self.cfg.portfolio_take_profit_reduce_ratio)
+        return (
+            enabled,
+            min(100.0, max(0.001, profit_pct)),
+            reset_hour % 24,
+            reset_minute % 60,
+            min(1.0, max(0.05, reduce_ratio)),
+        )
 
     @staticmethod
     def _is_entry_result_complete(result: object) -> bool:
@@ -868,6 +907,7 @@ class StrategyRuntimeService:
         local_dt = now_local or datetime.now(self.timezone)
         wallet_summary: Optional[Dict[str, object]] = None
         portfolio_result: Optional[Dict[str, object]] = None
+        portfolio_take_profit_result: Optional[Dict[str, object]] = None
 
         pending_entry_recovery = None
         if strategy is not None and hasattr(strategy, "recover_pending_entries"):
@@ -908,6 +948,38 @@ class StrategyRuntimeService:
             except Exception as exc:  # noqa: BLE001
                 LOGGER.warning("service wallet snapshot failed account=%s: %s", account_id, exc)
 
+        take_profit_enabled, profit_pct, take_profit_hour, take_profit_minute, reduce_ratio = (
+            self._portfolio_take_profit_settings(account_id)
+        )
+        if take_profit_enabled and hasattr(manager, "run_portfolio_take_profit"):
+            equity = wallet_summary.get("equity") if wallet_summary is not None else None
+            if equity is None:
+                portfolio_take_profit_result = {
+                    "status": "SKIPPED",
+                    "reason": "NO_CURRENT_EQUITY_SNAPSHOT",
+                }
+            else:
+                try:
+                    result = manager.run_portfolio_take_profit(  # type: ignore[attr-defined]
+                        current_equity_usdt=float(equity),
+                        now_local=local_dt,
+                        profit_pct=profit_pct,
+                        reset_hour=take_profit_hour,
+                        reset_minute=take_profit_minute,
+                        reduce_ratio=reduce_ratio,
+                    )
+                    if isinstance(result, dict):
+                        portfolio_take_profit_result = result
+                        if str(result.get("status") or "").upper() in {"TRIGGERED", "TRIGGERED_RETRY"}:
+                            LOGGER.warning(
+                                "service portfolio take-profit account=%s result=%s",
+                                account_id,
+                                result,
+                            )
+                except Exception as exc:  # noqa: BLE001
+                    portfolio_take_profit_result = {"status": "ERROR", "error": str(exc)}
+                    LOGGER.exception("service portfolio take-profit failed account=%s: %s", account_id, exc)
+
         enabled, loss_pct, reset_hour, reset_minute = self._portfolio_loss_cut_settings(account_id)
         if enabled and hasattr(manager, "run_portfolio_loss_cut"):
             equity = wallet_summary.get("equity") if wallet_summary is not None else None
@@ -934,7 +1006,14 @@ class StrategyRuntimeService:
                     portfolio_result = {"status": "ERROR", "error": str(exc)}
                     LOGGER.exception("service portfolio loss-cut failed account=%s: %s", account_id, exc)
 
-        if strategy is not None and hasattr(strategy, "run_equity_recovery_take_profit"):
+        # The fixed daily-baseline rule replaces the legacy rolling-low
+        # recovery rule for an account; never let both exit engines act on the
+        # same positions in one manage cycle.
+        if (
+            not take_profit_enabled
+            and strategy is not None
+            and hasattr(strategy, "run_equity_recovery_take_profit")
+        ):
             try:
                 result = strategy.run_equity_recovery_take_profit()  # type: ignore[attr-defined]
                 if isinstance(result, dict) and result.get("status") in {"TRIGGERED", "PARTIAL"}:
@@ -949,6 +1028,7 @@ class StrategyRuntimeService:
             "preclose_structure_recovery": preclose_structure_recovery,
             "pending_recovery": pending_recovery,
             "wallet_summary": wallet_summary,
+            "portfolio_take_profit": portfolio_take_profit_result,
             "portfolio_loss_cut": portfolio_result,
         }
 
