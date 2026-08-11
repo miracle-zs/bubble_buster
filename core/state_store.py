@@ -804,6 +804,7 @@ class StateStore:
             "KEPT_TIGHTER_EXISTING_STOP",
             "CLOSED_IMMEDIATE_TRIGGER",
             "SKIPPED_EXEMPT",
+            "DEFERRED_BEFORE_NOON",
         }
         with self._connect_ctx() as conn:
             rows = conn.execute(

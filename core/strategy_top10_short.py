@@ -97,6 +97,7 @@ class Top10ShortStrategy:
     REBALANCE_MODE_AGE_DECAY = "age_decay"
     EQUITY_RECOVERY_LOCK_NAME = "equity_recovery_take_profit_v1"
     ENTRY_WAIT_LOCK_NAME = "bearish_hour_entry_wait_v1"
+    PRECLOSE_STRUCTURE_DEFERRED_BEFORE_NOON = "DEFERRED_BEFORE_NOON"
     PENDING_EXIT_SETUP_RECOVERY_GRACE_SEC = 30.0
 
     def __init__(
@@ -1081,6 +1082,37 @@ class Top10ShortStrategy:
         summary["errors"] += invalid
         return summary
 
+    def _pending_preclose_order_event_ids(self) -> Optional[Set[int]]:
+        """Return persisted preclose audits still awaiting finalization, if available."""
+        list_pending = getattr(
+            self.store,
+            "list_open_preclose_entry_audits_needing_structure",
+            None,
+        )
+        if not callable(list_pending):
+            return None
+        try:
+            rows = list_pending()
+        except Exception:  # noqa: BLE001
+            return None
+        if not isinstance(rows, (list, tuple, set)):
+            return None
+        pending_ids: Set[int] = set()
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            try:
+                pending_ids.add(int(row["order_event_id"]))
+            except (KeyError, TypeError, ValueError):
+                continue
+        return pending_ids
+
+    def _is_before_local_noon(self, timestamp_utc: datetime) -> bool:
+        local_time = timestamp_utc.astimezone(self.runtime_timezone)
+        local_noon = local_time.replace(hour=12, minute=0, second=0, microsecond=0)
+        return local_time < local_noon
+
+    @_serialized_account_mutation
     def _finalize_preclose_entry_audits(
         self,
         audits: List[Dict[str, Any]],
@@ -1090,10 +1122,19 @@ class Top10ShortStrategy:
         if not audits:
             return summary
         update_order_event = getattr(self.store, "update_order_event", None)
+        pending_order_event_ids = self._pending_preclose_order_event_ids()
         for audit in audits:
             symbol = str(audit.get("symbol") or "").strip().upper()
             hour_open = audit.get("hour_open_utc")
             order_event_id = audit.get("order_event_id")
+            if pending_order_event_ids is not None and order_event_id is not None:
+                try:
+                    if int(order_event_id) not in pending_order_event_ids:
+                        summary["skipped"] += 1
+                        continue
+                except (TypeError, ValueError):
+                    summary["errors"] += 1
+                    continue
             payload = dict(audit.get("order_payload") or {})
             entry_audit = dict(payload.get("entry_audit") or {})
             if not symbol or not isinstance(hour_open, datetime):
@@ -1136,35 +1177,40 @@ class Top10ShortStrategy:
                         entry_audit["final_vs_provisional_close_pct"] = (
                             (close_price - provisional_close) / provisional_close * 100.0
                         )
-                    try:
-                        protection = self._build_finalized_preclose_structure_protection(
-                            symbol=symbol,
-                            final_close_time_utc=close_time,
+                    if self._is_before_local_noon(close_time):
+                        entry_audit["structure_stop_status"] = (
+                            self.PRECLOSE_STRUCTURE_DEFERRED_BEFORE_NOON
                         )
-                        structure_status = self._apply_finalized_preclose_structure_protection(
-                            position_id=int(audit["position_id"]),
-                            symbol=symbol,
-                            protection=protection,
-                        )
-                        entry_audit["structure_stop_status"] = structure_status
-                        entry_audit["structure_stop_price"] = protection.stop_price
-                        entry_audit["structure_window_start_utc"] = (
-                            protection.window_start_utc.isoformat()
-                        )
-                        entry_audit["structure_window_end_utc"] = (
-                            protection.window_end_utc.isoformat()
-                        )
-                    except Exception as exc:  # noqa: BLE001
-                        entry_audit["structure_stop_status"] = "ERROR"
-                        entry_audit["structure_stop_error"] = str(exc)
-                        LOGGER.exception(
-                            "Failed to apply finalized preclose structure stop: "
-                            "account=%s position_id=%s symbol=%s error=%s",
-                            self.account_id,
-                            audit.get("position_id"),
-                            symbol,
-                            exc,
-                        )
+                    else:
+                        try:
+                            protection = self._build_finalized_preclose_structure_protection(
+                                symbol=symbol,
+                                final_close_time_utc=close_time,
+                            )
+                            structure_status = self._apply_finalized_preclose_structure_protection(
+                                position_id=int(audit["position_id"]),
+                                symbol=symbol,
+                                protection=protection,
+                            )
+                            entry_audit["structure_stop_status"] = structure_status
+                            entry_audit["structure_stop_price"] = protection.stop_price
+                            entry_audit["structure_window_start_utc"] = (
+                                protection.window_start_utc.isoformat()
+                            )
+                            entry_audit["structure_window_end_utc"] = (
+                                protection.window_end_utc.isoformat()
+                            )
+                        except Exception as exc:  # noqa: BLE001
+                            entry_audit["structure_stop_status"] = "ERROR"
+                            entry_audit["structure_stop_error"] = str(exc)
+                            LOGGER.exception(
+                                "Failed to apply finalized preclose structure stop: "
+                                "account=%s position_id=%s symbol=%s error=%s",
+                                self.account_id,
+                                audit.get("position_id"),
+                                symbol,
+                                exc,
+                            )
 
             payload["entry_audit"] = entry_audit
             if callable(update_order_event) and order_event_id:
@@ -1200,6 +1246,8 @@ class Top10ShortStrategy:
                 summary["kept"] += 1
             elif structure_status.startswith("CLOSED_"):
                 summary["closed"] += 1
+            elif structure_status.startswith("DEFERRED_"):
+                summary["skipped"] += 1
             elif structure_status == "ERROR":
                 summary["errors"] += 1
             elif not entry_audit.get("final_candle_available"):

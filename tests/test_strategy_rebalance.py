@@ -692,6 +692,89 @@ class StrategyRebalanceTest(unittest.TestCase):
         self.assertEqual(audit["final_candle_close_price"], 101.0)
         self.assertEqual(audit["structure_stop_status"], "SKIPPED_POSITION_NOT_OPEN")
 
+    def test_preclose_before_noon_does_not_apply_structure_stop(self) -> None:
+        client = MagicMock()
+        store = MagicMock()
+        strategy = self._build_strategy(client, store, entry_preclose_sec=10)
+        hour_open = datetime(2025, 12, 1, 0, tzinfo=timezone.utc)
+        hour_close = hour_open + timedelta(hours=1)
+        strategy._utc_now_datetime = MagicMock(return_value=hour_close + timedelta(seconds=2))
+        strategy._fetch_hour_candle_with_retry = MagicMock(
+            return_value=(100.0, 95.0, hour_close - timedelta(milliseconds=1))
+        )
+        strategy._build_finalized_preclose_structure_protection = MagicMock()
+        strategy._apply_finalized_preclose_structure_protection = MagicMock()
+
+        strategy._finalize_preclose_entry_audits(
+            [
+                {
+                    "order_event_id": 12,
+                    "position_id": 34,
+                    "symbol": "AAAUSDT",
+                    "hour_open_utc": hour_open,
+                    "order_payload": {
+                        "orderId": 99,
+                        "symbol": "AAAUSDT",
+                        "side": "SELL",
+                        "type": "MARKET",
+                        "status": "FILLED",
+                        "entry_audit": {
+                            "entry_mode": "PRECLOSE",
+                            "filled_at_utc": (hour_close - timedelta(seconds=9)).isoformat(),
+                        },
+                    },
+                }
+            ]
+        )
+
+        strategy._build_finalized_preclose_structure_protection.assert_not_called()
+        strategy._apply_finalized_preclose_structure_protection.assert_not_called()
+        audit = store.update_order_event.call_args.kwargs["order_payload"]["entry_audit"]
+        self.assertEqual(audit["structure_stop_status"], "DEFERRED_BEFORE_NOON")
+
+    def test_preclose_finalization_is_idempotent_after_persisted_completion(self) -> None:
+        client = MagicMock()
+        store = MagicMock()
+        pending_row = {"order_event_id": 12}
+        store.list_open_preclose_entry_audits_needing_structure.side_effect = [
+            [pending_row],
+            [],
+        ]
+        strategy = self._build_strategy(client, store, entry_preclose_sec=10)
+        hour_open = datetime(2025, 12, 1, 7, tzinfo=timezone.utc)
+        hour_close = hour_open + timedelta(hours=1)
+        strategy._utc_now_datetime = MagicMock(return_value=hour_close + timedelta(seconds=2))
+        strategy._fetch_hour_candle_with_retry = MagicMock(
+            return_value=(100.0, 95.0, hour_close - timedelta(milliseconds=1))
+        )
+        strategy._build_finalized_preclose_structure_protection = MagicMock()
+        strategy._apply_finalized_preclose_structure_protection = MagicMock(
+            return_value="REPLACED"
+        )
+        audit = {
+            "order_event_id": 12,
+            "position_id": 34,
+            "symbol": "AAAUSDT",
+            "hour_open_utc": hour_open,
+            "order_payload": {
+                "orderId": 99,
+                "symbol": "AAAUSDT",
+                "side": "SELL",
+                "type": "MARKET",
+                "status": "FILLED",
+                "entry_audit": {
+                    "entry_mode": "PRECLOSE",
+                    "filled_at_utc": (hour_close - timedelta(seconds=9)).isoformat(),
+                },
+            },
+        }
+
+        strategy._finalize_preclose_entry_audits([audit])
+        strategy._finalize_preclose_entry_audits([audit])
+
+        strategy._apply_finalized_preclose_structure_protection.assert_called_once()
+        store.update_order_event.assert_called_once()
+
     def test_preclose_finalization_replaces_fallback_stop_with_two_candle_structure_stop(self) -> None:
         client = MagicMock()
         store = MagicMock()
