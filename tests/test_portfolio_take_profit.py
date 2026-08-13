@@ -128,6 +128,89 @@ class PortfolioTakeProfitTest(unittest.TestCase):
         self.assertEqual(triggered["status"], "TRIGGERED")
         self.assertEqual(triggered["cycle_date"], "2026-07-28")
 
+    def test_trailing_take_profit_arms_at_2_5_and_triggers_after_15_pct_peak_giveback(self) -> None:
+        self._insert_short("BTCUSDT")
+        self.store.add_wallet_snapshot("2026-07-28T00:00:00+00:00", 100.0)
+        client = MagicMock()
+        client.get_position_risk.return_value = [
+            {"symbol": "BTCUSDT", "positionAmt": "-1", "positionSide": "BOTH"},
+        ]
+        client.format_order_qty.side_effect = lambda _symbol, qty: str(qty)
+        client.create_order.return_value = {
+            "orderId": 351,
+            "clientOrderId": "pft-btc",
+            "status": "FILLED",
+            "side": "BUY",
+        }
+        manager = self._manager(client)
+        now_local = datetime(2026, 7, 28, 9, 0, tzinfo=ZoneInfo("Asia/Shanghai"))
+
+        monitoring = manager.run_portfolio_take_profit(
+            current_equity_usdt=102.49,
+            now_local=now_local,
+            profit_pct=2.5,
+            giveback_pct=15.0,
+        )
+        self.assertEqual(monitoring["status"], "MONITORING")
+        self.assertFalse(monitoring["armed"])
+
+        armed = manager.run_portfolio_take_profit(
+            current_equity_usdt=102.5,
+            now_local=now_local,
+            profit_pct=2.5,
+            giveback_pct=15.0,
+        )
+        self.assertEqual(armed["status"], "ARMED")
+        self.assertTrue(armed["armed"])
+        self.assertAlmostEqual(armed["threshold_equity"], 102.125)
+
+        trailing = manager.run_portfolio_take_profit(
+            current_equity_usdt=105.0,
+            now_local=now_local,
+            profit_pct=2.5,
+            giveback_pct=15.0,
+        )
+        self.assertEqual(trailing["status"], "TRAILING")
+        self.assertAlmostEqual(trailing["peak_profit_pct"], 5.0)
+        self.assertAlmostEqual(trailing["threshold_equity"], 104.25)
+
+        above_trigger = manager.run_portfolio_take_profit(
+            current_equity_usdt=104.26,
+            now_local=now_local,
+            profit_pct=2.5,
+            giveback_pct=15.0,
+        )
+        self.assertEqual(above_trigger["status"], "TRAILING")
+
+        triggered = manager.run_portfolio_take_profit(
+            current_equity_usdt=104.25,
+            now_local=now_local,
+            profit_pct=2.5,
+            giveback_pct=15.0,
+        )
+        self.assertEqual(triggered["status"], "TRIGGERED")
+        self.assertAlmostEqual(triggered["actual_profit_pct"], 4.25)
+        self.assertEqual(client.get_position_risk.call_count, 1)
+
+    def test_trailing_take_profit_recovers_cycle_peak_from_wallet_snapshots(self) -> None:
+        self.store.add_wallet_snapshot("2026-07-28T00:00:00+00:00", 100.0)
+        self.store.add_wallet_snapshot("2026-07-28T00:20:00+00:00", 109.0)
+        self.store.add_wallet_snapshot("2026-07-28T01:00:00+00:00", 107.65)
+        client = MagicMock()
+        client.get_position_risk.return_value = []
+
+        result = self._manager(client).run_portfolio_take_profit(
+            current_equity_usdt=107.65,
+            now_local=datetime(2026, 7, 28, 9, 0, tzinfo=ZoneInfo("Asia/Shanghai")),
+            profit_pct=2.5,
+            giveback_pct=15.0,
+        )
+
+        self.assertEqual(result["status"], "TRIGGERED")
+        self.assertAlmostEqual(result["peak_equity"], 109.0)
+        self.assertAlmostEqual(result["peak_profit_pct"], 9.0)
+        self.assertAlmostEqual(result["threshold_equity"], 107.65)
+
     def test_50_pct_take_profit_reduces_once_and_repairs_remaining_stop_on_retry(self) -> None:
         position_id = self._insert_short("BTCUSDT", qty=2.0)
         self.store.add_wallet_snapshot("2026-07-28T00:00:00+00:00", 100.0)
@@ -284,6 +367,7 @@ class PortfolioTakeProfitTest(unittest.TestCase):
                     "portfolio_take_profit_hour": 8,
                     "portfolio_take_profit_minute": 0,
                     "portfolio_take_profit_reduce_ratio": 0.50,
+                    "portfolio_take_profit_giveback_pct": 15.0,
                 },
                 "acc04": {
                     "mode": "full",
@@ -304,6 +388,7 @@ class PortfolioTakeProfitTest(unittest.TestCase):
             self.assertEqual(len(acc01_manager.take_profit_calls), 1)
             self.assertEqual(acc01_manager.take_profit_calls[0]["profit_pct"], 9.0)
             self.assertEqual(acc01_manager.take_profit_calls[0]["reduce_ratio"], 0.50)
+            self.assertEqual(acc01_manager.take_profit_calls[0]["giveback_pct"], 15.0)
             self.assertIsNone(acc04_result["portfolio_take_profit"])
             self.assertEqual(acc04_manager.take_profit_calls, [])
             self.assertEqual(strategy.legacy_calls, 1)

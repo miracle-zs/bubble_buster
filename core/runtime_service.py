@@ -37,6 +37,7 @@ class ServiceRuntimeConfig:
     portfolio_take_profit_hour: int = 8
     portfolio_take_profit_minute: int = 0
     portfolio_take_profit_reduce_ratio: float = 1.0
+    portfolio_take_profit_giveback_pct: float = 0.0
     max_account_workers: int = 1
     account_failure_threshold: int = 3
     account_cooldown_cycles: int = 2
@@ -221,7 +222,10 @@ class StrategyRuntimeService:
             reset_minute = int(self.cfg.portfolio_loss_cut_minute)
         return enabled, min(100.0, max(0.001, loss_pct)), reset_hour % 24, reset_minute % 60
 
-    def _portfolio_take_profit_settings(self, account_id: str) -> tuple[bool, float, int, int, float]:
+    def _portfolio_take_profit_settings(
+        self,
+        account_id: str,
+    ) -> tuple[bool, float, int, int, float, float]:
         ctx = self.account_runtimes.get(account_id, {})
         enabled = self._as_bool(
             ctx.get("portfolio_take_profit_enabled", self.cfg.portfolio_take_profit_enabled)
@@ -247,12 +251,22 @@ class StrategyRuntimeService:
             )
         except (TypeError, ValueError):
             reduce_ratio = float(self.cfg.portfolio_take_profit_reduce_ratio)
+        try:
+            giveback_pct = float(
+                ctx.get(
+                    "portfolio_take_profit_giveback_pct",
+                    self.cfg.portfolio_take_profit_giveback_pct,
+                )
+            )
+        except (TypeError, ValueError):
+            giveback_pct = float(self.cfg.portfolio_take_profit_giveback_pct)
         return (
             enabled,
             min(100.0, max(0.001, profit_pct)),
             reset_hour % 24,
             reset_minute % 60,
             min(1.0, max(0.05, reduce_ratio)),
+            min(100.0, max(0.0, giveback_pct)),
         )
 
     @staticmethod
@@ -948,9 +962,14 @@ class StrategyRuntimeService:
             except Exception as exc:  # noqa: BLE001
                 LOGGER.warning("service wallet snapshot failed account=%s: %s", account_id, exc)
 
-        take_profit_enabled, profit_pct, take_profit_hour, take_profit_minute, reduce_ratio = (
-            self._portfolio_take_profit_settings(account_id)
-        )
+        (
+            take_profit_enabled,
+            profit_pct,
+            take_profit_hour,
+            take_profit_minute,
+            reduce_ratio,
+            giveback_pct,
+        ) = self._portfolio_take_profit_settings(account_id)
         if take_profit_enabled and hasattr(manager, "run_portfolio_take_profit"):
             equity = wallet_summary.get("equity") if wallet_summary is not None else None
             if equity is None:
@@ -967,6 +986,7 @@ class StrategyRuntimeService:
                         reset_hour=take_profit_hour,
                         reset_minute=take_profit_minute,
                         reduce_ratio=reduce_ratio,
+                        giveback_pct=giveback_pct,
                     )
                     if isinstance(result, dict):
                         portfolio_take_profit_result = result

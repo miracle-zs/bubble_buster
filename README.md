@@ -208,10 +208,11 @@ CRON_TZ=Asia/Shanghai
 - `portfolio_loss_cut_pct`：组合权益相对当日基准的最大允许跌幅；例如 `3.5` 表示权益降至基准的 `96.5%` 或以下时，平掉该账号当时已存在的全部非保护白名单仓位。尚未开仓、仍在等待 1h 阴线的 symbol 不会被取消。
 - `portfolio_loss_cut_hour` / `portfolio_loss_cut_minute`：组合止损的日切换时间，默认北京时间 `08:00`。触发、平仓完成和失败重试状态持久化在 `locks` 表，服务重启后不会重复发送同一次触发通知。
 - 组合止损与 `daily_loss_cut_enabled` 可同时启用；前者处理组合权益跌幅，后者继续在 11:55 检查当时仍持有的亏损仓位。
-- `portfolio_take_profit_enabled`：是否启用真正的日周期组合止盈。启用后以本地时间 `portfolio_take_profit_hour:portfolio_take_profit_minute` 后的第一条有效账户权益快照为固定基准。
-- `portfolio_take_profit_pct`：组合权益相对固定基准的目标涨幅；例如 `9.0` 表示当前权益达到基准的 `109%` 时触发，不再使用“24h 最低权益反弹”计算。
+- `portfolio_take_profit_enabled`：是否启用日周期组合止盈。启用后以本地时间 `portfolio_take_profit_hour:portfolio_take_profit_minute` 后的第一条有效账户权益快照为固定基准。
+- `portfolio_take_profit_pct`：组合移动止盈的启动涨幅；例如 `2.5` 表示组合收益达到 `+2.5%` 后开始跟踪本周期峰值。若 `portfolio_take_profit_giveback_pct = 0`，则保持旧版固定阈值行为，达到该涨幅后立即触发。
+- `portfolio_take_profit_giveback_pct`：允许回吐的峰值利润比例，取值 `0`～`100`。例如峰值收益为 `+9%`、配置为 `15` 时，触发线为 `+9% × 85% = +7.65%`；该比例针对“峰值利润”，不是账户总权益。峰值及触发状态会持久化，服务重启或本周期中途启用时会从权益快照恢复峰值。
 - `portfolio_take_profit_reduce_ratio`：触发后每个实际持仓的止盈比例，取值 `0.05`～`1.0`；`0.50` 表示减仓 50%，`1.0` 表示全部清仓。部分止盈会按触发瞬间持仓生成持久化目标，失败重试不会再次对已经减半的仓位重复减半；剩余仓位数量和止损单数量会同步更新。
-- `portfolio_take_profit_hour` / `portfolio_take_profit_minute`：组合止盈的日切换时间，默认北京时间 `08:00`。每个周期从当日 08:00 持续到次日 08:00，全天监控，没有 07:30～12:00 等触发禁区；触发、平仓完成和失败重试状态持久化在 `locks` 表，并按周期去重。
+- `portfolio_take_profit_hour` / `portfolio_take_profit_minute`：组合止盈的日切换时间，默认北京时间 `08:00`。每个周期从当日 08:00 持续到次日 08:00，全天监控，没有 07:30～12:00 等触发禁区；每周期最多触发一次，平仓完成和失败重试状态持久化在 `locks` 表（`portfolio_take_profit_v2`）。触发后不会锁定或取消本周期后续策略入场，但后续新仓不会让本周期组合止盈再次触发。
 - `entry_initial_delay_sec`：账户 entry 启动前的额外等待秒数。
 - `entry_symbol_interval_sec`：账户 entry 每个 symbol 之间的额外等待秒数。
 - 入场开始前会预热 Binance REST 会话、服务器时间、交易规则、逐币杠杆和数量诊断；整点已收盘的候选币会通过 HTTP 连接池并发读取 1h K 线。
@@ -296,7 +297,7 @@ protection_exempt_symbols = XAUUSDT
 - `rebalance_cycles`：每次再平衡周期汇总（目标/执行结果/跳过原因）。
 - `rebalance_actions`：再平衡逐仓动作明细（偏离度/调整量/结果）。
 - `equity_recovery_events`：旧版 24h 低点反弹止盈触发事件（窗口最低点、触发权益、减仓结果与明细）。
-- `locks`：运行时状态表；旧版反弹止盈使用 `equity_recovery_take_profit_v1`，每日 08:00 基准组合止盈使用 `portfolio_take_profit_v1` 记录当前周期的基准、阈值、触发权益、平仓完成状态与通知去重状态。
+- `locks`：运行时状态表；旧版反弹止盈使用 `equity_recovery_take_profit_v1`，每日 08:00 基准组合移动止盈使用 `portfolio_take_profit_v2` 记录当前周期的基准、峰值、移动触发线、触发权益、平仓完成状态与通知去重状态。
 `cycle_key` 语义：触发后定义为“触发时刻（新的窗口起点）”。
 `window_start_utc` 语义：下一轮 24h 窗口起点锚点（与 rolling 24h 取更晚者）。
 

@@ -242,6 +242,7 @@ entry_minute = 40
 manager_interval_sec = 60
 portfolio_take_profit_enabled = false
 portfolio_take_profit_pct = 9.0
+portfolio_take_profit_giveback_pct = 15.0
 portfolio_take_profit_hour = 8
 portfolio_take_profit_minute = 0
 portfolio_take_profit_reduce_ratio = 1.0
@@ -270,10 +271,13 @@ serverchan_sendkey =
     assert service_cfg.portfolio_take_profit_hour == 8
     assert service_cfg.portfolio_take_profit_minute == 0
     assert service_cfg.portfolio_take_profit_reduce_ratio == 0.50
+    assert service_cfg.portfolio_take_profit_giveback_pct == 15.0
     assert account_runtimes["acc01"]["portfolio_take_profit_enabled"] is True
     assert account_runtimes["acc01"]["portfolio_take_profit_reduce_ratio"] == 0.50
+    assert account_runtimes["acc01"]["portfolio_take_profit_giveback_pct"] == 15.0
     assert account_runtimes["acc04"]["portfolio_take_profit_enabled"] is False
     assert account_runtimes["acc04"]["portfolio_take_profit_reduce_ratio"] == 1.0
+    assert account_runtimes["acc04"]["portfolio_take_profit_giveback_pct"] == 15.0
 
 
 def test_create_components_exposes_account_runtime_entry_schedule_override(tmp_path) -> None:

@@ -1206,6 +1206,36 @@ class StateStore:
                 ).fetchone()
             return dict(row) if row is not None else None
 
+    def get_wallet_snapshot_max_since(
+        self,
+        start_captured_at_utc: str,
+        end_captured_at_utc: Optional[str] = None,
+    ) -> Optional[Dict[str, Any]]:
+        """Return the highest valid equity snapshot captured in a time window."""
+        start = (start_captured_at_utc or "").strip()
+        if not start:
+            return None
+        with self._connect_ctx() as conn:
+            params: List[Any] = [self.account_id, start]
+            end_clause = ""
+            if end_captured_at_utc:
+                end_clause = " AND captured_at_utc <= ?"
+                params.append(end_captured_at_utc.strip())
+            row = conn.execute(
+                f"""
+                SELECT id, account_id, captured_at_utc, balance_usdt, source, error, created_at_utc
+                FROM wallet_snapshots
+                WHERE account_id = ?
+                  AND error IS NULL
+                  AND captured_at_utc >= ?
+                  {end_clause}
+                ORDER BY balance_usdt DESC, captured_at_utc ASC, id ASC
+                LIMIT 1
+                """,
+                tuple(params),
+            ).fetchone()
+            return dict(row) if row is not None else None
+
     def get_lock_state(self, lock_name: str) -> Optional[Dict[str, Any]]:
         name = self._scoped_lock_name(lock_name)
         if not name:

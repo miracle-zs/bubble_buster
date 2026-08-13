@@ -276,6 +276,13 @@ def _build_single_account_components(
                 runtime_cfg.getfloat("portfolio_take_profit_reduce_ratio", fallback=1.0),
             ),
         ),
+        "portfolio_take_profit_giveback_pct": min(
+            100.0,
+            max(
+                0.0,
+                runtime_cfg.getfloat("portfolio_take_profit_giveback_pct", fallback=0.0),
+            ),
+        ),
         "noon_protection_enabled": runtime_cfg.getboolean("noon_protection_enabled", fallback=True),
         "morning_protection_enabled": runtime_cfg.getboolean("morning_protection_enabled", fallback=False),
         "morning_protection_hour": runtime_cfg.getint("morning_protection_hour", fallback=7),
@@ -391,6 +398,16 @@ def create_components(
                 runtime_cfg_selected.getfloat(
                     "portfolio_take_profit_reduce_ratio",
                     fallback=1.0,
+                ),
+            ),
+        ),
+        portfolio_take_profit_giveback_pct=min(
+            100.0,
+            max(
+                0.0,
+                runtime_cfg_selected.getfloat(
+                    "portfolio_take_profit_giveback_pct",
+                    fallback=0.0,
                 ),
             ),
         ),

@@ -37,7 +37,7 @@ class PositionManager:
     HOURLY_EXCHANGE_TP_LOCK_NAME = "hourly_exchange_take_profit_v1"
     ORPHAN_EXIT_ORDER_CLEANUP_LOCK_NAME = "orphan_exit_order_cleanup_v1"
     PORTFOLIO_LOSS_CUT_LOCK_NAME = "portfolio_loss_cut_v1"
-    PORTFOLIO_TAKE_PROFIT_LOCK_NAME = "portfolio_take_profit_v1"
+    PORTFOLIO_TAKE_PROFIT_LOCK_NAME = "portfolio_take_profit_v2"
     NOON_PROTECTION_PRE_ENTRY_HOURS = 2
     # An untracked position has no fill timestamp; assume the normal 08:00 entry
     # and include the two completed hourly candles immediately before it.
@@ -654,14 +654,16 @@ class PositionManager:
         reset_hour: int = 8,
         reset_minute: int = 0,
         reduce_ratio: float = 1.0,
+        giveback_pct: float = 0.0,
     ) -> Dict[str, object]:
-        """Close or reduce the account portfolio after a fixed daily equity gain.
+        """Close or reduce the portfolio after a fixed or trailing daily gain.
 
-        Each cycle starts at the configured local reset time and uses the first
-        valid equity snapshot at or after that time as a fixed baseline. The
-        monitor remains active through the whole cycle, including the hours
-        before the next day's reset. Trigger and close state are persisted so a
-        restart cannot execute or notify the same cycle twice.
+        Each cycle uses the first valid equity snapshot at or after the local
+        reset as a fixed baseline. With ``giveback_pct > 0``, ``profit_pct`` is
+        the arming gain and the exit threshold retains ``100-giveback_pct``
+        percent of the highest observed profit. A zero giveback preserves the
+        legacy fixed-threshold behavior. The trigger is latched once per cycle,
+        but it does not block later strategy entries.
         """
         cycle_date, cycle_start_local, _active_after_today_reset = self._portfolio_loss_cut_cycle_window(
             now_local=now_local,
@@ -675,6 +677,7 @@ class PositionManager:
 
         normalized_profit_pct = min(100.0, max(0.001, float(profit_pct)))
         normalized_reduce_ratio = min(1.0, max(0.05, float(reduce_ratio)))
+        normalized_giveback_pct = min(100.0, max(0.0, float(giveback_pct)))
         state = self.store.get_lock_state(self.PORTFOLIO_TAKE_PROFIT_LOCK_NAME) or {}
         if str(state.get("cycle_date") or "") != cycle_key:
             cycle_start_utc = cycle_start_local.astimezone(timezone.utc).replace(microsecond=0).isoformat()
@@ -689,17 +692,52 @@ class PositionManager:
             )
             if baseline_equity <= 0:
                 baseline_equity = current_equity
-            threshold_equity = baseline_equity * (1.0 + normalized_profit_pct / 100.0)
+            peak_snapshot = self.store.get_wallet_snapshot_max_since(
+                start_captured_at_utc=cycle_start_utc,
+                end_captured_at_utc=current_time_utc,
+            )
+            peak_equity = max(
+                baseline_equity,
+                current_equity,
+                self._safe_float(
+                    peak_snapshot.get("balance_usdt") if peak_snapshot else current_equity,
+                    default=current_equity,
+                ),
+            )
+            peak_profit_pct = max(0.0, (peak_equity / baseline_equity - 1.0) * 100.0)
+            arming_threshold_equity = baseline_equity * (1.0 + normalized_profit_pct / 100.0)
+            armed = (
+                normalized_giveback_pct > 0.0
+                and peak_equity + max(1e-9, abs(arming_threshold_equity) * 1e-12)
+                >= arming_threshold_equity
+            )
+            trailing_profit_pct = peak_profit_pct * (1.0 - normalized_giveback_pct / 100.0)
+            trailing_threshold_equity = baseline_equity * (1.0 + trailing_profit_pct / 100.0)
+            threshold_equity = trailing_threshold_equity if armed else arming_threshold_equity
             state = {
+                "state_version": 2,
                 "cycle_date": cycle_key,
                 "cycle_start_at_local": cycle_start_local.isoformat(timespec="seconds"),
                 "baseline_equity_usdt": baseline_equity,
                 "baseline_captured_at_utc": (
                     str(snapshot.get("captured_at_utc") or "").strip() if snapshot else None
                 ),
+                "arming_threshold_equity_usdt": arming_threshold_equity,
                 "threshold_equity_usdt": threshold_equity,
                 "profit_pct": normalized_profit_pct,
+                "giveback_pct": normalized_giveback_pct,
                 "reduce_ratio": normalized_reduce_ratio,
+                "armed": armed,
+                "armed_at_utc": current_time_utc if armed else None,
+                "peak_equity_usdt": peak_equity,
+                "peak_profit_pct": peak_profit_pct,
+                "peak_captured_at_utc": (
+                    str(peak_snapshot.get("captured_at_utc") or "").strip()
+                    if peak_snapshot
+                    else current_time_utc
+                ),
+                "trailing_threshold_equity_usdt": trailing_threshold_equity if armed else None,
+                "trailing_threshold_profit_pct": trailing_profit_pct if armed else None,
                 "triggered": False,
                 "close_complete": False,
                 "notification_sent": False,
@@ -708,8 +746,7 @@ class PositionManager:
             self.store.set_lock_state(self.PORTFOLIO_TAKE_PROFIT_LOCK_NAME, state)
 
         baseline_equity = self._safe_float(state.get("baseline_equity_usdt"), default=0.0)
-        threshold_equity = self._safe_float(state.get("threshold_equity_usdt"), default=0.0)
-        if baseline_equity <= 0 or threshold_equity <= 0:
+        if baseline_equity <= 0:
             return {"status": "SKIPPED", "reason": "INVALID_BASELINE", "cycle_date": cycle_key}
 
         actual_profit_pct = (current_equity / baseline_equity - 1.0) * 100.0
@@ -718,24 +755,102 @@ class PositionManager:
         state["updated_at_utc"] = self._utc_now_iso()
         already_triggered = bool(state.get("triggered"))
         if not already_triggered:
-            # A configuration correction before the trigger should take effect
-            # immediately; once triggered, the persisted ratio is immutable for
-            # the rest of the daily cycle.
+            # Configuration corrections take effect until the trigger. Once an
+            # order plan exists, all exit parameters remain immutable so a
+            # retry cannot change the intended reduction.
+            state["profit_pct"] = normalized_profit_pct
+            state["giveback_pct"] = normalized_giveback_pct
             state["reduce_ratio"] = normalized_reduce_ratio
+            state["arming_threshold_equity_usdt"] = baseline_equity * (
+                1.0 + normalized_profit_pct / 100.0
+            )
+        active_profit_pct = min(
+            100.0,
+            max(0.001, self._safe_float(state.get("profit_pct"), default=normalized_profit_pct)),
+        )
+        active_giveback_pct = min(
+            100.0,
+            max(0.0, self._safe_float(state.get("giveback_pct"), default=normalized_giveback_pct)),
+        )
         active_reduce_ratio = min(
             1.0,
             max(0.05, self._safe_float(state.get("reduce_ratio"), default=normalized_reduce_ratio)),
         )
+        arming_threshold_equity = self._safe_float(
+            state.get("arming_threshold_equity_usdt"),
+            default=baseline_equity * (1.0 + active_profit_pct / 100.0),
+        )
+        if arming_threshold_equity <= 0:
+            return {"status": "SKIPPED", "reason": "INVALID_THRESHOLD", "cycle_date": cycle_key}
+
+        persisted_peak_equity = self._safe_float(
+            state.get("peak_equity_usdt"),
+            default=current_equity,
+        )
+        peak_equity = max(
+            baseline_equity,
+            persisted_peak_equity,
+            current_equity if not already_triggered else persisted_peak_equity,
+        )
+        peak_profit_pct = max(0.0, (peak_equity / baseline_equity - 1.0) * 100.0)
+        if not already_triggered:
+            previous_peak = self._safe_float(state.get("peak_equity_usdt"), default=0.0)
+            if peak_equity > previous_peak + max(1e-9, abs(peak_equity) * 1e-12):
+                state["peak_captured_at_utc"] = now_local.astimezone(timezone.utc).replace(
+                    microsecond=0
+                ).isoformat()
+            state["peak_equity_usdt"] = peak_equity
+            state["peak_profit_pct"] = peak_profit_pct
+
+        newly_armed = False
+        armed = bool(state.get("armed")) and active_giveback_pct > 0.0
+        arming_eps = max(1e-9, abs(arming_threshold_equity) * 1e-12)
+        if not already_triggered and active_giveback_pct > 0.0 and not armed:
+            if peak_equity + arming_eps >= arming_threshold_equity:
+                armed = True
+                newly_armed = True
+                state["armed"] = True
+                state["armed_at_utc"] = self._utc_now_iso()
+
+        if active_giveback_pct > 0.0 and armed:
+            trailing_profit_pct = peak_profit_pct * (1.0 - active_giveback_pct / 100.0)
+            threshold_equity = baseline_equity * (1.0 + trailing_profit_pct / 100.0)
+            state["trailing_threshold_profit_pct"] = trailing_profit_pct
+            state["trailing_threshold_equity_usdt"] = threshold_equity
+        else:
+            trailing_profit_pct = None
+            threshold_equity = arming_threshold_equity
+            state["armed"] = False
+            state["trailing_threshold_profit_pct"] = None
+            state["trailing_threshold_equity_usdt"] = None
+        state["threshold_equity_usdt"] = threshold_equity
+
         threshold_eps = max(1e-9, abs(threshold_equity) * 1e-12)
-        if not already_triggered and current_equity + threshold_eps < threshold_equity:
+        should_trigger = False
+        monitoring_status = "MONITORING"
+        if not already_triggered:
+            if active_giveback_pct <= 0.0:
+                should_trigger = current_equity + threshold_eps >= arming_threshold_equity
+            elif not armed:
+                should_trigger = False
+            else:
+                should_trigger = current_equity <= threshold_equity + threshold_eps
+                monitoring_status = "ARMED" if newly_armed else "TRAILING"
+
+        if not already_triggered and not should_trigger:
             self.store.set_lock_state(self.PORTFOLIO_TAKE_PROFIT_LOCK_NAME, state)
             return {
-                "status": "MONITORING",
+                "status": monitoring_status,
                 "cycle_date": cycle_key,
                 "baseline_equity": round(baseline_equity, 8),
                 "current_equity": round(current_equity, 8),
                 "threshold_equity": round(threshold_equity, 8),
+                "arming_threshold_equity": round(arming_threshold_equity, 8),
                 "actual_profit_pct": round(actual_profit_pct, 8),
+                "peak_equity": round(peak_equity, 8),
+                "peak_profit_pct": round(peak_profit_pct, 8),
+                "giveback_pct": active_giveback_pct,
+                "armed": armed,
                 "reduce_ratio": active_reduce_ratio,
             }
 
@@ -753,6 +868,7 @@ class PositionManager:
             state["triggered_at_utc"] = self._utc_now_iso()
             state["trigger_equity_usdt"] = current_equity
             state["trigger_profit_pct"] = actual_profit_pct
+            state["trigger_threshold_equity_usdt"] = threshold_equity
             self.store.set_lock_state(self.PORTFOLIO_TAKE_PROFIT_LOCK_NAME, state)
 
         if bool(state.get("close_complete")):
@@ -765,7 +881,12 @@ class PositionManager:
                 "baseline_equity": round(baseline_equity, 8),
                 "current_equity": round(current_equity, 8),
                 "threshold_equity": round(threshold_equity, 8),
+                "arming_threshold_equity": round(arming_threshold_equity, 8),
                 "actual_profit_pct": round(actual_profit_pct, 8),
+                "peak_equity": round(peak_equity, 8),
+                "peak_profit_pct": round(peak_profit_pct, 8),
+                "giveback_pct": active_giveback_pct,
+                "armed": armed,
                 "reduce_ratio": active_reduce_ratio,
             }
 
@@ -789,14 +910,19 @@ class PositionManager:
         state["last_close_summary"] = close_summary
         if not bool(state.get("notification_sent")):
             try:
+                notification_label = "组合移动止盈" if active_giveback_pct > 0.0 else "组合止盈"
                 self.notifier.send(
-                    f"【Top10做空】组合止盈 +{normalized_profit_pct:.2f}%",
+                    f"【Top10做空】{notification_label} +{actual_profit_pct:.2f}%",
                     self._build_portfolio_take_profit_notification(
                         close_summary,
                         baseline_equity=baseline_equity,
                         current_equity=current_equity,
                         threshold_equity=threshold_equity,
                         actual_profit_pct=actual_profit_pct,
+                        arming_profit_pct=active_profit_pct,
+                        giveback_pct=active_giveback_pct,
+                        peak_equity=peak_equity,
+                        peak_profit_pct=peak_profit_pct,
                         reduce_ratio=active_reduce_ratio,
                         cycle_date=cycle_key,
                     ),
@@ -814,7 +940,12 @@ class PositionManager:
             "baseline_equity": round(baseline_equity, 8),
             "current_equity": round(current_equity, 8),
             "threshold_equity": round(threshold_equity, 8),
+            "arming_threshold_equity": round(arming_threshold_equity, 8),
             "actual_profit_pct": round(actual_profit_pct, 8),
+            "peak_equity": round(peak_equity, 8),
+            "peak_profit_pct": round(peak_profit_pct, 8),
+            "giveback_pct": active_giveback_pct,
+            "armed": armed,
             "reduce_ratio": active_reduce_ratio,
             **close_summary,
         }
@@ -2724,6 +2855,10 @@ class PositionManager:
         current_equity: float,
         threshold_equity: float,
         actual_profit_pct: float,
+        arming_profit_pct: float,
+        giveback_pct: float,
+        peak_equity: float,
+        peak_profit_pct: float,
         reduce_ratio: float,
         cycle_date: str,
     ) -> str:
@@ -2731,8 +2866,12 @@ class PositionManager:
             ("cycle_date", cycle_date),
             ("baseline_equity_usdt", f"{baseline_equity:.8f}"),
             ("current_equity_usdt", f"{current_equity:.8f}"),
-            ("threshold_equity_usdt", f"{threshold_equity:.8f}"),
+            ("trigger_threshold_equity_usdt", f"{threshold_equity:.8f}"),
             ("actual_profit_pct", f"{actual_profit_pct:.4f}%"),
+            ("arming_profit_pct", f"{arming_profit_pct:.4f}%"),
+            ("peak_equity_usdt", f"{peak_equity:.8f}"),
+            ("peak_profit_pct", f"{peak_profit_pct:.4f}%"),
+            ("peak_profit_giveback_pct", f"{giveback_pct:.2f}%"),
             ("take_profit_reduce_ratio", f"{reduce_ratio * 100.0:.2f}%"),
             ("open_positions", int(summary.get("total", 0) or 0)),
             ("closed_positions", int(summary.get("closed_take_profit", 0) or 0)),
