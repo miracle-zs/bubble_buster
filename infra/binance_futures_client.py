@@ -424,6 +424,7 @@ class BinanceFuturesClient:
         order_id: Optional[int] = None,
         start_time: Optional[int] = None,
         end_time: Optional[int] = None,
+        from_id: Optional[int] = None,
         limit: int = 1000,
     ) -> List[Dict[str, Any]]:
         params: Dict[str, Any] = {
@@ -436,6 +437,8 @@ class BinanceFuturesClient:
             params["startTime"] = int(start_time)
         if end_time is not None:
             params["endTime"] = int(end_time)
+        if from_id is not None:
+            params["fromId"] = int(from_id)
         data = self._request("GET", "/fapi/v1/userTrades", params=params, signed=True)
         if isinstance(data, list):
             return data

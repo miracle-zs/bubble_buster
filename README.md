@@ -265,7 +265,7 @@ protection_exempt_symbols = XAUUSDT
 ### `[accounts]`（单进程多账户）
 
 - `enabled`：启用账户列表（逗号分隔），示例 `enabled = acc01,acc02,55`
-- `mode.<account_id>`：账户模式，支持 `full` / `loss_cut_only`
+- `mode.<account_id>`：账户模式，支持 `full` / `loss_cut_only` / `readonly`
 - 账户覆盖节：
   - `[account.<id>.binance]`
   - `[account.<id>.strategy]`

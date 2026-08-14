@@ -2232,6 +2232,9 @@ class DashboardDataProvider:
                                 if stats is not None:
                                     row["trade_stats"] = {
                                         "total_realized_pnl": stats.total_realized_pnl,
+                                        "net_realized_pnl": stats.net_realized_pnl,
+                                        "commission_usdt": stats.commission_usdt,
+                                        "funding_fee_usdt": stats.funding_fee_usdt,
                                         "total_trades": stats.total_trades,
                                         "win_count": stats.win_count,
                                         "loss_count": stats.loss_count,
@@ -6524,18 +6527,19 @@ ACCOUNTS_OVERVIEW_HTML = """<!doctype html>
 
       if (mode === "readonly") {
         var stats = r.trade_stats || {};
-        var pnlText = stats.total_realized_pnl != null ? fmt(stats.total_realized_pnl, 4) : "--";
+        var netPnl = stats.net_realized_pnl;
+        var pnlText = netPnl != null ? fmt(netPnl, 4) : "--";
         var winRateText = stats.win_rate_pct != null ? fmt(stats.win_rate_pct, 1) + "%" : "--";
         var tradeCountText = stats.total_trades != null ? fmt(stats.total_trades, 0) : "--";
         var profitFactorText = stats.profit_factor != null ? fmt(stats.profit_factor, 2) : "--";
-        var pnlNumber = Number(stats.total_realized_pnl);
+        var pnlNumber = Number(netPnl);
         var pnlCls = Number.isFinite(pnlNumber) ? (pnlNumber >= 0 ? "status-ok" : "status-bad") : "";
         readonlyHtml += '<article class="readonly-strip">'
           + '<div class="readonly-identity"><div><span class="readonly-id">' + safeAid + '</span><span class="readonly-badge">只读监控</span></div><div class="readonly-source">Binance Futures</div></div>'
           + '<div class="readonly-metric"><span class="metric-label">余额 (USDT)</span><strong class="metric-value">' + fmt(r.wallet_balance_usdt, 4) + '</strong></div>'
-          + '<div class="readonly-metric"><span class="metric-label">近30日盈亏</span><strong class="metric-value pnl-value ' + pnlCls + '">' + pnlText + '</strong></div>'
+          + '<div class="readonly-metric"><span class="metric-label">近30日净盈亏</span><strong class="metric-value pnl-value ' + pnlCls + '">' + pnlText + '</strong></div>'
           + '<div class="readonly-metric"><span class="metric-label">胜率</span><strong class="metric-value">' + winRateText + '</strong></div>'
-          + '<div class="readonly-metric readonly-secondary"><span class="metric-label">交易数</span><strong class="metric-value">' + tradeCountText + '</strong></div>'
+          + '<div class="readonly-metric readonly-secondary"><span class="metric-label">平仓订单数</span><strong class="metric-value">' + tradeCountText + '</strong></div>'
           + '<div class="readonly-metric readonly-secondary"><span class="metric-label">盈亏比</span><strong class="metric-value">' + profitFactorText + '</strong></div>'
           + '<div class="readonly-chart"><div>'
           + '<div class="spark-box" data-account-id="' + safeAid + '"><div class="spark-empty">加载中...</div></div>'
