@@ -1339,6 +1339,7 @@ class DashboardServerTest(unittest.TestCase):
         self.assertIn("近30日净盈亏", html)
         self.assertIn("net_realized_pnl", html)
         self.assertIn("盈亏比", html)
+        self.assertNotIn(".readonly-metric.readonly-secondary { display:none; }", html)
         self.assertIn("mode === \"readonly\"", html)
         self.assertIn("? (payload.balance_curve || payload.equity_curve || [])", html)
         self.assertIn("entry-progress-details", html)

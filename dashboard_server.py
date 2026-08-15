@@ -5567,9 +5567,14 @@ ACCOUNTS_OVERVIEW_HTML = """<!doctype html>
       .command-item.command-secondary { display:none; }
       .managed-grid { grid-template-columns:repeat(2,minmax(0,1fr)); }
       .readonly-strip {
-        grid-template-columns:minmax(190px,1.2fr) repeat(3,minmax(110px,0.8fr)) minmax(260px,2fr) auto;
+        grid-template-columns:minmax(180px,1.2fr) repeat(5,minmax(90px,0.8fr));
       }
-      .readonly-metric.readonly-secondary { display:none; }
+      .readonly-chart,
+      .readonly-action {
+        grid-column:1 / -1;
+        border-left:0;
+        border-top:1px solid #302b3c;
+      }
     }
     @media (max-width: 760px) {
       .wrap { padding:8px 10px 20px; }
