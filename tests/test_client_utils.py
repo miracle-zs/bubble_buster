@@ -186,6 +186,30 @@ class ClientUtilsTest(unittest.TestCase):
 
         self.assertEqual(order["orderId"], 123)
 
+    def test_create_order_reconciles_open_limit_order_by_client_id(self) -> None:
+        client = BinanceFuturesClient(api_key="k", api_secret="s")
+        client._request = MagicMock(side_effect=BinanceAPIError("NETWORK", "reset"))  # type: ignore[method-assign]
+        client.get_order = MagicMock(  # type: ignore[method-assign]
+            return_value={"orderId": 124, "clientOrderId": "test-limit-1", "status": "NEW"}
+        )
+
+        order = client.create_order(
+            symbol="BTCUSDT",
+            side="BUY",
+            type="LIMIT",
+            timeInForce="GTC",
+            price="50000",
+            quantity="1",
+            newClientOrderId="test-limit-1",
+        )
+
+        self.assertEqual(order["orderId"], 124)
+        self.assertEqual(order["status"], "NEW")
+        client.get_order.assert_called_once_with(
+            symbol="BTCUSDT",
+            orig_client_order_id="test-limit-1",
+        )
+
     @patch("infra.binance_futures_client.time.sleep")
     def test_create_order_waits_for_exchange_eventual_consistency(self, sleep_mock: MagicMock) -> None:
         client = BinanceFuturesClient(api_key="k", api_secret="s")
@@ -469,6 +493,15 @@ class ClientUtilsTest(unittest.TestCase):
         self.assertEqual(orders[1]["clientOrderId"], "algo-sl")
         self.assertEqual(orders[1]["type"], "STOP_MARKET")
         self.assertEqual(orders[1]["status"], "NEW")
+
+    def test_get_account_reads_position_margin_payload(self) -> None:
+        client = BinanceFuturesClient(api_key="k", api_secret="s")
+        client._request = MagicMock(return_value={"positions": []})  # type: ignore[method-assign]
+
+        account = client.get_account()
+
+        self.assertEqual(account, {"positions": []})
+        client._request.assert_called_once_with("GET", "/fapi/v2/account", signed=True)
 
 
 if __name__ == "__main__":

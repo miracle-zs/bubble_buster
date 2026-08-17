@@ -351,6 +351,30 @@ class StrategyRuntimeService:
         if not due_account_ids:
             return
 
+        entry_safe_account_ids: List[str] = []
+        for aid in due_account_ids:
+            manager = self.account_runtimes[aid].get("manager")
+            cleanup = getattr(manager, "cleanup_portfolio_take_profit_orders_before_entry", None)
+            if not callable(cleanup):
+                entry_safe_account_ids.append(aid)
+                continue
+            try:
+                cleanup_result = cleanup()
+            except Exception as exc:  # noqa: BLE001
+                LOGGER.warning("service pre-entry portfolio limit cleanup failed account=%s: %s", aid, exc)
+                continue
+            if int(cleanup_result.get("failed", 0) or 0) > 0:
+                LOGGER.warning(
+                    "service entry skipped because portfolio limit cleanup is incomplete account=%s result=%s",
+                    aid,
+                    cleanup_result,
+                )
+                continue
+            entry_safe_account_ids.append(aid)
+        due_account_ids = entry_safe_account_ids
+        if not due_account_ids:
+            return
+
         shared_top_gainers = self._get_entry_ranking(now_local, due_account_ids)
         submitted: List[str] = []
         for aid in due_account_ids:

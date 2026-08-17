@@ -43,6 +43,10 @@ class PortfolioTakeProfitTest(unittest.TestCase):
         )
 
     def _manager(self, client: MagicMock, notifier: MagicMock | None = None) -> PositionManager:
+        if client.format_trigger_price.side_effect is None:
+            client.format_trigger_price.side_effect = (
+                lambda _symbol, price, round_up=False: str(price)
+            )
         return PositionManager(
             client=client,
             store=self.store,
@@ -61,13 +65,25 @@ class PortfolioTakeProfitTest(unittest.TestCase):
 
         client = MagicMock()
         client.get_position_risk.return_value = [
-            {"symbol": "BTCUSDT", "positionAmt": "-1", "positionSide": "BOTH"},
-            {"symbol": "ETHUSDT", "positionAmt": "2", "positionSide": "BOTH"},
+            {"symbol": "BTCUSDT", "positionAmt": "-1", "positionSide": "BOTH", "markPrice": "99"},
+            {"symbol": "ETHUSDT", "positionAmt": "2", "positionSide": "BOTH", "markPrice": "101"},
         ]
         client.format_order_qty.side_effect = lambda _symbol, qty: str(qty)
         client.create_order.side_effect = [
-            {"orderId": 301, "clientOrderId": "pft-btc", "status": "FILLED", "side": "BUY"},
-            {"orderId": 302, "clientOrderId": "pft-eth", "status": "FILLED", "side": "SELL"},
+            {
+                "orderId": 301,
+                "clientOrderId": "pft-btc",
+                "status": "FILLED",
+                "side": "BUY",
+                "executedQty": "1",
+            },
+            {
+                "orderId": 302,
+                "clientOrderId": "pft-eth",
+                "status": "FILLED",
+                "side": "SELL",
+                "executedQty": "2",
+            },
         ]
         notifier = MagicMock()
 
@@ -93,7 +109,7 @@ class PortfolioTakeProfitTest(unittest.TestCase):
         first_order = client.create_order.call_args_list[0].kwargs
         self.assertEqual(first_order["side"], "BUY")
         self.assertTrue(first_order["reduceOnly"])
-        self.assertIn("-pft-", str(first_order["newClientOrderId"]))
+        self.assertIn("-pftlim-", str(first_order["newClientOrderId"]))
         second_order = client.create_order.call_args_list[1].kwargs
         self.assertEqual(second_order["side"], "SELL")
         self.assertTrue(second_order["reduceOnly"])
@@ -104,6 +120,132 @@ class PortfolioTakeProfitTest(unittest.TestCase):
         self.assertEqual(row["close_reason"], "PORTFOLIO_EQUITY_TAKE_PROFIT")
         notifier.send.assert_called_once()
         self.assertIn("组合止盈", notifier.send.call_args.args[0])
+
+    def test_full_take_profit_limit_waits_without_timeout_and_cleans_up_after_fill(self) -> None:
+        position_id = self._insert_short("BTCUSDT")
+        self.store.add_wallet_snapshot("2026-07-28T00:00:00+00:00", 100.0)
+        open_risk = {
+            "symbol": "BTCUSDT",
+            "positionAmt": "-1",
+            "positionSide": "BOTH",
+            "markPrice": "99",
+        }
+        client = MagicMock()
+        client.get_position_risk.side_effect = [[open_risk], [open_risk], [open_risk], [{
+            "symbol": "BTCUSDT",
+            "positionAmt": "0",
+            "positionSide": "BOTH",
+            "markPrice": "99",
+        }]]
+        client.format_order_qty.side_effect = lambda _symbol, qty: str(qty)
+        client.create_order.return_value = {
+            "orderId": 501,
+            "clientOrderId": "pftlim-btc",
+            "type": "LIMIT",
+            "status": "NEW",
+            "side": "BUY",
+        }
+        client.get_order.side_effect = [
+            {"orderId": 501, "clientOrderId": "pftlim-btc", "type": "LIMIT", "status": "NEW"},
+            {
+                "orderId": 501,
+                "clientOrderId": "pftlim-btc",
+                "type": "LIMIT",
+                "status": "FILLED",
+                "side": "BUY",
+                "executedQty": "1",
+            },
+        ]
+        client.get_user_trades.return_value = []
+        client.cancel_order.return_value = {}
+        manager = self._manager(client)
+        now_local = datetime(2026, 7, 28, 9, 0, tzinfo=ZoneInfo("Asia/Shanghai"))
+
+        triggered = manager.run_portfolio_take_profit(
+            current_equity_usdt=109.0,
+            now_local=now_local,
+            profit_pct=9.0,
+        )
+        self.assertEqual(triggered["status"], "TRIGGERED")
+        self.assertFalse(triggered["close_complete"])
+        self.assertEqual(triggered["pending"], 1)
+        self.assertEqual(client.create_order.call_count, 1)
+        self.assertEqual(client.cancel_order.call_count, 0)
+
+        waiting = manager.run_portfolio_take_profit(
+            current_equity_usdt=108.0,
+            now_local=now_local,
+            profit_pct=9.0,
+        )
+        self.assertEqual(waiting["status"], "TRIGGERED_RETRY")
+        self.assertFalse(waiting["close_complete"])
+        self.assertEqual(client.create_order.call_count, 1)
+        self.assertEqual(client.cancel_order.call_count, 0)
+
+        filled = manager.run_portfolio_take_profit(
+            current_equity_usdt=108.0,
+            now_local=now_local,
+            profit_pct=9.0,
+        )
+        self.assertEqual(filled["status"], "TRIGGERED_RETRY")
+        self.assertTrue(filled["close_complete"])
+        self.assertEqual(client.cancel_order.call_count, 2)
+
+        with self.store._connect() as conn:  # pylint: disable=protected-access
+            row = conn.execute(
+                "SELECT status, close_reason, close_order_id FROM positions WHERE id = ?",
+                (position_id,),
+            ).fetchone()
+        self.assertEqual(row["status"], "CLOSED_PORTFOLIO_TAKE_PROFIT")
+        self.assertEqual(row["close_reason"], "PORTFOLIO_EQUITY_TAKE_PROFIT")
+        self.assertEqual(row["close_order_id"], 501)
+
+    def test_pending_limit_plan_is_carried_across_daily_reset(self) -> None:
+        self._insert_short("BTCUSDT")
+        self.store.add_wallet_snapshot("2026-07-28T00:00:00+00:00", 100.0)
+        self.store.add_wallet_snapshot("2026-07-29T00:00:00+00:00", 100.0)
+        risk = {
+            "symbol": "BTCUSDT",
+            "positionAmt": "-1",
+            "positionSide": "BOTH",
+            "markPrice": "99",
+        }
+        client = MagicMock()
+        client.get_position_risk.side_effect = [[risk], [risk], [risk]]
+        client.format_order_qty.side_effect = lambda _symbol, qty: str(qty)
+        client.create_order.return_value = {
+            "orderId": 601,
+            "clientOrderId": "pftlim-btc",
+            "type": "LIMIT",
+            "status": "NEW",
+            "side": "BUY",
+        }
+        client.get_order.return_value = {
+            "orderId": 601,
+            "clientOrderId": "pftlim-btc",
+            "type": "LIMIT",
+            "status": "NEW",
+        }
+        manager = self._manager(client)
+        first = manager.run_portfolio_take_profit(
+            current_equity_usdt=109.0,
+            now_local=datetime(2026, 7, 28, 9, 0, tzinfo=ZoneInfo("Asia/Shanghai")),
+            profit_pct=9.0,
+        )
+        self.assertFalse(first["close_complete"])
+
+        next_cycle = manager.run_portfolio_take_profit(
+            current_equity_usdt=100.0,
+            now_local=datetime(2026, 7, 29, 8, 1, tzinfo=ZoneInfo("Asia/Shanghai")),
+            profit_pct=9.0,
+        )
+        self.assertEqual(next_cycle["status"], "TRIGGERED_RETRY")
+        self.assertFalse(next_cycle["close_complete"])
+        self.assertEqual(client.create_order.call_count, 1)
+        state = self.store.get_lock_state(PositionManager.PORTFOLIO_TAKE_PROFIT_LOCK_NAME)
+        assert state is not None
+        self.assertEqual(state["cycle_date"], "2026-07-29")
+        self.assertEqual(state["portfolio_limit_plan"][0]["portfolio_order_id"], 601)
 
     def test_monitoring_continues_before_08_using_previous_daily_cycle(self) -> None:
         self.store.add_wallet_snapshot("2026-07-28T00:00:00+00:00", 100.0)
@@ -190,7 +332,7 @@ class PortfolioTakeProfitTest(unittest.TestCase):
         )
         self.assertEqual(triggered["status"], "TRIGGERED")
         self.assertAlmostEqual(triggered["actual_profit_pct"], 4.25)
-        self.assertEqual(client.get_position_risk.call_count, 1)
+        self.assertEqual(client.get_position_risk.call_count, 2)
 
     def test_trailing_take_profit_recovers_cycle_peak_from_wallet_snapshots(self) -> None:
         self.store.add_wallet_snapshot("2026-07-28T00:00:00+00:00", 100.0)
@@ -211,7 +353,7 @@ class PortfolioTakeProfitTest(unittest.TestCase):
         self.assertAlmostEqual(result["peak_profit_pct"], 9.0)
         self.assertAlmostEqual(result["threshold_equity"], 107.65)
 
-    def test_50_pct_take_profit_reduces_once_and_repairs_remaining_stop_on_retry(self) -> None:
+    def test_50_pct_take_profit_uses_limit_and_keeps_original_protection(self) -> None:
         position_id = self._insert_short("BTCUSDT", qty=2.0)
         self.store.add_wallet_snapshot("2026-07-28T00:00:00+00:00", 100.0)
 
@@ -220,26 +362,22 @@ class PortfolioTakeProfitTest(unittest.TestCase):
             "positionAmt": "-2",
             "positionSide": "BOTH",
             "entryPrice": "100",
-        }
-        reduced_risk = {
-            "symbol": "BTCUSDT",
-            "positionAmt": "-1",
-            "positionSide": "BOTH",
-            "entryPrice": "100",
+            "markPrice": "99",
         }
         client = MagicMock()
         client.get_position_risk.side_effect = [
             [initial_risk],  # persisted reduction plan
             [initial_risk],  # first execution
-            [reduced_risk],  # protection-only retry
         ]
         client.format_order_qty.side_effect = lambda _symbol, qty: str(qty)
-        client.format_trigger_price.side_effect = lambda _symbol, price, **_kwargs: str(price)
-        client.create_order.side_effect = [
-            {"orderId": 401, "clientOrderId": "pft-btc", "status": "FILLED", "executedQty": "1"},
-            RuntimeError("temporary stop replacement failure"),
-            {"orderId": 402, "clientOrderId": "sl-new", "status": "NEW"},
-        ]
+        client.create_order.return_value = {
+            "orderId": 401,
+            "clientOrderId": "pft-btc",
+            "type": "LIMIT",
+            "status": "FILLED",
+            "executedQty": "1",
+            "side": "BUY",
+        }
         manager = self._manager(client)
         now_local = datetime(2026, 7, 28, 9, 0, tzinfo=ZoneInfo("Asia/Shanghai"))
 
@@ -250,22 +388,24 @@ class PortfolioTakeProfitTest(unittest.TestCase):
             reduce_ratio=0.50,
         )
         self.assertEqual(first["status"], "TRIGGERED")
-        self.assertFalse(first["close_complete"])
+        self.assertTrue(first["close_complete"])
         self.assertEqual(first["adjusted_take_profit"], 1)
 
-        retried = manager.run_portfolio_take_profit(
+        order_kwargs = client.create_order.call_args.kwargs
+        self.assertEqual(order_kwargs["type"], "LIMIT")
+        self.assertEqual(order_kwargs["timeInForce"], "GTC")
+        self.assertEqual(float(order_kwargs["price"]), 99.0)
+        self.assertTrue(order_kwargs["reduceOnly"])
+        self.assertEqual(float(order_kwargs["quantity"]), 1.0)
+        client.cancel_order.assert_not_called()
+
+        already_complete = manager.run_portfolio_take_profit(
             current_equity_usdt=109.0,
             now_local=now_local,
             profit_pct=9.0,
             reduce_ratio=0.50,
         )
-        self.assertEqual(retried["status"], "TRIGGERED_RETRY")
-        self.assertTrue(retried["close_complete"])
-        market_orders = [
-            call.kwargs for call in client.create_order.call_args_list if call.kwargs.get("type") == "MARKET"
-        ]
-        self.assertEqual(len(market_orders), 1)
-        self.assertEqual(float(market_orders[0]["quantity"]), 1.0)
+        self.assertEqual(already_complete["status"], "ALREADY_TRIGGERED")
 
         with self.store._connect() as conn:  # pylint: disable=protected-access
             row = conn.execute(
@@ -274,8 +414,8 @@ class PortfolioTakeProfitTest(unittest.TestCase):
             ).fetchone()
         self.assertAlmostEqual(float(row["qty"]), 1.0)
         self.assertEqual(row["status"], "OPEN")
-        self.assertEqual(row["sl_order_id"], 402)
-        self.assertEqual(row["sl_client_order_id"], "sl-new")
+        self.assertEqual(row["sl_order_id"], 102)
+        self.assertEqual(row["sl_client_order_id"], "sl-old")
 
     def test_trigger_latch_survives_restart_and_resets_at_next_08(self) -> None:
         self.store.add_wallet_snapshot("2026-07-28T00:00:00+00:00", 100.0)
@@ -295,7 +435,7 @@ class PortfolioTakeProfitTest(unittest.TestCase):
             profit_pct=9.0,
         )
         self.assertEqual(restarted["status"], "ALREADY_TRIGGERED")
-        self.assertEqual(client.get_position_risk.call_count, 1)
+        self.assertEqual(client.get_position_risk.call_count, 2)
 
         self.store.add_wallet_snapshot("2026-07-29T00:00:00+00:00", 110.0)
         next_cycle = self._manager(client).run_portfolio_take_profit(

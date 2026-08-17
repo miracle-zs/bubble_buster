@@ -131,6 +131,187 @@ class DashboardDataProvider:
                 return str(order.get("status") or "UNKNOWN").strip().upper() or "UNKNOWN"
         return "MISSING"
 
+    @classmethod
+    def _position_margin_details(
+        cls,
+        risk: Dict[str, Any],
+        account_position: Optional[Dict[str, Any]],
+        notional: Optional[float],
+    ) -> Tuple[Optional[float], Optional[str]]:
+        """Resolve the exchange-reported initial margin used for position ROI."""
+        account_position = account_position if isinstance(account_position, dict) else {}
+        for payload, keys, source in (
+            (
+                account_position,
+                ("positionInitialMargin", "initialMargin"),
+                "ACCOUNT_POSITION_INITIAL_MARGIN",
+            ),
+            (
+                risk,
+                ("positionInitialMargin", "initialMargin"),
+                "POSITION_RISK_INITIAL_MARGIN",
+            ),
+            (
+                risk,
+                ("isolatedMargin", "isolatedWallet"),
+                "POSITION_RISK_ISOLATED_MARGIN",
+            ),
+        ):
+            for key in keys:
+                value = cls._safe_float(payload.get(key))
+                if value is not None and value > 0:
+                    return value, source
+
+        leverage = cls._safe_float(risk.get("leverage"))
+        if notional is not None and notional > 0 and leverage is not None and leverage > 0:
+            return notional / leverage, "NOTIONAL_DIV_LEVERAGE"
+        return None, None
+
+    @classmethod
+    def _live_return_metrics(
+        cls,
+        risk: Dict[str, Any],
+        account_position: Optional[Dict[str, Any]],
+        qty: Optional[float],
+        entry_price: Optional[float],
+        mark_price: Optional[float],
+    ) -> Dict[str, Any]:
+        pnl = cls._safe_float(risk.get("unRealizedProfit"))
+        notional = cls._safe_float(risk.get("notional"))
+        if notional is None or abs(notional) <= 0:
+            fallback_price = mark_price if mark_price is not None and mark_price > 0 else entry_price
+            if qty is not None and qty > 0 and fallback_price is not None and fallback_price > 0:
+                notional = qty * fallback_price
+        if notional is not None:
+            notional = abs(notional)
+
+        actual_margin, actual_margin_source = cls._position_margin_details(
+            risk=risk,
+            account_position=account_position,
+            notional=notional,
+        )
+        return {
+            "unrealized_pnl": pnl,
+            "notional": notional,
+            "actual_margin": actual_margin,
+            "actual_margin_source": actual_margin_source,
+            "unrealized_pnl_notional_pct": (
+                round(pnl / notional * 100.0, 4)
+                if pnl is not None and notional is not None and notional > 0
+                else None
+            ),
+            "unrealized_pnl_margin_pct": (
+                round(pnl / actual_margin * 100.0, 4)
+                if pnl is not None and actual_margin is not None and actual_margin > 0
+                else None
+            ),
+        }
+
+    @classmethod
+    def _readonly_order_price(cls, order: Dict[str, Any]) -> Optional[float]:
+        for key in ("stopPrice", "triggerPrice", "price", "activatePrice"):
+            value = cls._safe_float(order.get(key))
+            if value is not None and value > 0:
+                return value
+        return None
+
+    @staticmethod
+    def _readonly_order_bool(value: Any) -> bool:
+        if isinstance(value, bool):
+            return value
+        return str(value or "").strip().lower() in {"1", "true", "yes", "y"}
+
+    @classmethod
+    def _readonly_exit_orders(
+        cls,
+        orders: List[Dict[str, Any]],
+        side: str,
+        position_side: str,
+        entry_price: Optional[float],
+    ) -> Dict[str, List[Dict[str, Any]]]:
+        """Match active exchange exit orders to one readonly exchange position."""
+        expected_order_side = "SELL" if side == "LONG" else "BUY"
+        matched: Dict[str, List[Dict[str, Any]]] = {"tp": [], "sl": []}
+        normalized_position_side = str(position_side or "").strip().upper()
+
+        for order in orders or []:
+            if not isinstance(order, dict):
+                continue
+            order_side = str(order.get("side") or "").strip().upper()
+            if order_side and order_side != expected_order_side:
+                continue
+            order_position_side = str(order.get("positionSide") or "").strip().upper()
+            if order_position_side in {"LONG", "SHORT"} and normalized_position_side in {"LONG", "SHORT"}:
+                if order_position_side != normalized_position_side:
+                    continue
+
+            order_type = str(order.get("type") or order.get("orderType") or "").strip().upper()
+            is_conditional = (
+                "STOP" in order_type
+                or "TAKE_PROFIT" in order_type
+                or order_type == "TRAILING_STOP_MARKET"
+            )
+            is_reduce_only = cls._readonly_order_bool(order.get("reduceOnly")) or cls._readonly_order_bool(
+                order.get("closePosition")
+            )
+            if not is_conditional and not is_reduce_only:
+                continue
+
+            order_price = cls._readonly_order_price(order)
+            kind: Optional[str] = None
+            if "TAKE_PROFIT" in order_type:
+                kind = "tp"
+            elif "STOP" in order_type or order_type == "TRAILING_STOP_MARKET":
+                kind = "sl"
+            elif order_type == "LIMIT" and order_price is not None and entry_price is not None and entry_price > 0:
+                is_profit_price = order_price > entry_price if side == "LONG" else order_price < entry_price
+                kind = "tp" if is_profit_price else "sl"
+            if kind is None:
+                continue
+
+            matched[kind].append(
+                {
+                    "order_id": order.get("orderId") or order.get("algoId"),
+                    "client_order_id": order.get("clientOrderId") or order.get("clientAlgoId"),
+                    "type": order_type or None,
+                    "status": str(order.get("status") or "NEW").strip().upper() or "NEW",
+                    "price": order_price,
+                    "limit_price": cls._safe_float(order.get("price")),
+                    "trigger_price": cls._safe_float(order.get("stopPrice") or order.get("triggerPrice")),
+                    "side": order_side or None,
+                    "position_side": order_position_side or None,
+                }
+            )
+        return matched
+
+    @staticmethod
+    def _select_readonly_order(orders: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+        if not orders:
+            return None
+        active_statuses = {"NEW", "ACTIVE", "PARTIALLY_FILLED"}
+        return sorted(
+            orders,
+            key=lambda order: (
+                0 if str(order.get("status") or "").upper() in active_statuses else 1,
+                -int(order.get("order_id") or 0) if str(order.get("order_id") or "").isdigit() else 0,
+            ),
+        )[0]
+
+    @staticmethod
+    def _account_position_index(account_payload: Any) -> Dict[Tuple[str, str], Dict[str, Any]]:
+        if not isinstance(account_payload, dict):
+            return {}
+        result: Dict[Tuple[str, str], Dict[str, Any]] = {}
+        for row in account_payload.get("positions") or []:
+            if not isinstance(row, dict):
+                continue
+            symbol = str(row.get("symbol") or "").strip().upper()
+            if not symbol:
+                continue
+            position_side = str(row.get("positionSide") or "BOTH").strip().upper() or "BOTH"
+            result[(symbol, position_side)] = row
+        return result
+
     def _enrich_open_positions_with_live_data(
         self,
         positions: List[Dict[str, Any]],
@@ -245,6 +426,33 @@ class DashboardDataProvider:
             self._readonly_position_cache[normalized_account_id] = (now_utc, [])
             return []
 
+        order_fetch_error = None
+        try:
+            open_orders_result = client.get_open_orders()
+            open_orders = open_orders_result if isinstance(open_orders_result, list) else []
+        except Exception as exc:  # noqa: BLE001
+            LOGGER.warning("Readonly open order fetch failed account=%s: %s", normalized_account_id, exc)
+            open_orders = []
+            order_fetch_error = "实时订单暂不可用"
+
+        account_position_index: Dict[Tuple[str, str], Dict[str, Any]] = {}
+        account_fetch_error = None
+        get_account = getattr(client, "get_account", None)
+        if callable(get_account):
+            try:
+                account_position_index = self._account_position_index(get_account())
+            except Exception as exc:  # noqa: BLE001
+                LOGGER.warning("Readonly account margin fetch failed account=%s: %s", normalized_account_id, exc)
+                account_fetch_error = "实际保证金暂不可用"
+
+        orders_by_symbol: Dict[str, List[Dict[str, Any]]] = {}
+        for order in open_orders:
+            if not isinstance(order, dict):
+                continue
+            symbol = str(order.get("symbol") or "").strip().upper()
+            if symbol:
+                orders_by_symbol.setdefault(symbol, []).append(order)
+
         captured_at = now_utc.replace(microsecond=0).isoformat()
         rows: List[Dict[str, Any]] = []
         for risk in risks or []:
@@ -261,15 +469,40 @@ class DashboardDataProvider:
             position_key = exchange_position_side or side
             entry_price = self._safe_float(risk.get("entryPrice"))
             mark_price = self._safe_float(risk.get("markPrice"))
-            unrealized_pnl = self._safe_float(risk.get("unRealizedProfit"))
-            isolated_margin = self._safe_float(risk.get("isolatedMargin"))
-            if isolated_margin is None:
-                isolated_margin = self._safe_float(risk.get("isolatedWallet"))
-            unrealized_pnl_pct = (
-                round(unrealized_pnl / isolated_margin * 100.0, 4)
-                if unrealized_pnl is not None and isolated_margin is not None and isolated_margin > 0
-                else None
+            account_position = account_position_index.get((symbol, exchange_position_side or "BOTH"))
+            if account_position is None:
+                account_position = next(
+                    (
+                        row
+                        for (account_symbol, _account_side), row in account_position_index.items()
+                        if account_symbol == symbol
+                    ),
+                    None,
+                )
+            return_metrics = self._live_return_metrics(
+                risk=risk,
+                account_position=account_position,
+                qty=abs(position_amt),
+                entry_price=entry_price,
+                mark_price=mark_price,
             )
+            exit_orders = self._readonly_exit_orders(
+                orders=orders_by_symbol.get(symbol, []),
+                side=side,
+                position_side=exchange_position_side or side,
+                entry_price=entry_price,
+            )
+            selected_tp = self._select_readonly_order(exit_orders["tp"])
+            selected_sl = self._select_readonly_order(exit_orders["sl"])
+            if order_fetch_error:
+                tp_order_status = "READ_ERROR"
+                sl_order_status = "READ_ERROR"
+            else:
+                tp_order_status = str((selected_tp or {}).get("status") or "NOT_FOUND").upper()
+                sl_order_status = str((selected_sl or {}).get("status") or "NOT_FOUND").upper()
+            margin_data_error = None
+            if return_metrics["actual_margin"] is None:
+                margin_data_error = account_fetch_error or "实际保证金暂不可用"
             rows.append(
                 {
                     "id": f"readonly:{normalized_account_id}:{symbol}:{position_key}",
@@ -280,16 +513,29 @@ class DashboardDataProvider:
                     "qty": abs(position_amt),
                     "entry_price": entry_price,
                     "mark_price": mark_price,
-                    "unrealized_pnl": unrealized_pnl,
-                    "unrealized_pnl_pct": unrealized_pnl_pct,
+                    "unrealized_pnl": return_metrics["unrealized_pnl"],
+                    "unrealized_pnl_pct": return_metrics["unrealized_pnl_margin_pct"],
+                    "unrealized_pnl_notional_pct": return_metrics["unrealized_pnl_notional_pct"],
+                    "unrealized_pnl_margin_pct": return_metrics["unrealized_pnl_margin_pct"],
                     "liq_price_latest": self._safe_float(risk.get("liquidationPrice")),
-                    "isolated_margin": isolated_margin,
-                    "notional": self._safe_float(risk.get("notional")),
+                    "isolated_margin": self._safe_float(risk.get("isolatedMargin")),
+                    "notional": return_metrics["notional"],
+                    "actual_margin": return_metrics["actual_margin"],
+                    "actual_margin_source": return_metrics["actual_margin_source"],
                     "leverage": self._safe_float(risk.get("leverage")),
-                    "tp_price": None,
-                    "sl_price": None,
-                    "tp_order_status": "NOT_MANAGED",
-                    "sl_order_status": "NOT_MANAGED",
+                    "tp_price": (selected_tp or {}).get("price"),
+                    "sl_price": (selected_sl or {}).get("price"),
+                    "tp_order_id": (selected_tp or {}).get("order_id"),
+                    "sl_order_id": (selected_sl or {}).get("order_id"),
+                    "tp_client_order_id": (selected_tp or {}).get("client_order_id"),
+                    "sl_client_order_id": (selected_sl or {}).get("client_order_id"),
+                    "tp_order_status": tp_order_status,
+                    "sl_order_status": sl_order_status,
+                    "tp_orders": exit_orders["tp"],
+                    "sl_orders": exit_orders["sl"],
+                    "order_data_source": "EXCHANGE_OPEN_ORDERS",
+                    "order_data_error": order_fetch_error,
+                    "margin_data_error": margin_data_error,
                     "opened_at_utc": None,
                     "expire_at_utc": None,
                     "status": "LIVE_READONLY",
@@ -4081,6 +4327,8 @@ DASHBOARD_HTML = """<!doctype html>
       CANCELLED: "已撤销",
       EXPIRED: "已过期",
       REJECTED: "已拒绝",
+      READ_ERROR: "读取失败",
+      NOT_FOUND: "未发现",
       MISSING: "缺失",
       NOT_SET: "未设置"
     };
@@ -4090,7 +4338,7 @@ DASHBOARD_HTML = """<!doctype html>
   function liveOrderClass(value) {
     var s = String(value || "").toUpperCase();
     if (s === "NEW" || s === "ACTIVE" || s === "PARTIALLY_FILLED") return "ok";
-    if (s === "MISSING" || s === "CANCELED" || s === "CANCELLED" || s === "EXPIRED" || s === "REJECTED") return "bad";
+    if (s === "READ_ERROR" || s === "MISSING" || s === "CANCELED" || s === "CANCELLED" || s === "EXPIRED" || s === "REJECTED") return "bad";
     return "warn";
   }
 
@@ -4759,12 +5007,17 @@ DASHBOARD_HTML = """<!doctype html>
         var errorText = String(p.last_error || "").trim();
         var liveAvailable = p.live_data_available === true;
         var readonlyLive = p.readonly_live === true;
-        var liveError = String(p.live_data_error || p.order_data_error || "").trim();
+        var liveError = String(p.live_data_error || p.order_data_error || p.margin_data_error || "").trim();
         var pnl = toNum(p.unrealized_pnl);
         var pnlPct = toNum(p.unrealized_pnl_pct);
+        var notionalPnlPct = toNum(p.unrealized_pnl_notional_pct);
+        var marginPnlPct = toNum(p.unrealized_pnl_margin_pct);
         var pnlClass = pnl === null ? "neutral" : (pnl > 0 ? "positive" : (pnl < 0 ? "negative" : "neutral"));
         var pnlMain = pnl === null ? "实时不可用" : fmtSigned(pnl, 2) + " USDT";
-        var pnlSub = pnlPct === null ? "收益率 --" : "收益率 " + fmtSigned(pnlPct, 2) + "%";
+        var pnlSub = readonlyLive
+          ? "名义收益率 " + (notionalPnlPct === null ? "--" : fmtSigned(notionalPnlPct, 2) + "%") +
+            " · 实际保证金收益率 " + (marginPnlPct === null ? "--" : fmtSigned(marginPnlPct, 2) + "%")
+          : (pnlPct === null ? "收益率 --" : "收益率 " + fmtSigned(pnlPct, 2) + "%");
         var stateHtml = errorText
           ? '<span class="status-badge bad">异常</span><div class="error-cell">' + escapeHtml(errorText) + "</div>"
           : (readonlyLive
@@ -4776,9 +5029,10 @@ DASHBOARD_HTML = """<!doctype html>
           stateHtml += '<small class="live-sync">' + (readonlyLive ? "交易所实时" : "实时已同步") + "</small>";
         }
         var sourceLabel = readonlyLive ? "交易所实时" : "#" + p.id;
-        var protectionHtml = readonlyLive
-          ? '<div class="readonly-protection-note">外部管理 / 未读取</div>'
-          : '<div class="exit-stack"><div class="exit-line"><span class="exit-key tp">TP</span><span class="exit-price">' + escapeHtml(fmtAdaptive(p.tp_price)) + '</span>' + liveOrderBadge(p.tp_order_status) + '</div><div class="exit-line"><span class="exit-key sl">SL</span><span class="exit-price">' + escapeHtml(fmtAdaptive(p.sl_price)) + '</span>' + liveOrderBadge(p.sl_order_status) + "</div></div>";
+        var protectionHtml = '<div class="exit-stack"><div class="exit-line"><span class="exit-key tp">TP</span><span class="exit-price">' + escapeHtml(fmtAdaptive(p.tp_price)) + '</span>' + liveOrderBadge(p.tp_order_status) + '</div><div class="exit-line"><span class="exit-key sl">SL</span><span class="exit-price">' + escapeHtml(fmtAdaptive(p.sl_price)) + '</span>' + liveOrderBadge(p.sl_order_status) + "</div></div>";
+        if (readonlyLive) {
+          protectionHtml += '<small class="readonly-protection-note">交易所订单读取</small>';
+        }
         return (
           "<tr>" +
           '<td class="symbol-cell"><strong>' + escapeHtml(p.symbol) + '</strong><small>' + escapeHtml(sideLabel(p.side)) + ' · ' + escapeHtml(sourceLabel) + "</small></td>" +

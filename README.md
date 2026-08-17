@@ -211,8 +211,9 @@ CRON_TZ=Asia/Shanghai
 - `portfolio_take_profit_enabled`：是否启用日周期组合止盈。启用后以本地时间 `portfolio_take_profit_hour:portfolio_take_profit_minute` 后的第一条有效账户权益快照为固定基准。
 - `portfolio_take_profit_pct`：组合移动止盈的启动涨幅；例如 `2.5` 表示组合收益达到 `+2.5%` 后开始跟踪本周期峰值。若 `portfolio_take_profit_giveback_pct = 0`，则保持旧版固定阈值行为，达到该涨幅后立即触发。
 - `portfolio_take_profit_giveback_pct`：允许回吐的峰值利润比例，取值 `0`～`100`。例如峰值收益为 `+9%`、配置为 `15` 时，触发线为 `+9% × 85% = +7.65%`；该比例针对“峰值利润”，不是账户总权益。峰值及触发状态会持久化，服务重启或本周期中途启用时会从权益快照恢复峰值。
-- `portfolio_take_profit_reduce_ratio`：触发后每个实际持仓的止盈比例，取值 `0.05`～`1.0`；`0.50` 表示减仓 50%，`1.0` 表示全部清仓。部分止盈会按触发瞬间持仓生成持久化目标，失败重试不会再次对已经减半的仓位重复减半；剩余仓位数量和止损单数量会同步更新。
-- `portfolio_take_profit_hour` / `portfolio_take_profit_minute`：组合止盈的日切换时间，默认北京时间 `08:00`。每个周期从当日 08:00 持续到次日 08:00，全天监控，没有 07:30～12:00 等触发禁区；每周期最多触发一次，平仓完成和失败重试状态持久化在 `locks` 表（`portfolio_take_profit_v2`）。触发后不会锁定或取消本周期后续策略入场，但后续新仓不会让本周期组合止盈再次触发。
+- `portfolio_take_profit_reduce_ratio`：触发后每个实际持仓的止盈比例，取值 `0.05`～`1.0`；`0.50` 表示减仓 50%，`1.0` 表示全部清仓。触发时按 `positionRisk.markPrice` 为每个仓位生成持久化的 `reduceOnly + LIMIT + GTC` 订单计划，重试不会改变原限价或重复叠加数量。
+- 组合止盈限价单不会设置固定秒数超时，原有逐仓止盈止损单继续保留作为兜底；限价成交至持仓归零后才取消剩余退出单并标记仓位关闭。若限价单被取消、过期或拒单，会在后续巡检中按原触发价重挂；若原退出单先成交，则清理组合限价单。部分止盈只更新剩余数量，不主动撤销原保护单。
+- `portfolio_take_profit_hour` / `portfolio_take_profit_minute`：组合止盈的日切换时间，默认北京时间 `08:00`。每个周期从当日 08:00 持续到次日 08:00，全天监控，没有 07:30～12:00 等触发禁区；每周期最多触发一次，平仓完成和失败重试状态持久化在 `locks` 表（`portfolio_take_profit_v2`）。触发后不会锁定本周期后续策略入场；新入场批次开始前会清理已失效仓位遗留的组合限价单，避免旧 `reduceOnly` 单误伤新仓。
 - `entry_initial_delay_sec`：账户 entry 启动前的额外等待秒数。
 - `entry_symbol_interval_sec`：账户 entry 每个 symbol 之间的额外等待秒数。
 - 入场开始前会预热 Binance REST 会话、服务器时间、交易规则、逐币杠杆和数量诊断；整点已收盘的候选币会通过 HTTP 连接池并发读取 1h K 线。
@@ -266,6 +267,7 @@ protection_exempt_symbols = XAUUSDT
 
 - `enabled`：启用账户列表（逗号分隔），示例 `enabled = acc01,acc02,55`
 - `mode.<account_id>`：账户模式，支持 `full` / `loss_cut_only` / `readonly`
+- `readonly` 账户仅从交易所实时读取当前持仓、活动止盈止损订单和仓位保证金，不写入策略持仓；收益率同时展示名义价值收益率与实际仓位初始保证金收益率。
 - 账户覆盖节：
   - `[account.<id>.binance]`
   - `[account.<id>.strategy]`
@@ -297,7 +299,7 @@ protection_exempt_symbols = XAUUSDT
 - `rebalance_cycles`：每次再平衡周期汇总（目标/执行结果/跳过原因）。
 - `rebalance_actions`：再平衡逐仓动作明细（偏离度/调整量/结果）。
 - `equity_recovery_events`：旧版 24h 低点反弹止盈触发事件（窗口最低点、触发权益、减仓结果与明细）。
-- `locks`：运行时状态表；旧版反弹止盈使用 `equity_recovery_take_profit_v1`，每日 08:00 基准组合移动止盈使用 `portfolio_take_profit_v2` 记录当前周期的基准、峰值、移动触发线、触发权益、平仓完成状态与通知去重状态。
+- `locks`：运行时状态表；旧版反弹止盈使用 `equity_recovery_take_profit_v1`，每日 08:00 基准组合移动止盈使用 `portfolio_take_profit_v2` 记录当前周期的基准、峰值、移动触发线、触发权益、逐币组合限价单计划、订单状态、平仓完成状态与通知去重状态。
 `cycle_key` 语义：触发后定义为“触发时刻（新的窗口起点）”。
 `window_start_utc` 语义：下一轮 24h 窗口起点锚点（与 rolling 24h 取更晚者）。
 

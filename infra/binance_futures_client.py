@@ -377,6 +377,11 @@ class BinanceFuturesClient:
     def get_balance(self) -> List[Dict[str, Any]]:
         return self._request("GET", "/fapi/v2/balance", signed=True)
 
+    def get_account(self) -> Dict[str, Any]:
+        """Return account-level position margin details from Binance."""
+        data = self._request("GET", "/fapi/v2/account", signed=True)
+        return data if isinstance(data, dict) else {}
+
     def get_available_balance(self, asset: str = "USDT") -> float:
         balances = self.get_balance()
         for item in balances:
@@ -496,6 +501,7 @@ class BinanceFuturesClient:
                 symbol=str(params.get("symbol") or ""),
                 client_order_id=str(params.get("newClientOrderId") or "") or None,
                 conditional=False,
+                accept_open_order=order_type != "MARKET",
                 error=exc,
             )
             if recovered is not None:
@@ -534,6 +540,7 @@ class BinanceFuturesClient:
         client_order_id: Optional[str],
         conditional: bool,
         error: BinanceAPIError,
+        accept_open_order: bool = False,
     ) -> Optional[Dict[str, Any]]:
         if not symbol or not client_order_id:
             return None
@@ -571,7 +578,7 @@ class BinanceFuturesClient:
                             f"client_id={client_order_id} status={status}"
                         ),
                     )
-                if not conditional and status != "FILLED":
+                if not conditional and not accept_open_order and status != "FILLED":
                     order = None
                 else:
                     LOGGER.warning(

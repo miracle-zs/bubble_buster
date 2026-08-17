@@ -180,6 +180,39 @@ class DashboardServerTest(unittest.TestCase):
                 "positionSide": "BOTH",
             },
         ]
+        live_client.get_open_orders.return_value = [
+            {
+                "symbol": "BTCUSDT",
+                "orderId": 1001,
+                "clientOrderId": "readonly-tp",
+                "type": "TAKE_PROFIT_MARKET",
+                "side": "BUY",
+                "positionSide": "BOTH",
+                "stopPrice": "63000",
+                "status": "NEW",
+                "closePosition": True,
+            },
+            {
+                "symbol": "BTCUSDT",
+                "orderId": 1002,
+                "clientOrderId": "readonly-sl",
+                "type": "STOP_MARKET",
+                "side": "BUY",
+                "positionSide": "BOTH",
+                "stopPrice": "72000",
+                "status": "NEW",
+                "closePosition": True,
+            },
+        ]
+        live_client.get_account.return_value = {
+            "positions": [
+                {
+                    "symbol": "BTCUSDT",
+                    "positionSide": "BOTH",
+                    "positionInitialMargin": "1000",
+                }
+            ]
+        }
 
         provider = DashboardDataProvider(
             db_path=self.db_path,
@@ -213,10 +246,20 @@ class DashboardServerTest(unittest.TestCase):
         self.assertEqual(row["entry_price"], 65000.0)
         self.assertEqual(row["mark_price"], 64000.0)
         self.assertEqual(row["unrealized_pnl"], 250.0)
-        self.assertIsNone(row["tp_price"])
-        self.assertIsNone(row["sl_price"])
+        self.assertAlmostEqual(row["unrealized_pnl_notional_pct"], 1.5625)
+        self.assertAlmostEqual(row["unrealized_pnl_margin_pct"], 25.0)
+        self.assertAlmostEqual(row["unrealized_pnl_pct"], 25.0)
+        self.assertEqual(row["actual_margin"], 1000.0)
+        self.assertEqual(row["actual_margin_source"], "ACCOUNT_POSITION_INITIAL_MARGIN")
+        self.assertEqual(row["tp_price"], 63000.0)
+        self.assertEqual(row["sl_price"], 72000.0)
+        self.assertEqual(row["tp_order_status"], "NEW")
+        self.assertEqual(row["sl_order_status"], "NEW")
+        self.assertEqual(row["tp_order_id"], 1001)
+        self.assertEqual(row["sl_order_id"], 1002)
         self.assertEqual(live_client.get_position_risk.call_count, 1)
-        live_client.get_open_orders.assert_not_called()
+        self.assertEqual(live_client.get_open_orders.call_count, 1)
+        self.assertEqual(live_client.get_account.call_count, 1)
         default_client.get_position_risk.assert_not_called()
 
         summary_row = provider.accounts_summary()["accounts"][0]
@@ -1393,7 +1436,7 @@ class DashboardServerTest(unittest.TestCase):
         self.assertIn('class="surface risk-panel"', html)
         self.assertIn('class="surface section-block positions-panel"', html)
         self.assertIn('class="status-badge readonly"', html)
-        self.assertIn("外部管理 / 未读取", html)
+        self.assertIn("交易所订单读取", html)
         self.assertIn('class="activity-tabs"', html)
         self.assertIn('class="diagnostics-panel"', html)
         self.assertIn("max-width: 1680px", html)

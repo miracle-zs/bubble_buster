@@ -10,7 +10,7 @@ from uuid import uuid4
 from core.entry_structure_protection import EntryStructureProtectionState
 from core.market_fill_reconciler import MarketFillReconciler
 from core.state_store import StateStore
-from infra.binance_futures_client import BinanceAPIError, BinanceFuturesClient
+from infra.binance_futures_client import BinanceAPIError, BinanceFuturesClient, OrderStateUnknownError
 from infra.notifier import (
     ServerChanNotifier,
     format_markdown_kv_table,
@@ -38,6 +38,14 @@ class PositionManager:
     ORPHAN_EXIT_ORDER_CLEANUP_LOCK_NAME = "orphan_exit_order_cleanup_v1"
     PORTFOLIO_LOSS_CUT_LOCK_NAME = "portfolio_loss_cut_v1"
     PORTFOLIO_TAKE_PROFIT_LOCK_NAME = "portfolio_take_profit_v2"
+    PORTFOLIO_LIMIT_ACTIVE_STATUSES = {"NEW", "PENDING", "PARTIALLY_FILLED"}
+    PORTFOLIO_LIMIT_TERMINAL_STATUSES = {
+        "FILLED",
+        "CANCELED",
+        "CANCELLED",
+        "EXPIRED",
+        "REJECTED",
+    }
     NOON_PROTECTION_PRE_ENTRY_HOURS = 2
     # An untracked position has no fill timestamp; assume the normal 08:00 entry
     # and include the two completed hourly candles immediately before it.
@@ -680,6 +688,13 @@ class PositionManager:
         normalized_giveback_pct = min(100.0, max(0.0, float(giveback_pct)))
         state = self.store.get_lock_state(self.PORTFOLIO_TAKE_PROFIT_LOCK_NAME) or {}
         if str(state.get("cycle_date") or "") != cycle_key:
+            previous_state = state
+            previous_plan = previous_state.get("portfolio_limit_plan")
+            carried_limit_plan = (
+                [dict(item) for item in previous_plan if isinstance(item, dict)]
+                if isinstance(previous_plan, list) and not bool(previous_state.get("close_complete"))
+                else []
+            )
             cycle_start_utc = cycle_start_local.astimezone(timezone.utc).replace(microsecond=0).isoformat()
             current_time_utc = now_local.astimezone(timezone.utc).replace(microsecond=0).isoformat()
             snapshot = self.store.get_wallet_snapshot_first_since(
@@ -715,7 +730,7 @@ class PositionManager:
             trailing_threshold_equity = baseline_equity * (1.0 + trailing_profit_pct / 100.0)
             threshold_equity = trailing_threshold_equity if armed else arming_threshold_equity
             state = {
-                "state_version": 2,
+                "state_version": 3 if carried_limit_plan else 2,
                 "cycle_date": cycle_key,
                 "cycle_start_at_local": cycle_start_local.isoformat(timespec="seconds"),
                 "baseline_equity_usdt": baseline_equity,
@@ -738,9 +753,24 @@ class PositionManager:
                 ),
                 "trailing_threshold_equity_usdt": trailing_threshold_equity if armed else None,
                 "trailing_threshold_profit_pct": trailing_profit_pct if armed else None,
-                "triggered": False,
+                # A pending limit plan is carried across the daily baseline
+                # reset so the old reduce-only order never becomes orphaned.
+                "triggered": bool(carried_limit_plan),
                 "close_complete": False,
-                "notification_sent": False,
+                "triggered_at_utc": (
+                    previous_state.get("triggered_at_utc") if carried_limit_plan else None
+                ),
+                "trigger_equity_usdt": (
+                    previous_state.get("trigger_equity_usdt") if carried_limit_plan else None
+                ),
+                "trigger_profit_pct": (
+                    previous_state.get("trigger_profit_pct") if carried_limit_plan else None
+                ),
+                "trigger_threshold_equity_usdt": (
+                    previous_state.get("trigger_threshold_equity_usdt") if carried_limit_plan else None
+                ),
+                "portfolio_limit_plan": carried_limit_plan if carried_limit_plan else None,
+                "notification_sent": bool(previous_state.get("notification_sent")) if carried_limit_plan else False,
                 "updated_at_utc": self._utc_now_iso(),
             }
             self.store.set_lock_state(self.PORTFOLIO_TAKE_PROFIT_LOCK_NAME, state)
@@ -855,16 +885,9 @@ class PositionManager:
             }
 
         if not already_triggered:
-            if active_reduce_ratio < 1.0 - 1e-12:
-                # Persist the original target before submitting any partial
-                # close order. On retry we compare exchange quantity with this
-                # target, so a crash cannot halve an already-reduced position a
-                # second time.
-                state["reduction_plan"] = self._build_portfolio_take_profit_reduction_plan(
-                    active_reduce_ratio
-                )
             state["triggered"] = True
             state["close_complete"] = False
+            state["state_version"] = 3
             state["triggered_at_utc"] = self._utc_now_iso()
             state["trigger_equity_usdt"] = current_equity
             state["trigger_profit_pct"] = actual_profit_pct
@@ -890,17 +913,28 @@ class PositionManager:
                 "reduce_ratio": active_reduce_ratio,
             }
 
-        if active_reduce_ratio < 1.0 - 1e-12:
-            raw_plan = state.get("reduction_plan")
-            if not isinstance(raw_plan, list):
-                raw_plan = self._build_portfolio_take_profit_reduction_plan(active_reduce_ratio)
-                state["reduction_plan"] = raw_plan
-                self.store.set_lock_state(self.PORTFOLIO_TAKE_PROFIT_LOCK_NAME, state)
-            reduction_plan = [dict(item) for item in raw_plan if isinstance(item, dict)]
+        # New portfolio take-profit executions use a persistent, ordinary
+        # reduce-only GTC limit order. Keep the legacy market plan available so
+        # a service upgrade can finish an already-triggered pre-v3 cycle
+        # without silently changing its execution semantics.
+        raw_limit_plan = state.get("portfolio_limit_plan")
+        legacy_reduction_plan = state.get("reduction_plan")
+        if (
+            not isinstance(raw_limit_plan, list)
+            and isinstance(legacy_reduction_plan, list)
+            and active_reduce_ratio < 1.0 - 1e-12
+        ):
+            reduction_plan = [dict(item) for item in legacy_reduction_plan if isinstance(item, dict)]
             close_summary = self._execute_portfolio_take_profit_reduction_plan(reduction_plan)
             state["reduction_plan"] = reduction_plan
         else:
-            close_summary = self._close_all_exchange_positions_for_portfolio_take_profit()
+            if not isinstance(raw_limit_plan, list):
+                raw_limit_plan = self._build_portfolio_take_profit_limit_plan(active_reduce_ratio)
+                state["portfolio_limit_plan"] = raw_limit_plan
+                self.store.set_lock_state(self.PORTFOLIO_TAKE_PROFIT_LOCK_NAME, state)
+            limit_plan = [dict(item) for item in raw_limit_plan if isinstance(item, dict)]
+            close_summary = self._execute_portfolio_take_profit_limit_plan(limit_plan)
+            state["portfolio_limit_plan"] = limit_plan
         close_summary["reduce_ratio"] = active_reduce_ratio
         close_complete = (
             int(close_summary.get("errors", 0) or 0) == 0
@@ -950,79 +984,509 @@ class PositionManager:
             **close_summary,
         }
 
-    def _close_all_exchange_positions_for_portfolio_take_profit(self) -> Dict[str, object]:
-        summary: Dict[str, object] = {
-            "total": 0,
-            "closed_take_profit": 0,
-            "adjusted_take_profit": 0,
-            "pending": 0,
-            "errors": 0,
-            "closed_symbols": [],
-            "failed_symbols": [],
-        }
-        details: Dict[str, List[str]] = {"closed_take_profit": [], "errors": []}
-        closed_symbols: List[str] = []
-        failed_symbols: List[str] = []
-        try:
-            risks = self.client.get_position_risk()
-        except Exception as exc:  # noqa: BLE001
-            LOGGER.exception("Portfolio take-profit failed to query exchange positions: %s", exc)
-            summary["errors"] = 1
-            details["errors"].append(f"fetch_position_risk_failed: {exc}")
-            summary["closed_symbols"] = closed_symbols
-            summary["failed_symbols"] = failed_symbols
-            summary["details"] = details
-            return summary
+    def _build_portfolio_take_profit_limit_plan(
+        self,
+        reduce_ratio: float,
+    ) -> List[Dict[str, object]]:
+        """Build the immutable per-position plan for a portfolio take-profit.
 
+        The price is captured from ``positionRisk.markPrice`` at trigger time.
+        It is deliberately stored in the lock state so retries do not chase a
+        later price. A missing mark price is treated as a plan error rather
+        than silently falling back to an entry price.
+        """
+        risks = self.client.get_position_risk()
+        plan: List[Dict[str, object]] = []
         for risk in risks:
             symbol = str(risk.get("symbol") or "").strip().upper()
             if not symbol or self._is_protection_exempt(symbol):
                 continue
             position_amt = self._safe_float(risk.get("positionAmt"), default=0.0)
-            if abs(position_amt) <= 1e-12:
+            initial_qty = abs(position_amt)
+            if initial_qty <= 1e-12:
                 continue
-            summary["total"] = int(summary["total"]) + 1
+
             position_side = str(risk.get("positionSide") or "BOTH").strip().upper() or "BOTH"
             close_side, use_reduce_only = self._resolve_close_side_for_exchange_position(
                 position_amt=position_amt,
                 position_side=position_side,
             )
-            tracked_pos = self._find_open_position_for_exchange_symbol(symbol)
-            tracked_position_id = int(tracked_pos["id"]) if tracked_pos is not None else None
-            try:
-                close_info = self._close_daily_loss_cut(
-                    symbol=symbol,
-                    qty=abs(position_amt),
-                    side=close_side,
-                    position_id=tracked_position_id,
-                    cancel_pos=tracked_pos,
-                    position_side=position_side if position_side in {"LONG", "SHORT"} else None,
-                    use_reduce_only=use_reduce_only,
-                    close_status="CLOSED_PORTFOLIO_TAKE_PROFIT",
-                    close_reason="PORTFOLIO_EQUITY_TAKE_PROFIT",
-                    client_id_tag="pft",
+            trigger_price = self._portfolio_take_profit_reference_price(symbol, risk)
+            formatted_price = self.client.format_trigger_price(
+                symbol,
+                trigger_price,
+                round_up=close_side == "SELL",
+            )
+            normalized_price = self._safe_positive_float(formatted_price)
+            if normalized_price is None:
+                raise RuntimeError(
+                    f"invalid portfolio take-profit limit price symbol={symbol} price={formatted_price}"
                 )
-                summary["closed_take_profit"] = int(summary["closed_take_profit"]) + 1
-                summary["adjusted_take_profit"] = int(summary["adjusted_take_profit"]) + 1
-                details["closed_take_profit"].append(
-                    f"{symbol}(qty={close_info['qty']}, side={close_side}, "
-                    f"position_side={position_side}, reduce_only={use_reduce_only}, "
-                    f"close_order_id={close_info['close_order_id']})"
-                )
-                closed_symbols.append(symbol)
-            except Exception as exc:  # noqa: BLE001
-                summary["errors"] = int(summary["errors"]) + 1
-                LOGGER.exception("Portfolio take-profit failed for exchange position symbol=%s: %s", symbol, exc)
-                details["errors"].append(
-                    f"{symbol}(qty={abs(position_amt)}, side={close_side}, "
-                    f"position_side={position_side}): {exc}"
-                )
-                failed_symbols.append(symbol)
 
-        summary["closed_symbols"] = closed_symbols
-        summary["failed_symbols"] = failed_symbols
+            tracked_pos = (
+                self._find_open_position_for_exchange_symbol(symbol)
+                if position_amt < 0
+                else None
+            )
+            plan.append(
+                {
+                    "key": f"{symbol}:{position_side}",
+                    "symbol": symbol,
+                    "position_side": position_side,
+                    "initial_qty": initial_qty,
+                    "target_remaining_qty": initial_qty * (1.0 - reduce_ratio),
+                    "tracked_position_id": (
+                        int(tracked_pos["id"]) if tracked_pos is not None else None
+                    ),
+                    "close_side": close_side,
+                    "use_reduce_only": use_reduce_only,
+                    "limit_price": normalized_price,
+                    "limit_price_source": "positionRisk.markPrice",
+                    "portfolio_order_id": None,
+                    "portfolio_client_order_id": None,
+                    "portfolio_order_status": None,
+                    "portfolio_requested_qty": None,
+                    "portfolio_executed_qty": 0.0,
+                    "portfolio_fill_recorded_qty": 0.0,
+                    "action_complete": False,
+                    "protection_complete": False,
+                    "retry_count": 0,
+                }
+            )
+        return plan
+
+    def _portfolio_take_profit_reference_price(
+        self,
+        symbol: str,
+        risk: Dict[str, object],
+    ) -> float:
+        for field in ("markPrice", "lastPrice", "price"):
+            price = self._safe_positive_float(risk.get(field))
+            if price is not None:
+                return price
+        try:
+            price = self._safe_positive_float(self.client.get_symbol_price(symbol))
+        except Exception as exc:  # noqa: BLE001
+            raise RuntimeError(f"failed to fetch portfolio limit reference price symbol={symbol}: {exc}") from exc
+        if price is None:
+            raise RuntimeError(f"missing portfolio limit reference price symbol={symbol}")
+        return price
+
+    def _execute_portfolio_take_profit_limit_plan(
+        self,
+        limit_plan: List[Dict[str, object]],
+    ) -> Dict[str, object]:
+        summary: Dict[str, object] = {
+            "total": len(limit_plan),
+            "closed_take_profit": 0,
+            "adjusted_take_profit": 0,
+            "pending": 0,
+            "errors": 0,
+            "limit_orders_placed": 0,
+            "closed_symbols": [],
+            "adjusted_symbols": [],
+            "failed_symbols": [],
+        }
+        details: Dict[str, List[str]] = {
+            "closed_take_profit": [],
+            "adjusted_take_profit": [],
+            "errors": [],
+        }
+        closed_symbols: List[str] = []
+        adjusted_symbols: List[str] = []
+        failed_symbols: List[str] = []
+
+        try:
+            risks = self.client.get_position_risk()
+        except Exception as exc:  # noqa: BLE001
+            LOGGER.exception("Portfolio take-profit failed to query exchange positions: %s", exc)
+            summary["errors"] = 1
+            summary["pending"] = len(limit_plan)
+            details["errors"].append(f"fetch_position_risk_failed: {exc}")
+            summary["closed_symbols"] = closed_symbols
+            summary["adjusted_symbols"] = adjusted_symbols
+            summary["failed_symbols"] = failed_symbols
+            summary["details"] = details
+            return summary
+
+        risk_map: Dict[tuple[str, str], Dict[str, object]] = {}
+        for risk in risks:
+            symbol = str(risk.get("symbol") or "").strip().upper()
+            position_side = str(risk.get("positionSide") or "BOTH").strip().upper() or "BOTH"
+            if symbol:
+                risk_map[(symbol, position_side)] = risk
+
+        for item in limit_plan:
+            symbol = str(item.get("symbol") or "").strip().upper()
+            position_side = str(item.get("position_side") or "BOTH").strip().upper() or "BOTH"
+            result: Dict[str, object]
+            try:
+                result = self._advance_portfolio_take_profit_limit_item(
+                    item=item,
+                    risk=risk_map.get((symbol, position_side)),
+                )
+            except Exception as exc:  # noqa: BLE001
+                LOGGER.exception(
+                    "Portfolio take-profit limit execution failed symbol=%s position_side=%s: %s",
+                    symbol,
+                    position_side,
+                    exc,
+                )
+                result = {
+                    "pending": True,
+                    "error": True,
+                    "detail": f"{symbol}(limit): {exc}",
+                }
+
+            if bool(result.get("pending")):
+                summary["pending"] = int(summary["pending"]) + 1
+            if bool(result.get("error")):
+                summary["errors"] = int(summary["errors"]) + 1
+                failed_symbols.append(symbol)
+                details["errors"].append(str(result.get("detail") or f"{symbol}(limit)"))
+            kind = str(result.get("kind") or "")
+            detail = str(result.get("detail") or "")
+            if kind == "closed":
+                summary["closed_take_profit"] = int(summary["closed_take_profit"]) + 1
+                closed_symbols.append(symbol)
+                if detail:
+                    details["closed_take_profit"].append(detail)
+            elif kind == "adjusted":
+                summary["adjusted_take_profit"] = int(summary["adjusted_take_profit"]) + 1
+                adjusted_symbols.append(symbol)
+                if detail:
+                    details["adjusted_take_profit"].append(detail)
+            if bool(result.get("placed")):
+                summary["limit_orders_placed"] = int(summary["limit_orders_placed"]) + 1
+
+        summary["closed_symbols"] = list(dict.fromkeys(closed_symbols))
+        summary["adjusted_symbols"] = list(dict.fromkeys(adjusted_symbols))
+        summary["failed_symbols"] = list(dict.fromkeys(failed_symbols))
         summary["details"] = details
         return summary
+
+    def _advance_portfolio_take_profit_limit_item(
+        self,
+        item: Dict[str, object],
+        risk: Optional[Dict[str, object]],
+    ) -> Dict[str, object]:
+        symbol = str(item.get("symbol") or "").strip().upper()
+        position_side = str(item.get("position_side") or "BOTH").strip().upper() or "BOTH"
+        target_qty = max(0.0, self._safe_float(item.get("target_remaining_qty"), default=0.0))
+        current_qty = abs(self._safe_float(risk.get("positionAmt"), default=0.0)) if risk else 0.0
+        qty_eps = max(1e-12, target_qty * 1e-10)
+
+        order: Optional[Dict[str, object]] = None
+        order_status = str(item.get("portfolio_order_status") or "").strip().upper()
+        order_id = item.get("portfolio_order_id")
+        client_order_id = item.get("portfolio_client_order_id")
+        if order_id or client_order_id:
+            try:
+                order = self._get_order(
+                    symbol=symbol,
+                    order_id=order_id,
+                    client_order_id=client_order_id,
+                )
+            except Exception as exc:  # noqa: BLE001
+                item["last_error"] = str(exc)
+                return {
+                    "pending": True,
+                    "error": True,
+                    "detail": f"{symbol}(order_status): {exc}",
+                }
+            if order is None:
+                order_status = "NOT_FOUND"
+            else:
+                order_status = str(order.get("status") or "").strip().upper()
+                item["portfolio_order_status"] = order_status or "UNKNOWN"
+                executed_qty = self._safe_float(order.get("executedQty"), default=0.0)
+                if order_status == "FILLED" and executed_qty <= 0:
+                    executed_qty = self._safe_float(
+                        item.get("portfolio_requested_qty"),
+                        default=0.0,
+                    )
+                if executed_qty > 0:
+                    item["portfolio_executed_qty"] = max(
+                        self._safe_float(item.get("portfolio_executed_qty"), default=0.0),
+                        executed_qty,
+                    )
+                if order_status in self.PORTFOLIO_LIMIT_TERMINAL_STATUSES and executed_qty > 0:
+                    self._record_portfolio_limit_fill(item=item, order=order, executed_qty=executed_qty)
+
+            if order_status in self.PORTFOLIO_LIMIT_ACTIVE_STATUSES:
+                if current_qty <= target_qty + qty_eps:
+                    self._cancel_order_if_exists(symbol, order_id, client_order_id)
+                    item["portfolio_order_status"] = "CANCELED"
+                    self._clear_portfolio_take_profit_order(item)
+                    return self._complete_portfolio_take_profit_item(
+                        item=item,
+                        current_qty=current_qty,
+                        target_qty=target_qty,
+                        portfolio_filled=False,
+                    )
+                return {
+                    "pending": True,
+                    "detail": (
+                        f"{symbol}(limit_order_id={order_id or '-'}, status={order_status}, "
+                        f"remaining={current_qty})"
+                    ),
+                }
+
+            if order_status == "FILLED":
+                filled_qty = self._safe_float(order.get("executedQty"), default=0.0) if order else 0.0
+                if filled_qty <= 0:
+                    filled_qty = self._safe_float(item.get("portfolio_requested_qty"), default=0.0)
+                # A FILLED response can race the positionRisk refresh. Treat
+                # the order's executed quantity as progress, but never below
+                # the immutable target remaining quantity.
+                effective_qty = max(target_qty, current_qty - max(0.0, filled_qty))
+                if effective_qty <= target_qty + qty_eps:
+                    return self._complete_portfolio_take_profit_item(
+                        item=item,
+                        current_qty=effective_qty,
+                        target_qty=target_qty,
+                        portfolio_filled=True,
+                    )
+                self._clear_portfolio_take_profit_order(item)
+            elif order_status in self.PORTFOLIO_LIMIT_TERMINAL_STATUSES or order_status == "NOT_FOUND":
+                self._clear_portfolio_take_profit_order(item)
+            else:
+                return {
+                    "pending": True,
+                    "error": True,
+                    "detail": f"{symbol}(order_status_unknown={order_status or 'EMPTY'})",
+                }
+
+        if current_qty <= target_qty + qty_eps:
+            return self._complete_portfolio_take_profit_item(
+                item=item,
+                current_qty=current_qty,
+                target_qty=target_qty,
+                portfolio_filled=False,
+            )
+
+        close_qty = current_qty - target_qty
+        try:
+            formatted_qty = self.client.format_order_qty(symbol, close_qty)
+            order_qty = self._safe_float(formatted_qty, default=0.0)
+        except Exception as exc:  # noqa: BLE001
+            return {"pending": True, "error": True, "detail": f"{symbol}(quantity): {exc}"}
+        if order_qty <= 0:
+            item["action_complete"] = True
+            item["protection_complete"] = True
+            item["skipped_reason"] = "FORMATTED_QTY_ZERO"
+            return {
+                "kind": "adjusted" if target_qty > 0 else "closed",
+                "detail": f"{symbol}(formatted_qty_zero, target_remaining={target_qty})",
+            }
+
+        client_id = str(item.get("portfolio_client_order_id") or "").strip()
+        if not client_id:
+            client_id = self._new_client_id("pftlim", symbol)
+            item["portfolio_client_order_id"] = client_id
+        order_params: Dict[str, object] = {
+            "symbol": symbol,
+            "side": str(item.get("close_side") or "BUY").strip().upper(),
+            "type": "LIMIT",
+            "timeInForce": "GTC",
+            "price": str(item.get("limit_price")),
+            "quantity": formatted_qty,
+            "newClientOrderId": client_id,
+            "newOrderRespType": "RESULT",
+        }
+        if bool(item.get("use_reduce_only", True)):
+            order_params["reduceOnly"] = True
+        if position_side in {"LONG", "SHORT"}:
+            order_params["positionSide"] = position_side
+
+        item["portfolio_requested_qty"] = order_qty
+        item["portfolio_order_status"] = "SUBMITTING"
+        try:
+            created_order = self.client.create_order(**order_params)
+        except OrderStateUnknownError as exc:
+            item["portfolio_order_status"] = "UNKNOWN"
+            item["last_error"] = str(exc)
+            item["retry_count"] = int(self._safe_float(item.get("retry_count"), default=0.0)) + 1
+            return {
+                "pending": True,
+                "error": True,
+                "detail": f"{symbol}(limit_submit_unknown): {exc}",
+            }
+        except Exception as exc:  # noqa: BLE001
+            self._clear_portfolio_take_profit_order(item)
+            item["portfolio_order_status"] = "REJECTED"
+            item["last_error"] = str(exc)
+            item["retry_count"] = int(self._safe_float(item.get("retry_count"), default=0.0)) + 1
+            return {
+                "pending": True,
+                "error": True,
+                "detail": f"{symbol}(limit_submit): {exc}",
+            }
+
+        created_order = dict(created_order or {})
+        created_status = str(created_order.get("status") or "NEW").strip().upper() or "NEW"
+        item["portfolio_order_id"] = created_order.get("orderId")
+        item["portfolio_client_order_id"] = (
+            created_order.get("clientOrderId") or created_order.get("clientAlgoId") or client_id
+        )
+        item["portfolio_order_status"] = created_status
+        created_executed_qty = self._safe_float(created_order.get("executedQty"), default=0.0)
+        if created_status == "FILLED" and created_executed_qty <= 0:
+            created_executed_qty = order_qty
+        if created_executed_qty > 0:
+            item["portfolio_executed_qty"] = max(
+                self._safe_float(item.get("portfolio_executed_qty"), default=0.0),
+                created_executed_qty,
+            )
+        if created_status in self.PORTFOLIO_LIMIT_TERMINAL_STATUSES and created_executed_qty > 0:
+            self._record_portfolio_limit_fill(
+                item=item,
+                order=created_order,
+                executed_qty=created_executed_qty,
+            )
+        try:
+            self.store.add_order_event(
+                symbol=symbol,
+                position_id=self._safe_optional_int(item.get("tracked_position_id")),
+                event_time_utc=self._utc_now_iso(),
+                order_payload=created_order,
+            )
+        except Exception as exc:  # noqa: BLE001
+            LOGGER.warning("Portfolio limit order persistence failed symbol=%s: %s", symbol, exc)
+
+        if created_status in self.PORTFOLIO_LIMIT_ACTIVE_STATUSES:
+            if created_status == "PARTIALLY_FILLED" and created_executed_qty > 0:
+                effective_qty = max(0.0, current_qty - created_executed_qty)
+                if effective_qty <= target_qty + qty_eps:
+                    self._cancel_order_if_exists(
+                        symbol,
+                        item.get("portfolio_order_id"),
+                        item.get("portfolio_client_order_id"),
+                    )
+                    self._clear_portfolio_take_profit_order(item)
+                    return self._complete_portfolio_take_profit_item(
+                        item=item,
+                        current_qty=effective_qty,
+                        target_qty=target_qty,
+                        portfolio_filled=False,
+                    )
+            return {
+                "pending": True,
+                "placed": True,
+                "detail": (
+                    f"{symbol}(limit_order_id={item.get('portfolio_order_id') or '-'}, "
+                    f"price={item.get('limit_price')}, qty={order_qty}, status={created_status})"
+                ),
+            }
+
+        if created_status == "FILLED":
+            effective_qty = max(target_qty, current_qty - max(0.0, created_executed_qty))
+            if effective_qty <= target_qty + qty_eps:
+                result = self._complete_portfolio_take_profit_item(
+                    item=item,
+                    current_qty=effective_qty,
+                    target_qty=target_qty,
+                    portfolio_filled=True,
+                )
+                result["placed"] = True
+                return result
+
+        if created_status in self.PORTFOLIO_LIMIT_TERMINAL_STATUSES:
+            self._clear_portfolio_take_profit_order(item)
+            return {
+                "pending": True,
+                "error": True,
+                "placed": True,
+                "detail": f"{symbol}(limit_submit_terminal={created_status})",
+            }
+        return {
+            "pending": True,
+            "error": True,
+            "placed": True,
+            "detail": f"{symbol}(limit_submit_unknown={created_status})",
+        }
+
+    def _complete_portfolio_take_profit_item(
+        self,
+        item: Dict[str, object],
+        current_qty: float,
+        target_qty: float,
+        portfolio_filled: bool,
+    ) -> Dict[str, object]:
+        symbol = str(item.get("symbol") or "").strip().upper()
+        position_id = self._safe_optional_int(item.get("tracked_position_id"))
+        portfolio_order_id = self._safe_optional_int(item.get("portfolio_order_id"))
+        tracked_pos = self.store.get_position(position_id) if position_id is not None else None
+        if current_qty <= 1e-12:
+            if tracked_pos is not None and str(tracked_pos.get("status") or "").upper() == "OPEN":
+                if portfolio_filled:
+                    self._cancel_exit_orders(tracked_pos)
+                    self.store.mark_position_closed(
+                        position_id=position_id,
+                        status="CLOSED_PORTFOLIO_TAKE_PROFIT",
+                        close_reason="PORTFOLIO_EQUITY_TAKE_PROFIT",
+                        close_order_id=portfolio_order_id,
+                    )
+                else:
+                    close_result = self._close_if_recorded_exit_filled(tracked_pos)
+                    if close_result is None:
+                        self._close_external_missing_short(tracked_pos)
+            item["action_complete"] = True
+            item["protection_complete"] = True
+            if portfolio_filled:
+                self._clear_portfolio_take_profit_order(item)
+            return {
+                "kind": "closed",
+                "detail": (
+                    f"{symbol}(qty=0, limit_order_id={item.get('portfolio_order_id') or '-'}, "
+                    f"filled={portfolio_filled})"
+                ),
+            }
+
+        if current_qty <= target_qty + max(1e-12, target_qty * 1e-10):
+            if tracked_pos is not None and str(tracked_pos.get("status") or "").upper() == "OPEN":
+                entry_price = self._safe_positive_float(tracked_pos.get("entry_price")) or 0.0
+                self.store.set_position_qty(int(position_id), current_qty, entry_price)
+            item["action_complete"] = True
+            # The original TP/SL intentionally remains in place for a partial
+            # reduction. It is only canceled after the exchange position is
+            # actually zero.
+            item["protection_complete"] = True
+            if portfolio_filled:
+                self._clear_portfolio_take_profit_order(item)
+            return {
+                "kind": "adjusted",
+                "detail": (
+                    f"{symbol}(remaining={current_qty}, target_remaining={target_qty}, "
+                    f"limit_order_id={item.get('portfolio_order_id') or '-'})"
+                ),
+            }
+        return {"pending": True}
+
+    def _record_portfolio_limit_fill(
+        self,
+        item: Dict[str, object],
+        order: Dict[str, object],
+        executed_qty: float,
+    ) -> None:
+        recorded_qty = self._safe_float(item.get("portfolio_fill_recorded_qty"), default=0.0)
+        if executed_qty <= recorded_qty + max(1e-12, executed_qty * 1e-9):
+            return
+        self._market_fill_reconciler.record_market_order(
+            symbol=str(item.get("symbol") or "").strip().upper(),
+            position_id=self._safe_optional_int(item.get("tracked_position_id")),
+            order=order,
+        )
+        item["portfolio_fill_recorded_qty"] = executed_qty
+
+    @staticmethod
+    def _clear_portfolio_take_profit_order(item: Dict[str, object]) -> None:
+        item["portfolio_order_id"] = None
+        item["portfolio_client_order_id"] = None
+        item["portfolio_order_status"] = None
+        # Fill reconciliation is per exchange order. A replacement order may
+        # legitimately execute less than the previous order's quantity.
+        item["portfolio_fill_recorded_qty"] = 0.0
 
     def _build_portfolio_take_profit_reduction_plan(
         self,
@@ -2001,6 +2465,12 @@ class PositionManager:
                 )
         except Exception as exc:  # noqa: BLE001
             LOGGER.warning("Market fill reconciliation failed account=%s: %s", self.account_id, exc)
+        try:
+            self._reconcile_portfolio_take_profit_limit_plan()
+        except Exception as exc:  # noqa: BLE001
+            # The original per-position stop remains the safety net when the
+            # optional portfolio limit status cannot be read.
+            LOGGER.warning("Portfolio take-profit limit reconciliation failed account=%s: %s", self.account_id, exc)
         self._noon_protection_caps_cache = self._load_noon_protection_caps()
         self._morning_protection_caps_cache = self._load_morning_protection_caps()
         positions = self.store.list_open_positions()
@@ -2047,6 +2517,84 @@ class PositionManager:
         self._noon_protection_caps_cache = None
         self._morning_protection_caps_cache = None
         return summary
+
+    def _reconcile_portfolio_take_profit_limit_plan(self) -> Optional[Dict[str, object]]:
+        state = self.store.get_lock_state(self.PORTFOLIO_TAKE_PROFIT_LOCK_NAME) or {}
+        raw_plan = state.get("portfolio_limit_plan")
+        if not bool(state.get("triggered")) or not isinstance(raw_plan, list):
+            return None
+        if bool(state.get("close_complete")):
+            return None
+
+        limit_plan = [dict(item) for item in raw_plan if isinstance(item, dict)]
+        summary = self._execute_portfolio_take_profit_limit_plan(limit_plan)
+        state["portfolio_limit_plan"] = limit_plan
+        state["close_complete"] = (
+            int(summary.get("errors", 0) or 0) == 0
+            and int(summary.get("pending", 0) or 0) == 0
+        )
+        state["last_close_summary"] = summary
+        state["updated_at_utc"] = self._utc_now_iso()
+        self.store.set_lock_state(self.PORTFOLIO_TAKE_PROFIT_LOCK_NAME, state)
+        return summary
+
+    @_serialized_account_mutation
+    def cleanup_portfolio_take_profit_orders_before_entry(self) -> Dict[str, object]:
+        """Remove stale portfolio limits immediately before a new entry batch."""
+        try:
+            self._reconcile_portfolio_take_profit_limit_plan()
+        except Exception as exc:  # noqa: BLE001
+            LOGGER.warning(
+                "Portfolio take-profit pre-entry reconciliation failed account=%s: %s",
+                self.account_id,
+                exc,
+            )
+
+        state = self.store.get_lock_state(self.PORTFOLIO_TAKE_PROFIT_LOCK_NAME) or {}
+        raw_plan = state.get("portfolio_limit_plan")
+        if not isinstance(raw_plan, list):
+            return {"canceled": 0, "failed": 0, "details": []}
+
+        try:
+            risks = self.client.get_position_risk()
+        except Exception as exc:  # noqa: BLE001
+            return {"canceled": 0, "failed": 1, "details": [f"fetch_position_risk_failed: {exc}"]}
+        active_by_key = {
+            (
+                str(risk.get("symbol") or "").strip().upper(),
+                str(risk.get("positionSide") or "BOTH").strip().upper() or "BOTH",
+            ): abs(self._safe_float(risk.get("positionAmt"), default=0.0))
+            for risk in risks
+        }
+
+        canceled = 0
+        failed = 0
+        details: List[str] = []
+        plan = [dict(item) for item in raw_plan if isinstance(item, dict)]
+        for item in plan:
+            symbol = str(item.get("symbol") or "").strip().upper()
+            position_side = str(item.get("position_side") or "BOTH").strip().upper() or "BOTH"
+            current_qty = active_by_key.get((symbol, position_side), 0.0)
+            order_id = item.get("portfolio_order_id")
+            client_order_id = item.get("portfolio_client_order_id")
+            position_id = self._safe_optional_int(item.get("tracked_position_id"))
+            tracked_pos = self.store.get_position(position_id) if position_id is not None else None
+            tracked_open = tracked_pos is not None and str(tracked_pos.get("status") or "").upper() == "OPEN"
+            same_position = tracked_open and current_qty > 1e-12
+            should_clear = bool(item.get("action_complete")) or not same_position
+            if not should_clear or not (order_id or client_order_id):
+                continue
+            if self._cancel_order_if_exists(symbol, order_id, client_order_id):
+                canceled += 1
+                details.append(f"{symbol}(order_id={order_id or '-'}, client_id={client_order_id or '-'})")
+                self._clear_portfolio_take_profit_order(item)
+            else:
+                failed += 1
+
+        state["portfolio_limit_plan"] = plan
+        state["updated_at_utc"] = self._utc_now_iso()
+        self.store.set_lock_state(self.PORTFOLIO_TAKE_PROFIT_LOCK_NAME, state)
+        return {"canceled": canceled, "failed": failed, "details": details}
 
     @_serialized_account_mutation
     def cleanup_orphan_exit_orders_once_per_day(self) -> Dict[str, object]:
@@ -2120,6 +2668,9 @@ class PositionManager:
         if position_side == "LONG":
             return False
         order_type = str(order.get("type") or order.get("orderType") or "").strip().upper()
+        client_order_id = str(order.get("clientOrderId") or "").strip()
+        if order_type == "LIMIT":
+            return client_order_id.startswith("t10s-pftlim-")
         if order_type not in {
             "STOP",
             "STOP_MARKET",
@@ -2130,7 +2681,6 @@ class PositionManager:
             return False
         if cls._truthy_order_flag(order.get("reduceOnly")) or cls._truthy_order_flag(order.get("closePosition")):
             return True
-        client_order_id = str(order.get("clientOrderId") or "").strip()
         return client_order_id.startswith(("t10s-sl-", "t10s-tp-", "t10s-nsl-", "t10s-msl-"))
 
     @staticmethod

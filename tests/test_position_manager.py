@@ -402,6 +402,15 @@ class PositionManagerTest(unittest.TestCase):
                 "side": "SELL",
                 "status": "NEW",
             },
+            {
+                "symbol": "OLDUSDT",
+                "orderId": 304,
+                "clientOrderId": "t10s-pftlim-OLDUS-abc123-xyz98765",
+                "type": "LIMIT",
+                "side": "BUY",
+                "status": "NEW",
+                "reduceOnly": True,
+            },
         ]
 
         manager = PositionManager(
@@ -414,11 +423,17 @@ class PositionManagerTest(unittest.TestCase):
 
         summary = manager.cleanup_orphan_exit_orders_once_per_day()
 
-        self.assertEqual(summary["canceled"], 1)
-        client.cancel_order.assert_called_once_with(
+        self.assertEqual(summary["canceled"], 2)
+        self.assertEqual(client.cancel_order.call_count, 2)
+        client.cancel_order.assert_any_call(
             symbol="BASUSDT",
             order_id=301,
             orig_client_order_id="old-bas-sl",
+        )
+        client.cancel_order.assert_any_call(
+            symbol="OLDUSDT",
+            order_id=304,
+            orig_client_order_id="t10s-pftlim-OLDUS-abc123-xyz98765",
         )
 
     def test_cleanup_orphan_exit_orders_retries_after_cancel_failure(self) -> None:
