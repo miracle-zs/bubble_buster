@@ -3,6 +3,7 @@
 为 readonly 模式账户从 Binance API 获取交易统计数据。
 """
 import logging
+import threading
 import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -48,6 +49,65 @@ class TradeStatsFetcher:
         self.client = client
         self.cache_ttl_sec = max(60, int(cache_ttl_sec))
         self._cache: Dict[str, tuple[float, Optional[TradeStats]]] = {}
+        self._cache_lock = threading.RLock()
+        self._inflight: Dict[str, threading.Event] = {}
+
+    @staticmethod
+    def _cache_key(account_id: str, lookback_days: int) -> str:
+        return f"{account_id}:{lookback_days}"
+
+    def get_cached_stats(
+        self,
+        *,
+        account_id: str,
+        lookback_days: int = 30,
+    ) -> Optional[TradeStats]:
+        """Return the latest cached value without making a network request."""
+        cache_key = self._cache_key(account_id, lookback_days)
+        with self._cache_lock:
+            cached = self._cache.get(cache_key)
+            return cached[1] if cached is not None else None
+
+    def refresh_stats(
+        self,
+        *,
+        account_id: str,
+        lookback_days: int = 30,
+    ) -> Optional[TradeStats]:
+        """Refresh a cache entry, sharing one in-flight API call per key."""
+        cache_key = self._cache_key(account_id, lookback_days)
+        with self._cache_lock:
+            refresh_event = self._inflight.get(cache_key)
+            previous = self._cache.get(cache_key)
+            previous_stats = previous[1] if previous is not None else None
+            if refresh_event is None:
+                refresh_event = threading.Event()
+                self._inflight[cache_key] = refresh_event
+                is_owner = True
+            else:
+                is_owner = False
+
+        if not is_owner:
+            refresh_event.wait()
+            with self._cache_lock:
+                cached = self._cache.get(cache_key)
+                return cached[1] if cached is not None else None
+
+        stats: Optional[TradeStats] = None
+        try:
+            stats = self._fetch_stats_from_api(lookback_days)
+            return stats
+        except Exception as exc:  # noqa: BLE001
+            LOGGER.warning("Failed to fetch trade stats for account=%s: %s", account_id, exc)
+            # Keep the last good snapshot available to the homepage after a
+            # transient Binance error such as -1003.
+            stats = previous_stats
+            return stats
+        finally:
+            with self._cache_lock:
+                self._cache[cache_key] = (time.time(), stats)
+                self._inflight.pop(cache_key, None)
+                refresh_event.set()
 
     def fetch_stats(
         self,
@@ -63,23 +123,17 @@ class TradeStatsFetcher:
         Returns:
             TradeStats 或 None（如果获取失败）
         """
-        cache_key = f"{account_id}:{lookback_days}"
         now = time.time()
 
-        # 检查缓存
-        if cache_key in self._cache:
-            cached_at, cached_stats = self._cache[cache_key]
-            if now - cached_at < self.cache_ttl_sec:
-                return cached_stats
+        cache_key = self._cache_key(account_id, lookback_days)
+        with self._cache_lock:
+            cached = self._cache.get(cache_key)
+            if cached is not None:
+                cached_at, cached_stats = cached
+                if now - cached_at < self.cache_ttl_sec:
+                    return cached_stats
 
-        try:
-            stats = self._fetch_stats_from_api(lookback_days)
-            self._cache[cache_key] = (now, stats)
-            return stats
-        except Exception as exc:  # noqa: BLE001
-            LOGGER.warning("Failed to fetch trade stats for account=%s: %s", account_id, exc)
-            self._cache[cache_key] = (now, None)
-            return None
+        return self.refresh_stats(account_id=account_id, lookback_days=lookback_days)
 
     def _fetch_income_records(
         self,

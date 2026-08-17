@@ -1,10 +1,12 @@
 import importlib.util
+import threading
+from concurrent.futures import ThreadPoolExecutor
 import unittest
 
 if importlib.util.find_spec("requests") is None:
     raise unittest.SkipTest("requests is not installed")
 
-from infra.trade_stats_fetcher import TradeStatsFetcher
+from infra.trade_stats_fetcher import TradeStats, TradeStatsFetcher
 
 
 def _income_record(seq: int, income: float, income_type: str = "REALIZED_PNL") -> dict:
@@ -218,3 +220,72 @@ def test_fetch_stats_caches_temporary_fetch_failure() -> None:
     assert fetcher.fetch_stats(account_id="readonly02", lookback_days=30) is None
 
     assert client.income_calls == 1
+
+
+def test_fetch_stats_deduplicates_concurrent_refreshes() -> None:
+    class SlowFetcher(TradeStatsFetcher):
+        def __init__(self) -> None:
+            super().__init__(client=object())
+            self.calls = 0
+            self.entered = threading.Event()
+            self.release = threading.Event()
+
+        def _fetch_stats_from_api(self, lookback_days: int) -> TradeStats:
+            self.calls += 1
+            self.entered.set()
+            assert self.release.wait(timeout=2.0)
+            return TradeStats(
+                total_realized_pnl=1.0,
+                total_trades=1,
+                win_count=1,
+                loss_count=0,
+                win_rate_pct=100.0,
+                gross_profit=1.0,
+                gross_loss=0.0,
+                profit_factor=None,
+                avg_win=1.0,
+                avg_loss=0.0,
+                last_updated_utc="2026-08-15T00:00:00+00:00",
+            )
+
+    fetcher = SlowFetcher()
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        first = pool.submit(fetcher.fetch_stats, "readonly01", 30)
+        assert fetcher.entered.wait(timeout=1.0)
+        second = pool.submit(fetcher.fetch_stats, "readonly01", 30)
+        fetcher.release.set()
+        first_result = first.result(timeout=2.0)
+        second_result = second.result(timeout=2.0)
+
+    assert fetcher.calls == 1
+    assert first_result == second_result
+
+
+def test_refresh_failure_keeps_last_good_stats() -> None:
+    fetcher = TradeStatsFetcher(client=object())
+    stats = TradeStats(
+        total_realized_pnl=1.0,
+        total_trades=1,
+        win_count=1,
+        loss_count=0,
+        win_rate_pct=100.0,
+        gross_profit=1.0,
+        gross_loss=0.0,
+        profit_factor=None,
+        avg_win=1.0,
+        avg_loss=0.0,
+        last_updated_utc="2026-08-15T00:00:00+00:00",
+    )
+    responses = [stats, RuntimeError("temporary Binance rate limit")]
+
+    def fake_fetch(lookback_days: int):
+        response = responses.pop(0)
+        if isinstance(response, Exception):
+            raise response
+        return response
+
+    fetcher._fetch_stats_from_api = fake_fetch  # type: ignore[method-assign]
+
+    assert fetcher.refresh_stats(account_id="readonly01", lookback_days=30) == stats
+    assert fetcher.refresh_stats(account_id="readonly01", lookback_days=30) == stats
+    assert fetcher.get_cached_stats(account_id="readonly01", lookback_days=30) == stats

@@ -1,4 +1,5 @@
 import importlib.util
+import threading
 import tempfile
 import unittest
 from pathlib import Path
@@ -9,7 +10,7 @@ if importlib.util.find_spec("fastapi") is None or importlib.util.find_spec("http
 from fastapi.testclient import TestClient
 
 from core.state_store import StateStore
-from dashboard_fastapi import create_app, create_dashboard_context
+from dashboard_fastapi import TradeStatsBackgroundRefresher, create_app, create_dashboard_context
 
 
 class DashboardFastAPITest(unittest.TestCase):
@@ -68,6 +69,28 @@ portfolio_take_profit_enabled = true
         self.assertTrue(ctx.db_path.endswith("data/state.db"))
         self.assertTrue(ctx.log_file.endswith("logs/strategy.log"))
         self.assertTrue(Path(ctx.db_path).exists())
+
+    def test_trade_stats_background_refresher_refreshes_without_request(self) -> None:
+        refreshed = threading.Event()
+        calls = []
+
+        class Fetcher:
+            def refresh_stats(self, *, account_id: str, lookback_days: int):
+                calls.append((account_id, lookback_days))
+                refreshed.set()
+                return None
+
+        refresher = TradeStatsBackgroundRefresher(
+            {"readonly01": Fetcher()},
+            refresh_interval_sec=300,
+        )
+        refresher.start()
+        try:
+            self.assertTrue(refreshed.wait(timeout=1.0))
+        finally:
+            refresher.stop()
+
+        self.assertEqual(calls, [("readonly01", 30)])
 
     def test_app_health_and_dashboard_api(self) -> None:
         app = create_app(config_path=str(self.config_path))

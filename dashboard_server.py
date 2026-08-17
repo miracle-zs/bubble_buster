@@ -50,6 +50,7 @@ class DashboardDataProvider:
         live_wallet_account_id: str = "default",
         trade_stats_fetchers: Optional[Dict[str, Any]] = None,
         live_position_clients: Optional[Dict[str, Any]] = None,
+        live_position_cache_ttl_sec: int = 30,
     ):
         self.db_path = db_path
         self.log_file = log_file
@@ -86,6 +87,9 @@ class DashboardDataProvider:
             for k, v in (live_position_clients or {}).items()
             if str(k).strip() and v is not None
         }
+        self.live_position_cache_ttl_sec = max(5, int(live_position_cache_ttl_sec))
+        self._readonly_position_cache: Dict[str, Tuple[datetime, List[Dict[str, Any]]]] = {}
+        self._readonly_position_cache_errors: Dict[str, Optional[str]] = {}
         self._balance_cache_value: Optional[float] = None
         self._balance_cache_at: Optional[datetime] = None
         self._balance_last_attempt_at: Optional[datetime] = None
@@ -208,6 +212,99 @@ class DashboardDataProvider:
                 if pnl is not None and isolated_margin is not None and isolated_margin > 0
                 else None
             )
+
+    def _is_readonly_account(self, account_id: Optional[str]) -> bool:
+        normalized = str(account_id or "").strip()
+        return bool(normalized) and self.account_modes.get(normalized, "full") == "readonly"
+
+    def _readonly_live_positions(self, account_id: str) -> List[Dict[str, Any]]:
+        """Return current exchange positions for a readonly account without persisting them."""
+        normalized_account_id = str(account_id or "").strip()
+        if not self._is_readonly_account(normalized_account_id):
+            return []
+
+        now_utc = datetime.now(timezone.utc)
+        cached = self._readonly_position_cache.get(normalized_account_id)
+        if cached is not None:
+            cached_at, cached_rows = cached
+            age_sec = (now_utc - cached_at).total_seconds()
+            if age_sec < self.live_position_cache_ttl_sec:
+                return [dict(row) for row in cached_rows]
+
+        client = self.live_position_clients.get(normalized_account_id)
+        if client is None:
+            self._readonly_position_cache_errors[normalized_account_id] = "只读账户未配置实时仓位客户端"
+            self._readonly_position_cache[normalized_account_id] = (now_utc, [])
+            return []
+
+        try:
+            risks = client.get_position_risk()
+        except Exception as exc:  # noqa: BLE001
+            LOGGER.warning("Readonly live position fetch failed account=%s: %s", normalized_account_id, exc)
+            self._readonly_position_cache_errors[normalized_account_id] = str(exc)
+            self._readonly_position_cache[normalized_account_id] = (now_utc, [])
+            return []
+
+        captured_at = now_utc.replace(microsecond=0).isoformat()
+        rows: List[Dict[str, Any]] = []
+        for risk in risks or []:
+            symbol = str(risk.get("symbol") or "").strip().upper()
+            position_amt = self._safe_float(risk.get("positionAmt"))
+            if not symbol or position_amt is None or abs(position_amt) <= 1e-12:
+                continue
+
+            exchange_position_side = str(risk.get("positionSide") or "").strip().upper()
+            if exchange_position_side in {"LONG", "SHORT"}:
+                side = exchange_position_side
+            else:
+                side = "LONG" if position_amt > 0 else "SHORT"
+            position_key = exchange_position_side or side
+            entry_price = self._safe_float(risk.get("entryPrice"))
+            mark_price = self._safe_float(risk.get("markPrice"))
+            unrealized_pnl = self._safe_float(risk.get("unRealizedProfit"))
+            isolated_margin = self._safe_float(risk.get("isolatedMargin"))
+            if isolated_margin is None:
+                isolated_margin = self._safe_float(risk.get("isolatedWallet"))
+            unrealized_pnl_pct = (
+                round(unrealized_pnl / isolated_margin * 100.0, 4)
+                if unrealized_pnl is not None and isolated_margin is not None and isolated_margin > 0
+                else None
+            )
+            rows.append(
+                {
+                    "id": f"readonly:{normalized_account_id}:{symbol}:{position_key}",
+                    "run_id": None,
+                    "symbol": symbol,
+                    "side": side,
+                    "position_side": exchange_position_side or side,
+                    "qty": abs(position_amt),
+                    "entry_price": entry_price,
+                    "mark_price": mark_price,
+                    "unrealized_pnl": unrealized_pnl,
+                    "unrealized_pnl_pct": unrealized_pnl_pct,
+                    "liq_price_latest": self._safe_float(risk.get("liquidationPrice")),
+                    "isolated_margin": isolated_margin,
+                    "notional": self._safe_float(risk.get("notional")),
+                    "leverage": self._safe_float(risk.get("leverage")),
+                    "tp_price": None,
+                    "sl_price": None,
+                    "tp_order_status": "NOT_MANAGED",
+                    "sl_order_status": "NOT_MANAGED",
+                    "opened_at_utc": None,
+                    "expire_at_utc": None,
+                    "status": "LIVE_READONLY",
+                    "last_error": None,
+                    "live_data_available": True,
+                    "live_data_as_of_utc": captured_at,
+                    "readonly_live": True,
+                    "live_position_source": "EXCHANGE_READONLY",
+                }
+            )
+
+        rows.sort(key=lambda row: (str(row.get("symbol") or ""), str(row.get("position_side") or "")))
+        self._readonly_position_cache_errors[normalized_account_id] = None
+        self._readonly_position_cache[normalized_account_id] = (now_utc, rows)
+        return [dict(row) for row in rows]
 
     def _connect(self) -> sqlite3.Connection:
         conn = sqlite3.connect(self.db_path, timeout=SQLITE_BUSY_TIMEOUT_MS / 1000)
@@ -1888,6 +1985,20 @@ class DashboardDataProvider:
             "log_tail": self._tail_log(lines=log_lines) if include_log else [],
         }
 
+        readonly_live_positions: List[Dict[str, Any]] = []
+        if self._is_readonly_account(scoped_account):
+            readonly_live_positions = self._readonly_live_positions(scoped_account)
+            data["live_position_source"] = "EXCHANGE_READONLY"
+            data["live_position_error"] = self._readonly_position_cache_errors.get(scoped_account)
+            data["summary"]["open_positions"] = len(readonly_live_positions)
+            data["summary"]["open_symbols"] = len(
+                {str(row.get("symbol") or "").strip() for row in readonly_live_positions if row.get("symbol")}
+            )
+            if data["live_position_error"]:
+                data["summary"]["recent_errors"] = 1
+            if include_details:
+                data["open_positions"] = [dict(row) for row in readonly_live_positions]
+
         if not os.path.exists(self.db_path):
             return data
 
@@ -1958,6 +2069,17 @@ class DashboardDataProvider:
                     data["summary"]["open_positions"] = int(summary_row["open_positions"] or 0)
                     data["summary"]["open_symbols"] = int(summary_row["open_symbols"] or 0)
                     data["summary"]["recent_errors"] = int(summary_row["recent_errors"] or 0)
+                if self._is_readonly_account(scoped_account):
+                    data["summary"]["open_positions"] = len(readonly_live_positions)
+                    data["summary"]["open_symbols"] = len(
+                        {
+                            str(row.get("symbol") or "").strip()
+                            for row in readonly_live_positions
+                            if row.get("symbol")
+                        }
+                    )
+                    if data.get("live_position_error"):
+                        data["summary"]["recent_errors"] = max(data["summary"]["recent_errors"], 1)
 
                 if include_details:
                     data["runs"] = self._query_rows(
@@ -1981,32 +2103,35 @@ class DashboardDataProvider:
                         ((scoped_account,) if scoped_account else ()),
                     )
 
-                    data["open_positions"] = self._query_rows(
-                        conn,
-                        """
-                        SELECT p.id, p.run_id, r.account_id AS _live_account_id,
-                               p.symbol, p.side, p.qty, p.entry_price,
-                               p.liq_price_latest, p.tp_price, p.sl_price,
-                               p.tp_order_id AS _tp_order_id,
-                               p.sl_order_id AS _sl_order_id,
-                               p.tp_client_order_id AS _tp_client_order_id,
-                               p.sl_client_order_id AS _sl_client_order_id,
-                               p.opened_at_utc, p.expire_at_utc, p.status, p.last_error
-                        FROM positions p
-                        LEFT JOIN runs r ON r.run_id = p.run_id
-                        WHERE p.status = 'OPEN'
-                          AND (? IS NULL OR r.account_id = ?)
-                        ORDER BY p.opened_at_utc DESC
-                        LIMIT 100
-                        """,
-                        (scoped_account, scoped_account),
-                    )
-                    if scoped_account:
+                    if self._is_readonly_account(scoped_account):
+                        data["open_positions"] = [dict(row) for row in readonly_live_positions]
+                    else:
+                        data["open_positions"] = self._query_rows(
+                            conn,
+                            """
+                            SELECT p.id, p.run_id, r.account_id AS _live_account_id,
+                                   p.symbol, p.side, p.qty, p.entry_price,
+                                   p.liq_price_latest, p.tp_price, p.sl_price,
+                                   p.tp_order_id AS _tp_order_id,
+                                   p.sl_order_id AS _sl_order_id,
+                                   p.tp_client_order_id AS _tp_client_order_id,
+                                   p.sl_client_order_id AS _sl_client_order_id,
+                                   p.opened_at_utc, p.expire_at_utc, p.status, p.last_error
+                            FROM positions p
+                            LEFT JOIN runs r ON r.run_id = p.run_id
+                            WHERE p.status = 'OPEN'
+                              AND (? IS NULL OR r.account_id = ?)
+                            ORDER BY p.opened_at_utc DESC
+                            LIMIT 100
+                            """,
+                            (scoped_account, scoped_account),
+                        )
+                    if scoped_account and not self._is_readonly_account(scoped_account):
                         self._enrich_open_positions_with_live_data(
                             data["open_positions"],
                             account_id=scoped_account,
                         )
-                    else:
+                    elif not scoped_account:
                         positions_by_account: Dict[str, List[Dict[str, Any]]] = {}
                         for position in data["open_positions"]:
                             position_account_id = str(
@@ -2212,6 +2337,22 @@ class DashboardDataProvider:
                         ),
                     }
 
+                for aid, row in by_account.items():
+                    if not self._is_readonly_account(aid):
+                        continue
+                    live_positions = self._readonly_live_positions(aid)
+                    row["open_positions"] = len(live_positions)
+                    row["open_symbols"] = len(
+                        {str(position.get("symbol") or "").strip() for position in live_positions if position.get("symbol")}
+                    )
+                    row["live_position_source"] = "EXCHANGE_READONLY"
+                    row["live_position_as_of_utc"] = (
+                        live_positions[0].get("live_data_as_of_utc") if live_positions else None
+                    )
+                    live_position_error = self._readonly_position_cache_errors.get(aid)
+                    if live_position_error:
+                        row["live_position_error"] = live_position_error
+
                 task_statuses = self._latest_task_statuses_for_accounts(
                     list(by_account.keys()),
                     conn=conn,
@@ -2228,7 +2369,7 @@ class DashboardDataProvider:
                         fetcher = self.trade_stats_fetchers.get(aid)
                         if fetcher is not None:
                             try:
-                                stats = fetcher.fetch_stats(account_id=aid, lookback_days=30)
+                                stats = fetcher.get_cached_stats(account_id=aid, lookback_days=30)
                                 if stats is not None:
                                     row["trade_stats"] = {
                                         "total_realized_pnl": stats.total_realized_pnl,
@@ -3415,6 +3556,8 @@ DASHBOARD_HTML = """<!doctype html>
     .status-badge.ok { border-color: #236944; color: #65dfa0; background: #10271e; }
     .status-badge.warn { border-color: #755822; color: #ffc86d; background: #271f10; }
     .status-badge.bad { border-color: #74383b; color: #ff8989; background: #291719; }
+    .status-badge.readonly { border-color: #694d77; color: #d7a0f0; background: #21162a; }
+    .readonly-protection-note { color: #d7a0f0; font-size: 10px; white-space: nowrap; }
     .error-cell { max-width: 320px; white-space: normal !important; color: #ff8989; line-height: 1.45; }
     .empty-row { padding: 24px 13px !important; color: #68899b; text-align: center !important; }
 
@@ -3664,7 +3807,7 @@ DASHBOARD_HTML = """<!doctype html>
       <header class="surface-head">
         <div class="surface-heading">
           <h2 class="surface-title" id="positionsHeading">当前持仓</h2>
-          <div class="surface-subtitle">行情、浮盈与止盈止损状态实时读取，不写入数据库</div>
+          <div class="surface-subtitle">策略仓位与 readonly 账户交易所仓位实时读取；只读仓位不写入数据库</div>
         </div>
         <span class="surface-count" id="positionsCount">0</span>
       </header>
@@ -4615,6 +4758,7 @@ DASHBOARD_HTML = """<!doctype html>
       renderRows(el.positionsBody, positions, function (p) {
         var errorText = String(p.last_error || "").trim();
         var liveAvailable = p.live_data_available === true;
+        var readonlyLive = p.readonly_live === true;
         var liveError = String(p.live_data_error || p.order_data_error || "").trim();
         var pnl = toNum(p.unrealized_pnl);
         var pnlPct = toNum(p.unrealized_pnl_pct);
@@ -4623,19 +4767,25 @@ DASHBOARD_HTML = """<!doctype html>
         var pnlSub = pnlPct === null ? "收益率 --" : "收益率 " + fmtSigned(pnlPct, 2) + "%";
         var stateHtml = errorText
           ? '<span class="status-badge bad">异常</span><div class="error-cell">' + escapeHtml(errorText) + "</div>"
-          : '<span class="status-badge ok">正常</span>';
+          : (readonlyLive
+            ? '<span class="status-badge readonly">只读实时</span>'
+            : '<span class="status-badge ok">正常</span>');
         if (liveError) {
           stateHtml += '<small class="live-unavailable">' + escapeHtml(liveError) + "</small>";
         } else if (liveAvailable) {
-          stateHtml += '<small class="live-sync">实时已同步</small>';
+          stateHtml += '<small class="live-sync">' + (readonlyLive ? "交易所实时" : "实时已同步") + "</small>";
         }
+        var sourceLabel = readonlyLive ? "交易所实时" : "#" + p.id;
+        var protectionHtml = readonlyLive
+          ? '<div class="readonly-protection-note">外部管理 / 未读取</div>'
+          : '<div class="exit-stack"><div class="exit-line"><span class="exit-key tp">TP</span><span class="exit-price">' + escapeHtml(fmtAdaptive(p.tp_price)) + '</span>' + liveOrderBadge(p.tp_order_status) + '</div><div class="exit-line"><span class="exit-key sl">SL</span><span class="exit-price">' + escapeHtml(fmtAdaptive(p.sl_price)) + '</span>' + liveOrderBadge(p.sl_order_status) + "</div></div>";
         return (
           "<tr>" +
-          '<td class="symbol-cell"><strong>' + escapeHtml(p.symbol) + '</strong><small>' + escapeHtml(sideLabel(p.side)) + ' · #' + escapeHtml(p.id) + "</small></td>" +
+          '<td class="symbol-cell"><strong>' + escapeHtml(p.symbol) + '</strong><small>' + escapeHtml(sideLabel(p.side)) + ' · ' + escapeHtml(sourceLabel) + "</small></td>" +
           '<td class="numeric">' + escapeHtml(fmtQuantity(p.qty)) + "</td>" +
           '<td class="numeric"><div class="position-stack"><strong class="position-primary">' + escapeHtml(fmtAdaptive(p.entry_price)) + '</strong><small class="position-secondary">标记 <strong>' + escapeHtml(liveAvailable ? fmtAdaptive(p.mark_price) : "--") + "</strong></small></div></td>" +
           '<td class="numeric live-pnl ' + pnlClass + '"><div class="position-stack"><strong class="position-primary">' + escapeHtml(pnlMain) + '</strong><small class="position-secondary">' + escapeHtml(pnlSub) + "</small></div></td>" +
-          '<td><div class="exit-stack"><div class="exit-line"><span class="exit-key tp">TP</span><span class="exit-price">' + escapeHtml(fmtAdaptive(p.tp_price)) + '</span>' + liveOrderBadge(p.tp_order_status) + '</div><div class="exit-line"><span class="exit-key sl">SL</span><span class="exit-price">' + escapeHtml(fmtAdaptive(p.sl_price)) + '</span>' + liveOrderBadge(p.sl_order_status) + "</div></div></td>" +
+          "<td>" + protectionHtml + "</td>" +
           '<td class="numeric">' + escapeHtml(fmtAxisTime(p.expire_at_utc)) + "</td>" +
           "<td>" + stateHtml + "</td>" +
           "</tr>"

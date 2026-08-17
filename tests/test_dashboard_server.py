@@ -2,6 +2,7 @@ import tempfile
 import unittest
 import sqlite3
 from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
 from typing import Dict
 from pathlib import Path
 from unittest.mock import Mock
@@ -155,6 +156,74 @@ class DashboardServerTest(unittest.TestCase):
         self.assertEqual(row["unrealized_pnl_pct"], -10.0)
         self.assertEqual(row["tp_order_status"], "NEW")
         self.assertEqual(row["sl_order_status"], "NEW")
+
+    def test_readonly_snapshot_shows_exchange_positions_without_strategy_rows(self) -> None:
+        live_client = Mock()
+        default_client = Mock()
+        default_client.get_position_risk.return_value = []
+        live_client.get_position_risk.return_value = [
+            {
+                "symbol": "BTCUSDT",
+                "positionAmt": "-0.25",
+                "positionSide": "BOTH",
+                "entryPrice": "65000",
+                "markPrice": "64000",
+                "unRealizedProfit": "250",
+                "liquidationPrice": "72000",
+                "isolatedMargin": "1000",
+                "notional": "16000",
+                "leverage": "16",
+            },
+            {
+                "symbol": "ETHUSDT",
+                "positionAmt": "0",
+                "positionSide": "BOTH",
+            },
+        ]
+
+        provider = DashboardDataProvider(
+            db_path=self.db_path,
+            log_file=self.log_file,
+            timezone_name="UTC",
+            entry_hour=7,
+            entry_minute=40,
+            account_modes={"readonly01": "readonly"},
+            overview_account_ids=["readonly01"],
+            live_position_clients={"readonly01": live_client, "default": default_client},
+        )
+
+        snapshot = provider.snapshot(
+            log_lines=0,
+            account_id="readonly01",
+            include_curves=False,
+            include_balance_curve=False,
+            include_trade_stats=False,
+        )
+
+        self.assertEqual(snapshot["summary"]["open_positions"], 1)
+        self.assertEqual(snapshot["summary"]["open_symbols"], 1)
+        self.assertEqual(snapshot["live_position_source"], "EXCHANGE_READONLY")
+        self.assertEqual(len(snapshot["open_positions"]), 1)
+        row = snapshot["open_positions"][0]
+        self.assertTrue(row["readonly_live"])
+        self.assertEqual(row["live_position_source"], "EXCHANGE_READONLY")
+        self.assertEqual(row["symbol"], "BTCUSDT")
+        self.assertEqual(row["side"], "SHORT")
+        self.assertAlmostEqual(row["qty"], 0.25)
+        self.assertEqual(row["entry_price"], 65000.0)
+        self.assertEqual(row["mark_price"], 64000.0)
+        self.assertEqual(row["unrealized_pnl"], 250.0)
+        self.assertIsNone(row["tp_price"])
+        self.assertIsNone(row["sl_price"])
+        self.assertEqual(live_client.get_position_risk.call_count, 1)
+        live_client.get_open_orders.assert_not_called()
+        default_client.get_position_risk.assert_not_called()
+
+        summary_row = provider.accounts_summary()["accounts"][0]
+        self.assertEqual(summary_row["account_id"], "readonly01")
+        self.assertEqual(summary_row["open_positions"], 1)
+        self.assertEqual(summary_row["open_symbols"], 1)
+        self.assertEqual(live_client.get_position_risk.call_count, 1)
 
     def test_snapshot_without_trade_stats_still_returns_curve_stats(self) -> None:
         now = datetime.now(timezone.utc).replace(microsecond=0)
@@ -350,6 +419,50 @@ class DashboardServerTest(unittest.TestCase):
         combined_sql = "\n".join(seen_sql)
         self.assertNotIn("SELECT DISTINCT account_id FROM wallet_snapshots", combined_sql)
         self.assertNotIn("MAX(id) AS max_id FROM wallet_snapshots GROUP BY account_id", combined_sql)
+
+    def test_accounts_summary_reads_cached_trade_stats_without_live_fetch(self) -> None:
+        class CachedFetcher:
+            def __init__(self) -> None:
+                self.cached_calls = 0
+
+            def get_cached_stats(self, *, account_id: str, lookback_days: int) -> SimpleNamespace:
+                self.cached_calls += 1
+                return SimpleNamespace(
+                    total_realized_pnl=1.0,
+                    total_trades=2,
+                    win_count=1,
+                    loss_count=1,
+                    win_rate_pct=50.0,
+                    gross_profit=2.0,
+                    gross_loss=1.0,
+                    profit_factor=2.0,
+                    avg_win=2.0,
+                    avg_loss=1.0,
+                    last_updated_utc="2026-08-15T00:00:00+00:00",
+                    net_realized_pnl=0.8,
+                    commission_usdt=-0.1,
+                    funding_fee_usdt=-0.1,
+                )
+
+            def fetch_stats(self, **kwargs):
+                raise AssertionError("homepage must not fetch Binance synchronously")
+
+        fetcher = CachedFetcher()
+        provider = DashboardDataProvider(
+            db_path=self.db_path,
+            log_file=self.log_file,
+            timezone_name="UTC",
+            entry_hour=7,
+            entry_minute=40,
+            overview_account_ids=["readonly01"],
+            account_modes={"readonly01": "readonly"},
+            trade_stats_fetchers={"readonly01": fetcher},
+        )
+
+        row = provider.accounts_summary()["accounts"][0]
+
+        self.assertEqual(row["trade_stats"]["total_trades"], 2)
+        self.assertEqual(fetcher.cached_calls, 1)
 
     def test_accounts_summary_includes_task_status_from_service_logs(self) -> None:
         self.store.create_run("2026-02-13", account_id="acc01")
@@ -1279,6 +1392,8 @@ class DashboardServerTest(unittest.TestCase):
         self.assertIn('class="summary-rail"', html)
         self.assertIn('class="surface risk-panel"', html)
         self.assertIn('class="surface section-block positions-panel"', html)
+        self.assertIn('class="status-badge readonly"', html)
+        self.assertIn("外部管理 / 未读取", html)
         self.assertIn('class="activity-tabs"', html)
         self.assertIn('class="diagnostics-panel"', html)
         self.assertIn("max-width: 1680px", html)

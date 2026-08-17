@@ -46,8 +46,78 @@ class DashboardRuntimeContext:
     portfolio_loss_cut_hour: int
     portfolio_loss_cut_minute: int
     refresh_sec: int
+    trade_stats_refresh_sec: int
     echarts_src: str
     provider: DashboardDataProvider
+
+
+class TradeStatsBackgroundRefresher:
+    """Refresh readonly trade statistics outside the dashboard request path."""
+
+    def __init__(
+        self,
+        fetchers: dict,
+        *,
+        refresh_interval_sec: int = 300,
+        lookback_days: int = 30,
+    ):
+        self.fetchers = {
+            str(account_id).strip(): fetcher
+            for account_id, fetcher in (fetchers or {}).items()
+            if str(account_id).strip() and fetcher is not None
+        }
+        self.refresh_interval_sec = max(60, int(refresh_interval_sec))
+        self.lookback_days = max(1, int(lookback_days))
+        self._stop_event = threading.Event()
+        self._thread: Optional[threading.Thread] = None
+
+    def start(self) -> None:
+        if not self.fetchers or (self._thread is not None and self._thread.is_alive()):
+            return
+        self._stop_event.clear()
+        self._thread = threading.Thread(
+            target=self._run,
+            name="bubble-buster-trade-stats-cache",
+            daemon=True,
+        )
+        self._thread.start()
+
+    def stop(self, timeout_sec: float = 10.0) -> None:
+        self._stop_event.set()
+        thread = self._thread
+        if thread is not None and thread.is_alive() and thread is not threading.current_thread():
+            thread.join(timeout=max(0.0, float(timeout_sec)))
+        self._thread = None
+
+    def _run(self) -> None:
+        next_refresh_at = {account_id: 0.0 for account_id in sorted(self.fetchers)}
+        while not self._stop_event.is_set():
+            did_refresh = False
+            now = time.monotonic()
+            for account_id in sorted(self.fetchers):
+                if self._stop_event.is_set():
+                    break
+                if now < next_refresh_at[account_id]:
+                    continue
+                fetcher = self.fetchers[account_id]
+                try:
+                    fetcher.refresh_stats(
+                        account_id=account_id,
+                        lookback_days=self.lookback_days,
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    logging.getLogger(__name__).warning(
+                        "Background trade stats refresh failed for account=%s: %s",
+                        account_id,
+                        exc,
+                    )
+                next_refresh_at[account_id] = time.monotonic() + self.refresh_interval_sec
+                did_refresh = True
+
+            if did_refresh:
+                self._stop_event.wait(0.1)
+            else:
+                self._stop_event.wait(1.0)
 
 
 class RuntimeFileLock:
@@ -117,6 +187,10 @@ def create_dashboard_context(config_path: str) -> DashboardRuntimeContext:
     portfolio_loss_cut_hour = int(runtime_cfg.get("portfolio_loss_cut_hour", 8)) % 24
     portfolio_loss_cut_minute = int(runtime_cfg.get("portfolio_loss_cut_minute", 0)) % 60
     refresh_sec = max(15, int(runtime_cfg.get("dashboard_refresh_sec", 15)))
+    trade_stats_refresh_sec = max(
+        60,
+        int(runtime_cfg.get("dashboard_trade_stats_refresh_sec", 300)),
+    )
     curve_points = max(100, int(runtime_cfg.get("dashboard_curve_points", 600)))
     balance_refresh_sec = max(5, int(runtime_cfg.get("manager_interval_sec", 60)))
     run_with_dashboard = runtime_cfg.get("run_service_with_dashboard", "true").strip().lower() in {
@@ -360,6 +434,7 @@ def create_dashboard_context(config_path: str) -> DashboardRuntimeContext:
         portfolio_loss_cut_hour=portfolio_loss_cut_hour,
         portfolio_loss_cut_minute=portfolio_loss_cut_minute,
         refresh_sec=refresh_sec,
+        trade_stats_refresh_sec=trade_stats_refresh_sec,
         echarts_src=echarts_src,
         provider=provider,
     )
@@ -546,6 +621,24 @@ def _shutdown_background_service(app: FastAPI) -> None:
         service_state["service"] = None
 
 
+def _start_trade_stats_background_refresh(app: FastAPI) -> None:
+    ctx: DashboardRuntimeContext = app.state.ctx
+    refresher = TradeStatsBackgroundRefresher(
+        ctx.provider.trade_stats_fetchers,
+        refresh_interval_sec=ctx.trade_stats_refresh_sec,
+        lookback_days=30,
+    )
+    refresher.start()
+    app.state.trade_stats_refresher = refresher
+
+
+def _shutdown_trade_stats_background_refresh(app: FastAPI) -> None:
+    refresher = getattr(app.state, "trade_stats_refresher", None)
+    if refresher is not None:
+        refresher.stop()
+    app.state.trade_stats_refresher = None
+
+
 def create_app(config_path: Optional[str] = None) -> FastAPI:
     app = FastAPI(title="Bubble Buster Dashboard", version="1.1.0")
     static_root = (Path(__file__).resolve().parent / "app_static").resolve()
@@ -568,10 +661,12 @@ def create_app(config_path: Optional[str] = None) -> FastAPI:
         app.state.config_path = path
         app.state.ctx = create_dashboard_context(path)
         _ensure_strategy_log_handler(app.state.ctx.log_file)
+        _start_trade_stats_background_refresh(app)
         _startup_background_service(app, path)
 
     @app.on_event("shutdown")
     def _shutdown() -> None:
+        _shutdown_trade_stats_background_refresh(app)
         _shutdown_background_service(app)
 
     @app.get("/", response_class=HTMLResponse)
