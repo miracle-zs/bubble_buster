@@ -343,6 +343,10 @@ serverchan_sendkey =
     assert account_runtimes["acc01"]["entry_minute"] == 40
     assert account_runtimes["acc02"]["entry_hour"] == 7
     assert account_runtimes["acc02"]["entry_minute"] == 45
+    assert (
+        account_runtimes["acc01"]["strategy"].client.rate_limit_coordinator
+        is account_runtimes["acc02"]["strategy"].client.rate_limit_coordinator
+    )
 
 
 def test_create_components_applies_per_account_hourly_exchange_take_profit_override(tmp_path) -> None:

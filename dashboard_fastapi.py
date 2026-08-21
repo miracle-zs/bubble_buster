@@ -25,6 +25,7 @@ from dashboard_server import (
     render_accounts_overview_html,
 )
 from infra.binance_futures_client import BinanceFuturesClient
+from infra.binance_rate_limit import get_shared_rate_limit_coordinator
 from infra.trade_stats_fetcher import TradeStatsFetcher
 
 try:
@@ -199,6 +200,10 @@ def create_dashboard_context(config_path: str) -> DashboardRuntimeContext:
         "yes",
         "on",
     }
+    rate_limit_coordinator = get_shared_rate_limit_coordinator(
+        runtime_cfg.get("binance_rate_limit_scope", "binance-futures-ip").strip()
+        or "binance-futures-ip"
+    )
     default_account_id = runtime_cfg.get("default_account_id", "default").strip() or "default"
     enabled_accounts_raw = account_cfg.get("enabled", fallback="") if account_cfg else ""
     enabled_accounts = [x.strip() for x in enabled_accounts_raw.split(",") if x.strip()]
@@ -261,6 +266,7 @@ def create_dashboard_context(config_path: str) -> DashboardRuntimeContext:
                 recv_window=binance_cfg.getint("recv_window", fallback=5000),
                 http_pool_maxsize=default_pool_size,
                 proxies=build_proxies(cfg),
+                rate_limit_coordinator=rate_limit_coordinator,
             )
             live_position_clients[default_account_id] = client
 
@@ -384,6 +390,7 @@ def create_dashboard_context(config_path: str) -> DashboardRuntimeContext:
                 else 5000,
                 http_pool_maxsize=32,
                 proxies=build_proxies(cfg),
+                rate_limit_coordinator=rate_limit_coordinator,
             )
             live_position_clients[aid] = readonly_client
             trade_stats_fetchers[aid] = TradeStatsFetcher(client=readonly_client, cache_ttl_sec=300)

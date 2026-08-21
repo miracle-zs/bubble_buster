@@ -13,6 +13,7 @@ from core.runtime_service import ServiceRuntimeConfig
 from core.state_store import StateStore
 from core.strategy_top10_short import Top10ShortStrategy
 from infra.binance_futures_client import BinanceFuturesClient
+from infra.binance_rate_limit import get_shared_rate_limit_coordinator
 from infra.notifier import ServerChanNotifier
 
 LOGGER = logging.getLogger(__name__)
@@ -108,6 +109,7 @@ def _build_single_account_components(
     runtime_cfg: MergedSection,
     notify_cfg: MergedSection,
     root_store: StateStore,
+    rate_limit_coordinator=None,
 ) -> Dict[str, object]:
     ranker_max_workers = max(1, strategy_cfg.getint("ranker_max_workers", fallback=24))
     default_pool_size = max(32, ranker_max_workers * 2)
@@ -123,6 +125,7 @@ def _build_single_account_components(
         recv_window=binance_cfg.getint("recv_window", fallback=5000),
         http_pool_maxsize=binance_cfg.getint("http_pool_maxsize", fallback=default_pool_size),
         proxies=proxies,
+        rate_limit_coordinator=rate_limit_coordinator,
     )
 
     scoped_store = root_store.scoped(account_id)
@@ -323,6 +326,10 @@ def create_components(
     default_account_id = runtime_global.get("default_account_id", fallback="default").strip() or "default"
     root_store = StateStore(db_path=db_path, schema_path=schema_path, account_id=default_account_id)
     root_store.init_schema()
+    rate_limit_coordinator = get_shared_rate_limit_coordinator(
+        runtime_global.get("binance_rate_limit_scope", "binance-futures-ip").strip()
+        or "binance-futures-ip"
+    )
 
     account_runtimes: Dict[str, Dict[str, object]] = {}
     if cfg.has_section("accounts"):
@@ -337,6 +344,7 @@ def create_components(
                     runtime_cfg=_merged_section(cfg, account_id, "runtime"),
                     notify_cfg=_merged_section(cfg, account_id, "notify"),
                     root_store=root_store,
+                    rate_limit_coordinator=rate_limit_coordinator,
                 )
             except Exception as exc:  # noqa: BLE001
                 LOGGER.error("Skip account due to invalid config account=%s error=%s", account_id, exc)
@@ -354,6 +362,7 @@ def create_components(
             runtime_cfg=_merged_section(cfg, account_id, "runtime"),
             notify_cfg=_merged_section(cfg, account_id, "notify"),
             root_store=root_store,
+            rate_limit_coordinator=rate_limit_coordinator,
         )
 
     selected_account_id = default_account_id if default_account_id in account_runtimes else next(iter(account_runtimes))

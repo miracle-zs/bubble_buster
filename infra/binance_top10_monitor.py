@@ -12,6 +12,11 @@ from typing import Any, Dict, List, Optional
 import requests
 from requests.adapters import HTTPAdapter
 
+from infra.binance_rate_limit import (
+    BinanceRateLimitCoordinator,
+    BinanceRateLimitTriggered,
+)
+
 # Configure logging for standalone usage.
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
@@ -125,6 +130,40 @@ def create_session(proxies: Optional[Dict[str, str]] = None, pool_maxsize: int =
     return session
 
 
+def _raise_if_rate_limited(
+    response: Any,
+    rate_limit_coordinator: Optional[BinanceRateLimitCoordinator],
+) -> None:
+    if rate_limit_coordinator is None:
+        return
+
+    code = None
+    try:
+        payload = response.json()
+        if isinstance(payload, dict):
+            code = payload.get("code")
+    except (TypeError, ValueError):
+        payload = None
+
+    try:
+        numeric_code = int(code) if code is not None else None
+    except (TypeError, ValueError):
+        numeric_code = None
+    if response.status_code not in {418, 429} and numeric_code not in {-1003, 429}:
+        return
+
+    raw_retry_after = response.headers.get("Retry-After")
+    try:
+        retry_after_sec = float(raw_retry_after)
+    except (TypeError, ValueError):
+        retry_after_sec = None
+    effective_delay = rate_limit_coordinator.trip(
+        retry_after_sec=retry_after_sec,
+        http_status=response.status_code,
+    )
+    raise BinanceRateLimitTriggered(response.status_code, effective_delay)
+
+
 # Create a shared session for standalone script execution.
 SESSION = create_session(PROXIES)
 
@@ -145,6 +184,8 @@ def retry(
             while _retries > 1:
                 try:
                     return func(*args, **kwargs)
+                except BinanceRateLimitTriggered:
+                    raise
                 except requests.exceptions.RequestException as e:
                     _retries -= 1
                     logging.warning(
@@ -161,6 +202,8 @@ def retry(
 
             try:
                 return func(*args, **kwargs)
+            except BinanceRateLimitTriggered:
+                raise
             except requests.exceptions.RequestException as e:
                 logging.error("Final attempt for %s failed with args %s: %s", func.__name__, args, e)
                 if raise_on_failure:
@@ -183,12 +226,16 @@ def get_exchange_info(
     base_url: str = BINANCE_API_BASE,
     rate_limiter: Optional[ApiWeightLimiter] = None,
     request_weight: int = 1,
+    rate_limit_coordinator: Optional[BinanceRateLimitCoordinator] = None,
 ) -> List[str]:
     """Fetches all USDT perpetual futures symbols."""
     if rate_limiter:
         rate_limiter.acquire(weight=request_weight)
+    if rate_limit_coordinator:
+        rate_limit_coordinator.wait_for_available()
     endpoint = f"{base_url}/fapi/v1/exchangeInfo"
     response = (session or SESSION).get(endpoint, timeout=10)
+    _raise_if_rate_limited(response, rate_limit_coordinator)
     response.raise_for_status()
     data = response.json()
     symbols = [
@@ -205,12 +252,16 @@ def get_24hr_ticker_data(
     base_url: str = BINANCE_API_BASE,
     rate_limiter: Optional[ApiWeightLimiter] = None,
     request_weight: int = 40,
+    rate_limit_coordinator: Optional[BinanceRateLimitCoordinator] = None,
 ) -> List[Dict[str, Any]]:
     """Fetches 24hr ticker data for all futures symbols."""
     if rate_limiter:
         rate_limiter.acquire(weight=request_weight)
+    if rate_limit_coordinator:
+        rate_limit_coordinator.wait_for_available()
     endpoint = f"{base_url}/fapi/v1/ticker/24hr"
     response = (session or SESSION).get(endpoint, timeout=10)
+    _raise_if_rate_limited(response, rate_limit_coordinator)
     response.raise_for_status()
     return response.json()
 
@@ -226,10 +277,13 @@ def get_klines_data(
     base_url: str = BINANCE_API_BASE,
     rate_limiter: Optional[ApiWeightLimiter] = None,
     request_weight: int = 1,
+    rate_limit_coordinator: Optional[BinanceRateLimitCoordinator] = None,
 ) -> List[List[Any]]:
     """Fetches klines data for a given symbol and interval."""
     if rate_limiter:
         rate_limiter.acquire(weight=request_weight)
+    if rate_limit_coordinator:
+        rate_limit_coordinator.wait_for_available()
     endpoint = f"{base_url}/fapi/v1/klines"
     params = {
         'symbol': symbol,
@@ -242,6 +296,7 @@ def get_klines_data(
         params['limit'] = int(limit)
 
     response = (session or SESSION).get(endpoint, params=params, timeout=10)
+    _raise_if_rate_limited(response, rate_limit_coordinator)
     response.raise_for_status()
     return response.json()
 
@@ -259,6 +314,7 @@ def get_open_price_at_midnight(
     session: Optional[requests.Session] = None,
     base_url: str = BINANCE_API_BASE,
     rate_limiter: Optional[ApiWeightLimiter] = None,
+    rate_limit_coordinator: Optional[BinanceRateLimitCoordinator] = None,
 ) -> Optional[float]:
     """Fetch the exact UTC-midnight 1h candle open, without forward fallback."""
     end_time = midnight_utc_timestamp + (60 * 60 * 1000) - 1
@@ -271,6 +327,7 @@ def get_open_price_at_midnight(
         session=session,
         base_url=base_url,
         rate_limiter=rate_limiter,
+        rate_limit_coordinator=rate_limit_coordinator,
     )
 
     for row in klines or []:
@@ -302,6 +359,7 @@ def build_top_gainers(
     max_workers: int = 24,
     weight_limit_per_minute: int = 1000,
     min_request_interval_ms: int = 20,
+    rate_limit_coordinator: Optional[BinanceRateLimitCoordinator] = None,
 ) -> List[Dict[str, float]]:
     """Builds top gainers ranked by UTC-midnight-based percentage change."""
     started_at = time.perf_counter()
@@ -325,6 +383,7 @@ def build_top_gainers(
         base_url=base_url,
         rate_limiter=weight_limiter,
         request_weight=1,
+        rate_limit_coordinator=rate_limit_coordinator,
     )
     if not symbols:
         raise MarketDataUnavailableError("exchange info unavailable or empty")
@@ -340,6 +399,7 @@ def build_top_gainers(
         base_url=base_url,
         rate_limiter=weight_limiter,
         request_weight=40,
+        rate_limit_coordinator=rate_limit_coordinator,
     )
     if not ticker_data:
         raise MarketDataUnavailableError("24h ticker data unavailable or empty")
@@ -407,6 +467,7 @@ def build_top_gainers(
                     session=session,
                     base_url=base_url,
                     rate_limiter=weight_limiter,
+                    rate_limit_coordinator=rate_limit_coordinator,
                 )
             except Exception as exc:  # noqa: BLE001
                 logging.warning("Failed to load midnight open for %s: %s", symbol, exc)
@@ -435,6 +496,7 @@ def build_top_gainers(
                     session,
                     base_url,
                     weight_limiter,
+                    rate_limit_coordinator,
                 ): str(item['symbol'])
                 for item in candidates
             }

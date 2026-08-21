@@ -1,6 +1,6 @@
 import importlib.util
 import unittest
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 if importlib.util.find_spec("requests") is None:
     raise unittest.SkipTest("requests is not installed")
@@ -12,9 +12,27 @@ from infra.binance_top10_monitor import (
     get_open_price_at_midnight,
     MarketDataUnavailableError,
 )
+from infra.binance_rate_limit import BinanceRateLimitCoordinator, BinanceRateLimitTriggered
 
 
 class MonitorMathTest(unittest.TestCase):
+    def test_market_data_rate_limit_trips_coordinator_without_retry(self) -> None:
+        session = MagicMock()
+        response = MagicMock()
+        response.status_code = 429
+        response.headers = {"Retry-After": "12"}
+        response.json.return_value = {"code": -1003, "msg": "Too many requests"}
+        session.get.return_value = response
+        coordinator = BinanceRateLimitCoordinator()
+
+        with self.assertRaises(BinanceRateLimitTriggered):
+            from infra.binance_top10_monitor import get_24hr_ticker_data
+
+            get_24hr_ticker_data(session=session, rate_limit_coordinator=coordinator)
+
+        self.assertEqual(session.get.call_count, 1)
+        self.assertTrue(coordinator.is_blocked())
+
     def test_daily_change(self) -> None:
         self.assertAlmostEqual(calculate_daily_percentage_change(110, 100), 10.0)
         self.assertAlmostEqual(calculate_daily_percentage_change(90, 100), -10.0)

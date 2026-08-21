@@ -10,6 +10,8 @@ from urllib.parse import urlencode
 import requests
 from requests.adapters import HTTPAdapter
 
+from infra.binance_rate_limit import BinanceRateLimitCoordinator
+
 LOGGER = logging.getLogger(__name__)
 
 
@@ -19,6 +21,20 @@ class BinanceAPIError(Exception):
         self.message = message
         self.http_status = http_status
         super().__init__(f"Binance API Error {code}: {message}")
+
+
+class BinanceRateLimitError(BinanceAPIError):
+    """A Binance request was rejected by the shared REST rate limiter."""
+
+    def __init__(
+        self,
+        code: Any,
+        message: str,
+        http_status: Optional[int],
+        retry_after_sec: float,
+    ):
+        self.retry_after_sec = max(0.0, float(retry_after_sec))
+        super().__init__(code=code, message=message, http_status=http_status)
 
 
 class OrderStateUnknownError(BinanceAPIError):
@@ -117,6 +133,7 @@ class BinanceFuturesClient:
         proxies: Optional[Dict[str, str]] = None,
         order_reconcile_attempts: int = 5,
         order_reconcile_delay_sec: float = 0.2,
+        rate_limit_coordinator: Optional[BinanceRateLimitCoordinator] = None,
     ):
         if not api_key or not api_secret:
             raise ValueError("Binance API key/secret is required")
@@ -130,6 +147,7 @@ class BinanceFuturesClient:
         self.recv_window = recv_window
         self.order_reconcile_attempts = max(1, int(order_reconcile_attempts))
         self.order_reconcile_delay_sec = max(0.0, float(order_reconcile_delay_sec))
+        self.rate_limit_coordinator = rate_limit_coordinator or BinanceRateLimitCoordinator()
         self._server_time_offset_ms = 0
 
         self.session = requests.Session()
@@ -158,6 +176,21 @@ class BinanceFuturesClient:
             return int(err.code)
         except (TypeError, ValueError):
             return None
+
+    @classmethod
+    def is_rate_limit_error(cls, err: BinanceAPIError) -> bool:
+        code = cls._safe_error_code(err)
+        return err.http_status in {418, 429} or code in {-1003, 429}
+
+    @staticmethod
+    def _retry_after_seconds(response: Any) -> Optional[float]:
+        headers = getattr(response, "headers", None)
+        raw_value = headers.get("Retry-After") if headers is not None else None
+        try:
+            value = float(raw_value)
+        except (TypeError, ValueError):
+            return None
+        return value if value > 0 else None
 
     def _sync_server_time(self) -> int:
         started_ms = int(time.time() * 1000)
@@ -241,6 +274,7 @@ class BinanceFuturesClient:
         timestamp_sync_attempted = False
 
         for attempt in range(1, self.retry_count + 1):
+            self.rate_limit_coordinator.wait_for_available()
             payload = self._sign_params(base_payload) if signed else dict(base_payload)
             try:
                 if method in {"GET", "DELETE"}:
@@ -283,6 +317,17 @@ class BinanceFuturesClient:
                 pass
 
             err = BinanceAPIError(code=code, message=msg, http_status=response.status_code)
+            if self.is_rate_limit_error(err):
+                retry_after_sec = self.rate_limit_coordinator.trip(
+                    retry_after_sec=self._retry_after_seconds(response),
+                    http_status=response.status_code,
+                )
+                raise BinanceRateLimitError(
+                    code=err.code,
+                    message=err.message,
+                    http_status=err.http_status,
+                    retry_after_sec=retry_after_sec,
+                )
             if (
                 attempt < self.retry_count
                 and signed
@@ -549,6 +594,10 @@ class BinanceFuturesClient:
             and self._safe_error_code(error) != -4117
             and not self._is_retriable_error(error)
         ):
+            return None
+        if self.is_rate_limit_error(error):
+            # A 429/418 is a rejected request, not an unknown execution result.
+            # Reconciliation here would create another burst during cooldown.
             return None
         for attempt in range(1, self.order_reconcile_attempts + 1):
             try:

@@ -36,7 +36,7 @@ if importlib.util.find_spec("requests") is None:
 from core.entry_structure_protection import EntryStructureProtection
 from core.state_store import RunState
 from core.strategy_top10_short import EntryStructureWindow, RankEntry, ReadyEntry, Top10ShortStrategy
-from infra.binance_futures_client import BinanceAPIError
+from infra.binance_futures_client import BinanceAPIError, BinanceRateLimitError
 
 
 class StrategyRebalanceTest(unittest.TestCase):
@@ -1457,6 +1457,64 @@ class StrategyRebalanceTest(unittest.TestCase):
 
         self.assertEqual(result["status"], "SUCCESS")
         store.mark_position_open.assert_called_once_with(1001)
+
+    def test_entry_defers_initial_exit_setup_on_rate_limit(self) -> None:
+        client = MagicMock()
+        client.get_available_balance.return_value = 500.0
+        client.diagnose_order_qty.return_value = {"normalized_qty": 1.0}
+
+        store = MagicMock()
+        store.create_run.return_value = ("run-1", True)
+        store.list_open_symbols.return_value = set()
+        store.insert_position.return_value = 1001
+        store.list_open_positions.return_value = []
+
+        strategy = self._build_strategy(client, store, rebalance_enabled=False)
+        strategy.top_n = 1
+        strategy._load_short_position = MagicMock(
+            return_value={
+                "symbol": "AAAUSDT",
+                "entryPrice": "10",
+                "liquidationPrice": "12",
+                "positionAmt": "-1",
+            }
+        )
+        strategy._place_market_short_with_shrink_retry = MagicMock(
+            return_value=(
+                {
+                    "orderId": 2001,
+                    "clientOrderId": "ent-aaa-1",
+                    "status": "FILLED",
+                    "origQty": "1",
+                    "side": "SELL",
+                    "type": "MARKET",
+                    "symbol": "AAAUSDT",
+                },
+                0,
+            )
+        )
+        strategy._place_exit_orders = MagicMock(
+            side_effect=BinanceRateLimitError(
+                code=-1003,
+                message="Too many requests",
+                http_status=429,
+                retry_after_sec=60.0,
+            )
+        )
+        strategy._force_close_position = MagicMock()
+
+        result = strategy.run_entry(
+            trade_day_utc="2026-03-01-test-rate-limit-exit-setup",
+            shared_top_gainers=[
+                {"symbol": "AAAUSDT", "change": "15", "current_price": "10", "volume": "100"},
+            ],
+        )
+
+        self.assertEqual(result["status"], "SUCCESS")
+        self.assertEqual(result["exit_setup_deferred"], 1)
+        self.assertEqual(result["exit_setup_failed"], 0)
+        strategy._force_close_position.assert_not_called()
+        store.mark_position_open.assert_not_called()
 
     def test_entry_places_initial_exit_orders_before_waiting_for_later_bearish_symbols(self) -> None:
         client = MagicMock()

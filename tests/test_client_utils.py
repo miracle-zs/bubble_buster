@@ -9,7 +9,9 @@ if importlib.util.find_spec("requests") is None:
 
 from infra.binance_futures_client import (
     BinanceAPIError,
+    BinanceRateLimitError,
     BinanceFuturesClient,
+    BinanceRateLimitCoordinator,
     OrderStateUnknownError,
     SymbolRules,
     ceil_to_step,
@@ -18,6 +20,36 @@ from infra.binance_futures_client import (
 
 
 class ClientUtilsTest(unittest.TestCase):
+    def test_rate_limit_does_not_retry_immediately_and_records_retry_after(self) -> None:
+        coordinator = BinanceRateLimitCoordinator(fallback_retry_after_sec=60.0)
+        client = BinanceFuturesClient(
+            api_key="k",
+            api_secret="s",
+            retry_count=3,
+            rate_limit_coordinator=coordinator,
+        )
+        response = MagicMock()
+        response.status_code = 429
+        response.text = '{"code": -1003, "msg": "Too many requests"}'
+        response.headers = {"Retry-After": "17"}
+        response.json.return_value = {"code": -1003, "msg": "Too many requests"}
+        client.session.request = MagicMock(return_value=response)
+
+        with self.assertRaises(BinanceRateLimitError) as caught:
+            client._request("GET", "/fapi/v2/positionRisk", signed=True)
+
+        self.assertEqual(client.session.request.call_count, 1)
+        self.assertEqual(caught.exception.retry_after_sec, 17.0)
+        self.assertTrue(coordinator.is_blocked())
+
+    def test_clients_can_share_one_ip_rate_limit_coordinator(self) -> None:
+        coordinator = BinanceRateLimitCoordinator()
+        first = BinanceFuturesClient(api_key="k1", api_secret="s1", rate_limit_coordinator=coordinator)
+        second = BinanceFuturesClient(api_key="k2", api_secret="s2", rate_limit_coordinator=coordinator)
+
+        self.assertIs(first.rate_limit_coordinator, coordinator)
+        self.assertIs(second.rate_limit_coordinator, coordinator)
+
     def test_entry_prewarm_warms_signed_path_rules_leverage_and_qty(self) -> None:
         client = BinanceFuturesClient(
             api_key="k",

@@ -18,7 +18,12 @@ from core.entry_structure_protection import (
 )
 from core.market_fill_reconciler import MarketFillReconciler
 from core.state_store import StateStore
-from infra.binance_futures_client import BinanceAPIError, BinanceFuturesClient, OrderStateUnknownError
+from infra.binance_futures_client import (
+    BinanceAPIError,
+    BinanceFuturesClient,
+    BinanceRateLimitError,
+    OrderStateUnknownError,
+)
 from infra.binance_top10_monitor import build_top_gainers
 from infra.notifier import (
     ServerChanNotifier,
@@ -352,11 +357,15 @@ class Top10ShortStrategy:
             opened_count = self.store.count_run_opened_positions(run_id)
         self._entry_wait_interrupted = False
         entry_failed_count = 0
+        entry_deferred_count = 0
         exit_setup_failed_count = 0
+        exit_setup_deferred_count = 0
         skipped_symbols: List[str] = []
         opened_symbols: List[str] = []
         entry_failure_details: List[str] = []
+        entry_deferred_details: List[str] = []
         exit_setup_failure_details: List[str] = []
+        exit_setup_deferred_details: List[str] = []
         risk_off_details: List[str] = []
         shrink_retry_details: List[str] = []
         preclose_audit_pending: List[Dict[str, Any]] = []
@@ -384,6 +393,7 @@ class Top10ShortStrategy:
                     max_workers=self.ranker_max_workers,
                     weight_limit_per_minute=self.ranker_weight_limit_per_minute,
                     min_request_interval_ms=self.ranker_min_request_interval_ms,
+                    rate_limit_coordinator=getattr(self.client, "rate_limit_coordinator", None),
                 )
             else:
                 top_gainers = shared_top_gainers
@@ -811,6 +821,20 @@ class Top10ShortStrategy:
                             )
                         self.store.mark_position_open(position_id)
                     except Exception as exc:  # noqa: BLE001
+                        if self._is_rate_limit_error(exc):
+                            exit_setup_deferred_count += 1
+                            exit_setup_deferred_details.append(f"{plan.symbol}: {exc}")
+                            self.store.set_position_error(
+                                position_id,
+                                f"exit_setup_deferred_rate_limit: {exc}",
+                            )
+                            LOGGER.warning(
+                                "Exit setup deferred by Binance rate limit: account=%s position_id=%s symbol=%s",
+                                self.account_id,
+                                position_id,
+                                plan.symbol,
+                            )
+                            continue
                         exit_setup_failed_count += 1
                         exit_setup_failure_details.append(f"{plan.symbol}: {exc}")
                         LOGGER.exception("Failed to place exit orders for %s: %s", plan.symbol, exc)
@@ -829,6 +853,20 @@ class Top10ShortStrategy:
                         continue
 
                 except Exception as exc:  # noqa: BLE001
+                    if self._is_rate_limit_error(exc) and position_id is not None:
+                        entry_deferred_count += 1
+                        entry_deferred_details.append(f"{entry.symbol}: {exc}")
+                        self.store.set_position_error(
+                            position_id,
+                            f"entry_deferred_rate_limit: {exc}",
+                        )
+                        LOGGER.warning(
+                            "Entry deferred by Binance rate limit: account=%s position_id=%s symbol=%s",
+                            self.account_id,
+                            position_id,
+                            entry.symbol,
+                        )
+                        continue
                     if position_id is not None:
                         try:
                             current = self.store.get_position(position_id)
@@ -894,15 +932,19 @@ class Top10ShortStrategy:
                     "status": "INTERRUPTED",
                     "run_id": run_id,
                     "opened": opened_count,
-                    "failed": entry_failed_count + exit_setup_failed_count,
-                    "entry_failed": entry_failed_count,
-                    "exit_setup_failed": exit_setup_failed_count,
-                }
+                "failed": entry_failed_count + exit_setup_failed_count,
+                "entry_failed": entry_failed_count,
+                "entry_deferred": entry_deferred_count,
+                "exit_setup_failed": exit_setup_failed_count,
+                "exit_setup_deferred": exit_setup_deferred_count,
+            }
 
             failed_count = entry_failed_count + exit_setup_failed_count
             summary = (
                 f"run_id={run_id}, opened={opened_count}, failed={failed_count}, "
-                f"entry_failed={entry_failed_count}, exit_setup_failed={exit_setup_failed_count}, "
+                f"entry_failed={entry_failed_count}, entry_deferred={entry_deferred_count}, "
+                f"exit_setup_failed={exit_setup_failed_count}, "
+                f"exit_setup_deferred={exit_setup_deferred_count}, "
                 f"skipped_existing={len(skipped_symbols)}, failed_notional={failed_notional:.4f}, "
                 f"fee_buffer_pct={self.entry_fee_buffer_pct:.2f}, shrink_retry_success={len(shrink_retry_details)}, "
                 f"entry_target_mode={entry_target_mode}, entry_target_notional={target_notional:.4f}, "
@@ -932,6 +974,10 @@ class Top10ShortStrategy:
                     exit_setup_failed_count=exit_setup_failed_count,
                     available_balance=available_balance,
                     effective_balance=effective_balance,
+                    entry_deferred_count=entry_deferred_count,
+                    entry_deferred_details=entry_deferred_details,
+                    exit_setup_deferred_count=exit_setup_deferred_count,
+                    exit_setup_deferred_details=exit_setup_deferred_details,
                 ),
             )
             return {
@@ -940,11 +986,15 @@ class Top10ShortStrategy:
                 "opened": opened_count,
                 "failed": failed_count,
                 "entry_failed": entry_failed_count,
+                "entry_deferred": entry_deferred_count,
                 "exit_setup_failed": exit_setup_failed_count,
+                "exit_setup_deferred": exit_setup_deferred_count,
                 "skipped": len(skipped_symbols),
                 "skipped_symbols": skipped_symbols,
                 "entry_failed_symbols": self._extract_symbol_prefixes(entry_failure_details),
+                "entry_deferred_symbols": self._extract_symbol_prefixes(entry_deferred_details),
                 "exit_setup_failed_symbols": self._extract_symbol_prefixes(exit_setup_failure_details),
+                "exit_setup_deferred_symbols": self._extract_symbol_prefixes(exit_setup_deferred_details),
                 "rebalance_pre": pre_rebalance_summary,
                 "rebalance_post": post_rebalance_summary,
             }
@@ -969,10 +1019,14 @@ class Top10ShortStrategy:
                 "opened": opened_count,
                 "failed": entry_failed_count + exit_setup_failed_count,
                 "entry_failed": entry_failed_count,
+                "entry_deferred": entry_deferred_count,
                 "exit_setup_failed": exit_setup_failed_count,
+                "exit_setup_deferred": exit_setup_deferred_count,
                 "skipped_symbols": [],
                 "entry_failed_symbols": self._extract_symbol_prefixes(entry_failure_details),
+                "entry_deferred_symbols": self._extract_symbol_prefixes(entry_deferred_details),
                 "exit_setup_failed_symbols": self._extract_symbol_prefixes(exit_setup_failure_details),
+                "exit_setup_deferred_symbols": self._extract_symbol_prefixes(exit_setup_deferred_details),
             }
 
     @staticmethod
@@ -2533,6 +2587,16 @@ class Top10ShortStrategy:
                 self.store.clear_position_error(position_id)
                 summary["recovered"] = int(summary["recovered"]) + 1
             except Exception as exc:  # noqa: BLE001
+                if self._is_rate_limit_error(exc):
+                    summary["deferred"] = int(summary["deferred"]) + 1
+                    self.store.set_position_error(position_id, f"pending_entry_rate_limit: {exc}")
+                    LOGGER.warning(
+                        "Pending entry recovery deferred by Binance rate limit: account=%s position_id=%s symbol=%s",
+                        self.account_id,
+                        position_id,
+                        symbol,
+                    )
+                    continue
                 summary["errors"] = int(summary["errors"]) + 1
                 self.store.set_position_error(position_id, f"pending_entry_recovery: {exc}")
                 LOGGER.exception(
@@ -2594,6 +2658,16 @@ class Top10ShortStrategy:
                 self.store.clear_position_error(position_id)
                 summary["recovered"] = int(summary["recovered"]) + 1
             except Exception as exc:  # noqa: BLE001
+                if self._is_rate_limit_error(exc):
+                    summary["deferred"] = int(summary["deferred"]) + 1
+                    self.store.set_position_error(position_id, f"pending_exit_setup_rate_limit: {exc}")
+                    LOGGER.warning(
+                        "Pending exit setup recovery deferred by Binance rate limit: account=%s position_id=%s symbol=%s",
+                        self.account_id,
+                        position_id,
+                        symbol,
+                    )
+                    continue
                 summary["errors"] = int(summary["errors"]) + 1
                 self.store.set_position_error(position_id, f"pending_exit_recovery: {exc}")
                 LOGGER.exception(
@@ -3389,6 +3463,10 @@ class Top10ShortStrategy:
         exit_setup_failed_count: int,
         available_balance: float,
         effective_balance: float,
+        entry_deferred_count: int = 0,
+        entry_deferred_details: Optional[List[str]] = None,
+        exit_setup_deferred_count: int = 0,
+        exit_setup_deferred_details: Optional[List[str]] = None,
     ) -> str:
         summary_rows: List[Tuple[object, object]] = [
             ("run_id", f"`{run_id}`"),
@@ -3400,7 +3478,9 @@ class Top10ShortStrategy:
             ("开仓成功数", opened_count),
             ("失败总数", failed_count),
             ("初始开仓失败", entry_failed_count),
+            ("初始开仓限流暂挂", entry_deferred_count),
             ("止盈止损挂单失败", exit_setup_failed_count),
+            ("止盈止损挂单限流暂挂", exit_setup_deferred_count),
             ("缩量重试成功", len(shrink_retry_details)),
             ("跳过(已有仓位)", len(skipped_symbols)),
             ("失败未用名义资金", f"{failed_notional:.4f} USDT"),
@@ -3439,6 +3519,14 @@ class Top10ShortStrategy:
         if entry_failed_block:
             lines.extend(["", entry_failed_block])
 
+        entry_deferred_block = format_markdown_list_section(
+            "初始开仓限流暂挂明细",
+            entry_deferred_details or [],
+            max_items=15,
+        )
+        if entry_deferred_block:
+            lines.extend(["", entry_deferred_block])
+
         exit_failed_block = format_markdown_list_section(
             "止盈止损挂单失败明细",
             exit_setup_failure_details,
@@ -3446,6 +3534,14 @@ class Top10ShortStrategy:
         )
         if exit_failed_block:
             lines.extend(["", exit_failed_block])
+
+        exit_deferred_block = format_markdown_list_section(
+            "止盈止损挂单限流暂挂明细",
+            exit_setup_deferred_details or [],
+            max_items=15,
+        )
+        if exit_deferred_block:
+            lines.extend(["", exit_deferred_block])
 
         risk_off_block = format_markdown_list_section(
             "自动风险平仓明细",
@@ -3663,6 +3759,13 @@ class Top10ShortStrategy:
     def _is_cooling_off_error(cls, exc: BinanceAPIError) -> bool:
         code = cls._safe_int(getattr(exc, "code", None))
         return code in cls.COOLING_OFF_ERROR_CODES
+
+    @staticmethod
+    def _is_rate_limit_error(exc: BaseException) -> bool:
+        return isinstance(exc, BinanceRateLimitError) or (
+            isinstance(exc, BinanceAPIError)
+            and BinanceFuturesClient.is_rate_limit_error(exc)
+        )
 
     @staticmethod
     def _describe_cooling_off_context(client_id_tag: str) -> str:

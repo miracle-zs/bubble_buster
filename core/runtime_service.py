@@ -517,6 +517,7 @@ class StrategyRuntimeService:
                 max_workers=max(1, max_workers),
                 weight_limit_per_minute=max(100, int(weight_limit_per_minute)),
                 min_request_interval_ms=max(0, int(min_request_interval_ms)),
+                rate_limit_coordinator=getattr(reference_strategy.client, "rate_limit_coordinator", None),
             )
             LOGGER.info(
                 "service shared ranking built once for accounts=%s fetched=%s",

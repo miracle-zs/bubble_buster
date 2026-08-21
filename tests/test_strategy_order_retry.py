@@ -2,6 +2,7 @@ import importlib.util
 import sys
 import types
 import unittest
+from datetime import timedelta
 from unittest.mock import MagicMock, patch
 
 if importlib.util.find_spec("requests") is None:
@@ -32,7 +33,7 @@ if importlib.util.find_spec("requests") is None:
     sys.modules["requests"] = requests_stub
     sys.modules["requests.adapters"] = adapters_stub
 
-from infra.binance_futures_client import BinanceAPIError, OrderStateUnknownError
+from infra.binance_futures_client import BinanceAPIError, BinanceRateLimitError, OrderStateUnknownError
 from core.strategy_top10_short import Top10ShortStrategy
 
 
@@ -199,6 +200,36 @@ class StrategyOrderRetryTest(unittest.TestCase):
         self.assertEqual(summary["deferred"], 1)
         strategy.store.mark_position_open.assert_not_called()
         client.get_position_risk.assert_not_called()
+
+    def test_pending_exit_recovery_defers_rate_limit_without_risk_off(self) -> None:
+        client = MagicMock()
+        strategy = self._build_strategy(client)
+        now = strategy._utc_now_datetime()
+        strategy.store.list_pending_exit_setup_positions.return_value = [
+            {
+                "id": 7,
+                "symbol": "ABCUSDT",
+                "created_at_utc": (now - timedelta(seconds=60)).isoformat(),
+            }
+        ]
+        strategy._load_short_position = MagicMock(
+            return_value={"symbol": "ABCUSDT", "positionAmt": "-10", "entryPrice": "10"}
+        )
+        strategy._place_exit_orders = MagicMock(
+            side_effect=BinanceRateLimitError(
+                code=-1003,
+                message="Too many requests",
+                http_status=429,
+                retry_after_sec=60.0,
+            )
+        )
+        strategy._force_close_position = MagicMock()
+
+        summary = strategy.recover_pending_exit_setups()
+
+        self.assertEqual(summary["deferred"], 1)
+        self.assertEqual(summary["risk_off"], 0)
+        strategy._force_close_position.assert_not_called()
 
     def test_exit_refresh_places_replacement_before_canceling_old_orders(self) -> None:
         client = MagicMock()

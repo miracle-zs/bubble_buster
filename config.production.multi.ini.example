@@ -49,6 +49,8 @@ equity_recovery_reduce_ratio = 0.50
 
 [runtime]
 timezone = Asia/Shanghai
+# Accounts sharing one Binance source IP must use the same rate-limit scope.
+binance_rate_limit_scope = binance-futures-ip
 entry_hour = 7
 entry_minute = 40
 entry_misfire_grace_min = 20
