@@ -214,6 +214,7 @@ CRON_TZ=Asia/Shanghai
 - `portfolio_take_profit_reduce_ratio`：触发后每个实际持仓的止盈比例，取值 `0.05`～`1.0`；`0.50` 表示减仓 50%，`1.0` 表示全部清仓。触发时按 `positionRisk.markPrice` 为每个仓位生成持久化的 `reduceOnly + LIMIT + GTC` 订单计划，重试不会改变原限价或重复叠加数量。
 - 组合止盈限价单不会设置固定秒数超时，原有逐仓止盈止损单继续保留作为兜底；限价成交至持仓归零后才取消剩余退出单并标记仓位关闭。若限价单被取消、过期或拒单，会在后续巡检中按原触发价重挂；若原退出单先成交，则清理组合限价单。部分止盈只更新剩余数量，不主动撤销原保护单。
 - `portfolio_take_profit_hour` / `portfolio_take_profit_minute`：组合止盈的日切换时间，默认北京时间 `08:00`。每个周期从当日 08:00 持续到次日 08:00，全天监控，没有 07:30～12:00 等触发禁区；每周期最多触发一次，平仓完成和失败重试状态持久化在 `locks` 表（`portfolio_take_profit_v2`）。触发后不会锁定本周期后续策略入场；新入场批次开始前会清理已失效仓位遗留的组合限价单，避免旧 `reduceOnly` 单误伤新仓。
+- 组合止盈与再平衡的实际交互、目标单仓公式、后触发新仓口径及 acc01 的 50% 减仓示例，见 [`docs/strategy-understanding-20260821.md`](docs/strategy-understanding-20260821.md)。
 - `entry_initial_delay_sec`：账户 entry 启动前的额外等待秒数。
 - `entry_symbol_interval_sec`：账户 entry 每个 symbol 之间的额外等待秒数。
 - 入场开始前会预热 Binance REST 会话、服务器时间、交易规则、逐币杠杆和数量诊断；整点已收盘的候选币会通过 HTTP 连接池并发读取 1h K 线。
