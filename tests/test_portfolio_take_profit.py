@@ -121,6 +121,67 @@ class PortfolioTakeProfitTest(unittest.TestCase):
         notifier.send.assert_called_once()
         self.assertIn("组合止盈", notifier.send.call_args.args[0])
 
+    def test_low_price_portfolio_limit_uses_fixed_point_price_on_new_and_legacy_retry(self) -> None:
+        position_id = self._insert_short("NEIROUSDT", qty=498977.0)
+        self.store.add_wallet_snapshot("2026-07-28T00:00:00+00:00", 100.0)
+        risk = {
+            "symbol": "NEIROUSDT",
+            "positionAmt": "-498977",
+            "positionSide": "BOTH",
+            "markPrice": "0.00008598",
+        }
+        client = MagicMock()
+        client.get_position_risk.return_value = [risk]
+        client.format_trigger_price.side_effect = (
+            lambda _symbol, _price, round_up=False: "0.00008598"
+        )
+        client.format_order_qty.side_effect = lambda _symbol, qty: str(qty)
+        client.create_order.side_effect = RuntimeError("temporary submit failure")
+        manager = self._manager(client)
+        now_local = datetime(2026, 7, 28, 9, 0, tzinfo=ZoneInfo("Asia/Shanghai"))
+
+        first = manager.run_portfolio_take_profit(
+            current_equity_usdt=109.0,
+            now_local=now_local,
+            profit_pct=9.0,
+        )
+        self.assertEqual(first["errors"], 1)
+        state = self.store.get_lock_state(PositionManager.PORTFOLIO_TAKE_PROFIT_LOCK_NAME)
+        assert state is not None
+        self.assertEqual(
+            state["portfolio_limit_plan"][0]["limit_price"],
+            "0.00008598",
+        )
+
+        # Simulate a plan persisted by the buggy version before the retry.
+        state["portfolio_limit_plan"][0]["limit_price"] = 8.598e-05
+        self.store.set_lock_state(PositionManager.PORTFOLIO_TAKE_PROFIT_LOCK_NAME, state)
+        client.create_order.side_effect = None
+        client.create_order.return_value = {
+            "orderId": 701,
+            "clientOrderId": "pftlim-neiro",
+            "type": "LIMIT",
+            "status": "FILLED",
+            "executedQty": "498977",
+            "side": "BUY",
+        }
+
+        retry = manager.run_portfolio_take_profit(
+            current_equity_usdt=109.0,
+            now_local=now_local,
+            profit_pct=9.0,
+        )
+
+        self.assertTrue(retry["close_complete"])
+        self.assertEqual(client.create_order.call_args.kwargs["price"], "0.00008598")
+        with self.store._connect() as conn:  # pylint: disable=protected-access
+            row = conn.execute(
+                "SELECT status, close_reason FROM positions WHERE id = ?",
+                (position_id,),
+            ).fetchone()
+        self.assertEqual(row["status"], "CLOSED_PORTFOLIO_TAKE_PROFIT")
+        self.assertEqual(row["close_reason"], "PORTFOLIO_EQUITY_TAKE_PROFIT")
+
     def test_full_take_profit_limit_waits_without_timeout_and_cleans_up_after_fill(self) -> None:
         position_id = self._insert_short("BTCUSDT")
         self.store.add_wallet_snapshot("2026-07-28T00:00:00+00:00", 100.0)

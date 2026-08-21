@@ -1040,7 +1040,11 @@ class PositionManager:
                     ),
                     "close_side": close_side,
                     "use_reduce_only": use_reduce_only,
-                    "limit_price": normalized_price,
+                    # Keep the exchange client's fixed-point text. Converting
+                    # this to float makes small prices serialize as scientific
+                    # notation (for example, ``8.598e-05``), which Binance
+                    # rejects for LIMIT orders.
+                    "limit_price": str(formatted_price).strip(),
                     "limit_price_source": "positionRisk.markPrice",
                     "portfolio_order_id": None,
                     "portfolio_client_order_id": None,
@@ -1071,6 +1075,36 @@ class PositionManager:
         if price is None:
             raise RuntimeError(f"missing portfolio limit reference price symbol={symbol}")
         return price
+
+    def _canonicalize_portfolio_take_profit_limit_price(
+        self,
+        item: Dict[str, object],
+    ) -> str:
+        """Return a Binance-compatible fixed-point price for a persisted plan.
+
+        Plans created before this method was added may contain a float rendered
+        in scientific notation. Re-format the immutable stored price using the
+        symbol's tick size so retries repair those plans without chasing the
+        current market price.
+        """
+        symbol = str(item.get("symbol") or "").strip().upper()
+        raw_price = item.get("limit_price")
+        numeric_price = self._safe_positive_float(raw_price)
+        if numeric_price is None:
+            raise ValueError(f"invalid persisted portfolio limit price symbol={symbol} price={raw_price}")
+
+        close_side = str(item.get("close_side") or "BUY").strip().upper() or "BUY"
+        formatted_price = self.client.format_trigger_price(
+            symbol,
+            numeric_price,
+            round_up=close_side == "SELL",
+        )
+        formatted_text = str(formatted_price or "").strip()
+        if self._safe_positive_float(formatted_text) is None:
+            raise ValueError(
+                f"invalid formatted portfolio limit price symbol={symbol} price={formatted_price}"
+            )
+        return formatted_text
 
     def _execute_portfolio_take_profit_limit_plan(
         self,
@@ -1280,6 +1314,19 @@ class PositionManager:
                 "detail": f"{symbol}(formatted_qty_zero, target_remaining={target_qty})",
             }
 
+        try:
+            limit_price = self._canonicalize_portfolio_take_profit_limit_price(item)
+        except Exception as exc:  # noqa: BLE001
+            item["portfolio_order_status"] = "REJECTED"
+            item["last_error"] = str(exc)
+            item["retry_count"] = int(self._safe_float(item.get("retry_count"), default=0.0)) + 1
+            return {
+                "pending": True,
+                "error": True,
+                "detail": f"{symbol}(limit_price): {exc}",
+            }
+        item["limit_price"] = limit_price
+
         client_id = str(item.get("portfolio_client_order_id") or "").strip()
         if not client_id:
             client_id = self._new_client_id("pftlim", symbol)
@@ -1289,7 +1336,7 @@ class PositionManager:
             "side": str(item.get("close_side") or "BUY").strip().upper(),
             "type": "LIMIT",
             "timeInForce": "GTC",
-            "price": str(item.get("limit_price")),
+            "price": limit_price,
             "quantity": formatted_qty,
             "newClientOrderId": client_id,
             "newOrderRespType": "RESULT",
