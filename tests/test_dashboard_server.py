@@ -345,6 +345,34 @@ class DashboardServerTest(unittest.TestCase):
         self.assertEqual(len(row["points"]), 2)
         self.assertAlmostEqual(row["change_pct"], 10.0, places=5)
 
+    def test_accounts_equity_comparison_excludes_readonly_accounts(self) -> None:
+        self.store.scoped("acc01").add_wallet_snapshot(
+            "2026-08-10T02:00:00+00:00",
+            1000.0,
+            source="API",
+        )
+        self.store.scoped("readonly01").add_wallet_snapshot(
+            "2026-08-10T02:00:00+00:00",
+            2000.0,
+            source="API",
+        )
+
+        provider = DashboardDataProvider(
+            db_path=self.db_path,
+            log_file=self.log_file,
+            timezone_name="UTC",
+            entry_hour=7,
+            entry_minute=40,
+            account_modes={"readonly01": "readonly"},
+            overview_account_ids=["acc01", "readonly01"],
+        )
+
+        payload = provider.accounts_equity_comparison(window_hours=None)
+        self.assertEqual(
+            [row["account_id"] for row in payload["series"]],
+            ["acc01"],
+        )
+
     def test_snapshot_without_db_file(self) -> None:
         missing_db = str(Path(self.temp_dir.name) / "missing.db")
         provider = DashboardDataProvider(

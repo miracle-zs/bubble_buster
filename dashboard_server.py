@@ -2587,7 +2587,11 @@ class DashboardDataProvider:
         try:
             with self._connect_ctx() as conn:
                 if self.overview_account_ids is not None:
-                    account_ids = sorted(self.overview_account_ids)
+                    account_ids = sorted(
+                        account_id
+                        for account_id in self.overview_account_ids
+                        if self.account_modes.get(account_id, "full") != "readonly"
+                    )
                 else:
                     account_rows = self._query_rows(
                         conn,
@@ -2603,6 +2607,8 @@ class DashboardDataProvider:
                             str(row.get("account_id") or "").strip()
                             for row in account_rows
                             if str(row.get("account_id") or "").strip()
+                            and self.account_modes.get(str(row.get("account_id") or "").strip(), "full")
+                            != "readonly"
                         }
                     )
 
@@ -2675,10 +2681,15 @@ class DashboardDataProvider:
             payload["db_error"] = str(exc)
             return payload
 
-        payload["events"] = self._portfolio_take_profit_comparison_events(
-            window_start_utc=window_start_utc,
-            end_utc=now_utc.isoformat(),
-        )
+        comparison_account_ids = set(account_ids)
+        payload["events"] = [
+            event
+            for event in self._portfolio_take_profit_comparison_events(
+                window_start_utc=window_start_utc,
+                end_utc=now_utc.isoformat(),
+            )
+            if str(event.get("account_id") or "").strip() in comparison_account_ids
+        ]
         return payload
 
     def _portfolio_take_profit_comparison_events(
