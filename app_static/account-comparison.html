@@ -304,6 +304,12 @@
       font-size: 10px;
     }
     .event-chip strong { color: #f1f8fb; font-weight: 800; }
+    .event-chip .event-kind { color: #d0e5ee; }
+    .event-chip.is-retry {
+      border-color: rgba(255, 179, 64, 0.52);
+      background: rgba(59, 42, 22, 0.74);
+    }
+    .event-chip.is-retry .event-kind { color: #ffc875; }
     .event-empty { color: #688596; font-size: 11px; padding-top: 4px; }
     .footnote {
       display: flex;
@@ -532,8 +538,10 @@
         return;
       }
       el("events-list").innerHTML = events.map(function (event) {
+        var isRetry = String(event.status || "").toUpperCase() === "TRIGGERED_RETRY";
+        var eventLabel = event.label || (isRetry ? "组合止盈重试" : "组合止盈首次触发");
         var detail = event.actual_profit_pct == null ? "" : " · 触发时 +" + Number(event.actual_profit_pct).toFixed(2) + "%";
-        return '<span class="event-chip"><strong>' + escapeHtml(event.account_id) + '</strong><span>' + escapeHtml(event.label || "策略节点") + '</span><span>' + formatLocalTime(event.t_utc, true) + detail + '</span></span>';
+        return '<span class="event-chip' + (isRetry ? " is-retry" : "") + '"><strong>' + escapeHtml(event.account_id) + '</strong><span class="event-kind">' + escapeHtml(eventLabel) + '</span><span>' + formatLocalTime(event.t_utc, true) + detail + '</span></span>';
       }).join("");
     }
 
@@ -548,8 +556,8 @@
       emptyElement.style.display = activeRows.length ? "none" : "flex";
       el("chart-title").textContent = mode === "relative" ? "相对权益变化（%）" : "账户权益（USDT）";
       el("chart-subtitle").textContent = mode === "relative"
-        ? "组合止盈上线后的首个有效快照 = 0%；悬停查看每个账户的绝对权益。"
-        : "显示服务器记录的权益快照；悬停查看相对变化。";
+        ? "组合止盈上线后的首个有效快照 = 0%；竖线表示组合止盈事件，首次触发/重试见下方节点。"
+        : "显示服务器记录的权益快照；竖线表示组合止盈事件，悬停查看相对变化。";
       if (!chart) chart = echarts.init(chartElement, null, { renderer: "canvas" });
       var chartSeries = activeRows.map(function (row, index) {
         var color = colorFor(row.account_id, index);
@@ -574,11 +582,38 @@
           } : undefined
         };
       });
-      var eventLines = ((payload && payload.events) || []).map(function (event) {
+      var eventGroups = [];
+      ((payload && payload.events) || []).slice().sort(function (left, right) {
+        return new Date(left.t_utc).getTime() - new Date(right.t_utc).getTime();
+      }).forEach(function (event) {
+        var eventMs = new Date(event.t_utc).getTime();
+        var previous = eventGroups[eventGroups.length - 1];
+        var isSameMoment = previous && Number.isFinite(eventMs) && Number.isFinite(previous.timeMs)
+          && Math.abs(eventMs - previous.timeMs) <= 5000;
+        if (!isSameMoment) {
+          previous = { time: event.t_utc, timeMs: eventMs, events: [] };
+          eventGroups.push(previous);
+        }
+        previous.events.push(event);
+      });
+      var eventLines = eventGroups.map(function (group, index) {
         return {
-          xAxis: event.t_utc,
-          name: event.label || "组合止盈",
-          label: { formatter: event.account_id + " · 组合止盈", position: "insideEndTop" }
+          xAxis: group.time,
+          name: "组合止盈事件",
+          lineStyle: { color: "rgba(255, 179, 64, 0.72)", type: "dashed", width: 1 },
+          label: index === eventGroups.length - 1
+            ? {
+                show: true,
+                formatter: "组合止盈事件",
+                position: "insideEndTop",
+                rotate: 0,
+                color: "#ffd38a",
+                fontSize: 10,
+                backgroundColor: "rgba(7, 16, 25, 0.9)",
+                padding: [3, 5],
+                borderRadius: 3
+              }
+            : { show: false }
         };
       });
       if (chartSeries.length && eventLines.length) {

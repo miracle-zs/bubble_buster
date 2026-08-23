@@ -345,6 +345,39 @@ class DashboardServerTest(unittest.TestCase):
         self.assertEqual(len(row["points"]), 2)
         self.assertAlmostEqual(row["change_pct"], 10.0, places=5)
 
+    def test_accounts_equity_comparison_distinguishes_take_profit_retry_events(self) -> None:
+        self.store.scoped("acc01").add_wallet_snapshot(
+            "2026-08-10T02:00:00+00:00",
+            1000.0,
+            source="API",
+        )
+        with open(self.log_file, "w", encoding="utf-8") as f:
+            f.write(
+                "\n".join(
+                    [
+                        "2026-08-10 03:00:00,000 - WARNING - core.runtime_service - service portfolio take-profit account=acc01 result={'status': 'TRIGGERED', 'actual_profit_pct': 2.5}",
+                        "2026-08-10 03:01:00,000 - WARNING - core.runtime_service - service portfolio take-profit account=acc01 result={'status': 'TRIGGERED_RETRY', 'actual_profit_pct': 2.4}",
+                    ]
+                )
+                + "\n"
+            )
+
+        provider = DashboardDataProvider(
+            db_path=self.db_path,
+            log_file=self.log_file,
+            timezone_name="UTC",
+            entry_hour=7,
+            entry_minute=40,
+            overview_account_ids=["acc01"],
+        )
+
+        events = provider.accounts_equity_comparison(window_hours=None)["events"]
+        self.assertEqual([event["status"] for event in events], ["TRIGGERED", "TRIGGERED_RETRY"])
+        self.assertEqual(
+            [event["label"] for event in events],
+            ["组合止盈首次触发", "组合止盈重试"],
+        )
+
     def test_accounts_equity_comparison_excludes_readonly_accounts(self) -> None:
         self.store.scoped("acc01").add_wallet_snapshot(
             "2026-08-10T02:00:00+00:00",

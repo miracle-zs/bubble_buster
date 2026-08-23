@@ -2742,7 +2742,11 @@ class DashboardDataProvider:
                         "account_id": account_id,
                         "t_utc": event_utc,
                         "status": status,
-                        "label": "组合止盈触发",
+                        "label": (
+                            "组合止盈重试"
+                            if status == "TRIGGERED_RETRY"
+                            else "组合止盈首次触发"
+                        ),
                         "actual_profit_pct": self._safe_float(parsed.get("actual_profit_pct")),
                         "closed_take_profit": self._safe_int(parsed.get("closed_take_profit"), 0),
                         "adjusted_take_profit": self._safe_int(parsed.get("adjusted_take_profit"), 0),
