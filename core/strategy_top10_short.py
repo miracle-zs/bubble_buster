@@ -1113,7 +1113,7 @@ class Top10ShortStrategy:
         if not callable(list_pending):
             return self._empty_preclose_structure_summary()
 
-        pending_rows = list_pending()
+        pending_rows = list_pending(runtime_timezone=self.runtime_timezone_name)
         audits: List[Dict[str, Any]] = []
         invalid = 0
         for row in pending_rows or []:
@@ -1146,7 +1146,7 @@ class Top10ShortStrategy:
         if not callable(list_pending):
             return None
         try:
-            rows = list_pending()
+            rows = list_pending(runtime_timezone=self.runtime_timezone_name)
         except Exception:  # noqa: BLE001
             return None
         if not isinstance(rows, (list, tuple, set)):

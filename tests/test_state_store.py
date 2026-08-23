@@ -430,6 +430,73 @@ class StateStoreTest(unittest.TestCase):
             [],
         )
 
+    def test_rechecks_legacy_deferred_entry_when_logical_close_reaches_noon(self) -> None:
+        run_id, _ = self.store.create_run("2026-08-23")
+        position_id = self.store.insert_position(
+            run_id=run_id,
+            symbol="PORTALUSDT",
+            side="SHORT",
+            qty=1.0,
+            entry_price=0.0127,
+            liq_price_open=0.0181,
+            tp_price=None,
+            sl_price=0.01797,
+            tp_order_id=None,
+            sl_order_id=22,
+            tp_client_order_id=None,
+            sl_client_order_id="sl-fallback",
+            opened_at_utc="2026-08-23T04:00:02+00:00",
+            expire_at_utc="2026-08-25T04:00:02+00:00",
+            status="OPEN",
+        )
+        entry_payload = {
+            "orderId": 7004,
+            "clientOrderId": "entry-portal-preclose",
+            "type": "MARKET",
+            "side": "SELL",
+            "origQty": "1",
+            "executedQty": "1",
+            "avgPrice": "0.0127",
+            "status": "FILLED",
+            "entry_audit": {
+                "entry_mode": "PRECLOSE",
+                "signal_hour_open_utc": "2026-08-23T02:00:00+00:00",
+                "filled_at_utc": "2026-08-23T03:00:02+00:00",
+                "final_candle_available": True,
+                "final_candle_close_time_utc": "2026-08-23T02:59:59.999000+00:00",
+                "structure_stop_status": "DEFERRED_BEFORE_NOON",
+            },
+        }
+        event_id = self.store.add_order_event(
+            symbol="PORTALUSDT",
+            position_id=position_id,
+            event_time_utc="2026-08-23T03:00:02+00:00",
+            order_payload=entry_payload,
+        )
+
+        self.assertEqual(
+            self.store.list_open_preclose_entry_audits_needing_structure(),
+            [],
+        )
+
+        entry_payload["entry_audit"].update(
+            {
+                "signal_hour_open_utc": "2026-08-23T03:00:00+00:00",
+                "filled_at_utc": "2026-08-23T04:00:02+00:00",
+                "final_candle_close_time_utc": "2026-08-23T03:59:59.999000+00:00",
+            }
+        )
+        self.store.update_order_event(
+            order_event_id=event_id,
+            symbol="PORTALUSDT",
+            position_id=position_id,
+            event_time_utc="2026-08-23T04:00:02+00:00",
+            order_payload=entry_payload,
+        )
+
+        pending = self.store.list_open_preclose_entry_audits_needing_structure()
+        self.assertEqual([row["order_event_id"] for row in pending], [event_id])
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -6,8 +6,9 @@ import uuid
 import hashlib
 from contextlib import contextmanager
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Set, Tuple
+from zoneinfo import ZoneInfo
 
 
 @dataclass(frozen=True)
@@ -797,7 +798,55 @@ class StateStore:
                 order_payload=order_payload,
             )
 
-    def list_open_preclose_entry_audits_needing_structure(self) -> List[Dict[str, Any]]:
+    @staticmethod
+    def _deferred_structure_boundary_reached(
+        entry_audit: Dict[str, Any],
+        runtime_timezone: str,
+    ) -> bool:
+        logical_close_raw = entry_audit.get("final_candle_logical_close_time_utc")
+        close_raw = entry_audit.get("final_candle_close_time_utc")
+        hour_open_raw = entry_audit.get("signal_hour_open_utc")
+
+        def parse_utc(raw: Any) -> Optional[datetime]:
+            if not isinstance(raw, str) or not raw.strip():
+                return None
+            try:
+                parsed = datetime.fromisoformat(raw.strip().replace("Z", "+00:00"))
+            except ValueError:
+                return None
+            if parsed.tzinfo is None:
+                parsed = parsed.replace(tzinfo=timezone.utc)
+            return parsed.astimezone(timezone.utc)
+
+        logical_close = parse_utc(logical_close_raw)
+        if logical_close is None:
+            raw_close = parse_utc(close_raw)
+            if raw_close is not None:
+                hour_boundary = raw_close.replace(minute=0, second=0, microsecond=0)
+                logical_close = (
+                    hour_boundary + timedelta(hours=1)
+                    if raw_close > hour_boundary
+                    else hour_boundary
+                )
+        if logical_close is None:
+            hour_open = parse_utc(hour_open_raw)
+            if hour_open is not None:
+                logical_close = hour_open + timedelta(hours=1)
+        if logical_close is None:
+            return False
+
+        try:
+            local_timezone = ZoneInfo(runtime_timezone or "Asia/Shanghai")
+        except Exception:  # noqa: BLE001
+            local_timezone = ZoneInfo("Asia/Shanghai")
+        local_close = logical_close.astimezone(local_timezone)
+        local_noon = local_close.replace(hour=12, minute=0, second=0, microsecond=0)
+        return local_close >= local_noon
+
+    def list_open_preclose_entry_audits_needing_structure(
+        self,
+        runtime_timezone: str = "Asia/Shanghai",
+    ) -> List[Dict[str, Any]]:
         completed_statuses = {
             "REPLACED",
             "REPLACED_OLD_STOP_CANCEL_FAILED",
@@ -845,7 +894,10 @@ class StateStore:
                 continue
             structure_status = str(entry_audit.get("structure_stop_status") or "").strip().upper()
             if structure_status in completed_statuses:
-                continue
+                if structure_status != "DEFERRED_BEFORE_NOON":
+                    continue
+                if not self._deferred_structure_boundary_reached(entry_audit, runtime_timezone):
+                    continue
             position_id = int(row["position_id"])
             if position_id in seen_position_ids:
                 continue
