@@ -1580,6 +1580,7 @@ class DashboardServerTest(unittest.TestCase):
         self.assertIn(".task-filter-chip", html)
         self.assertIn(".task-result", html)
         self.assertIn("组合止盈监控", html)
+        self.assertIn('href="accounts/comparison/"', html)
         self.assertIn("巡检内触发", html)
         self.assertIn('fullText += (fullText ? "\\n" : "")', html)
         self.assertIn('taskUpdatedAt.textContent = "数据更新时间 " + (latest || "--")', html)

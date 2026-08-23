@@ -99,12 +99,13 @@ portfolio_take_profit_enabled = true
             self.assertEqual(overview.status_code, 200)
             self.assertIn("账户总览", overview.text)
             self.assertIn("组合止损 -3.5% 已启用", overview.text)
-            self.assertIn('href="/accounts/comparison/"', overview.text)
+            self.assertIn('href="accounts/comparison/"', overview.text)
 
             comparison_page = client.get("/accounts/comparison/")
             self.assertEqual(comparison_page.status_code, 200)
             self.assertIn("四账户权益，放在同一条时间线上", comparison_page.text)
-            self.assertIn("/api/accounts/equity-comparison", comparison_page.text)
+            self.assertIn("../../static/vendor/echarts.min.js", comparison_page.text)
+            self.assertIn("pathPrefix + \"/api/accounts/equity-comparison?\"", comparison_page.text)
 
             compact = client.get("/account/acc01/")
             self.assertEqual(compact.status_code, 200)

@@ -355,7 +355,7 @@
   <main class="page">
     <div class="topline">
       <div class="crumbs">
-        <a href="/">← 账户总览</a>
+        <a href="../../">← 账户总览</a>
         <span class="crumb-sep">/</span>
         <span>账户权益对比</span>
       </div>
@@ -411,7 +411,7 @@
     </div>
   </main>
 
-  <script src="/static/vendor/echarts.min.js"></script>
+  <script src="../../static/vendor/echarts.min.js"></script>
   <script>
   (function () {
     "use strict";
@@ -429,6 +429,10 @@
     var mode = "relative";
     var visible = {};
     var loading = false;
+    var currentPath = (window && window.location && window.location.pathname) || "/";
+    var comparisonMarker = "/accounts/comparison";
+    var comparisonMarkerIndex = currentPath.indexOf(comparisonMarker);
+    var pathPrefix = comparisonMarkerIndex >= 0 ? currentPath.slice(0, comparisonMarkerIndex).replace(/\/+$/, "") : "";
 
     function el(id) { return document.getElementById(id); }
 
@@ -666,7 +670,7 @@
       setStatus("正在读取快照", "loading");
       el("notice").style.display = "none";
       var query = range === "all" ? "all_time=true" : "window_hours=" + encodeURIComponent(range);
-      fetch("/api/accounts/equity-comparison?" + query + "&curve_points=600&_=" + Date.now(), { cache: "no-store" })
+      fetch(pathPrefix + "/api/accounts/equity-comparison?" + query + "&curve_points=600&_=" + Date.now(), { cache: "no-store" })
         .then(function (response) {
           if (!response.ok) throw new Error("HTTP " + response.status);
           return response.json();

@@ -6315,7 +6315,7 @@ ACCOUNTS_OVERVIEW_HTML = """<!doctype html>
       <div class="command-brand">
         <div class="command-brand-title-row">
           <h1 class="title">Bubble Buster 账户总览</h1>
-          <a class="command-brand-link" href="/accounts/comparison/">权益对比 ↗</a>
+          <a class="command-brand-link" href="accounts/comparison/">权益对比 ↗</a>
         </div>
         <p class="sub">账户、开仓进度与风险状态</p>
       </div>
