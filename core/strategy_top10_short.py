@@ -1223,6 +1223,10 @@ class Top10ShortStrategy:
                     entry_audit["final_candle_open_price"] = open_price
                     entry_audit["final_candle_close_price"] = close_price
                     entry_audit["final_candle_close_time_utc"] = close_time.isoformat()
+                    logical_close_time = self._closed_hour_boundary(close_time)
+                    entry_audit["final_candle_logical_close_time_utc"] = (
+                        logical_close_time.isoformat()
+                    )
                     try:
                         provisional_close = float(entry_audit.get("provisional_close_price") or 0.0)
                     except (TypeError, ValueError):
@@ -1231,7 +1235,7 @@ class Top10ShortStrategy:
                         entry_audit["final_vs_provisional_close_pct"] = (
                             (close_price - provisional_close) / provisional_close * 100.0
                         )
-                    if self._is_before_local_noon(close_time):
+                    if self._is_before_local_noon(logical_close_time):
                         entry_audit["structure_stop_status"] = (
                             self.PRECLOSE_STRUCTURE_DEFERRED_BEFORE_NOON
                         )
@@ -1239,7 +1243,7 @@ class Top10ShortStrategy:
                         try:
                             protection = self._build_finalized_preclose_structure_protection(
                                 symbol=symbol,
-                                final_close_time_utc=close_time,
+                                final_close_time_utc=logical_close_time,
                             )
                             structure_status = self._apply_finalized_preclose_structure_protection(
                                 position_id=int(audit["position_id"]),
