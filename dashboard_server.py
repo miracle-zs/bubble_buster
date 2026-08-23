@@ -213,6 +213,30 @@ class DashboardDataProvider:
         }
 
     @classmethod
+    def _ensure_position_notional(cls, position: Dict[str, Any]) -> None:
+        """Fill a displayable current exposure when exchange notional is absent."""
+        current_notional = cls._safe_float(position.get("notional"))
+        if current_notional is not None and current_notional > 0:
+            if not str(position.get("notional_source") or "").strip():
+                mark_price = cls._safe_float(position.get("mark_price"))
+                position["notional_source"] = (
+                    "MARK_PRICE" if mark_price is not None and mark_price > 0 else "ENTRY_PRICE_ESTIMATE"
+                )
+            return
+
+        qty = cls._safe_float(position.get("qty"))
+        mark_price = cls._safe_float(position.get("mark_price"))
+        entry_price = cls._safe_float(position.get("entry_price"))
+        reference_price = mark_price if mark_price is not None and mark_price > 0 else entry_price
+        if qty is None or qty <= 0 or reference_price is None or reference_price <= 0:
+            return
+
+        position["notional"] = round(abs(qty) * reference_price, 8)
+        position["notional_source"] = (
+            "MARK_PRICE" if mark_price is not None and mark_price > 0 else "ENTRY_PRICE_ESTIMATE"
+        )
+
+    @classmethod
     def _readonly_order_price(cls, order: Dict[str, Any]) -> Optional[float]:
         for key in ("stopPrice", "triggerPrice", "price", "activatePrice"):
             value = cls._safe_float(order.get(key))
@@ -385,12 +409,25 @@ class DashboardDataProvider:
                 configured=position.get("sl_price") not in (None, ""),
             )
             if risk is None:
+                self._ensure_position_notional(position)
                 continue
 
             position["position_side"] = str(risk.get("positionSide") or position.get("side") or "").upper()
             position["mark_price"] = self._safe_float(risk.get("markPrice"))
             position["unrealized_pnl"] = self._safe_float(risk.get("unRealizedProfit"))
             position["live_liq_price"] = self._safe_float(risk.get("liquidationPrice"))
+            return_metrics = self._live_return_metrics(
+                risk=risk,
+                account_position=None,
+                qty=self._safe_float(position.get("qty")),
+                entry_price=self._safe_float(position.get("entry_price")),
+                mark_price=position["mark_price"],
+            )
+            position["notional"] = return_metrics["notional"]
+            position["actual_margin"] = return_metrics["actual_margin"]
+            position["actual_margin_source"] = return_metrics["actual_margin_source"]
+            position["unrealized_pnl_notional_pct"] = return_metrics["unrealized_pnl_notional_pct"]
+            position["unrealized_pnl_margin_pct"] = return_metrics["unrealized_pnl_margin_pct"]
             isolated_margin = self._safe_float(risk.get("isolatedMargin"))
             pnl = self._safe_float(risk.get("unRealizedProfit"))
             position["unrealized_pnl_pct"] = (
@@ -398,6 +435,12 @@ class DashboardDataProvider:
                 if pnl is not None and isolated_margin is not None and isolated_margin > 0
                 else None
             )
+            position["leverage"] = self._safe_float(risk.get("leverage"))
+            raw_notional = self._safe_float(risk.get("notional"))
+            if raw_notional is not None and abs(raw_notional) > 0:
+                position["notional_source"] = "EXCHANGE_NOTIONAL"
+            else:
+                self._ensure_position_notional(position)
 
     def _is_readonly_account(self, account_id: Optional[str]) -> bool:
         normalized = str(account_id or "").strip()
@@ -525,6 +568,15 @@ class DashboardDataProvider:
                     "liq_price_latest": self._safe_float(risk.get("liquidationPrice")),
                     "isolated_margin": self._safe_float(risk.get("isolatedMargin")),
                     "notional": return_metrics["notional"],
+                    "notional_source": (
+                        "EXCHANGE_NOTIONAL"
+                        if self._safe_float(risk.get("notional")) not in (None, 0.0)
+                        else (
+                            "MARK_PRICE"
+                            if self._safe_float(risk.get("markPrice")) not in (None, 0.0)
+                            else "ENTRY_PRICE_ESTIMATE"
+                        )
+                    ),
                     "actual_margin": return_metrics["actual_margin"],
                     "actual_margin_source": return_metrics["actual_margin_source"],
                     "leverage": self._safe_float(risk.get("leverage")),
@@ -2396,6 +2448,7 @@ class DashboardDataProvider:
                                 account_id=position_account_id,
                             )
                     for position in data["open_positions"]:
+                        self._ensure_position_notional(position)
                         position.pop("_live_account_id", None)
                         position.pop("_tp_order_id", None)
                         position.pop("_sl_order_id", None)
@@ -4250,13 +4303,13 @@ DASHBOARD_HTML = """<!doctype html>
       <header class="surface-head">
         <div class="surface-heading">
           <h2 class="surface-title" id="positionsHeading">当前持仓</h2>
-          <div class="surface-subtitle">策略仓位与 readonly 账户交易所仓位实时读取；只读仓位不写入数据库</div>
+          <div class="surface-subtitle">名义金额优先按交易所敞口或标记价计算；缺失时按入场价估算，数量保留用于核对</div>
         </div>
         <span class="surface-count" id="positionsCount">0</span>
       </header>
       <div class="table-wrap">
         <table class="detail-table positions-table">
-          <thead><tr><th>交易对 / 方向</th><th>数量</th><th>入场价 / 标记价</th><th>未实现盈亏</th><th>止盈 / 止损</th><th>到期时间</th><th>状态</th></tr></thead>
+          <thead><tr><th>交易对 / 方向</th><th>名义金额 / 数量</th><th>入场价 / 标记价</th><th>未实现盈亏</th><th>止盈 / 止损</th><th>到期时间</th><th>状态</th></tr></thead>
           <tbody id="positionsBody"><tr><td colspan="7" class="empty-row">持仓加载中...</td></tr></tbody>
         </table>
       </div>
@@ -4596,6 +4649,15 @@ DASHBOARD_HTML = """<!doctype html>
     if (n === null) return "--";
     var digits = Math.abs(n) >= 100 ? 2 : (Math.abs(n) >= 1 ? 4 : 8);
     return trimFixed(n, digits);
+  }
+
+  function notionalSourceLabel(value) {
+    var labels = {
+      EXCHANGE_NOTIONAL: "交易所实时",
+      MARK_PRICE: "按标记价",
+      ENTRY_PRICE_ESTIMATE: "按入场价估算"
+    };
+    return labels[String(value || "").toUpperCase()] || "";
   }
 
   function zonedFormat(isoText, options, fallbackSlice) {
@@ -5209,6 +5271,12 @@ DASHBOARD_HTML = """<!doctype html>
         var pnlPct = toNum(p.unrealized_pnl_pct);
         var notionalPnlPct = toNum(p.unrealized_pnl_notional_pct);
         var marginPnlPct = toNum(p.unrealized_pnl_margin_pct);
+        var notional = toNum(p.notional);
+        var leverage = toNum(p.leverage);
+        var notionalSub = "数量 " + fmtQuantity(p.qty);
+        if (leverage !== null) notionalSub += " · 杠杆 " + fmtAdaptive(leverage) + "x";
+        var notionalSource = notionalSourceLabel(p.notional_source);
+        if (notionalSource) notionalSub += " · " + notionalSource;
         var pnlClass = pnl === null ? "neutral" : (pnl > 0 ? "positive" : (pnl < 0 ? "negative" : "neutral"));
         var pnlMain = pnl === null ? "实时不可用" : fmtSigned(pnl, 2) + " USDT";
         var pnlSub = readonlyLive
@@ -5233,7 +5301,7 @@ DASHBOARD_HTML = """<!doctype html>
         return (
           "<tr>" +
           '<td class="symbol-cell"><strong>' + escapeHtml(p.symbol) + '</strong><small>' + escapeHtml(sideLabel(p.side)) + ' · ' + escapeHtml(sourceLabel) + "</small></td>" +
-          '<td class="numeric">' + escapeHtml(fmtQuantity(p.qty)) + "</td>" +
+          '<td class="numeric"><div class="position-stack"><strong class="position-primary">' + escapeHtml(notional === null ? "--" : fmtAdaptive(notional) + " USDT") + '</strong><small class="position-secondary">' + escapeHtml(notionalSub) + "</small></div></td>" +
           '<td class="numeric"><div class="position-stack"><strong class="position-primary">' + escapeHtml(fmtAdaptive(p.entry_price)) + '</strong><small class="position-secondary">标记 <strong>' + escapeHtml(liveAvailable ? fmtAdaptive(p.mark_price) : "--") + "</strong></small></div></td>" +
           '<td class="numeric live-pnl ' + pnlClass + '"><div class="position-stack"><strong class="position-primary">' + escapeHtml(pnlMain) + '</strong><small class="position-secondary">' + escapeHtml(pnlSub) + "</small></div></td>" +
           "<td>" + protectionHtml + "</td>" +

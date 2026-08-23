@@ -100,6 +100,8 @@ class DashboardServerTest(unittest.TestCase):
         self.assertIn("cashflow_events", snapshot)
         self.assertIn("unpriced_closed_details", snapshot)
         self.assertIn("net_cashflow_usdt", snapshot["summary"])
+        self.assertEqual(snapshot["open_positions"][0]["notional"], 500.0)
+        self.assertEqual(snapshot["open_positions"][0]["notional_source"], "ENTRY_PRICE_ESTIMATE")
 
     def test_snapshot_enriches_positions_from_live_exchange_data(self) -> None:
         run_id, _ = self.store.create_run("2026-02-13")
@@ -154,6 +156,8 @@ class DashboardServerTest(unittest.TestCase):
         self.assertEqual(row["mark_price"], 51000.0)
         self.assertEqual(row["unrealized_pnl"], -10.0)
         self.assertEqual(row["unrealized_pnl_pct"], -10.0)
+        self.assertEqual(row["notional"], 510.0)
+        self.assertEqual(row["notional_source"], "MARK_PRICE")
         self.assertEqual(row["tp_order_status"], "NEW")
         self.assertEqual(row["sl_order_status"], "NEW")
 
@@ -249,6 +253,7 @@ class DashboardServerTest(unittest.TestCase):
         self.assertAlmostEqual(row["unrealized_pnl_notional_pct"], 1.5625)
         self.assertAlmostEqual(row["unrealized_pnl_margin_pct"], 25.0)
         self.assertAlmostEqual(row["unrealized_pnl_pct"], 25.0)
+        self.assertEqual(row["notional_source"], "EXCHANGE_NOTIONAL")
         self.assertEqual(row["actual_margin"], 1000.0)
         self.assertEqual(row["actual_margin_source"], "ACCOUNT_POSITION_INITIAL_MARGIN")
         self.assertEqual(row["tp_price"], 63000.0)
@@ -1483,6 +1488,7 @@ class DashboardServerTest(unittest.TestCase):
         self.assertIn("max-width: 1680px", html)
         self.assertIn("距组合止损", html)
         self.assertIn("当前持仓", html)
+        self.assertIn("名义金额 / 数量", html)
         self.assertIn("账户活动", html)
         self.assertIn("诊断信息", html)
         self.assertIn('var accountMode = "full";', html)
