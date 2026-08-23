@@ -17,6 +17,11 @@ from core.state_store import SQLITE_BUSY_TIMEOUT_MS
 
 LOGGER = logging.getLogger(__name__)
 
+# The daily portfolio take-profit feature was introduced in commit 2dc257c
+# at 2026-08-10 09:32:10 Asia/Shanghai. Comparisons must not use snapshots
+# from before that strategy existed.
+PORTFOLIO_TAKE_PROFIT_LAUNCH_AT_UTC = "2026-08-10T01:32:10+00:00"
+
 
 @dataclass(frozen=True)
 class DashboardServerConfig:
@@ -2489,6 +2494,198 @@ class DashboardDataProvider:
             data["db_error"] = str(exc)
 
         return data
+
+    def accounts_equity_comparison(
+        self,
+        window_hours: Optional[float] = 168.0,
+        curve_points: int = 600,
+    ) -> Dict[str, Any]:
+        """Return normalized wallet-equity curves starting at portfolio TP launch."""
+        now_utc = datetime.now(timezone.utc).replace(microsecond=0)
+        points_limit = max(100, min(5000, int(curve_points)))
+        launch_start_utc = datetime.fromisoformat(PORTFOLIO_TAKE_PROFIT_LAUNCH_AT_UTC)
+        parsed_window_hours: Optional[float] = None
+        if window_hours is not None:
+            try:
+                parsed_window_hours = min(24.0 * 366.0, max(0.001, float(window_hours)))
+            except (TypeError, ValueError):
+                parsed_window_hours = 168.0
+        requested_start_utc = (
+            now_utc - timedelta(hours=parsed_window_hours)
+            if parsed_window_hours is not None
+            else launch_start_utc
+        )
+        effective_start_utc = max(launch_start_utc, requested_start_utc)
+        window_start_utc = effective_start_utc.isoformat()
+
+        payload: Dict[str, Any] = {
+            "generated_at_utc": now_utc.isoformat(),
+            "timezone": str(getattr(self.local_tz, "key", self.local_tz)),
+            "window_hours": parsed_window_hours,
+            "curve_points": points_limit,
+            "comparison_start_at_utc": PORTFOLIO_TAKE_PROFIT_LAUNCH_AT_UTC,
+            "baseline": "first_valid_snapshot_at_or_after_portfolio_take_profit_launch",
+            "series": [],
+            "events": [],
+        }
+        if not os.path.exists(self.db_path):
+            return payload
+
+        try:
+            with self._connect_ctx() as conn:
+                if self.overview_account_ids is not None:
+                    account_ids = sorted(self.overview_account_ids)
+                else:
+                    account_rows = self._query_rows(
+                        conn,
+                        """
+                        SELECT DISTINCT account_id
+                        FROM wallet_snapshots
+                        WHERE error IS NULL
+                        ORDER BY account_id ASC
+                        """,
+                    )
+                    account_ids = sorted(
+                        {
+                            str(row.get("account_id") or "").strip()
+                            for row in account_rows
+                            if str(row.get("account_id") or "").strip()
+                        }
+                    )
+
+                for account_id in account_ids:
+                    wallet_rows = self._query_wallet_rows(
+                        conn=conn,
+                        window_start_utc=window_start_utc,
+                        account_id=account_id,
+                    )
+                    raw_curve: List[Dict[str, Any]] = []
+                    for row in wallet_rows:
+                        balance = self._safe_float(row.get("balance_usdt"))
+                        captured_at = str(row.get("captured_at_utc") or "").strip()
+                        if balance is None or not captured_at:
+                            continue
+                        raw_curve.append(
+                            {
+                                "t": captured_at,
+                                "equity": round(balance, 8),
+                            }
+                        )
+
+                    curve = self._resample_curve(raw_curve, points_limit)
+                    baseline = self._safe_float(curve[0].get("equity")) if curve else None
+                    if baseline is None or baseline <= 0:
+                        payload["series"].append(
+                            {
+                                "account_id": account_id,
+                                "status": "NO_DATA",
+                                "points": [],
+                                "baseline_equity": None,
+                                "baseline_at_utc": None,
+                                "latest_equity": None,
+                                "latest_at_utc": None,
+                                "change_pct": None,
+                                "min_change_pct": None,
+                                "max_change_pct": None,
+                            }
+                        )
+                        continue
+
+                    points: List[Dict[str, Any]] = []
+                    for point in curve:
+                        equity = self._safe_float(point.get("equity")) or 0.0
+                        points.append(
+                            {
+                                "t": point.get("t"),
+                                "equity": round(equity, 8),
+                                "relative_pct": round((equity / baseline - 1.0) * 100.0, 6),
+                            }
+                        )
+
+                    latest = points[-1]
+                    relative_values = [float(point["relative_pct"]) for point in points]
+                    payload["series"].append(
+                        {
+                            "account_id": account_id,
+                            "status": "OK",
+                            "points": points,
+                            "baseline_equity": round(baseline, 8),
+                            "baseline_at_utc": points[0].get("t"),
+                            "latest_equity": latest.get("equity"),
+                            "latest_at_utc": latest.get("t"),
+                            "change_pct": latest.get("relative_pct"),
+                            "min_change_pct": round(min(relative_values), 6),
+                            "max_change_pct": round(max(relative_values), 6),
+                        }
+                    )
+        except sqlite3.Error as exc:
+            payload["db_error"] = str(exc)
+            return payload
+
+        payload["events"] = self._portfolio_take_profit_comparison_events(
+            window_start_utc=window_start_utc,
+            end_utc=now_utc.isoformat(),
+        )
+        return payload
+
+    def _portfolio_take_profit_comparison_events(
+        self,
+        window_start_utc: Optional[str],
+        end_utc: str,
+    ) -> List[Dict[str, Any]]:
+        """Extract actual portfolio take-profit trigger moments from strategy logs."""
+        events: List[Dict[str, Any]] = []
+        seen: Set[Tuple[str, str]] = set()
+        for path in self._task_log_files():
+            for line in self._read_task_log_lines(path, ("service portfolio take-profit ",)):
+                matched = re.search(
+                    r"service portfolio take-profit account=([A-Za-z0-9_.-]+)\s+result=(\{.*\})",
+                    line,
+                )
+                if not matched:
+                    continue
+                account_id = matched.group(1).strip()
+                try:
+                    parsed = ast.literal_eval(matched.group(2).strip())
+                except (SyntaxError, ValueError):
+                    continue
+                if not isinstance(parsed, dict):
+                    continue
+                status = str(parsed.get("status") or "").upper()
+                if status not in {"TRIGGERED", "TRIGGERED_RETRY"}:
+                    continue
+                time_local = self._log_time_from_line(line)
+                if not time_local:
+                    continue
+                try:
+                    local_dt = datetime.strptime(time_local, "%Y-%m-%d %H:%M:%S").replace(
+                        tzinfo=self.local_tz
+                    )
+                    event_dt = local_dt.astimezone(timezone.utc)
+                except (TypeError, ValueError):
+                    continue
+                event_utc = event_dt.replace(microsecond=0).isoformat()
+                if window_start_utc and event_utc < window_start_utc:
+                    continue
+                if event_utc > end_utc:
+                    continue
+                key = (account_id, event_utc)
+                if key in seen:
+                    continue
+                seen.add(key)
+                events.append(
+                    {
+                        "account_id": account_id,
+                        "t_utc": event_utc,
+                        "status": status,
+                        "label": "组合止盈触发",
+                        "actual_profit_pct": self._safe_float(parsed.get("actual_profit_pct")),
+                        "closed_take_profit": self._safe_int(parsed.get("closed_take_profit"), 0),
+                        "adjusted_take_profit": self._safe_int(parsed.get("adjusted_take_profit"), 0),
+                    }
+                )
+        events.sort(key=lambda item: (str(item.get("t_utc") or ""), str(item.get("account_id") or "")))
+        return events
 
     def accounts_summary(self) -> Dict[str, Any]:
         now_utc = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
@@ -5431,6 +5628,12 @@ ACCOUNTS_OVERVIEW_HTML = """<!doctype html>
       min-width:0;
       padding:10px 18px;
     }
+    .command-brand-title-row {
+      display:flex;
+      align-items:center;
+      justify-content:space-between;
+      gap:14px;
+    }
     .command-brand .title {
       margin:0;
       font-size:20px;
@@ -5442,6 +5645,25 @@ ACCOUNTS_OVERVIEW_HTML = """<!doctype html>
       margin:4px 0 0;
       color:#7899ac;
       font-size:11px;
+    }
+    .command-brand-link {
+      flex:0 0 auto;
+      color:#bfe9ff;
+      text-decoration:none;
+      border:1px solid #2d6078;
+      border-radius:5px;
+      padding:5px 8px;
+      background:#102938;
+      font-size:11px;
+      font-weight:800;
+      transition:color 140ms ease, border-color 140ms ease, background 140ms ease;
+    }
+    .command-brand-link:hover,
+    .command-brand-link:focus-visible {
+      color:#f2fbff;
+      border-color:#4ec1ff;
+      background:#173d52;
+      outline:none;
     }
     .command-item {
       min-width:0;
@@ -5984,6 +6206,7 @@ ACCOUNTS_OVERVIEW_HTML = """<!doctype html>
       .wrap { padding:8px 10px 20px; }
       .command-bar { grid-template-columns:1fr 1fr; }
       .command-brand { grid-column:1 / -1; border-bottom:1px solid #203b4c; }
+      .command-brand-title-row { align-items:flex-start; }
       .command-item { border-left:0; padding:8px 14px; }
       .command-item:nth-of-type(even) { border-left:1px solid #203b4c; }
       .portfolio-stop-command {
@@ -6022,7 +6245,10 @@ ACCOUNTS_OVERVIEW_HTML = """<!doctype html>
   <main class="wrap">
     <header class="command-bar">
       <div class="command-brand">
-        <h1 class="title">Bubble Buster 账户总览</h1>
+        <div class="command-brand-title-row">
+          <h1 class="title">Bubble Buster 账户总览</h1>
+          <a class="command-brand-link" href="/accounts/comparison/">权益对比 ↗</a>
+        </div>
         <p class="sub">账户、开仓进度与风险状态</p>
       </div>
       <div class="command-item">

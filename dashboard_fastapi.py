@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Optional
 
 from fastapi import FastAPI, HTTPException, Query, Request
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from core.runtime_components import build_proxies, create_components, resolve_path
@@ -691,6 +691,13 @@ def create_app(config_path: Optional[str] = None) -> FastAPI:
             )
         )
 
+    @app.get("/accounts/comparison/")
+    def accounts_comparison_page():
+        comparison_page = static_root / "account-comparison.html"
+        if not comparison_page.exists():
+            raise HTTPException(status_code=404, detail="accounts comparison page not found")
+        return FileResponse(comparison_page, media_type="text/html")
+
     @app.get("/account/{account_id}/", response_class=HTMLResponse)
     def account_detail_page(
         request: Request,
@@ -745,6 +752,24 @@ def create_app(config_path: Optional[str] = None) -> FastAPI:
             return JSONResponse(ctx.provider.accounts_summary())
         except Exception as exc:  # noqa: BLE001
             raise HTTPException(status_code=500, detail=f"accounts summary failed: {exc}") from exc
+
+    @app.get("/api/accounts/equity-comparison")
+    def accounts_equity_comparison(
+        request: Request,
+        window_hours: Optional[float] = Query(default=168.0, gt=0.0, le=8784.0),
+        curve_points: int = Query(default=600, ge=100, le=5000),
+        all_time: bool = Query(default=False),
+    ):
+        ctx: DashboardRuntimeContext = request.app.state.ctx
+        try:
+            return JSONResponse(
+                ctx.provider.accounts_equity_comparison(
+                    window_hours=None if all_time else window_hours,
+                    curve_points=curve_points,
+                )
+            )
+        except Exception as exc:  # noqa: BLE001
+            raise HTTPException(status_code=500, detail=f"accounts equity comparison failed: {exc}") from exc
 
     @app.get("/api/account/{account_id}/snapshot")
     def account_snapshot(

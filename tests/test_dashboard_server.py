@@ -299,6 +299,47 @@ class DashboardServerTest(unittest.TestCase):
         self.assertEqual(len(snapshot["strategy_equity_curve"]), 2)
         self.assertEqual(snapshot["drawdown_stats_strategy"]["realized_fill_count"], 0)
 
+    def test_accounts_equity_comparison_starts_at_portfolio_take_profit_launch(self) -> None:
+        self.store.scoped("acc01").add_wallet_snapshot(
+            "2026-08-09T23:00:00+00:00",
+            900.0,
+            source="API",
+        )
+        self.store.scoped("acc01").add_wallet_snapshot(
+            "2026-08-10T02:00:00+00:00",
+            1000.0,
+            source="API",
+        )
+        self.store.scoped("acc01").add_wallet_snapshot(
+            "2026-08-10T03:00:00+00:00",
+            1100.0,
+            source="API",
+        )
+
+        provider = DashboardDataProvider(
+            db_path=self.db_path,
+            log_file=self.log_file,
+            timezone_name="UTC",
+            entry_hour=7,
+            entry_minute=40,
+            overview_account_ids=["acc01"],
+        )
+
+        payload = provider.accounts_equity_comparison(window_hours=None)
+        self.assertEqual(
+            payload["comparison_start_at_utc"],
+            "2026-08-10T01:32:10+00:00",
+        )
+        self.assertEqual(
+            payload["baseline"],
+            "first_valid_snapshot_at_or_after_portfolio_take_profit_launch",
+        )
+        row = payload["series"][0]
+        self.assertEqual(row["status"], "OK")
+        self.assertEqual(row["baseline_at_utc"], "2026-08-10T02:00:00+00:00")
+        self.assertEqual(len(row["points"]), 2)
+        self.assertAlmostEqual(row["change_pct"], 10.0, places=5)
+
     def test_snapshot_without_db_file(self) -> None:
         missing_db = str(Path(self.temp_dir.name) / "missing.db")
         provider = DashboardDataProvider(

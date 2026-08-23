@@ -99,6 +99,12 @@ portfolio_take_profit_enabled = true
             self.assertEqual(overview.status_code, 200)
             self.assertIn("账户总览", overview.text)
             self.assertIn("组合止损 -3.5% 已启用", overview.text)
+            self.assertIn('href="/accounts/comparison/"', overview.text)
+
+            comparison_page = client.get("/accounts/comparison/")
+            self.assertEqual(comparison_page.status_code, 200)
+            self.assertIn("四账户权益，放在同一条时间线上", comparison_page.text)
+            self.assertIn("/api/accounts/equity-comparison", comparison_page.text)
 
             compact = client.get("/account/acc01/")
             self.assertEqual(compact.status_code, 200)
@@ -208,6 +214,14 @@ portfolio_take_profit_enabled = true
             store.scoped("acc01").add_wallet_snapshot(now, 111.0, source="API")
             store.scoped("acc02").add_wallet_snapshot(now, 222.0, source="API")
             store.scoped("55").add_wallet_snapshot(now, 333.0, source="API")
+            later = "2026-08-10T03:00:00+00:00"
+            launch_window_start = "2026-08-10T02:00:00+00:00"
+            store.scoped("acc01").add_wallet_snapshot(launch_window_start, 111.0, source="API")
+            store.scoped("acc02").add_wallet_snapshot(launch_window_start, 222.0, source="API")
+            store.scoped("55").add_wallet_snapshot(launch_window_start, 333.0, source="API")
+            store.scoped("acc01").add_wallet_snapshot(later, 121.0, source="API")
+            store.scoped("acc02").add_wallet_snapshot(later, 200.0, source="API")
+            store.scoped("55").add_wallet_snapshot(later, 333.0, source="API")
 
             summary = client.get("/api/accounts/summary")
             self.assertEqual(summary.status_code, 200)
@@ -261,6 +275,24 @@ portfolio_take_profit_enabled = true
             self.assertIn("balance_curve", curve_payload)
             self.assertTrue(isinstance(curve_payload.get("balance_curve"), list))
             self.assertGreater(len(curve_payload.get("balance_curve") or []), 0)
+
+            comparison = client.get("/api/accounts/equity-comparison?all_time=true")
+            self.assertEqual(comparison.status_code, 200)
+            comparison_payload = comparison.json()
+            self.assertEqual(
+                comparison_payload["comparison_start_at_utc"],
+                "2026-08-10T01:32:10+00:00",
+            )
+            self.assertEqual(
+                comparison_payload["baseline"],
+                "first_valid_snapshot_at_or_after_portfolio_take_profit_launch",
+            )
+            comparison_rows = {row["account_id"]: row for row in comparison_payload["series"]}
+            self.assertEqual(set(comparison_rows), {"acc01", "acc02", "55"})
+            self.assertAlmostEqual(comparison_rows["acc01"]["change_pct"], 9.009009, places=4)
+            self.assertAlmostEqual(comparison_rows["acc02"]["change_pct"], -9.90991, places=4)
+            self.assertEqual(comparison_rows["55"]["change_pct"], 0.0)
+            self.assertEqual(len(comparison_rows["acc01"]["points"]), 2)
 
             details = client.get("/api/account/acc01/details")
             self.assertEqual(details.status_code, 200)
