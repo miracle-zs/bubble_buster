@@ -103,6 +103,159 @@ class DashboardServerTest(unittest.TestCase):
         self.assertEqual(snapshot["open_positions"][0]["notional"], 500.0)
         self.assertEqual(snapshot["open_positions"][0]["notional_source"], "ENTRY_PRICE_ESTIMATE")
 
+    def test_snapshot_exposes_backend_portfolio_loss_cut_state(self) -> None:
+        account_id = "acc04"
+        run_id, _ = self.store.create_run("2026-08-23", account_id=account_id)
+        now = "2026-08-23T12:00:00+00:00"
+        position_id = self.store.insert_position(
+            run_id=run_id,
+            symbol="TUTUSDT",
+            side="SHORT",
+            qty=558.0,
+            entry_price=0.06096,
+            liq_price_open=0.12,
+            tp_price=0.055,
+            sl_price=0.07198,
+            tp_order_id=None,
+            sl_order_id=None,
+            tp_client_order_id=None,
+            sl_client_order_id=None,
+            opened_at_utc=now,
+            expire_at_utc=now,
+            status="OPEN",
+        )
+        account_store = self.store.scoped(account_id)
+        account_store.add_wallet_snapshot(
+            "2026-08-22T23:59:38+00:00",
+            283.78986596,
+            source="API",
+        )
+        account_store.add_wallet_snapshot(
+            "2026-08-23T00:00:38+00:00",
+            282.29224992,
+            source="API",
+        )
+        account_store.add_wallet_snapshot(
+            "2026-08-23T11:37:30+00:00",
+            273.62408136,
+            source="API",
+        )
+        account_store.set_lock_state(
+            "portfolio_loss_cut_v1",
+            {
+                "cycle_date": "2026-08-23",
+                "baseline_equity_usdt": 282.29224992,
+                "baseline_captured_at_utc": "2026-08-23T00:00:38+00:00",
+                "threshold_equity_usdt": 272.41202117,
+                "current_equity_usdt": 273.62408136,
+                "loss_pct": 3.5,
+                "triggered": False,
+                "close_complete": False,
+            },
+        )
+        provider = DashboardDataProvider(
+            db_path=self.db_path,
+            log_file=self.log_file,
+            timezone_name="Asia/Shanghai",
+            entry_hour=7,
+            entry_minute=40,
+        )
+
+        payload = provider.snapshot(
+            log_lines=0,
+            account_id=account_id,
+            include_details=False,
+            include_curves=False,
+            include_trade_stats=False,
+        )
+
+        stop = payload["portfolio_loss_cut"]
+        self.assertEqual(stop["status"], "MONITORING")
+        self.assertFalse(stop["threshold_reached"])
+        self.assertFalse(stop["triggered"])
+        self.assertFalse(stop["close_complete"])
+        self.assertEqual(stop["open_positions"], 1)
+        self.assertAlmostEqual(stop["baseline_equity"], 282.29224992)
+        self.assertAlmostEqual(stop["threshold_equity"], 272.41202117)
+        self.assertAlmostEqual(stop["current_equity"], 273.62408136)
+
+        account_store.set_lock_state(
+            "portfolio_loss_cut_v1",
+            {
+                "cycle_date": "2026-08-23",
+                "baseline_equity_usdt": 282.29224992,
+                "baseline_captured_at_utc": "2026-08-23T00:00:38+00:00",
+                "threshold_equity_usdt": 272.41202117,
+                "current_equity_usdt": 272.29564335,
+                "loss_pct": 3.5,
+                "triggered": False,
+                "close_complete": False,
+            },
+        )
+        account_store.add_wallet_snapshot(
+            "2026-08-23T12:11:30+00:00",
+            272.29564335,
+            source="API",
+        )
+        threshold_reached = provider.snapshot(
+            log_lines=0,
+            account_id=account_id,
+            include_details=False,
+            include_curves=False,
+            include_trade_stats=False,
+        )["portfolio_loss_cut"]
+        self.assertEqual(threshold_reached["status"], "THRESHOLD_REACHED")
+        self.assertTrue(threshold_reached["threshold_reached"])
+        self.assertFalse(threshold_reached["triggered"])
+
+        account_store.set_lock_state(
+            "portfolio_loss_cut_v1",
+            {
+                "cycle_date": "2026-08-23",
+                "baseline_equity_usdt": 282.29224992,
+                "baseline_captured_at_utc": "2026-08-23T00:00:38+00:00",
+                "threshold_equity_usdt": 272.41202117,
+                "current_equity_usdt": 272.29564335,
+                "loss_pct": 3.5,
+                "triggered": True,
+                "close_complete": True,
+                "triggered_at_utc": "2026-08-23T12:11:30+00:00",
+            },
+        )
+
+        inconsistent = provider.snapshot(
+            log_lines=0,
+            account_id=account_id,
+            include_details=False,
+            include_curves=False,
+            include_trade_stats=False,
+        )["portfolio_loss_cut"]
+        self.assertEqual(inconsistent["status"], "CLOSING")
+        self.assertTrue(inconsistent["reported_close_complete"])
+        self.assertFalse(inconsistent["close_complete"])
+        self.assertTrue(inconsistent["state_inconsistent"])
+
+        self.store.mark_position_closed(
+            position_id=position_id,
+            status="CLOSED_PORTFOLIO_LOSS_CUT",
+            close_reason="PORTFOLIO_EQUITY_LOSS_CUT",
+            close_order_id=9001,
+        )
+        completed = provider.snapshot(
+            log_lines=0,
+            account_id=account_id,
+            include_details=False,
+            include_curves=False,
+            include_trade_stats=False,
+        )["portfolio_loss_cut"]
+        self.assertEqual(completed["status"], "TRIGGERED_COMPLETE")
+        self.assertTrue(completed["close_complete"])
+        self.assertFalse(completed["state_inconsistent"])
+        overview_row = next(
+            row for row in provider.accounts_summary()["accounts"] if row["account_id"] == account_id
+        )
+        self.assertEqual(overview_row["portfolio_loss_cut"]["status"], "TRIGGERED_COMPLETE")
+
     def test_snapshot_enriches_positions_from_live_exchange_data(self) -> None:
         run_id, _ = self.store.create_run("2026-02-13")
         now = datetime.now(timezone.utc).replace(microsecond=0)
@@ -1555,6 +1708,11 @@ class DashboardServerTest(unittest.TestCase):
         self.assertIn('var accountMode = "full";', html)
         self.assertIn('var portfolioStopEnabled = true;', html)
         self.assertIn('var portfolioStopPct = Number("3.5")', html)
+        self.assertIn("data && data.portfolio_loss_cut", html)
+        self.assertIn('status === "TRIGGERED_COMPLETE"', html)
+        self.assertIn("if (afterIndex < 0) return null;", html)
+        self.assertNotIn("pointMs <= targetMs", html)
+        self.assertNotIn("已触发组合止损", html)
         self.assertIn("TP 9% / 减仓50% / 浮亏砍仓ON", html)
         self.assertNotIn("Bubble Buster Runtime Console", html)
         self.assertNotIn("All-time Equity Change", html)
@@ -1643,6 +1801,11 @@ class DashboardServerTest(unittest.TestCase):
         self.assertIn("组合止盈监控", html)
         self.assertIn('href="accounts/comparison/"', html)
         self.assertIn("巡检内触发", html)
+        self.assertIn("portfolioStopStates[aid] = r.portfolio_loss_cut || null", html)
+        self.assertIn('status === "TRIGGERED_COMPLETE"', html)
+        self.assertIn("if (afterIndex < 0) return null;", html)
+        self.assertNotIn("pointMs <= targetMs", html)
+        self.assertNotIn("已触发组合止损", html)
         self.assertIn('fullText += (fullText ? "\\n" : "")', html)
         self.assertIn('taskUpdatedAt.textContent = "数据更新时间 " + (latest || "--")', html)
         self.assertIn('var timeText = timeRaw || "--";', html)

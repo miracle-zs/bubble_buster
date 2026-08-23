@@ -21,6 +21,7 @@ LOGGER = logging.getLogger(__name__)
 # at 2026-08-10 09:32:10 Asia/Shanghai. Comparisons must not use snapshots
 # from before that strategy existed.
 PORTFOLIO_TAKE_PROFIT_LAUNCH_AT_UTC = "2026-08-10T01:32:10+00:00"
+PORTFOLIO_LOSS_CUT_LOCK_NAME = "portfolio_loss_cut_v1"
 
 
 @dataclass(frozen=True)
@@ -1383,6 +1384,107 @@ class DashboardDataProvider:
         except (TypeError, ValueError):
             return None
 
+    def _load_portfolio_loss_cut_state(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        account_id: Optional[str],
+        current_equity_usdt: Any,
+        open_positions: int,
+    ) -> Optional[Dict[str, Any]]:
+        """Return the strategy's persisted loss-cut state for one account.
+
+        The curve is useful for presentation, but it is not authoritative for
+        whether the manager has actually latched and completed a portfolio
+        loss-cut. Keep those states tied to the same scoped lock used by the
+        position manager.
+        """
+        normalized_account_id = str(account_id or "").strip()
+        if not normalized_account_id:
+            return None
+        try:
+            row = conn.execute(
+                """
+                SELECT holder, updated_at_utc
+                FROM locks
+                WHERE lock_name = ?
+                LIMIT 1
+                """,
+                (f"{normalized_account_id}:{PORTFOLIO_LOSS_CUT_LOCK_NAME}",),
+            ).fetchone()
+        except sqlite3.Error:
+            return None
+        if row is None or row["holder"] is None:
+            return None
+        try:
+            state = json.loads(str(row["holder"]))
+        except (TypeError, ValueError):
+            return None
+        if not isinstance(state, dict):
+            return None
+
+        baseline_equity = self._safe_float(state.get("baseline_equity_usdt"))
+        threshold_equity = self._safe_float(state.get("threshold_equity_usdt"))
+        current_equity = self._safe_float(current_equity_usdt)
+        if current_equity is None:
+            current_equity = self._safe_float(state.get("current_equity_usdt"))
+        loss_pct = self._safe_float(state.get("loss_pct"))
+        if (
+            loss_pct is None
+            and baseline_equity is not None
+            and baseline_equity > 0
+            and threshold_equity is not None
+        ):
+            loss_pct = (1.0 - threshold_equity / baseline_equity) * 100.0
+
+        current_return_pct: Optional[float] = None
+        distance_pct: Optional[float] = None
+        threshold_reached = False
+        if baseline_equity is not None and baseline_equity > 0 and current_equity is not None:
+            current_return_pct = ((current_equity - baseline_equity) / baseline_equity) * 100.0
+            if threshold_equity is not None:
+                distance_pct = ((current_equity - threshold_equity) / baseline_equity) * 100.0
+                threshold_eps = max(1e-9, abs(threshold_equity) * 1e-12)
+                threshold_reached = current_equity + threshold_eps <= threshold_equity
+
+        tracked_open_positions = max(0, int(open_positions or 0))
+        triggered = bool(state.get("triggered"))
+        reported_close_complete = bool(state.get("close_complete"))
+        close_complete = triggered and reported_close_complete and tracked_open_positions == 0
+        state_inconsistent = reported_close_complete and not close_complete
+        if triggered:
+            status = "TRIGGERED_COMPLETE" if close_complete else "CLOSING"
+        elif threshold_reached:
+            status = "THRESHOLD_REACHED"
+        elif baseline_equity is None or threshold_equity is None:
+            status = "UNAVAILABLE"
+        else:
+            status = "MONITORING"
+
+        def rounded(value: Optional[float]) -> Optional[float]:
+            return round(value, 8) if value is not None else None
+
+        return {
+            "status": status,
+            "source": "BACKEND_LOCK",
+            "cycle_date": state.get("cycle_date"),
+            "baseline_equity": rounded(baseline_equity),
+            "baseline_captured_at_utc": state.get("baseline_captured_at_utc"),
+            "current_equity": rounded(current_equity),
+            "threshold_equity": rounded(threshold_equity),
+            "loss_pct": rounded(loss_pct),
+            "current_return_pct": rounded(current_return_pct),
+            "distance_pct": rounded(distance_pct),
+            "threshold_reached": threshold_reached,
+            "triggered": triggered,
+            "reported_close_complete": reported_close_complete,
+            "close_complete": close_complete,
+            "state_inconsistent": state_inconsistent,
+            "triggered_at_utc": state.get("triggered_at_utc"),
+            "updated_at_utc": state.get("updated_at_utc") or row["updated_at_utc"],
+            "open_positions": tracked_open_positions,
+        }
+
     def _read_wallet_balance(self, now_utc: datetime) -> Dict[str, Any]:
         if self.balance_fetcher is None:
             return {"balance_usdt": None, "as_of_utc": None, "source": "DISABLED", "error": None}
@@ -2194,6 +2296,7 @@ class DashboardDataProvider:
                 "net_cashflow_usdt": 0.0,
             },
             "wallet": live_wallet,
+            "portfolio_loss_cut": None,
             "latest_run": None,
             "runs": [],
             "open_positions": [],
@@ -2383,6 +2486,14 @@ class DashboardDataProvider:
                     )
                     if data.get("live_position_error"):
                         data["summary"]["recent_errors"] = max(data["summary"]["recent_errors"], 1)
+
+                if scoped_account and not self._is_readonly_account(scoped_account):
+                    data["portfolio_loss_cut"] = self._load_portfolio_loss_cut_state(
+                        conn,
+                        account_id=scoped_account,
+                        current_equity_usdt=data["wallet"].get("balance_usdt"),
+                        open_positions=data["summary"]["open_positions"],
+                    )
 
                 if include_details:
                     data["runs"] = self._query_rows(
@@ -2850,7 +2961,14 @@ class DashboardDataProvider:
 
                 for aid, row in by_account.items():
                     if not self._is_readonly_account(aid):
+                        row["portfolio_loss_cut"] = self._load_portfolio_loss_cut_state(
+                            conn,
+                            account_id=aid,
+                            current_equity_usdt=row.get("wallet_balance_usdt"),
+                            open_positions=int(row.get("open_positions") or 0),
+                        )
                         continue
+                    row["portfolio_loss_cut"] = None
                     live_positions = self._readonly_live_positions(aid)
                     row["open_positions"] = len(live_positions)
                     row["open_symbols"] = len(
@@ -4401,6 +4519,7 @@ DASHBOARD_HTML = """<!doctype html>
   var fullLoadedOnce = false;
   var detailsLoaded = false;
   var detailsInFlight = false;
+  var detailsRefreshPending = false;
 
   var el = {
     overviewLink: document.getElementById("overviewLink"),
@@ -5017,23 +5136,14 @@ DASHBOARD_HTML = """<!doctype html>
       var latestMs = new Date(points[points.length - 1].t || "").getTime();
       if (!Number.isFinite(latestMs)) return null;
       var targetMs = cycleStartMs(latestMs);
-      var beforeIndex = -1;
       var afterIndex = -1;
       for (var i = 0; i < points.length; i += 1) {
         var pointMs = new Date(points[i].t || "").getTime();
         if (!Number.isFinite(pointMs)) continue;
-        if (pointMs <= targetMs) beforeIndex = i;
         if (afterIndex < 0 && pointMs >= targetMs) afterIndex = i;
       }
-      if (beforeIndex >= 0) {
-        startIndex = beforeIndex;
-      } else if (afterIndex >= 0) {
-        var afterMs = new Date(points[afterIndex].t || "").getTime();
-        if (!Number.isFinite(afterMs) || afterMs - targetMs > 15 * 60 * 1000) return null;
-        startIndex = afterIndex;
-      } else {
-        return null;
-      }
+      if (afterIndex < 0) return null;
+      startIndex = afterIndex;
     }
     var scoped = points.slice(startIndex);
     if (scoped.length < 2) return null;
@@ -5060,14 +5170,22 @@ DASHBOARD_HTML = """<!doctype html>
       ? ((data && data.strategy_equity_curve) || [])
       : activeCurve(data || {});
     var calculated = calculateCurveMetrics(sourceCurve, useCycle);
-    if (calculated) riskSnapshot = calculated;
-    var metrics = calculated || riskSnapshot;
-    if (!metrics) return;
-
-    var returnCls = metrics.currentReturnPct > 0 ? "ok" : (metrics.currentReturnPct < 0 ? "warn" : "");
-    var drawdownCls = metrics.currentDrawdownPct <= -(portfolioStopPct * 0.7) ? "bad" : (metrics.currentDrawdownPct < 0 ? "warn" : "ok");
-    setSummaryMetric(el.cycleReturn, fmtSigned(metrics.currentReturnPct, 2) + "%", returnCls);
-    setSummaryMetric(el.currentDrawdown, fmtSigned(metrics.currentDrawdownPct, 2) + "%", drawdownCls);
+    if (calculated) {
+      riskSnapshot = calculated;
+    } else if (sourceCurve.length) {
+      riskSnapshot = null;
+    }
+    var metrics = calculated || riskSnapshot || {};
+    var stop = data && data.portfolio_loss_cut;
+    var backendReturn = stop ? toNum(stop.current_return_pct) : null;
+    var currentReturn = backendReturn !== null ? backendReturn : toNum(metrics.currentReturnPct);
+    var currentDrawdown = toNum(metrics.currentDrawdownPct);
+    var returnCls = currentReturn === null ? "" : (currentReturn > 0 ? "ok" : (currentReturn < 0 ? "warn" : ""));
+    var drawdownCls = currentDrawdown === null
+      ? ""
+      : (currentDrawdown <= -(portfolioStopPct * 0.7) ? "bad" : (currentDrawdown < 0 ? "warn" : "ok"));
+    setSummaryMetric(el.cycleReturn, currentReturn === null ? "--" : fmtSigned(currentReturn, 2) + "%", returnCls);
+    setSummaryMetric(el.currentDrawdown, currentDrawdown === null ? "--" : fmtSigned(currentDrawdown, 2) + "%", drawdownCls);
 
     if (accountMode === "readonly") {
       setSummaryMetric(el.stopDistance, "不适用", "");
@@ -5095,21 +5213,67 @@ DASHBOARD_HTML = """<!doctype html>
       return;
     }
 
-    var distance = metrics.stopDistancePct;
-    var riskCls = distance <= 0 ? "bad" : (distance <= 1 ? "warn" : "ok");
-    var distanceText = distance <= 0 ? "已超出 " + fmtNum(Math.abs(distance), 2) + "%" : fmtNum(distance, 2) + "%";
-    var stateText = distance <= 0 ? "已触发组合止损" : (distance <= 1 ? "接近组合止损" : "风险正常");
-    var description = distance <= 0
-      ? "当前周期收益已低于组合止损阈值，请结合持仓开仓时间与任务记录核对后续状态。"
-      : "当前周期收益 " + fmtSigned(metrics.currentReturnPct, 2) + "% ，距离 -" + fmtNum(portfolioStopPct, 2) + "% 止损阈值仍有 " + fmtNum(distance, 2) + " 个百分点。";
+    if (!stop || !stop.status) {
+      setSummaryMetric(el.stopDistance, "状态待同步", "warn");
+      if (el.riskState) el.riskState.className = "risk-state warn";
+      setText(el.riskState, "等待后端止损状态");
+      setText(el.riskDescription, "后端尚未写入本周期组合止损状态；页面不会仅凭权益曲线判定已经触发。");
+      setText(el.riskMeterLabel, "待同步");
+      if (el.riskMeterFill) {
+        el.riskMeterFill.style.width = "0%";
+        el.riskMeterFill.className = "risk-meter-fill warn";
+      }
+      return;
+    }
+
+    var status = String(stop.status || "").toUpperCase();
+    var distance = toNum(stop.distance_pct);
+    var configuredLossPct = toNum(stop.loss_pct);
+    if (configuredLossPct === null || configuredLossPct <= 0) configuredLossPct = portfolioStopPct;
+    var riskCls = "ok";
+    var distanceText = distance === null ? "--" : fmtNum(distance, 2) + "%";
+    var stateText = "风险正常";
+    var description = currentReturn === null
+      ? "后端正在监控本周期组合止损。"
+      : "当前周期收益 " + fmtSigned(currentReturn, 2) + "% ，距离 -" + fmtNum(configuredLossPct, 2) + "% 止损阈值仍有 " + fmtNum(distance, 2) + " 个百分点。";
+
+    if (status === "TRIGGERED_COMPLETE") {
+      riskCls = "bad";
+      distanceText = "已完成";
+      stateText = "组合止损已完成";
+      description = "后端已完成本周期组合止损，当前受管持仓为 0。";
+    } else if (status === "CLOSING") {
+      riskCls = "bad";
+      distanceText = "执行中";
+      stateText = "组合止损执行中";
+      description = stop.state_inconsistent
+        ? "后端已记录平仓完成，但本地仍有 " + txt(stop.open_positions) + " 个受管持仓，状态正在等待对账。"
+        : "后端已经触发组合止损，正在处理剩余 " + txt(stop.open_positions) + " 个受管持仓。";
+    } else if (status === "THRESHOLD_REACHED") {
+      riskCls = "bad";
+      distanceText = distance === null ? "已到阈值" : "已超出 " + fmtNum(Math.abs(distance), 2) + "%";
+      stateText = "已到组合止损阈值";
+      description = "最新权益已达到止损阈值，正在等待策略管理器确认并执行；当前尚未标记为已触发。";
+    } else if (status === "MONITORING" && distance !== null) {
+      riskCls = distance <= 1 ? "warn" : "ok";
+      stateText = distance <= 1 ? "接近组合止损" : "风险正常";
+    } else {
+      riskCls = "warn";
+      distanceText = "状态待同步";
+      stateText = "等待后端止损状态";
+      description = "后端组合止损基准尚未就绪；页面不会仅凭权益曲线判定已经触发。";
+    }
+
     setSummaryMetric(el.stopDistance, distanceText, riskCls);
     if (el.riskState) el.riskState.className = "risk-state " + riskCls;
     setText(el.riskState, stateText);
     setText(el.riskDescription, description);
 
-    var usedPct = metrics.currentReturnPct < 0
-      ? Math.min(100, Math.abs(metrics.currentReturnPct) / portfolioStopPct * 100)
-      : 0;
+    var usedPct = status === "TRIGGERED_COMPLETE" || status === "CLOSING" || status === "THRESHOLD_REACHED"
+      ? 100
+      : (currentReturn !== null && currentReturn < 0
+        ? Math.min(100, Math.abs(currentReturn) / configuredLossPct * 100)
+        : 0);
     setText(el.riskMeterLabel, usedPct <= 0 ? "未消耗" : fmtNum(usedPct, 0) + "%");
     if (el.riskMeterFill) {
       el.riskMeterFill.style.width = usedPct.toFixed(2) + "%";
@@ -5188,6 +5352,9 @@ DASHBOARD_HTML = """<!doctype html>
         return;
       }
 
+      var previousOpenCount = latestData && latestData.summary
+        ? toNum(latestData.summary.open_positions)
+        : null;
       mergeLatest(d);
       d = latestData || d;
       var summary = d.summary || {};
@@ -5229,6 +5396,14 @@ DASHBOARD_HTML = """<!doctype html>
         el.lastRunStatus.className = "summary-value " + clsForStatus(summary.last_run_status);
       }
       rerenderFromLatest();
+      var currentOpenCount = toNum(summary.open_positions);
+      if (
+        previousOpenCount !== null
+        && currentOpenCount !== null
+        && previousOpenCount !== currentOpenCount
+      ) {
+        refreshDetails();
+      }
 
     });
   }
@@ -5390,8 +5565,12 @@ DASHBOARD_HTML = """<!doctype html>
   }
 
   function refreshDetails() {
-    if (detailsInFlight) return;
+    if (detailsInFlight) {
+      detailsRefreshPending = true;
+      return;
+    }
     detailsInFlight = true;
+    detailsRefreshPending = false;
     fetchDashboard(api + "/details", { lite: false }, function (err, d) {
       detailsInFlight = false;
       if (err) {
@@ -5402,6 +5581,7 @@ DASHBOARD_HTML = """<!doctype html>
       }
       renderDetails(d || {});
       detailsLoaded = true;
+      if (detailsRefreshPending) refreshDetails();
     });
   }
 
@@ -6409,6 +6589,7 @@ ACCOUNTS_OVERVIEW_HTML = """<!doctype html>
   var curveInFlight = {};
   var curveObserver = null;
   var accountModes = {};
+  var portfolioStopStates = {};
   var summaryRows = [];
   var taskFilter = "anomaly";
   var entryDetailsExpanded = false;
@@ -7031,19 +7212,18 @@ ACCOUNTS_OVERVIEW_HTML = """<!doctype html>
       var latestMs = new Date(points[points.length - 1].t || "").getTime();
       if (Number.isFinite(latestMs)) {
         var targetMs = cycleStartMs(latestMs);
-        var beforeIndex = -1;
         var afterIndex = -1;
         for (var i = 0; i < points.length; i += 1) {
           var pointMs = new Date(points[i].t || "").getTime();
           if (!Number.isFinite(pointMs)) continue;
-          if (pointMs <= targetMs) beforeIndex = i;
           if (afterIndex < 0 && pointMs >= targetMs) afterIndex = i;
         }
-        startIndex = beforeIndex >= 0 ? beforeIndex : Math.max(0, afterIndex);
+        if (afterIndex < 0) return null;
+        startIndex = afterIndex;
       }
     }
     var scoped = points.slice(startIndex);
-    if (scoped.length < 2) scoped = points;
+    if (scoped.length < 2) return null;
     var baseline = Number(scoped[0].equity);
     if (!Number.isFinite(baseline) || baseline === 0) return null;
     var values = scoped.map(function (point) {
@@ -7099,21 +7279,138 @@ ACCOUNTS_OVERVIEW_HTML = """<!doctype html>
     el.setAttribute("data-account-id", aid);
   }
 
+  function renderPortfolioStopState(aid, stop, metrics) {
+    var meterLabel = accountElement("stop-meter-label", aid);
+    var meter = accountElement("stop-meter-fill", aid);
+    if (metrics) {
+      setAccountMetric(
+        "current-drawdown",
+        aid,
+        fmt(metrics.currentDrawdownPct, 2) + "%",
+        drawdownClass(metrics.currentDrawdownPct)
+      );
+    } else {
+      setAccountMetric("current-drawdown", aid, "--", "");
+    }
+    if (!portfolioStopEnabled) {
+      setAccountMetric("stop-distance", aid, "未启用", "status-warn");
+      setAccountMetric("risk-state", aid, "组合止损未启用", "status-warn");
+      if (meterLabel) {
+        meterLabel.textContent = "未启用";
+        meterLabel.className = "stop-meter-label status-warn";
+      }
+      if (meter) {
+        meter.style.width = "0%";
+        meter.className = "stop-meter-fill status-warn";
+      }
+      return;
+    }
+    if (!stop || !stop.status) {
+      setAccountMetric("stop-distance", aid, "状态待同步", "status-warn");
+      setAccountMetric("risk-state", aid, "等待后端止损状态", "status-warn");
+      if (meterLabel) {
+        meterLabel.textContent = "待同步";
+        meterLabel.className = "stop-meter-label status-warn";
+      }
+      if (meter) {
+        meter.style.width = "0%";
+        meter.className = "stop-meter-fill status-warn";
+      }
+      return;
+    }
+
+    var status = String(stop.status || "").toUpperCase();
+    var rawDistance = stop.distance_pct;
+    var distance = rawDistance === null || rawDistance === undefined ? NaN : Number(rawDistance);
+    var hasDistance = Number.isFinite(distance);
+    var riskCls = "status-ok";
+    var riskText = "正常";
+    var stopDistanceText = hasDistance ? fmt(distance, 2) + "%" : "--";
+    var meterText = "安全距离";
+    var meterPct = hasDistance
+      ? Math.max(0, Math.min(100, distance / (portfolioStopPct * 2) * 100))
+      : 0;
+
+    if (status === "TRIGGERED_COMPLETE") {
+      riskCls = "status-bad";
+      riskText = "组合止损已完成";
+      stopDistanceText = "已完成";
+      meterText = "本周期已止损";
+      meterPct = 0;
+    } else if (status === "CLOSING") {
+      riskCls = "status-bad";
+      riskText = "组合止损执行中";
+      stopDistanceText = "执行中";
+      meterText = stop.state_inconsistent ? "等待持仓对账" : "正在平仓";
+      meterPct = 0;
+    } else if (status === "THRESHOLD_REACHED") {
+      riskCls = "status-bad";
+      riskText = "已到止损阈值";
+      stopDistanceText = hasDistance ? "已超出 " + fmt(Math.abs(distance), 2) + "%" : "已到阈值";
+      meterText = "等待策略执行";
+      meterPct = 0;
+    } else if (status === "MONITORING" && hasDistance) {
+      riskCls = distance <= 1 ? "status-warn" : "status-ok";
+      riskText = distance <= 1 ? "接近组合止损" : "正常";
+      meterText = distance <= 1 ? "接近阈值" : "安全距离";
+    } else {
+      riskCls = "status-warn";
+      riskText = "等待后端止损状态";
+      stopDistanceText = "状态待同步";
+      meterText = "待同步";
+      meterPct = 0;
+    }
+
+    setAccountMetric("stop-distance", aid, stopDistanceText, riskCls);
+    setAccountMetric("risk-state", aid, riskText, riskCls);
+    if (meterLabel) {
+      meterLabel.textContent = meterText;
+      meterLabel.className = "stop-meter-label " + riskCls;
+    }
+    if (meter) {
+      meter.style.width = meterPct.toFixed(2) + "%";
+      meter.className = "stop-meter-fill " + riskCls;
+    }
+  }
+
   function renderCurve(aid) {
     var box = accountElement("spark-box", aid);
     var deltaEl = accountElement("spark-delta", aid);
     if (!box || !deltaEl) return;
     var cached = curveCache[aid];
     var mode = String(accountModes[aid] || "full").toLowerCase();
+    var hasSummaryStop = Object.prototype.hasOwnProperty.call(portfolioStopStates, aid);
+    var stop = hasSummaryStop
+      ? portfolioStopStates[aid]
+      : ((cached && cached.portfolioLossCut) || null);
+    var rawBackendReturn = stop ? stop.current_return_pct : null;
+    var backendReturn = rawBackendReturn === null || rawBackendReturn === undefined
+      ? null
+      : Number(rawBackendReturn);
+    if (!Number.isFinite(backendReturn)) backendReturn = null;
     var metrics = cached ? curveMetrics(cached.points, mode) : null;
     if (!metrics) {
       box.className = "spark-box";
       box.innerHTML = '<div class="spark-empty">暂无曲线</div>';
-      setAccountMetric("spark-delta", aid, "--", "");
+      if (mode !== "readonly" && backendReturn !== null) {
+        var backendCls = backendReturn > 0 ? "spark-up" : (backendReturn < 0 ? "spark-down" : "spark-flat");
+        setAccountMetric(
+          "spark-delta",
+          aid,
+          (backendReturn >= 0 ? "+" : "") + fmt(backendReturn, 2) + "%",
+          backendCls
+        );
+        renderPortfolioStopState(aid, stop, null);
+      } else {
+        setAccountMetric("spark-delta", aid, "--", "");
+        if (mode !== "readonly") renderPortfolioStopState(aid, stop, null);
+      }
       return;
     }
 
-    var changePct = metrics.currentReturnPct;
+    var changePct = mode !== "readonly" && backendReturn !== null
+      ? backendReturn
+      : metrics.currentReturnPct;
     var deltaCls = changePct > 0 ? "spark-up" : (changePct < 0 ? "spark-down" : "spark-flat");
     var width = mode === "readonly" ? 300 : 320;
     var height = mode === "readonly" ? 50 : 126;
@@ -7132,37 +7429,7 @@ ACCOUNTS_OVERVIEW_HTML = """<!doctype html>
     var signedReturn = (changePct >= 0 ? "+" : "") + fmt(changePct, 2) + "%";
     setAccountMetric("spark-delta", aid, signedReturn, deltaCls);
     if (mode === "readonly") return;
-
-    setAccountMetric("current-drawdown", aid, fmt(metrics.currentDrawdownPct, 2) + "%", drawdownClass(metrics.currentDrawdownPct));
-    var meterLabel = accountElement("stop-meter-label", aid);
-    if (!portfolioStopEnabled) {
-      setAccountMetric("stop-distance", aid, "未启用", "status-warn");
-      setAccountMetric("risk-state", aid, "组合止损未启用", "status-warn");
-      if (meterLabel) {
-        meterLabel.textContent = "未启用";
-        meterLabel.className = "stop-meter-label status-warn";
-      }
-      return;
-    }
-
-    var distance = metrics.stopDistancePct;
-    var riskCls = distance <= 0 ? "status-bad" : (distance <= 1 ? "status-warn" : "status-ok");
-    var riskText = distance <= 0 ? "已触发组合止损" : (distance <= 1 ? "接近组合止损" : "正常");
-    var stopDistanceText = distance <= 0 ? "已超出 " + fmt(Math.abs(distance), 2) + "%" : fmt(distance, 2) + "%";
-    setAccountMetric("stop-distance", aid, stopDistanceText, riskCls);
-    setAccountMetric("risk-state", aid, riskText, riskCls);
-    if (meterLabel) {
-      meterLabel.textContent = distance <= 0
-        ? "已超出 " + fmt(Math.abs(distance), 2) + "%"
-        : (distance <= 1 ? "接近阈值" : "安全距离");
-      meterLabel.className = "stop-meter-label " + riskCls;
-    }
-    var meter = accountElement("stop-meter-fill", aid);
-    if (meter) {
-      var meterPct = Math.max(0, Math.min(100, distance / (portfolioStopPct * 2) * 100));
-      meter.style.width = meterPct.toFixed(2) + "%";
-      meter.className = "stop-meter-fill " + riskCls;
-    }
+    renderPortfolioStopState(aid, stop, metrics);
   }
 
   function fetchCurve(aid) {
@@ -7201,9 +7468,14 @@ ACCOUNTS_OVERVIEW_HTML = """<!doctype html>
           var n = Number(p.equity);
           if (Number.isFinite(n)) points.push({ t: p.t || "", equity: n });
         }
-        if (points.length >= 2) {
-          curveCache[aid] = { points: points.slice(-160), ts: Date.now() };
+        if (payload.portfolio_loss_cut) {
+          portfolioStopStates[aid] = payload.portfolio_loss_cut;
         }
+        curveCache[aid] = {
+          points: points.slice(-160),
+          portfolioLossCut: payload.portfolio_loss_cut || portfolioStopStates[aid] || null,
+          ts: Date.now()
+        };
       } catch (e) {}
       renderCurve(aid);
     };
@@ -7233,12 +7505,14 @@ ACCOUNTS_OVERVIEW_HTML = """<!doctype html>
     var managedHtml = "";
     var readonlyHtml = "";
     accountModes = {};
+    portfolioStopStates = {};
     for (var i = 0; i < rows.length; i += 1) {
       var r = rows[i] || {};
       var mode = String(r.mode || "full").toLowerCase();
       if (mode === "loss_cut_only") continue;  // loss_cut_only 不在上卡片区显示
       var aid = String(r.account_id || "");
       accountModes[aid] = mode;
+      portfolioStopStates[aid] = r.portfolio_loss_cut || null;
       var safeAid = escapeHtml(aid);
       var base = pathPrefix + "/account/" + encodeURIComponent(aid) + "/";
       var st = r.last_run_status || "--";
