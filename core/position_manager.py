@@ -1388,6 +1388,7 @@ class PositionManager:
                 executed_qty,
             )
         item["last_error"] = None
+        item["retry_count"] = 0
         return {
             "pending": True,
             "reconciled": True,
