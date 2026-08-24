@@ -560,6 +560,47 @@ class DashboardServerTest(unittest.TestCase):
             ["组合止盈首次触发", "组合止盈重试"],
         )
 
+    def test_accounts_equity_comparison_coalesces_retries_and_marks_completion(self) -> None:
+        self.store.scoped("acc01").add_wallet_snapshot(
+            "2026-08-10T02:00:00+00:00",
+            1000.0,
+            source="API",
+        )
+        with open(self.log_file, "w", encoding="utf-8") as f:
+            f.write(
+                "\n".join(
+                    [
+                        "2026-08-10 03:00:00,000 - WARNING - core.runtime_service - service portfolio take-profit account=acc01 result={'status': 'TRIGGERED', 'cycle_date': '2026-08-10', 'close_complete': False, 'actual_profit_pct': 2.5}",
+                        "2026-08-10 03:01:00,000 - WARNING - core.runtime_service - service portfolio take-profit account=acc01 result={'status': 'TRIGGERED_RETRY', 'cycle_date': '2026-08-10', 'close_complete': False, 'actual_profit_pct': 2.4, 'pending': 4, 'errors': 0}",
+                        "2026-08-10 03:02:00,000 - WARNING - core.runtime_service - service portfolio take-profit account=acc01 result={'status': 'TRIGGERED_RETRY', 'cycle_date': '2026-08-10', 'close_complete': False, 'actual_profit_pct': 2.3, 'pending': 2, 'errors': 0}",
+                        "2026-08-10 03:03:00,000 - WARNING - core.runtime_service - service portfolio take-profit account=acc01 result={'status': 'TRIGGERED_RETRY', 'cycle_date': '2026-08-10', 'close_complete': True, 'actual_profit_pct': 2.2, 'pending': 0, 'errors': 0}",
+                    ]
+                )
+                + "\n"
+            )
+
+        provider = DashboardDataProvider(
+            db_path=self.db_path,
+            log_file=self.log_file,
+            timezone_name="UTC",
+            entry_hour=7,
+            entry_minute=40,
+            overview_account_ids=["acc01"],
+        )
+
+        events = provider.accounts_equity_comparison(window_hours=None)["events"]
+        self.assertEqual(
+            [event["label"] for event in events],
+            ["组合止盈首次触发", "组合止盈重试", "组合止盈完成"],
+        )
+        self.assertEqual(events[1]["retry_count"], 2)
+        self.assertEqual(events[1]["pending"], 2)
+        self.assertEqual(events[1]["first_retry_at_utc"], "2026-08-10T03:01:00+00:00")
+        self.assertEqual(events[1]["last_retry_at_utc"], "2026-08-10T03:02:00+00:00")
+        self.assertEqual(events[2]["status"], "ALREADY_TRIGGERED")
+        self.assertTrue(events[2]["close_complete"])
+        self.assertEqual(events[2]["retry_count"], 3)
+
     def test_accounts_equity_comparison_excludes_readonly_accounts(self) -> None:
         self.store.scoped("acc01").add_wallet_snapshot(
             "2026-08-10T02:00:00+00:00",

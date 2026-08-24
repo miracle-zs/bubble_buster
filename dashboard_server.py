@@ -2866,8 +2866,15 @@ class DashboardDataProvider:
         window_start_utc: Optional[str],
         end_utc: str,
     ) -> List[Dict[str, Any]]:
-        """Extract actual portfolio take-profit trigger moments from strategy logs."""
-        events: List[Dict[str, Any]] = []
+        """Extract compact portfolio take-profit lifecycle events from strategy logs.
+
+        The runtime checks an already-triggered plan once per minute.  Showing
+        every ``TRIGGERED_RETRY`` warning as a separate dashboard event makes a
+        single pending exit look like a stream of new triggers, so retries are
+        coalesced by account and portfolio cycle here.  A completed retry is
+        emitted separately to make the waiting-to-complete transition visible.
+        """
+        raw_events: List[Dict[str, Any]] = []
         seen: Set[Tuple[str, str]] = set()
         for path in self._task_log_files():
             for line in self._read_task_log_lines(path, ("service portfolio take-profit ",)):
@@ -2906,21 +2913,104 @@ class DashboardDataProvider:
                 if key in seen:
                     continue
                 seen.add(key)
-                events.append(
+                cycle_key = str(parsed.get("cycle_date") or time_local[:10]).strip() or time_local[:10]
+                close_complete_raw = parsed.get("close_complete")
+                close_complete = (
+                    close_complete_raw is True
+                    or close_complete_raw == 1
+                    or str(close_complete_raw).strip().lower() == "true"
+                )
+                raw_events.append(
                     {
                         "account_id": account_id,
+                        "cycle_key": cycle_key,
                         "t_utc": event_utc,
                         "status": status,
-                        "label": (
-                            "组合止盈重试"
-                            if status == "TRIGGERED_RETRY"
-                            else "组合止盈首次触发"
-                        ),
                         "actual_profit_pct": self._safe_float(parsed.get("actual_profit_pct")),
                         "closed_take_profit": self._safe_int(parsed.get("closed_take_profit"), 0),
                         "adjusted_take_profit": self._safe_int(parsed.get("adjusted_take_profit"), 0),
+                        "close_complete": close_complete,
+                        "pending": self._safe_int(parsed.get("pending"), 0),
+                        "errors": self._safe_int(parsed.get("errors"), 0),
                     }
                 )
+
+        grouped: Dict[Tuple[str, str], List[Dict[str, Any]]] = {}
+        for raw_event in sorted(
+            raw_events,
+            key=lambda item: (
+                str(item.get("account_id") or ""),
+                str(item.get("cycle_key") or ""),
+                str(item.get("t_utc") or ""),
+            ),
+        ):
+            group_key = (
+                str(raw_event.get("account_id") or ""),
+                str(raw_event.get("cycle_key") or ""),
+            )
+            grouped.setdefault(group_key, []).append(raw_event)
+
+        events: List[Dict[str, Any]] = []
+
+        def public_event(raw_event: Dict[str, Any]) -> Dict[str, Any]:
+            return {
+                "account_id": raw_event["account_id"],
+                "t_utc": raw_event["t_utc"],
+                "status": raw_event["status"],
+                "actual_profit_pct": raw_event["actual_profit_pct"],
+                "closed_take_profit": raw_event["closed_take_profit"],
+                "adjusted_take_profit": raw_event["adjusted_take_profit"],
+                "close_complete": raw_event["close_complete"],
+                "pending": raw_event["pending"],
+                "errors": raw_event["errors"],
+            }
+
+        for group_events in grouped.values():
+            initial_events = [item for item in group_events if item["status"] == "TRIGGERED"]
+            retry_events = [item for item in group_events if item["status"] == "TRIGGERED_RETRY"]
+            if initial_events:
+                initial_event = public_event(initial_events[0])
+                initial_event["label"] = "组合止盈首次触发"
+                events.append(initial_event)
+
+            incomplete_retries = [item for item in retry_events if not item["close_complete"]]
+            if incomplete_retries:
+                first_retry = incomplete_retries[0]
+                last_retry = incomplete_retries[-1]
+                retry_event = public_event(first_retry)
+                retry_event.update(
+                    {
+                        "label": "组合止盈重试",
+                        "retry_count": len(incomplete_retries),
+                        "first_retry_at_utc": first_retry["t_utc"],
+                        "last_retry_at_utc": last_retry["t_utc"],
+                        "actual_profit_pct": last_retry["actual_profit_pct"],
+                        "closed_take_profit": last_retry["closed_take_profit"],
+                        "adjusted_take_profit": last_retry["adjusted_take_profit"],
+                        "pending": last_retry["pending"],
+                        "errors": last_retry["errors"],
+                        "close_complete": False,
+                    }
+                )
+                events.append(retry_event)
+
+            completed_retries = [item for item in retry_events if item["close_complete"]]
+            if completed_retries:
+                completed_retry = completed_retries[-1]
+                completed_event = public_event(completed_retry)
+                completed_event.update(
+                    {
+                        "status": "ALREADY_TRIGGERED",
+                        "label": "组合止盈完成",
+                        "retry_count": len(retry_events),
+                        "first_retry_at_utc": retry_events[0]["t_utc"],
+                        "last_retry_at_utc": retry_events[-1]["t_utc"],
+                        "close_complete": True,
+                        "pending": 0,
+                    }
+                )
+                events.append(completed_event)
+
         events.sort(key=lambda item: (str(item.get("t_utc") or ""), str(item.get("account_id") or "")))
         return events
 

@@ -310,6 +310,11 @@
       background: rgba(59, 42, 22, 0.74);
     }
     .event-chip.is-retry .event-kind { color: #ffc875; }
+    .event-chip.is-complete {
+      border-color: rgba(77, 213, 163, 0.52);
+      background: rgba(17, 57, 53, 0.72);
+    }
+    .event-chip.is-complete .event-kind { color: #72e2b5; }
     .event-empty { color: #688596; font-size: 11px; padding-top: 4px; }
     .footnote {
       display: flex;
@@ -538,10 +543,23 @@
         return;
       }
       el("events-list").innerHTML = events.map(function (event) {
-        var isRetry = String(event.status || "").toUpperCase() === "TRIGGERED_RETRY";
-        var eventLabel = event.label || (isRetry ? "组合止盈重试" : "组合止盈首次触发");
-        var detail = event.actual_profit_pct == null ? "" : " · 触发时 +" + Number(event.actual_profit_pct).toFixed(2) + "%";
-        return '<span class="event-chip' + (isRetry ? " is-retry" : "") + '"><strong>' + escapeHtml(event.account_id) + '</strong><span class="event-kind">' + escapeHtml(eventLabel) + '</span><span>' + formatLocalTime(event.t_utc, true) + detail + '</span></span>';
+        var status = String(event.status || "").toUpperCase();
+        var isComplete = Boolean(event.close_complete) || status === "ALREADY_TRIGGERED";
+        var isRetry = status === "TRIGGERED_RETRY" && !isComplete;
+        var eventLabel = event.label || (isComplete ? "组合止盈完成" : (isRetry ? "组合止盈重试" : "组合止盈首次触发"));
+        var classes = isRetry ? " is-retry" : (isComplete ? " is-complete" : "");
+        var retryCount = Number(event.retry_count || 0);
+        var timeText = formatLocalTime(event.t_utc, true);
+        if (isRetry && event.first_retry_at_utc && event.last_retry_at_utc && event.first_retry_at_utc !== event.last_retry_at_utc) {
+          timeText = formatLocalTime(event.first_retry_at_utc, true) + " → " + formatLocalTime(event.last_retry_at_utc, true);
+        }
+        var details = [];
+        if (event.actual_profit_pct != null) details.push("触发时 +" + Number(event.actual_profit_pct).toFixed(2) + "%");
+        if (isRetry && retryCount > 0) details.push("连续检查 " + retryCount + " 次");
+        if (isRetry && event.pending != null) details.push("待处理 " + Number(event.pending));
+        if (isComplete && retryCount > 0) details.push("期间检查 " + retryCount + " 次");
+        var detail = details.length ? " · " + details.join(" · ") : "";
+        return '<span class="event-chip' + classes + '"><strong>' + escapeHtml(event.account_id) + '</strong><span class="event-kind">' + escapeHtml(eventLabel) + '</span><span>' + timeText + detail + '</span></span>';
       }).join("");
     }
 
@@ -556,7 +574,7 @@
       emptyElement.style.display = activeRows.length ? "none" : "flex";
       el("chart-title").textContent = mode === "relative" ? "相对权益变化（%）" : "账户权益（USDT）";
       el("chart-subtitle").textContent = mode === "relative"
-        ? "组合止盈上线后的首个有效快照 = 0%；竖线表示组合止盈事件，首次触发/重试见下方节点。"
+        ? "组合止盈上线后的首个有效快照 = 0%；竖线表示组合止盈生命周期，首次触发/等待/完成见下方节点。"
         : "显示服务器记录的权益快照；竖线表示组合止盈事件，悬停查看相对变化。";
       if (!chart) chart = echarts.init(chartElement, null, { renderer: "canvas" });
       var chartSeries = activeRows.map(function (row, index) {
