@@ -746,7 +746,7 @@ class StateStore:
                 order_payload=order_payload,
             )
         self.upsert_exchange_order_state(
-            order_payload,
+            {**order_payload, "symbol": order_payload.get("symbol") or symbol},
             source="LOCAL_ORDER_EVENT",
             event_time_utc=event_time_utc,
         )
@@ -802,6 +802,11 @@ class StateStore:
                 event_time_utc=event_time_utc,
                 order_payload=order_payload,
             )
+        self.upsert_exchange_order_state(
+            {**order_payload, "symbol": order_payload.get("symbol") or symbol},
+            source="LOCAL_ORDER_EVENT",
+            event_time_utc=event_time_utc,
+        )
 
     @staticmethod
     def _deferred_structure_boundary_reached(
@@ -990,6 +995,51 @@ class StateStore:
                 (self.account_id, max(1, int(limit))),
             ).fetchall()
             return [dict(row) for row in rows]
+
+    def get_latest_portfolio_take_profit_fill(self, position_id: int) -> Optional[Dict[str, Any]]:
+        """Return the latest persisted portfolio-limit close fill for a position.
+
+        Portfolio take-profit LIMIT orders are not stored in the position's
+        legacy ``tp_order_id`` column.  When the exchange position reaches
+        zero before the portfolio lock state is persisted, the normal
+        position patrol would otherwise classify the close as external.  The
+        client-order prefix lets the patrol attribute that fill without
+        confusing it with a regular stop or take-profit order.
+        """
+        with self._connect_ctx() as conn:
+            row = conn.execute(
+                """
+                SELECT
+                    f.id,
+                    f.position_id,
+                    f.order_id,
+                    f.client_order_id,
+                    f.side,
+                    f.status,
+                    f.executed_qty,
+                    f.avg_price,
+                    f.realized_pnl,
+                    f.commission,
+                    f.commission_asset,
+                    f.event_time_utc
+                FROM fills f
+                INNER JOIN positions p ON p.id = f.position_id
+                INNER JOIN runs r ON r.run_id = p.run_id
+                WHERE f.position_id = ?
+                  AND r.account_id = ?
+                  AND UPPER(COALESCE(f.side, '')) = 'BUY'
+                  AND UPPER(COALESCE(f.status, '')) IN ('FILLED', 'POSITION_RECONCILED')
+                  AND COALESCE(f.reduce_only, 0) = 1
+                  AND (
+                      COALESCE(f.client_order_id, '') LIKE 't10s-pftlim-%'
+                      OR COALESCE(f.client_order_id, '') LIKE 'pftlim-%'
+                  )
+                ORDER BY f.event_time_utc DESC, f.id DESC
+                LIMIT 1
+                """,
+                (int(position_id), self.account_id),
+            ).fetchone()
+            return dict(row) if row is not None else None
 
     def create_rebalance_cycle(
         self,
@@ -1766,7 +1816,7 @@ class StateStore:
                     reduce_only, close_position, event_time_utc, source, raw_json
                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(account_id, order_key) DO UPDATE SET
-                    symbol = excluded.symbol,
+                    symbol = COALESCE(NULLIF(excluded.symbol, ''), exchange_order_state.symbol),
                     order_id = COALESCE(excluded.order_id, exchange_order_state.order_id),
                     client_order_id = COALESCE(excluded.client_order_id, exchange_order_state.client_order_id),
                     type = COALESCE(excluded.type, exchange_order_state.type),

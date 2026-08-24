@@ -8,6 +8,7 @@ from zoneinfo import ZoneInfo
 from core.position_manager import PositionManager
 from core.runtime_service import ServiceRuntimeConfig, StrategyRuntimeService
 from core.state_store import StateStore
+from infra.binance_futures_client import BinanceAPIError
 
 
 class PortfolioTakeProfitTest(unittest.TestCase):
@@ -260,6 +261,121 @@ class PortfolioTakeProfitTest(unittest.TestCase):
         self.assertEqual(row["status"], "CLOSED_PORTFOLIO_TAKE_PROFIT")
         self.assertEqual(row["close_reason"], "PORTFOLIO_EQUITY_TAKE_PROFIT")
         self.assertEqual(row["close_order_id"], 501)
+
+    def test_reuses_existing_local_limit_when_persisted_plan_lost_order_id(self) -> None:
+        self._insert_short("BTCUSDT")
+        self.store.add_wallet_snapshot("2026-07-28T00:00:00+00:00", 100.0)
+        risk = {
+            "symbol": "BTCUSDT",
+            "positionAmt": "-1",
+            "positionSide": "BOTH",
+            "markPrice": "99",
+        }
+        client = MagicMock()
+        client.get_position_risk.return_value = [risk]
+        client.format_order_qty.side_effect = lambda _symbol, qty: str(qty)
+        client.create_order.return_value = {
+            "orderId": 701,
+            "clientOrderId": "t10s-pftlim-BTCUS-abc123-xyz98765",
+            "type": "LIMIT",
+            "side": "BUY",
+            "positionSide": "BOTH",
+            "price": "99",
+            "origQty": "1",
+            "executedQty": "0",
+            "reduceOnly": True,
+            "status": "NEW",
+        }
+        user_stream = MagicMock()
+        manager = self._manager(client)
+        manager.order_state = user_stream
+
+        first = manager.run_portfolio_take_profit(
+            current_equity_usdt=109.0,
+            now_local=datetime(2026, 7, 28, 9, 0, tzinfo=ZoneInfo("Asia/Shanghai")),
+            profit_pct=9.0,
+        )
+        self.assertFalse(first["close_complete"])
+        self.assertEqual(client.create_order.call_count, 1)
+
+        state = self.store.get_lock_state(PositionManager.PORTFOLIO_TAKE_PROFIT_LOCK_NAME)
+        assert state is not None
+        item = state["portfolio_limit_plan"][0]
+        item["portfolio_order_id"] = None
+        item["portfolio_client_order_id"] = None
+        item["portfolio_order_status"] = "REJECTED"
+        item["retry_count"] = 1
+        self.store.set_lock_state(PositionManager.PORTFOLIO_TAKE_PROFIT_LOCK_NAME, state)
+
+        second = manager.run_portfolio_take_profit(
+            current_equity_usdt=108.0,
+            now_local=datetime(2026, 7, 28, 9, 1, tzinfo=ZoneInfo("Asia/Shanghai")),
+            profit_pct=9.0,
+        )
+
+        self.assertFalse(second["close_complete"])
+        self.assertEqual(second["errors"], 0)
+        self.assertEqual(second["pending"], 1)
+        self.assertEqual(client.create_order.call_count, 1)
+        state = self.store.get_lock_state(PositionManager.PORTFOLIO_TAKE_PROFIT_LOCK_NAME)
+        assert state is not None
+        self.assertEqual(state["portfolio_limit_plan"][0]["portfolio_order_id"], 701)
+
+    def test_reduce_only_rejection_adopts_existing_remote_limit(self) -> None:
+        self._insert_short("BTCUSDT")
+        self.store.add_wallet_snapshot("2026-07-28T00:00:00+00:00", 100.0)
+        client = MagicMock()
+        client.get_position_risk.return_value = [
+            {
+                "symbol": "BTCUSDT",
+                "positionAmt": "-1",
+                "positionSide": "BOTH",
+                "markPrice": "99",
+            }
+        ]
+        client.format_order_qty.side_effect = lambda _symbol, qty: str(qty)
+        client.create_order.side_effect = BinanceAPIError(-2022, "ReduceOnly Order is rejected")
+        client.get_open_orders.return_value = [
+            {
+                "orderId": 702,
+                "clientOrderId": "t10s-pftlim-BTCUS-abc123-remote1",
+                "symbol": "BTCUSDT",
+                "type": "LIMIT",
+                "side": "BUY",
+                "positionSide": "BOTH",
+                "price": "99",
+                "origQty": "1",
+                "executedQty": "0",
+                "reduceOnly": True,
+                "status": "NEW",
+            }
+        ]
+        manager = self._manager(client)
+
+        first = manager.run_portfolio_take_profit(
+            current_equity_usdt=109.0,
+            now_local=datetime(2026, 7, 28, 9, 0, tzinfo=ZoneInfo("Asia/Shanghai")),
+            profit_pct=9.0,
+        )
+
+        self.assertFalse(first["close_complete"])
+        self.assertEqual(first["errors"], 0)
+        self.assertEqual(first["pending"], 1)
+        self.assertEqual(client.create_order.call_count, 1)
+        client.get_open_orders.assert_called_once_with(symbol="BTCUSDT")
+
+        state = self.store.get_lock_state(PositionManager.PORTFOLIO_TAKE_PROFIT_LOCK_NAME)
+        assert state is not None
+        self.assertEqual(state["portfolio_limit_plan"][0]["portfolio_order_id"], 702)
+
+        client.get_order.return_value = client.get_open_orders.return_value[0]
+        second = manager.run_portfolio_take_profit(
+            current_equity_usdt=108.0,
+            now_local=datetime(2026, 7, 28, 9, 1, tzinfo=ZoneInfo("Asia/Shanghai")),
+            profit_pct=9.0,
+        )
+        self.assertEqual(second["errors"], 0)
+        self.assertEqual(client.create_order.call_count, 1)
 
     def test_pending_limit_plan_is_carried_across_daily_reset(self) -> None:
         self._insert_short("BTCUSDT")

@@ -1206,6 +1206,197 @@ class PositionManager:
         summary["details"] = details
         return summary
 
+    def _find_existing_portfolio_limit_order(
+        self,
+        item: Dict[str, object],
+        expected_qty: float,
+        refresh_rest: bool = False,
+    ) -> Optional[Dict[str, object]]:
+        """Find an already-open portfolio LIMIT before submitting another one.
+
+        A successful Binance write can be followed by a lost response or a
+        missed User Stream event.  The old retry path then submitted a second
+        reduce-only order and treated ``-2022`` as a reason to forget the
+        first order.  Prefer the local order ledger and only perform a
+        symbol-scoped REST open-order scan when the caller is recovering from
+        a rejected/unknown submission.
+        """
+        symbol = str(item.get("symbol") or "").strip().upper()
+        if not symbol:
+            return None
+        try:
+            expected_price = self._safe_float(
+                self._canonicalize_portfolio_take_profit_limit_price(item),
+                default=0.0,
+            )
+        except Exception:  # noqa: BLE001
+            return None
+
+        candidates: List[Dict[str, object]] = []
+        try:
+            candidates.extend(
+                dict(row)
+                for row in self.store.list_exchange_order_state(active_only=True)
+                if isinstance(row, dict)
+            )
+        except Exception as exc:  # noqa: BLE001
+            LOGGER.debug(
+                "Portfolio limit local order lookup failed account=%s symbol=%s: %s",
+                self.account_id,
+                symbol,
+                exc,
+            )
+
+        for order in candidates:
+            if self._portfolio_limit_order_matches(
+                order=order,
+                item=item,
+                expected_qty=expected_qty,
+                expected_price=expected_price,
+            ):
+                return order
+
+        if not refresh_rest:
+            return None
+        try:
+            remote_orders = self.client.get_open_orders(symbol=symbol)
+        except BinanceAPIError as exc:
+            LOGGER.warning(
+                "Portfolio limit REST reconciliation failed account=%s symbol=%s: %s",
+                self.account_id,
+                symbol,
+                exc,
+            )
+            return None
+        if not isinstance(remote_orders, list):
+            return None
+        for order in remote_orders:
+            if not isinstance(order, dict):
+                continue
+            if not self._portfolio_limit_order_matches(
+                order=order,
+                item=item,
+                expected_qty=expected_qty,
+                expected_price=expected_price,
+            ):
+                continue
+            try:
+                self.store.upsert_exchange_order_state(
+                    order,
+                    source="REST_PORTFOLIO_RECONCILE",
+                )
+            except Exception as exc:  # noqa: BLE001
+                LOGGER.warning(
+                    "Portfolio limit REST order persistence failed account=%s symbol=%s: %s",
+                    self.account_id,
+                    symbol,
+                    exc,
+                )
+            return dict(order)
+        return None
+
+    def _portfolio_limit_order_matches(
+        self,
+        order: Dict[str, object],
+        item: Dict[str, object],
+        expected_qty: float,
+        expected_price: float,
+    ) -> bool:
+        symbol = str(order.get("symbol") or order.get("s") or "").strip().upper()
+        if symbol != str(item.get("symbol") or "").strip().upper():
+            return False
+        status = str(order.get("status") or order.get("X") or "").strip().upper()
+        if status not in self.PORTFOLIO_LIMIT_ACTIVE_STATUSES:
+            return False
+        order_type = str(order.get("type") or order.get("orderType") or order.get("o") or "").strip().upper()
+        if order_type != "LIMIT":
+            return False
+        side = str(order.get("side") or order.get("S") or "").strip().upper()
+        expected_side = str(item.get("close_side") or "BUY").strip().upper() or "BUY"
+        if side != expected_side:
+            return False
+        position_side = str(order.get("positionSide") or order.get("position_side") or order.get("ps") or "").strip().upper()
+        expected_position_side = str(item.get("position_side") or "BOTH").strip().upper() or "BOTH"
+        if position_side and position_side != expected_position_side:
+            return False
+        reduce_only = order.get("reduceOnly") if "reduceOnly" in order else order.get("reduce_only")
+        if not self._truthy_order_flag(reduce_only):
+            return False
+
+        order_price = self._safe_float(order.get("price") if "price" in order else order.get("p"), default=0.0)
+        if expected_price <= 0 or order_price <= 0:
+            return False
+        price_tolerance = max(1e-12, expected_price * 1e-8)
+        if abs(order_price - expected_price) > price_tolerance:
+            return False
+
+        raw_order_qty = (
+            order.get("origQty")
+            if "origQty" in order
+            else order.get("original_qty")
+            if "original_qty" in order
+            else order.get("q")
+        )
+        order_qty = self._safe_float(raw_order_qty, default=0.0)
+        client_order_id = str(
+            order.get("clientOrderId")
+            or order.get("client_order_id")
+            or order.get("clientAlgoId")
+            or order.get("c")
+            or ""
+        ).strip()
+        if expected_qty > 0 and order_qty > 0:
+            qty_tolerance = max(1e-12, expected_qty * 1e-8)
+            if abs(order_qty - expected_qty) > qty_tolerance:
+                return False
+        elif not client_order_id.startswith(("t10s-pftlim-", "pftlim-")):
+            return False
+        return True
+
+    def _bind_portfolio_limit_order(
+        self,
+        item: Dict[str, object],
+        order: Dict[str, object],
+        detail_prefix: str = "reconciled",
+    ) -> Dict[str, object]:
+        raw_order_id = order.get("orderId") or order.get("order_id") or order.get("algoId")
+        order_id = self._safe_optional_int(raw_order_id) or raw_order_id
+        client_order_id = (
+            order.get("clientOrderId")
+            or order.get("client_order_id")
+            or order.get("clientAlgoId")
+        )
+        status = str(order.get("status") or order.get("algoStatus") or "NEW").strip().upper() or "NEW"
+        original_qty = self._safe_float(
+            order.get("origQty") if "origQty" in order else order.get("original_qty"),
+            default=0.0,
+        )
+        executed_qty = self._safe_float(
+            order.get("executedQty") if "executedQty" in order else order.get("executed_qty"),
+            default=0.0,
+        )
+        item["portfolio_order_id"] = order_id
+        item["portfolio_client_order_id"] = str(client_order_id or "").strip() or item.get(
+            "portfolio_client_order_id"
+        )
+        item["portfolio_order_status"] = status
+        if original_qty > 0:
+            item["portfolio_requested_qty"] = original_qty
+        if executed_qty > 0:
+            item["portfolio_executed_qty"] = max(
+                self._safe_float(item.get("portfolio_executed_qty"), default=0.0),
+                executed_qty,
+            )
+        item["last_error"] = None
+        return {
+            "pending": True,
+            "reconciled": True,
+            "detail": (
+                f"{str(item.get('symbol') or '').strip().upper()}(limit_{detail_prefix}, "
+                f"order_id={order_id or '-'}, status={status})"
+            ),
+        }
+
     def _advance_portfolio_take_profit_limit_item(
         self,
         item: Dict[str, object],
@@ -1227,6 +1418,7 @@ class PositionManager:
                     symbol=symbol,
                     order_id=order_id,
                     client_order_id=client_order_id,
+                    allow_rest_fallback=True,
                 )
             except Exception as exc:  # noqa: BLE001
                 item["last_error"] = str(exc)
@@ -1253,6 +1445,19 @@ class PositionManager:
                     )
                 if order_status in self.PORTFOLIO_LIMIT_TERMINAL_STATUSES and executed_qty > 0:
                     self._record_portfolio_limit_fill(item=item, order=order, executed_qty=executed_qty)
+
+            if order_status == "NOT_FOUND":
+                adopted_order = self._find_existing_portfolio_limit_order(
+                    item=item,
+                    expected_qty=max(0.0, current_qty - target_qty),
+                    refresh_rest=True,
+                )
+                if adopted_order is not None:
+                    return self._bind_portfolio_limit_order(
+                        item=item,
+                        order=adopted_order,
+                        detail_prefix="adopted",
+                    )
 
             if order_status in self.PORTFOLIO_LIMIT_ACTIVE_STATUSES:
                 if current_qty <= target_qty + qty_eps:
@@ -1334,6 +1539,20 @@ class PositionManager:
             }
         item["limit_price"] = limit_price
 
+        retry_count = int(self._safe_float(item.get("retry_count"), default=0.0))
+        if not item.get("portfolio_order_id") and not item.get("portfolio_client_order_id"):
+            adopted_order = self._find_existing_portfolio_limit_order(
+                item=item,
+                expected_qty=order_qty,
+                refresh_rest=retry_count > 0 or order_status in {"REJECTED", "UNKNOWN"},
+            )
+            if adopted_order is not None:
+                return self._bind_portfolio_limit_order(
+                    item=item,
+                    order=adopted_order,
+                    detail_prefix="adopted",
+                )
+
         client_id = str(item.get("portfolio_client_order_id") or "").strip()
         if not client_id:
             client_id = self._new_client_id("pftlim", symbol)
@@ -1365,6 +1584,33 @@ class PositionManager:
                 "pending": True,
                 "error": True,
                 "detail": f"{symbol}(limit_submit_unknown): {exc}",
+            }
+        except BinanceAPIError as exc:
+            try:
+                error_code = int(exc.code)
+            except (TypeError, ValueError):
+                error_code = None
+            if error_code == -2022:
+                adopted_order = self._find_existing_portfolio_limit_order(
+                    item=item,
+                    expected_qty=order_qty,
+                    refresh_rest=True,
+                )
+                if adopted_order is not None:
+                    return self._bind_portfolio_limit_order(
+                        item=item,
+                        order=adopted_order,
+                        detail_prefix="adopted_after_reject",
+                    )
+            if error_code != -2022:
+                self._clear_portfolio_take_profit_order(item)
+            item["portfolio_order_status"] = "REJECTED"
+            item["last_error"] = str(exc)
+            item["retry_count"] = int(self._safe_float(item.get("retry_count"), default=0.0)) + 1
+            return {
+                "pending": True,
+                "error": True,
+                "detail": f"{symbol}(limit_submit): {exc}",
             }
         except Exception as exc:  # noqa: BLE001
             self._clear_portfolio_take_profit_order(item)
@@ -2790,11 +3036,17 @@ class PositionManager:
             close_result = self._close_if_recorded_exit_filled(pos)
             if close_result:
                 return close_result
+            close_result = self._close_if_portfolio_take_profit_filled(pos)
+            if close_result:
+                return close_result
             return self._close_external_missing_short(pos)
 
         position_amt = float(risk.get("positionAmt", "0") or 0)
         if position_amt >= 0:
             close_result = self._close_if_recorded_exit_filled(pos)
+            if close_result:
+                return close_result
+            close_result = self._close_if_portfolio_take_profit_filled(pos)
             if close_result:
                 return close_result
 
@@ -2849,6 +3101,38 @@ class PositionManager:
             }
 
         return None
+
+    def _close_if_portfolio_take_profit_filled(
+        self,
+        pos: Dict[str, object],
+    ) -> Optional[Dict[str, object]]:
+        """Attribute a zero exchange position to a persisted portfolio fill.
+
+        Portfolio LIMIT orders deliberately live in the lock plan rather than
+        the position's legacy TP column.  A User Stream fill can therefore
+        arrive just before the portfolio loop persists ``close_complete``.
+        Check the fill ledger before labeling the position as external.
+        """
+        position_id = int(pos["id"])
+        fill = self.store.get_latest_portfolio_take_profit_fill(position_id)
+        if not fill:
+            return None
+        self._cancel_exit_orders(pos)
+        close_order_id = self._safe_optional_int(fill.get("order_id"))
+        self.store.mark_position_closed(
+            position_id=position_id,
+            status="CLOSED_PORTFOLIO_TAKE_PROFIT",
+            close_reason="PORTFOLIO_EQUITY_TAKE_PROFIT",
+            close_order_id=close_order_id,
+        )
+        symbol = str(pos.get("symbol") or "").strip().upper()
+        return {
+            "type": "closed_tp",
+            "detail": (
+                f"{symbol}(id={position_id}, portfolio_order_id={close_order_id or '-'}, "
+                "fill_ledger=true)"
+            ),
+        }
 
     def _close_external_missing_short(self, pos: Dict[str, object]) -> Dict[str, object]:
         position_id = int(pos["id"])
@@ -3274,6 +3558,7 @@ class PositionManager:
         symbol: str,
         order_id: object,
         client_order_id: object,
+        allow_rest_fallback: bool = False,
     ) -> Optional[Dict[str, Any]]:
         if not order_id and not client_order_id:
             return None
@@ -3283,6 +3568,31 @@ class PositionManager:
                 order_id=order_id,
                 client_order_id=client_order_id,
             )
+            row_status = str((row or {}).get("status") or "").strip().upper()
+            if (row is None or row_status == "MISSING") and allow_rest_fallback:
+                try:
+                    parsed_order_id = int(order_id) if order_id else None
+                    parsed_client_order_id = str(client_order_id) if client_order_id else None
+                    resolved = self.client.get_order(
+                        symbol=symbol,
+                        order_id=parsed_order_id,
+                        orig_client_order_id=parsed_client_order_id,
+                    )
+                except BinanceAPIError as exc:
+                    try:
+                        code = int(exc.code)
+                    except (TypeError, ValueError):
+                        code = None
+                    if code in {-2011, -2013}:
+                        resolved = None
+                    else:
+                        raise
+                if isinstance(resolved, dict):
+                    self.store.upsert_exchange_order_state(
+                        resolved,
+                        source="REST_PORTFOLIO_RECONCILE",
+                    )
+                    return resolved
             if row is None:
                 return None
             payload: Dict[str, Any] = {}

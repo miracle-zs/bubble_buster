@@ -366,6 +366,60 @@ class PositionManagerTest(unittest.TestCase):
         self.assertEqual(row["close_reason"], "SHORT_POSITION_NOT_FOUND")
         self.assertIsNone(row["last_error"])
 
+    def test_portfolio_limit_fill_is_not_classified_as_external(self) -> None:
+        position_id = self._insert_open_position(
+            symbol="USUALUSDT",
+            qty=10.0,
+            tp_order_id=101,
+            sl_order_id=202,
+            tp_price=0.27,
+            sl_price=0.41,
+            expire_in_hours=24,
+        )
+        self.store.add_order_event(
+            symbol="USUALUSDT",
+            position_id=position_id,
+            event_time_utc="2026-02-13T03:04:24+00:00",
+            order_payload={
+                "orderId": 777,
+                "clientOrderId": "t10s-pftlim-USUALU-abc123-fill777",
+                "type": "LIMIT",
+                "side": "BUY",
+                "price": "0.27",
+                "origQty": "10",
+                "executedQty": "10",
+                "status": "FILLED",
+                "reduceOnly": True,
+                "avgPrice": "0.27",
+                "realizedPnl": "1.2",
+                "commission": "0.01",
+                "commissionAsset": "USDT",
+            },
+        )
+
+        client = MagicMock()
+        client.get_position_risk.return_value = []
+        client.get_order.side_effect = [
+            {"orderId": 101, "clientOrderId": "tp-old", "status": "NEW"},
+            {"orderId": 202, "clientOrderId": "sl-old", "status": "NEW"},
+        ]
+        manager = PositionManager(
+            client=client,
+            store=self.store,
+            notifier=MagicMock(),
+            sl_liq_buffer_pct=1.0,
+            trigger_price_type="CONTRACT_PRICE",
+        )
+
+        summary = manager.run_once()
+
+        self.assertEqual(summary["closed_tp"], 1)
+        self.assertEqual(summary["closed_external"], 0)
+        row = self._get_position(position_id)
+        self.assertEqual(row["status"], "CLOSED_PORTFOLIO_TAKE_PROFIT")
+        self.assertEqual(row["close_reason"], "PORTFOLIO_EQUITY_TAKE_PROFIT")
+        self.assertEqual(row["close_order_id"], 777)
+
     def test_cleanup_orphan_exit_orders_once_per_day_cancels_without_exchange_short(self) -> None:
         client = MagicMock()
         client.get_position_risk.return_value = [
