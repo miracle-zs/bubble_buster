@@ -1461,6 +1461,8 @@ class PositionManager:
                     )
 
             if order_status in self.PORTFOLIO_LIMIT_ACTIVE_STATUSES:
+                item["last_error"] = None
+                item["retry_count"] = 0
                 if current_qty <= target_qty + qty_eps:
                     self._cancel_order_if_exists(symbol, order_id, client_order_id)
                     item["portfolio_order_status"] = "CANCELED"
