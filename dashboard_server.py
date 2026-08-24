@@ -318,7 +318,14 @@ class DashboardDataProvider:
     def _select_readonly_order(orders: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
         if not orders:
             return None
-        active_statuses = {"NEW", "ACTIVE", "PARTIALLY_FILLED"}
+        active_statuses = {
+            "NEW",
+            "PENDING",
+            "ACTIVE",
+            "PARTIALLY_FILLED",
+            "TRIGGERING",
+            "TRIGGERED",
+        }
         return sorted(
             orders,
             key=lambda order: (
@@ -342,6 +349,68 @@ class DashboardDataProvider:
             result[(symbol, position_side)] = row
         return result
 
+    def _local_exchange_risks(self, account_id: str) -> List[Dict[str, Any]]:
+        """Read the latest persisted account snapshot in Binance-shaped rows."""
+        with self._connect_ctx() as conn:
+            rows = conn.execute(
+                """
+                SELECT * FROM account_position_state
+                WHERE account_id = ? AND ABS(position_amt) > 0.000000000001
+                ORDER BY symbol, position_side
+                """,
+                (str(account_id).strip(),),
+            ).fetchall()
+        return [
+            {
+                "symbol": row["symbol"],
+                "positionSide": row["position_side"],
+                "positionAmt": row["position_amt"],
+                "entryPrice": row["entry_price"],
+                "breakEvenPrice": row["break_even_price"],
+                "markPrice": row["mark_price"],
+                "unRealizedProfit": row["unrealized_pnl"],
+                "liquidationPrice": row["liquidation_price"],
+                "leverage": row["leverage"],
+                "notional": row["notional"],
+                "isolatedMargin": row["isolated_margin"],
+                "positionInitialMargin": row["initial_margin"],
+                "capturedAtUtc": row["captured_at_utc"],
+            }
+            for row in rows
+        ]
+
+    def _local_exchange_orders(self, account_id: str) -> List[Dict[str, Any]]:
+        with self._connect_ctx() as conn:
+            rows = conn.execute(
+                """
+                SELECT * FROM exchange_order_state
+                WHERE account_id = ?
+                  AND status IN ('NEW', 'PENDING', 'ACTIVE', 'PARTIALLY_FILLED', 'TRIGGERING', 'TRIGGERED')
+                ORDER BY event_time_utc DESC
+                """,
+                (str(account_id).strip(),),
+            ).fetchall()
+        return [
+            {
+                "symbol": row["symbol"],
+                "orderId": self._safe_int(row["order_id"]) if row["order_id"] not in (None, "") else None,
+                "clientOrderId": row["client_order_id"],
+                "type": row["type"],
+                "side": row["side"],
+                "positionSide": row["position_side"],
+                "status": row["status"],
+                "price": row["price"],
+                "stopPrice": row["stop_price"],
+                "avgPrice": row["avg_price"],
+                "origQty": row["original_qty"],
+                "executedQty": row["executed_qty"],
+                "reduceOnly": bool(row["reduce_only"]) if row["reduce_only"] is not None else None,
+                "closePosition": bool(row["close_position"]) if row["close_position"] is not None else None,
+                "eventTimeUtc": row["event_time_utc"],
+            }
+            for row in rows
+        ]
+
     def _enrich_open_positions_with_live_data(
         self,
         positions: List[Dict[str, Any]],
@@ -350,14 +419,10 @@ class DashboardDataProvider:
         if not positions or not account_id:
             return
 
-        client = self.live_position_clients.get(str(account_id).strip())
-        if client is None:
-            return
-
         try:
-            risks = client.get_position_risk()
+            risks = self._local_exchange_risks(str(account_id).strip())
         except Exception as exc:  # noqa: BLE001
-            LOGGER.warning("Live position risk fetch failed account=%s: %s", account_id, exc)
+            LOGGER.warning("Local position state read failed account=%s: %s", account_id, exc)
             for position in positions:
                 position["live_data_available"] = False
                 position["live_data_error"] = "实时仓位暂不可用"
@@ -365,9 +430,9 @@ class DashboardDataProvider:
 
         order_fetch_error = None
         try:
-            open_orders = client.get_open_orders()
+            open_orders = self._local_exchange_orders(str(account_id).strip())
         except Exception as exc:  # noqa: BLE001
-            LOGGER.warning("Live open order fetch failed account=%s: %s", account_id, exc)
+            LOGGER.warning("Local order state read failed account=%s: %s", account_id, exc)
             open_orders = []
             order_fetch_error = "实时挂单暂不可用"
 
@@ -461,38 +526,31 @@ class DashboardDataProvider:
             if age_sec < self.live_position_cache_ttl_sec:
                 return [dict(row) for row in cached_rows]
 
-        client = self.live_position_clients.get(normalized_account_id)
-        if client is None:
-            self._readonly_position_cache_errors[normalized_account_id] = "只读账户未配置实时仓位客户端"
-            self._readonly_position_cache[normalized_account_id] = (now_utc, [])
-            return []
-
         try:
-            risks = client.get_position_risk()
+            risks = self._local_exchange_risks(normalized_account_id)
         except Exception as exc:  # noqa: BLE001
-            LOGGER.warning("Readonly live position fetch failed account=%s: %s", normalized_account_id, exc)
+            LOGGER.warning("Readonly local position read failed account=%s: %s", normalized_account_id, exc)
             self._readonly_position_cache_errors[normalized_account_id] = str(exc)
             self._readonly_position_cache[normalized_account_id] = (now_utc, [])
             return []
 
         order_fetch_error = None
         try:
-            open_orders_result = client.get_open_orders()
-            open_orders = open_orders_result if isinstance(open_orders_result, list) else []
+            open_orders = self._local_exchange_orders(normalized_account_id)
         except Exception as exc:  # noqa: BLE001
-            LOGGER.warning("Readonly open order fetch failed account=%s: %s", normalized_account_id, exc)
+            LOGGER.warning("Readonly local order read failed account=%s: %s", normalized_account_id, exc)
             open_orders = []
             order_fetch_error = "实时订单暂不可用"
 
-        account_position_index: Dict[Tuple[str, str], Dict[str, Any]] = {}
+        account_position_index: Dict[Tuple[str, str], Dict[str, Any]] = {
+            (
+                str(row.get("symbol") or "").strip().upper(),
+                str(row.get("positionSide") or "BOTH").strip().upper() or "BOTH",
+            ): row
+            for row in risks
+            if str(row.get("symbol") or "").strip()
+        }
         account_fetch_error = None
-        get_account = getattr(client, "get_account", None)
-        if callable(get_account):
-            try:
-                account_position_index = self._account_position_index(get_account())
-            except Exception as exc:  # noqa: BLE001
-                LOGGER.warning("Readonly account margin fetch failed account=%s: %s", normalized_account_id, exc)
-                account_fetch_error = "实际保证金暂不可用"
 
         orders_by_symbol: Dict[str, List[Dict[str, Any]]] = {}
         for order in open_orders:
@@ -591,7 +649,7 @@ class DashboardDataProvider:
                     "sl_order_status": sl_order_status,
                     "tp_orders": exit_orders["tp"],
                     "sl_orders": exit_orders["sl"],
-                    "order_data_source": "EXCHANGE_OPEN_ORDERS",
+                    "order_data_source": "LOCAL_USER_STREAM",
                     "order_data_error": order_fetch_error,
                     "margin_data_error": margin_data_error,
                     "opened_at_utc": None,
@@ -601,7 +659,7 @@ class DashboardDataProvider:
                     "live_data_available": True,
                     "live_data_as_of_utc": captured_at,
                     "readonly_live": True,
-                    "live_position_source": "EXCHANGE_READONLY",
+                    "live_position_source": "LOCAL_ACCOUNT_STATE",
                 }
             )
 
@@ -2394,7 +2452,7 @@ class DashboardDataProvider:
         readonly_live_positions: List[Dict[str, Any]] = []
         if self._is_readonly_account(scoped_account):
             readonly_live_positions = self._readonly_live_positions(scoped_account)
-            data["live_position_source"] = "EXCHANGE_READONLY"
+            data["live_position_source"] = "LOCAL_ACCOUNT_STATE"
             data["live_position_error"] = self._readonly_position_cache_errors.get(scoped_account)
             data["summary"]["open_positions"] = len(readonly_live_positions)
             data["summary"]["open_symbols"] = len(
@@ -2974,7 +3032,7 @@ class DashboardDataProvider:
                     row["open_symbols"] = len(
                         {str(position.get("symbol") or "").strip() for position in live_positions if position.get("symbol")}
                     )
-                    row["live_position_source"] = "EXCHANGE_READONLY"
+                    row["live_position_source"] = "LOCAL_ACCOUNT_STATE"
                     row["live_position_as_of_utc"] = (
                         live_positions[0].get("live_data_as_of_utc") if live_positions else None
                     )

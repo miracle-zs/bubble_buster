@@ -745,7 +745,12 @@ class StateStore:
                 event_time_utc=event_time_utc,
                 order_payload=order_payload,
             )
-            return event_id
+        self.upsert_exchange_order_state(
+            order_payload,
+            source="LOCAL_ORDER_EVENT",
+            event_time_utc=event_time_utc,
+        )
+        return event_id
 
     def update_order_event(
         self,
@@ -1408,21 +1413,39 @@ class StateStore:
         normalized_symbol = (symbol or "").upper().strip() or None
         normalized_tran_id = (str(tran_id).strip() if tran_id is not None else "") or None
         normalized_info = (info or "").strip() or None
-        unique_source = "|".join(
-            [
-                self.account_id,
-                event_time_utc,
-                normalized_asset,
-                f"{float(amount):.12f}",
-                normalized_type,
-                normalized_symbol or "",
-                normalized_tran_id or "",
-                normalized_info or "",
-            ]
-        )
+        raw_trade_id = str((raw_json or {}).get("tradeId") or "").strip()
+        if normalized_tran_id:
+            unique_source = f"{self.account_id}|tran|{normalized_tran_id}"
+        elif raw_trade_id:
+            unique_source = (
+                f"{self.account_id}|trade|{normalized_symbol or ''}|{raw_trade_id}|{normalized_type}"
+            )
+        else:
+            unique_source = "|".join(
+                [
+                    self.account_id,
+                    event_time_utc,
+                    normalized_asset,
+                    f"{float(amount):.12f}",
+                    normalized_type,
+                    normalized_symbol or "",
+                    normalized_info or "",
+                ]
+            )
         unique_key = hashlib.sha1(unique_source.encode("utf-8")).hexdigest()
         payload_json = json.dumps(raw_json, ensure_ascii=False) if raw_json is not None else None
         with self._connect_ctx() as conn:
+            if normalized_tran_id:
+                existing = conn.execute(
+                    """
+                    SELECT 1 FROM cashflow_events
+                    WHERE account_id = ? AND tran_id = ?
+                    LIMIT 1
+                    """,
+                    (self.account_id, normalized_tran_id),
+                ).fetchone()
+                if existing is not None:
+                    return False
             cursor = conn.execute(
                 """
                 INSERT OR IGNORE INTO cashflow_events (
@@ -1469,6 +1492,716 @@ class StateStore:
                 tuple(params),
             ).fetchone()
             return str(row["event_time_utc"]) if row is not None else None
+
+    def replace_account_state(
+        self,
+        *,
+        captured_at_utc: str,
+        wallet_balance: float,
+        unrealized_pnl: float,
+        equity: float,
+        available_balance: float,
+        positions: List[Dict[str, Any]],
+        raw_json: Optional[Dict[str, Any]] = None,
+        stream_status: str = "REST",
+    ) -> None:
+        """Atomically replace the account's shared current snapshot."""
+        payload_json = json.dumps(raw_json, ensure_ascii=False) if raw_json is not None else None
+        with self._connect_ctx() as conn:
+            conn.execute(
+                """
+                INSERT INTO account_state (
+                    account_id, captured_at_utc, wallet_balance, unrealized_pnl,
+                    equity, available_balance, stream_status, raw_json, updated_at_utc
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(account_id) DO UPDATE SET
+                    captured_at_utc = excluded.captured_at_utc,
+                    wallet_balance = excluded.wallet_balance,
+                    unrealized_pnl = excluded.unrealized_pnl,
+                    equity = excluded.equity,
+                    available_balance = excluded.available_balance,
+                    stream_status = excluded.stream_status,
+                    raw_json = excluded.raw_json,
+                    updated_at_utc = excluded.updated_at_utc
+                """,
+                (
+                    self.account_id,
+                    captured_at_utc,
+                    float(wallet_balance),
+                    float(unrealized_pnl),
+                    float(equity),
+                    float(available_balance),
+                    str(stream_status or "REST").upper()[:24],
+                    payload_json,
+                    utc_now_iso(),
+                ),
+            )
+            conn.execute(
+                "DELETE FROM account_position_state WHERE account_id = ?",
+                (self.account_id,),
+            )
+            for row in positions or []:
+                self._upsert_account_position_row(conn, row, captured_at_utc)
+
+    def upsert_account_position_updates(
+        self,
+        positions: List[Dict[str, Any]],
+        *,
+        captured_at_utc: Optional[str] = None,
+    ) -> None:
+        """Apply the changed-position subset carried by ACCOUNT_UPDATE."""
+        captured_at = captured_at_utc or utc_now_iso()
+        with self._connect_ctx() as conn:
+            for row in positions or []:
+                self._upsert_account_position_row(conn, row, captured_at)
+
+    def apply_account_stream_update(
+        self,
+        *,
+        balances: List[Dict[str, Any]],
+        positions: List[Dict[str, Any]],
+        captured_at_utc: str,
+        asset: str = "USDT",
+    ) -> None:
+        """Merge the changed subset delivered by ACCOUNT_UPDATE."""
+        self.upsert_account_position_updates(positions, captured_at_utc=captured_at_utc)
+        normalized_asset = str(asset or "USDT").strip().upper()
+        balance_row = next(
+            (
+                row
+                for row in balances or []
+                if str(row.get("asset") or row.get("a") or "").strip().upper() == normalized_asset
+            ),
+            None,
+        )
+        with self._connect_ctx() as conn:
+            current = conn.execute(
+                "SELECT * FROM account_state WHERE account_id = ?",
+                (self.account_id,),
+            ).fetchone()
+            if current is None and balance_row is None:
+                return
+            try:
+                wallet_balance = float(
+                    (balance_row or {}).get("walletBalance")
+                    or (balance_row or {}).get("wb")
+                    or (current["wallet_balance"] if current is not None else 0.0)
+                )
+            except (TypeError, ValueError):
+                wallet_balance = float(current["wallet_balance"] if current is not None else 0.0)
+            pnl_row = conn.execute(
+                """
+                SELECT COALESCE(SUM(unrealized_pnl), 0) AS total
+                FROM account_position_state
+                WHERE account_id = ? AND ABS(position_amt) > 0.000000000001
+                """,
+                (self.account_id,),
+            ).fetchone()
+            unrealized_pnl = float(pnl_row["total"] or 0.0) if pnl_row is not None else 0.0
+            available_balance = float(current["available_balance"] or 0.0) if current is not None else 0.0
+            conn.execute(
+                """
+                INSERT INTO account_state (
+                    account_id, captured_at_utc, wallet_balance, unrealized_pnl,
+                    equity, available_balance, stream_status, raw_json, updated_at_utc
+                ) VALUES (?, ?, ?, ?, ?, ?, 'STREAM', NULL, ?)
+                ON CONFLICT(account_id) DO UPDATE SET
+                    captured_at_utc = excluded.captured_at_utc,
+                    wallet_balance = excluded.wallet_balance,
+                    unrealized_pnl = excluded.unrealized_pnl,
+                    equity = excluded.equity,
+                    stream_status = 'STREAM',
+                    updated_at_utc = excluded.updated_at_utc
+                """,
+                (
+                    self.account_id,
+                    captured_at_utc,
+                    wallet_balance,
+                    unrealized_pnl,
+                    wallet_balance + unrealized_pnl,
+                    available_balance,
+                    utc_now_iso(),
+                ),
+            )
+
+    def _upsert_account_position_row(
+        self,
+        conn: sqlite3.Connection,
+        row: Dict[str, Any],
+        captured_at_utc: str,
+    ) -> None:
+        symbol = str(row.get("symbol") or row.get("s") or "").strip().upper()
+        if not symbol:
+            return
+        position_side = str(row.get("positionSide") or row.get("ps") or "BOTH").strip().upper() or "BOTH"
+
+        def number(*keys: str) -> Optional[float]:
+            for key in keys:
+                value = row.get(key)
+                if value is None:
+                    continue
+                try:
+                    return float(value)
+                except (TypeError, ValueError):
+                    continue
+            return None
+
+        position_amt = number("positionAmt", "pa") or 0.0
+        notional = number("notional")
+        mark_price = number("markPrice")
+        if (mark_price is None or mark_price <= 0) and notional is not None and abs(position_amt) > 1e-12:
+            mark_price = abs(notional / position_amt)
+        conn.execute(
+            """
+            INSERT INTO account_position_state (
+                account_id, symbol, position_side, position_amt, entry_price,
+                break_even_price, mark_price, unrealized_pnl, liquidation_price,
+                leverage, notional, isolated_margin, initial_margin,
+                captured_at_utc, raw_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(account_id, symbol, position_side) DO UPDATE SET
+                position_amt = excluded.position_amt,
+                entry_price = COALESCE(excluded.entry_price, account_position_state.entry_price),
+                break_even_price = COALESCE(excluded.break_even_price, account_position_state.break_even_price),
+                mark_price = COALESCE(excluded.mark_price, account_position_state.mark_price),
+                unrealized_pnl = COALESCE(excluded.unrealized_pnl, account_position_state.unrealized_pnl),
+                liquidation_price = COALESCE(excluded.liquidation_price, account_position_state.liquidation_price),
+                leverage = COALESCE(excluded.leverage, account_position_state.leverage),
+                notional = COALESCE(excluded.notional, account_position_state.notional),
+                isolated_margin = COALESCE(excluded.isolated_margin, account_position_state.isolated_margin),
+                initial_margin = COALESCE(excluded.initial_margin, account_position_state.initial_margin),
+                captured_at_utc = excluded.captured_at_utc,
+                raw_json = excluded.raw_json
+            """,
+            (
+                self.account_id,
+                symbol,
+                position_side,
+                float(position_amt),
+                number("entryPrice", "ep"),
+                number("breakEvenPrice", "bep"),
+                mark_price,
+                number("unRealizedProfit", "unrealizedProfit", "up"),
+                number("liquidationPrice"),
+                number("leverage"),
+                notional,
+                number("isolatedMargin", "isolatedWallet", "iw"),
+                number("positionInitialMargin", "initialMargin"),
+                captured_at_utc,
+                json.dumps(row, ensure_ascii=False),
+            ),
+        )
+
+    def get_latest_account_state(self) -> Optional[Dict[str, Any]]:
+        with self._connect_ctx() as conn:
+            row = conn.execute(
+                "SELECT * FROM account_state WHERE account_id = ? LIMIT 1",
+                (self.account_id,),
+            ).fetchone()
+            return dict(row) if row is not None else None
+
+    def list_account_position_state(self, *, active_only: bool = False) -> List[Dict[str, Any]]:
+        with self._connect_ctx() as conn:
+            rows = conn.execute(
+                """
+                SELECT * FROM account_position_state
+                WHERE account_id = ?
+                  AND (? = 0 OR ABS(position_amt) > 0.000000000001)
+                ORDER BY symbol, position_side
+                """,
+                (self.account_id, 1 if active_only else 0),
+            ).fetchall()
+            return [dict(row) for row in rows]
+
+    @staticmethod
+    def _exchange_order_key(order: Dict[str, Any]) -> str:
+        order_id = order.get("orderId") or order.get("algoId") or order.get("actualOrderId")
+        if order_id not in (None, ""):
+            return f"id:{order_id}"
+        client_id = order.get("clientOrderId") or order.get("clientAlgoId") or order.get("c")
+        if client_id not in (None, ""):
+            return f"client:{client_id}"
+        symbol = str(order.get("symbol") or order.get("s") or "").upper()
+        event_time = order.get("updateTime") or order.get("time") or order.get("T") or order.get("E")
+        return f"fallback:{symbol}:{event_time or 0}"
+
+    def upsert_exchange_order_state(
+        self,
+        order: Dict[str, Any],
+        *,
+        source: str,
+        event_time_utc: Optional[str] = None,
+    ) -> None:
+        event_time = event_time_utc or utc_now_iso()
+        order_key = self._exchange_order_key(order)
+
+        def number(*keys: str) -> Optional[float]:
+            for key in keys:
+                value = order.get(key)
+                if value is None:
+                    continue
+                try:
+                    return float(value)
+                except (TypeError, ValueError):
+                    continue
+            return None
+
+        def flag(*keys: str) -> Optional[int]:
+            for key in keys:
+                if key not in order:
+                    continue
+                value = order.get(key)
+                if isinstance(value, bool):
+                    return int(value)
+                return int(str(value or "").strip().lower() in {"1", "true", "yes"})
+            return None
+
+        with self._connect_ctx() as conn:
+            conn.execute(
+                """
+                INSERT INTO exchange_order_state (
+                    account_id, order_key, symbol, order_id, client_order_id,
+                    type, side, position_side, status, execution_type,
+                    price, stop_price, avg_price, original_qty, executed_qty,
+                    reduce_only, close_position, event_time_utc, source, raw_json
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(account_id, order_key) DO UPDATE SET
+                    symbol = excluded.symbol,
+                    order_id = COALESCE(excluded.order_id, exchange_order_state.order_id),
+                    client_order_id = COALESCE(excluded.client_order_id, exchange_order_state.client_order_id),
+                    type = COALESCE(excluded.type, exchange_order_state.type),
+                    side = COALESCE(excluded.side, exchange_order_state.side),
+                    position_side = COALESCE(excluded.position_side, exchange_order_state.position_side),
+                    status = COALESCE(excluded.status, exchange_order_state.status),
+                    execution_type = COALESCE(excluded.execution_type, exchange_order_state.execution_type),
+                    price = COALESCE(excluded.price, exchange_order_state.price),
+                    stop_price = COALESCE(excluded.stop_price, exchange_order_state.stop_price),
+                    avg_price = COALESCE(excluded.avg_price, exchange_order_state.avg_price),
+                    original_qty = COALESCE(excluded.original_qty, exchange_order_state.original_qty),
+                    executed_qty = COALESCE(excluded.executed_qty, exchange_order_state.executed_qty),
+                    reduce_only = COALESCE(excluded.reduce_only, exchange_order_state.reduce_only),
+                    close_position = COALESCE(excluded.close_position, exchange_order_state.close_position),
+                    event_time_utc = excluded.event_time_utc,
+                    source = excluded.source,
+                    raw_json = excluded.raw_json
+                """,
+                (
+                    self.account_id,
+                    order_key,
+                    str(order.get("symbol") or order.get("s") or "").strip().upper(),
+                    str(order.get("orderId") or order.get("algoId") or order.get("i") or "").strip() or None,
+                    str(order.get("clientOrderId") or order.get("clientAlgoId") or order.get("c") or "").strip() or None,
+                    str(order.get("type") or order.get("orderType") or order.get("o") or "").strip().upper() or None,
+                    str(order.get("side") or order.get("S") or "").strip().upper() or None,
+                    str(order.get("positionSide") or order.get("ps") or "").strip().upper() or None,
+                    str(order.get("status") or order.get("X") or order.get("algoStatus") or "").strip().upper() or None,
+                    str(order.get("executionType") or order.get("x") or "").strip().upper() or None,
+                    number("price", "p"),
+                    number("stopPrice", "triggerPrice", "sp"),
+                    number("avgPrice", "ap"),
+                    number("origQty", "quantity", "q"),
+                    number("executedQty", "z"),
+                    flag("reduceOnly", "R"),
+                    flag("closePosition", "cp"),
+                    event_time,
+                    str(source or "UNKNOWN").upper()[:32],
+                    json.dumps(order, ensure_ascii=False),
+                ),
+            )
+
+    def reconcile_open_order_state(self, orders: List[Dict[str, Any]]) -> None:
+        returned_keys = {self._exchange_order_key(order) for order in orders or [] if isinstance(order, dict)}
+        returned_by_id = {
+            str(order.get("orderId") or order.get("algoId") or "").strip(): order
+            for order in orders or []
+            if isinstance(order, dict)
+            and str(order.get("orderId") or order.get("algoId") or "").strip()
+        }
+        with self._connect_ctx() as conn:
+            active_rows = conn.execute(
+                """
+                SELECT order_key, raw_json FROM exchange_order_state
+                WHERE account_id = ? AND status IN (
+                    'NEW', 'PENDING', 'ACTIVE', 'PARTIALLY_FILLED', 'TRIGGERING', 'TRIGGERED'
+                )
+                """,
+                (self.account_id,),
+            ).fetchall()
+            missing: List[str] = []
+            for row in active_rows:
+                order_key = str(row["order_key"])
+                if order_key in returned_keys:
+                    continue
+                linked_actual: Optional[Dict[str, Any]] = None
+                try:
+                    raw_payload = json.loads(str(row["raw_json"] or ""))
+                except (TypeError, ValueError, json.JSONDecodeError):
+                    raw_payload = {}
+                actual_order_id = str(
+                    raw_payload.get("actualOrderId")
+                    or raw_payload.get("actualOrderID")
+                    or raw_payload.get("aoid")
+                    or ""
+                ).strip()
+                if actual_order_id:
+                    linked_actual = returned_by_id.get(actual_order_id)
+                if linked_actual is not None:
+                    linked_status = str(linked_actual.get("status") or "TRIGGERED").upper()
+                    conn.execute(
+                        """
+                        UPDATE exchange_order_state
+                        SET status = ?, source = 'REST_VERIFY_LINK', event_time_utc = ?
+                        WHERE account_id = ? AND order_key = ?
+                        """,
+                        (linked_status, utc_now_iso(), self.account_id, order_key),
+                    )
+                    continue
+                missing.append(order_key)
+            for order_key in missing:
+                conn.execute(
+                    """
+                    UPDATE exchange_order_state
+                    SET status = 'MISSING', source = 'REST_VERIFY', event_time_utc = ?
+                    WHERE account_id = ? AND order_key = ?
+                    """,
+                    (utc_now_iso(), self.account_id, order_key),
+                )
+        for order in orders or []:
+            if isinstance(order, dict):
+                self.upsert_exchange_order_state(order, source="REST_VERIFY")
+
+    def get_exchange_order_status(
+        self,
+        *,
+        symbol: str,
+        order_id: object = None,
+        client_order_id: object = None,
+    ) -> Optional[str]:
+        normalized_symbol = str(symbol or "").strip().upper()
+        normalized_order_id = str(order_id).strip() if order_id not in (None, "") else ""
+        normalized_client_id = str(client_order_id).strip() if client_order_id not in (None, "") else ""
+        with self._connect_ctx() as conn:
+            row = conn.execute(
+                """
+                SELECT status FROM exchange_order_state
+                WHERE account_id = ? AND symbol = ?
+                  AND ((? != '' AND order_id = ?) OR (? != '' AND client_order_id = ?))
+                ORDER BY event_time_utc DESC LIMIT 1
+                """,
+                (
+                    self.account_id,
+                    normalized_symbol,
+                    normalized_order_id,
+                    normalized_order_id,
+                    normalized_client_id,
+                    normalized_client_id,
+                ),
+            ).fetchone()
+            return str(row["status"]).upper() if row is not None and row["status"] else None
+
+    def get_exchange_order_state(
+        self,
+        *,
+        symbol: str,
+        order_id: object = None,
+        client_order_id: object = None,
+    ) -> Optional[Dict[str, Any]]:
+        normalized_symbol = str(symbol or "").strip().upper()
+        normalized_order_id = str(order_id).strip() if order_id not in (None, "") else ""
+        normalized_client_id = str(client_order_id).strip() if client_order_id not in (None, "") else ""
+        with self._connect_ctx() as conn:
+            row = conn.execute(
+                """
+                SELECT * FROM exchange_order_state
+                WHERE account_id = ? AND symbol = ?
+                  AND ((? != '' AND order_id = ?) OR (? != '' AND client_order_id = ?))
+                ORDER BY event_time_utc DESC LIMIT 1
+                """,
+                (
+                    self.account_id,
+                    normalized_symbol,
+                    normalized_order_id,
+                    normalized_order_id,
+                    normalized_client_id,
+                    normalized_client_id,
+                ),
+            ).fetchone()
+            return dict(row) if row is not None else None
+
+    def list_exchange_order_state(self, *, active_only: bool = False) -> List[Dict[str, Any]]:
+        with self._connect_ctx() as conn:
+            rows = conn.execute(
+                """
+                SELECT * FROM exchange_order_state
+                WHERE account_id = ?
+                  AND (? = 0 OR status IN ('NEW', 'PENDING', 'ACTIVE', 'PARTIALLY_FILLED', 'TRIGGERING', 'TRIGGERED'))
+                ORDER BY event_time_utc DESC
+                """,
+                (self.account_id, 1 if active_only else 0),
+            ).fetchall()
+            return [dict(row) for row in rows]
+
+    def update_parent_algo_order_status(
+        self,
+        *,
+        actual_order_id: object,
+        status: str,
+        event_time_utc: str,
+    ) -> int:
+        """Apply an actual matching-engine order result to its parent algo."""
+        normalized_actual_id = str(actual_order_id or "").strip()
+        normalized_status = str(status or "").strip().upper()
+        if not normalized_actual_id or not normalized_status:
+            return 0
+        with self._connect_ctx() as conn:
+            rows = conn.execute(
+                """
+                SELECT order_key, raw_json
+                FROM exchange_order_state
+                WHERE account_id = ? AND raw_json IS NOT NULL
+                """,
+                (self.account_id,),
+            ).fetchall()
+            parent_keys: List[str] = []
+            for row in rows:
+                try:
+                    payload = json.loads(str(row["raw_json"]))
+                except (TypeError, ValueError, json.JSONDecodeError):
+                    continue
+                candidate = (
+                    payload.get("actualOrderId")
+                    or payload.get("actualOrderID")
+                    or payload.get("aoid")
+                )
+                if str(candidate or "").strip() == normalized_actual_id:
+                    parent_keys.append(str(row["order_key"]))
+            for order_key in parent_keys:
+                conn.execute(
+                    """
+                    UPDATE exchange_order_state
+                    SET status = ?, source = 'ORDER_TRADE_UPDATE_LINK', event_time_utc = ?
+                    WHERE account_id = ? AND order_key = ?
+                    """,
+                    (normalized_status, event_time_utc, self.account_id, order_key),
+                )
+            return len(parent_keys)
+
+    def add_binance_income_records(self, records: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        inserted: List[Dict[str, Any]] = []
+        with self._connect_ctx() as conn:
+            for record in records or []:
+                tran_id = str(record.get("tranId") or "").strip()
+                trade_id = str(record.get("tradeId") or "").strip()
+                symbol = str(record.get("symbol") or "").strip().upper()
+                income_type = str(record.get("incomeType") or "").strip().upper()
+                try:
+                    event_time_ms = int(record.get("time") or 0)
+                    income = float(record.get("income") or 0.0)
+                except (TypeError, ValueError):
+                    continue
+                if event_time_ms <= 0 or not income_type:
+                    continue
+                if tran_id:
+                    unique_source = f"tran:{tran_id}"
+                elif trade_id:
+                    unique_source = f"trade:{symbol}:{trade_id}:{income_type}"
+                else:
+                    unique_source = (
+                        f"fallback:{symbol}:{event_time_ms}:{income_type}:"
+                        f"{record.get('asset') or ''}:{income:.12f}"
+                    )
+                unique_key = hashlib.sha1(unique_source.encode("utf-8")).hexdigest()
+                if tran_id:
+                    existing = conn.execute(
+                        """
+                        SELECT 1 FROM binance_income_records
+                        WHERE account_id = ? AND tran_id = ?
+                        LIMIT 1
+                        """,
+                        (self.account_id, tran_id),
+                    ).fetchone()
+                    if existing is not None:
+                        continue
+                cursor = conn.execute(
+                    """
+                    INSERT OR IGNORE INTO binance_income_records (
+                        account_id, unique_key, tran_id, trade_id, symbol,
+                        income_type, asset, income, event_time_ms, raw_json, created_at_utc
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        self.account_id,
+                        unique_key,
+                        tran_id or None,
+                        trade_id or None,
+                        symbol or None,
+                        income_type,
+                        str(record.get("asset") or "").strip().upper() or None,
+                        income,
+                        event_time_ms,
+                        json.dumps(record, ensure_ascii=False),
+                        utc_now_iso(),
+                    ),
+                )
+                if int(cursor.rowcount or 0) > 0:
+                    inserted.append(record)
+        return inserted
+
+    def add_binance_user_trades(self, trades: List[Dict[str, Any]]) -> int:
+        inserted = 0
+        with self._connect_ctx() as conn:
+            for trade in trades or []:
+                symbol = str(trade.get("symbol") or "").strip().upper()
+                trade_id = str(trade.get("id") or trade.get("tradeId") or "").strip()
+                try:
+                    event_time_ms = int(trade.get("time") or 0)
+                except (TypeError, ValueError):
+                    continue
+                if not symbol or not trade_id or event_time_ms <= 0:
+                    continue
+
+                def number(key: str) -> Optional[float]:
+                    try:
+                        value = trade.get(key)
+                        return float(value) if value is not None else None
+                    except (TypeError, ValueError):
+                        return None
+
+                cursor = conn.execute(
+                    """
+                    INSERT OR IGNORE INTO binance_user_trades (
+                        account_id, symbol, trade_id, order_id, event_time_ms,
+                        realized_pnl, commission, commission_asset, side,
+                        qty, price, quote_qty, raw_json, created_at_utc
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        self.account_id,
+                        symbol,
+                        trade_id,
+                        str(trade.get("orderId") or "").strip() or None,
+                        event_time_ms,
+                        number("realizedPnl") or 0.0,
+                        number("commission") or 0.0,
+                        str(trade.get("commissionAsset") or "").strip().upper() or None,
+                        str(trade.get("side") or "").strip().upper() or None,
+                        number("qty"),
+                        number("price"),
+                        number("quoteQty"),
+                        json.dumps(trade, ensure_ascii=False),
+                        utc_now_iso(),
+                    ),
+                )
+                inserted += int(cursor.rowcount or 0)
+        return inserted
+
+    def load_binance_income_records(self, start_time_ms: int) -> List[Dict[str, Any]]:
+        with self._connect_ctx() as conn:
+            rows = conn.execute(
+                """
+                SELECT * FROM binance_income_records
+                WHERE account_id = ? AND event_time_ms >= ?
+                ORDER BY event_time_ms, unique_key
+                """,
+                (self.account_id, int(start_time_ms)),
+            ).fetchall()
+            return [dict(row) for row in rows]
+
+    def load_binance_user_trades(self, start_time_ms: int) -> List[Dict[str, Any]]:
+        with self._connect_ctx() as conn:
+            rows = conn.execute(
+                """
+                SELECT * FROM binance_user_trades
+                WHERE account_id = ? AND event_time_ms >= ?
+                ORDER BY event_time_ms, symbol, trade_id
+                """,
+                (self.account_id, int(start_time_ms)),
+            ).fetchall()
+            return [dict(row) for row in rows]
+
+    def prune_binance_trade_ledger(self, before_time_ms: int) -> None:
+        with self._connect_ctx() as conn:
+            conn.execute(
+                "DELETE FROM binance_income_records WHERE account_id = ? AND event_time_ms < ?",
+                (self.account_id, int(before_time_ms)),
+            )
+            conn.execute(
+                "DELETE FROM binance_user_trades WHERE account_id = ? AND event_time_ms < ?",
+                (self.account_id, int(before_time_ms)),
+            )
+
+    def put_daily_open_price(self, day_utc: str, symbol: str, price: float, source: str) -> None:
+        with self._connect_ctx() as conn:
+            conn.execute(
+                """
+                INSERT INTO daily_open_prices (day_utc, symbol, open_price, source, updated_at_utc)
+                VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT(day_utc, symbol) DO UPDATE SET
+                    open_price = excluded.open_price,
+                    source = excluded.source,
+                    updated_at_utc = excluded.updated_at_utc
+                """,
+                (day_utc, str(symbol).upper(), float(price), str(source).upper()[:24], utc_now_iso()),
+            )
+
+    def get_daily_open_prices(self, day_utc: str) -> Dict[str, float]:
+        with self._connect_ctx() as conn:
+            rows = conn.execute(
+                "SELECT symbol, open_price FROM daily_open_prices WHERE day_utc = ?",
+                (day_utc,),
+            ).fetchall()
+            return {str(row["symbol"]): float(row["open_price"]) for row in rows}
+
+    def put_market_data_cache(self, cache_key: str, payload: Any, expires_at_utc: str) -> None:
+        with self._connect_ctx() as conn:
+            conn.execute(
+                """
+                INSERT INTO market_data_cache (cache_key, payload_json, expires_at_utc, updated_at_utc)
+                VALUES (?, ?, ?, ?)
+                ON CONFLICT(cache_key) DO UPDATE SET
+                    payload_json = excluded.payload_json,
+                    expires_at_utc = excluded.expires_at_utc,
+                    updated_at_utc = excluded.updated_at_utc
+                """,
+                (cache_key, json.dumps(payload, ensure_ascii=False), expires_at_utc, utc_now_iso()),
+            )
+
+    def claim_market_data_attempt(self, cache_key: str, expires_at_utc: str) -> bool:
+        """Atomically claim a once-per-cache-key external request."""
+        with self._connect_ctx() as conn:
+            cursor = conn.execute(
+                """
+                INSERT OR IGNORE INTO market_data_cache (
+                    cache_key, payload_json, expires_at_utc, updated_at_utc
+                ) VALUES (?, ?, ?, ?)
+                """,
+                (
+                    cache_key,
+                    json.dumps({"attempted": True}),
+                    expires_at_utc,
+                    utc_now_iso(),
+                ),
+            )
+            return int(cursor.rowcount or 0) == 1
+
+    def get_market_data_cache(self, cache_key: str, *, now_utc: Optional[datetime] = None) -> Optional[Any]:
+        now = (now_utc or datetime.now(timezone.utc)).replace(microsecond=0)
+        with self._connect_ctx() as conn:
+            row = conn.execute(
+                "SELECT payload_json, expires_at_utc FROM market_data_cache WHERE cache_key = ?",
+                (cache_key,),
+            ).fetchone()
+            if row is None:
+                return None
+            try:
+                expires_at = datetime.fromisoformat(str(row["expires_at_utc"]))
+                if expires_at.tzinfo is None:
+                    expires_at = expires_at.replace(tzinfo=timezone.utc)
+                if expires_at <= now:
+                    return None
+                return json.loads(str(row["payload_json"]))
+            except (TypeError, ValueError, json.JSONDecodeError):
+                return None
 
     def _scoped_lock_name(self, lock_name: str) -> str:
         raw = (lock_name or "").strip()

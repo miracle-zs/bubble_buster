@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Dict, Optional, Set, Tuple
 
 from core.account_config import parse_account_settings
+from core.account_snapshot import AccountSnapshotProvider
 from core.balance_sampler import WalletSnapshotSampler
 from core.position_manager import PositionManager
 from core.runtime_service import ServiceRuntimeConfig
@@ -14,6 +15,8 @@ from core.state_store import StateStore
 from core.strategy_top10_short import Top10ShortStrategy
 from infra.binance_futures_client import BinanceFuturesClient
 from infra.binance_rate_limit import get_shared_rate_limit_coordinator
+from infra.binance_top10_monitor import DailyOpenPriceStream
+from infra.binance_user_stream import BinanceUserStreamState
 from infra.notifier import ServerChanNotifier
 
 LOGGER = logging.getLogger(__name__)
@@ -130,6 +133,23 @@ def _build_single_account_components(
 
     scoped_store = root_store.scoped(account_id)
     protection_exempt_symbols = _parse_symbol_set(runtime_cfg.get("protection_exempt_symbols", fallback=""))
+    snapshot_provider = AccountSnapshotProvider(
+        client=client,
+        store=scoped_store,
+        account_id=account_id,
+        asset=runtime_cfg.get("wallet_snapshot_asset", fallback="USDT").strip() or "USDT",
+    )
+    user_stream = BinanceUserStreamState(
+        client=client,
+        store=scoped_store,
+        snapshot_provider=snapshot_provider,
+        account_id=account_id,
+        websocket_base_url=(runtime_cfg.get("binance_user_stream_ws_url", fallback="").strip() or None),
+        rest_verify_interval_sec=max(
+            60.0,
+            runtime_cfg.getfloat("user_stream_rest_verify_interval_sec", fallback=300.0),
+        ),
+    )
 
     # readonly 模式：只需要 client 和 wallet_sampler，不需要 strategy 和 manager
     if mode == "readonly":
@@ -140,12 +160,16 @@ def _build_single_account_components(
             sync_cashflows=False,  # readonly 模式不同步资金流水
             cashflow_income_types=[],
             account_id=account_id,
+            snapshot_provider=snapshot_provider,
+            cashflow_inline=False,
         )
         return {
             "account_id": account_id,
             "mode": mode,
             "client": client,
             "balance_sampler": wallet_sampler,
+            "snapshot_provider": snapshot_provider,
+            "user_stream": user_stream,
         }
 
     notifier = ServerChanNotifier(
@@ -205,6 +229,8 @@ def _build_single_account_components(
         account_id=account_id,
         protection_exempt_symbols=protection_exempt_symbols,
         mutation_lock=mutation_lock,
+        order_state=user_stream,
+        snapshot_provider=snapshot_provider,
     )
 
     manager = PositionManager(
@@ -215,6 +241,8 @@ def _build_single_account_components(
         trigger_price_type=strategy_cfg.get("trigger_price_type", fallback="CONTRACT_PRICE").strip(),
         daily_loss_cut_scope=runtime_cfg.get("daily_loss_cut_scope", fallback="tracked").strip(),
         account_id=account_id,
+        snapshot_provider=snapshot_provider,
+        order_state=user_stream,
         protection_exempt_symbols=protection_exempt_symbols,
         mutation_lock=mutation_lock,
     )
@@ -230,15 +258,20 @@ def _build_single_account_components(
             if x.strip()
         ],
         account_id=account_id,
+        snapshot_provider=snapshot_provider,
+        cashflow_overlap_minutes=runtime_cfg.getint("cashflow_overlap_minutes", fallback=20),
+        cashflow_inline=False,
     )
 
     return {
         "account_id": account_id,
         "mode": mode,
+        "client": client,
         "entry_hour": runtime_cfg.getint("entry_hour", fallback=7),
         "entry_minute": runtime_cfg.getint("entry_minute", fallback=40),
         "entry_initial_delay_sec": max(0, runtime_cfg.getint("entry_initial_delay_sec", fallback=0)),
         "entry_symbol_interval_sec": max(0, runtime_cfg.getint("entry_symbol_interval_sec", fallback=0)),
+        "cashflow_second_offset": runtime_cfg.get("cashflow_second_offset", fallback=""),
         "entry_wait_close_grace_sec": max(
             0.0, strategy_cfg.getfloat("entry_wait_close_grace_sec", fallback=1.0)
         ),
@@ -306,6 +339,8 @@ def _build_single_account_components(
         "strategy": strategy,
         "manager": manager,
         "balance_sampler": wallet_sampler,
+        "snapshot_provider": snapshot_provider,
+        "user_stream": user_stream,
     }
 
 
@@ -368,6 +403,16 @@ def create_components(
     selected_account_id = default_account_id if default_account_id in account_runtimes else next(iter(account_runtimes))
     selected_ctx = account_runtimes[selected_account_id]
     runtime_cfg_selected = _merged_section(cfg, selected_account_id, "runtime")
+    selected_client = selected_ctx.get("client")
+    if isinstance(selected_client, BinanceFuturesClient):
+        market_data_stream = DailyOpenPriceStream(
+            state_store=root_store,
+            base_url=selected_client.base_url,
+            session=selected_client.session,
+            rate_limit_coordinator=rate_limit_coordinator,
+        )
+        for runtime_ctx in account_runtimes.values():
+            runtime_ctx["market_data_stream"] = market_data_stream
 
     service_cfg = ServiceRuntimeConfig(
         timezone_name=runtime_cfg_selected.get("timezone", fallback="Asia/Shanghai").strip(),

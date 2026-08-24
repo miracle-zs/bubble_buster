@@ -183,6 +183,30 @@ class ClientUtilsTest(unittest.TestCase):
         self.assertEqual(caught.exception.code, "NETWORK")
         self.assertEqual(client.session.request.call_count, 1)
 
+    def test_signed_network_error_does_not_leak_query_or_signature(self) -> None:
+        client = BinanceFuturesClient(
+            api_key="k",
+            api_secret="s",
+            retry_count=1,
+        )
+        leaked_text = (
+            "connection failed for /fapi/v3/account?timestamp=1&"
+            "signature=TOP_SECRET_SIGNATURE"
+        )
+        client.session.request = MagicMock(
+            side_effect=requests.RequestException(leaked_text)
+        )
+
+        with self.assertLogs("infra.binance_futures_client", level="WARNING") as captured:
+            with self.assertRaises(BinanceAPIError) as caught:
+                client.get_account()
+
+        combined = "\n".join([*captured.output, str(caught.exception)])
+        self.assertIn("endpoint=/fapi/v3/account", combined)
+        self.assertIn("weight=5", combined)
+        self.assertNotIn("TOP_SECRET_SIGNATURE", combined)
+        self.assertNotIn("timestamp=", combined)
+
     def test_create_order_does_not_treat_recovered_new_market_order_as_filled(self) -> None:
         client = BinanceFuturesClient(api_key="k", api_secret="s")
         client._request = MagicMock(side_effect=BinanceAPIError("NETWORK", "reset"))  # type: ignore[method-assign]
@@ -457,7 +481,7 @@ class ClientUtilsTest(unittest.TestCase):
         order = client.get_order(symbol="BTCUSDT", order_id=654321, orig_client_order_id="cid-2")
         self.assertEqual(order["orderId"], 654321)
         self.assertEqual(order["clientOrderId"], "cid-2")
-        self.assertEqual(order["status"], "FILLED")
+        self.assertEqual(order["status"], "TRIGGERED")
 
     def test_cancel_order_falls_back_to_algo_endpoint(self) -> None:
         client = BinanceFuturesClient(api_key="k", api_secret="s")
@@ -533,7 +557,7 @@ class ClientUtilsTest(unittest.TestCase):
         account = client.get_account()
 
         self.assertEqual(account, {"positions": []})
-        client._request.assert_called_once_with("GET", "/fapi/v2/account", signed=True)
+        client._request.assert_called_once_with("GET", "/fapi/v3/account", signed=True)
 
 
 if __name__ == "__main__":

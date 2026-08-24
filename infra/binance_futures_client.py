@@ -1,7 +1,9 @@
 import hashlib
 import hmac
 import logging
+import threading
 import time
+from contextlib import contextmanager
 from dataclasses import dataclass
 from decimal import Decimal, ROUND_CEILING, ROUND_DOWN
 from typing import Any, Dict, List, Optional
@@ -149,6 +151,7 @@ class BinanceFuturesClient:
         self.order_reconcile_delay_sec = max(0.0, float(order_reconcile_delay_sec))
         self.rate_limit_coordinator = rate_limit_coordinator or BinanceRateLimitCoordinator()
         self._server_time_offset_ms = 0
+        self._request_context = threading.local()
 
         self.session = requests.Session()
         self.session.headers.update({"X-MBX-APIKEY": self.api_key})
@@ -160,6 +163,8 @@ class BinanceFuturesClient:
             self.session.proxies = proxies
 
         self._symbol_rules_cache: Dict[str, SymbolRules] = {}
+        self._exchange_info_cache: Optional[Dict[str, Any]] = None
+        self._exchange_info_cached_at_monotonic = 0.0
 
     def _is_retriable_error(self, err: BinanceAPIError) -> bool:
         if err.http_status in self.RETRIABLE_HTTP_STATUS:
@@ -274,7 +279,14 @@ class BinanceFuturesClient:
         timestamp_sync_attempted = False
 
         for attempt in range(1, self.retry_count + 1):
-            self.rate_limit_coordinator.wait_for_available()
+            request_weight = self._request_weight(path=path, params=base_payload)
+            is_trading = self._is_trading_request(method=method, path=path)
+            self.rate_limit_coordinator.acquire(
+                path=path,
+                weight=request_weight,
+                is_trading=is_trading,
+                background=bool(getattr(self._request_context, "background", False)),
+            )
             payload = self._sign_params(base_payload) if signed else dict(base_payload)
             try:
                 if method in {"GET", "DELETE"}:
@@ -293,9 +305,22 @@ class BinanceFuturesClient:
                     )
             except requests.RequestException as exc:
                 if attempt >= self.retry_count or (method == "POST" and has_idempotency_key):
-                    raise BinanceAPIError("NETWORK", str(exc)) from exc
+                    LOGGER.warning(
+                        "Binance REST request failed endpoint=%s weight=%s",
+                        path,
+                        request_weight,
+                    )
+                    raise BinanceAPIError(
+                        "NETWORK",
+                        f"request failed endpoint={path} weight={request_weight}",
+                    ) from exc
                 sleep_sec = self.retry_delay_sec * (2 ** (attempt - 1))
-                LOGGER.warning("Network error for %s %s: %s. Retry in %.2fs", method, path, exc, sleep_sec)
+                LOGGER.warning(
+                    "Binance REST request retry endpoint=%s weight=%s retry_in_sec=%.2f",
+                    path,
+                    request_weight,
+                    sleep_sec,
+                )
                 time.sleep(sleep_sec)
                 continue
 
@@ -349,10 +374,10 @@ class BinanceFuturesClient:
             ):
                 sleep_sec = self.retry_delay_sec * (2 ** (attempt - 1))
                 LOGGER.warning(
-                    "Retriable API error for %s %s: %s. Retry in %.2fs",
-                    method,
+                    "Binance REST API retry endpoint=%s weight=%s code=%s retry_in_sec=%.2f",
                     path,
-                    err,
+                    request_weight,
+                    err.code,
                     sleep_sec,
                 )
                 time.sleep(sleep_sec)
@@ -361,8 +386,72 @@ class BinanceFuturesClient:
 
         raise BinanceAPIError("UNKNOWN", f"Unexpected failure for {method} {path}")
 
-    def get_exchange_info(self) -> Dict[str, Any]:
-        return self._request("GET", "/fapi/v1/exchangeInfo")
+    @contextmanager
+    def background_requests(self):
+        """Count calls in the stricter project background-task budget."""
+        previous = bool(getattr(self._request_context, "background", False))
+        self._request_context.background = True
+        try:
+            yield self
+        finally:
+            self._request_context.background = previous
+
+    @staticmethod
+    def _is_trading_request(method: str, path: str) -> bool:
+        if str(path).split("?", 1)[0] == "/fapi/v1/listenKey":
+            return False
+        return str(method).upper() in {"POST", "PUT", "DELETE"}
+
+    @staticmethod
+    def _request_weight(path: str, params: Optional[Dict[str, Any]] = None) -> int:
+        """Return the documented request weight without logging query values."""
+        endpoint = str(path or "").split("?", 1)[0]
+        values = params or {}
+        if endpoint == "/fapi/v1/income":
+            return 30
+        if endpoint in {"/fapi/v3/account", "/fapi/v3/balance", "/fapi/v3/positionRisk"}:
+            return 5
+        if endpoint in {"/fapi/v2/account", "/fapi/v2/balance", "/fapi/v2/positionRisk"}:
+            return 5
+        if endpoint == "/fapi/v1/userTrades":
+            return 5
+        if endpoint == "/fapi/v1/aggTrades":
+            return 20
+        if endpoint == "/fapi/v1/ticker/price":
+            return 1 if values.get("symbol") else 2
+        if endpoint in {"/fapi/v1/openOrders", "/fapi/v1/openAlgoOrders"}:
+            return 1 if values.get("symbol") else 40
+        if endpoint == "/fapi/v1/ticker/24hr":
+            return 1 if values.get("symbol") else 40
+        if endpoint in {"/fapi/v1/exchangeInfo", "/fapi/v1/time", "/fapi/v1/listenKey"}:
+            return 1
+        if endpoint == "/fapi/v1/klines":
+            try:
+                limit = int(values.get("limit") or 500)
+            except (TypeError, ValueError):
+                limit = 500
+            if limit < 100:
+                return 1
+            if limit < 500:
+                return 2
+            if limit <= 1000:
+                return 5
+            return 10
+        return 1
+
+    def get_exchange_info(self, *, force: bool = False) -> Dict[str, Any]:
+        if (
+            not force
+            and self._exchange_info_cache is not None
+            and time.monotonic() - self._exchange_info_cached_at_monotonic < 24 * 60 * 60
+        ):
+            return self._exchange_info_cache
+        data = self._request("GET", "/fapi/v1/exchangeInfo")
+        if isinstance(data, dict):
+            self._exchange_info_cache = data
+            self._exchange_info_cached_at_monotonic = time.monotonic()
+            return data
+        return {}
 
     def list_usdt_perpetual_symbols(self) -> List[str]:
         data = self.get_exchange_info()
@@ -420,11 +509,11 @@ class BinanceFuturesClient:
         return data if isinstance(data, list) else []
 
     def get_balance(self) -> List[Dict[str, Any]]:
-        return self._request("GET", "/fapi/v2/balance", signed=True)
+        return self._request("GET", "/fapi/v3/balance", signed=True)
 
     def get_account(self) -> Dict[str, Any]:
         """Return account-level position margin details from Binance."""
-        data = self._request("GET", "/fapi/v2/account", signed=True)
+        data = self._request("GET", "/fapi/v3/account", signed=True)
         return data if isinstance(data, dict) else {}
 
     def get_available_balance(self, asset: str = "USDT") -> float:
@@ -436,7 +525,7 @@ class BinanceFuturesClient:
 
     def get_position_risk(self, symbol: Optional[str] = None) -> List[Dict[str, Any]]:
         params = {"symbol": symbol} if symbol else None
-        data = self._request("GET", "/fapi/v2/positionRisk", params=params, signed=True)
+        data = self._request("GET", "/fapi/v3/positionRisk", params=params, signed=True)
         if isinstance(data, dict):
             return [data]
         return data
@@ -467,6 +556,19 @@ class BinanceFuturesClient:
         if isinstance(data, dict):
             return [data]
         return []
+
+    def start_user_data_stream(self) -> str:
+        data = self._request("POST", "/fapi/v1/listenKey")
+        listen_key = str(data.get("listenKey") or "").strip() if isinstance(data, dict) else ""
+        if not listen_key:
+            raise BinanceAPIError("LISTEN_KEY", "Binance returned an empty listenKey")
+        return listen_key
+
+    def keepalive_user_data_stream(self) -> None:
+        self._request("PUT", "/fapi/v1/listenKey")
+
+    def close_user_data_stream(self) -> None:
+        self._request("DELETE", "/fapi/v1/listenKey")
 
     def get_user_trades(
         self,
@@ -755,20 +857,37 @@ class BinanceFuturesClient:
         return result
 
     @staticmethod
-    def _map_algo_status(raw_status: Any, actual_order_id: Any = None) -> Optional[str]:
+    def _map_algo_status(
+        raw_status: Any,
+        actual_order_id: Any = None,
+        actual_order_status: Any = None,
+    ) -> Optional[str]:
         status = str(raw_status or "").upper()
         if not status:
             return None
-        if status in {"NEW", "PENDING"}:
+        if status in {"NEW", "PENDING", "ACTIVE"}:
             return "NEW"
+        if status in {"TRIGGERING", "TRIGGERED"}:
+            # Binance documents these as transition states: forwarded to / or
+            # accepted by the matching engine, not as proof of a fill.
+            return status
         if status in {"CANCELED", "CANCELLED"}:
             return "CANCELED"
         if status in {"EXPIRED", "FAILED", "REJECTED"}:
             return "EXPIRED"
-        if status in {"TRIGGERED", "FINISHED", "FILLED", "SUCCESS"}:
+        if status in {"FILLED", "SUCCESS"}:
             return "FILLED"
-        if actual_order_id:
-            return "FILLED"
+        if status == "FINISHED":
+            actual_status = str(actual_order_status or "").strip().upper()
+            if actual_status == "FILLED":
+                return "FILLED"
+            if actual_status in {"CANCELED", "CANCELLED"}:
+                return "CANCELED"
+            if actual_status in {"EXPIRED", "REJECTED"}:
+                return "EXPIRED"
+            # actualOrderId only proves the child was created. Its
+            # ORDER_TRADE_UPDATE determines whether it filled or was canceled.
+            return "FINISHED"
         return status
 
     def _normalize_algo_order_payload(self, payload: Dict[str, Any]) -> Dict[str, Any]:
@@ -785,6 +904,11 @@ class BinanceFuturesClient:
             normalized["status"] = self._map_algo_status(
                 payload.get("algoStatus"),
                 actual_order_id=payload.get("actualOrderId"),
+                actual_order_status=(
+                    payload.get("actualOrderStatus")
+                    or payload.get("actualStatus")
+                    or payload.get("orderStatus")
+                ),
             )
         if "stopPrice" not in normalized and payload.get("triggerPrice") is not None:
             normalized["stopPrice"] = payload.get("triggerPrice")

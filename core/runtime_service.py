@@ -124,6 +124,7 @@ class StrategyRuntimeService:
         self._last_hourly_exchange_take_profit_hour_by_account: Dict[str, str] = {}
         self._last_orphan_exit_order_cleanup_local_date: Optional[date] = None
         self._next_readonly_wallet_snapshot_monotonic_by_account: Dict[str, float] = {}
+        self._last_cashflow_minute_by_account: Dict[str, str] = {}
         self._shared_ranking_cache: Optional[List[Dict[str, Any]]] = None
         self._shared_ranking_cache_day: Optional[date] = None
         self._shared_ranking_cache_expires_at: Optional[datetime] = None
@@ -518,6 +519,7 @@ class StrategyRuntimeService:
                 weight_limit_per_minute=max(100, int(weight_limit_per_minute)),
                 min_request_interval_ms=max(0, int(min_request_interval_ms)),
                 rate_limit_coordinator=getattr(reference_strategy.client, "rate_limit_coordinator", None),
+                state_store=reference_strategy.store,
             )
             LOGGER.info(
                 "service shared ranking built once for accounts=%s fetched=%s",
@@ -947,6 +949,10 @@ class StrategyRuntimeService:
         wallet_summary: Optional[Dict[str, object]] = None
         portfolio_result: Optional[Dict[str, object]] = None
         portfolio_take_profit_result: Optional[Dict[str, object]] = None
+        snapshot_provider = ctx.get("snapshot_provider")
+        account_snapshot = None
+        if snapshot_provider is not None:
+            account_snapshot = snapshot_provider.capture()  # type: ignore[attr-defined]
 
         pending_entry_recovery = None
         if strategy is not None and hasattr(strategy, "recover_pending_entries"):
@@ -977,10 +983,14 @@ class StrategyRuntimeService:
             if isinstance(pending_recovery, dict) and int(pending_recovery.get("total", 0)) > 0:
                 LOGGER.warning("service pending exit setup recovery account=%s: %s", account_id, pending_recovery)
 
-        summary = manager.run_once()  # type: ignore[attr-defined]
+        run_manager = manager.run_once  # type: ignore[attr-defined]
+        summary = self._call_with_optional_account_snapshot(run_manager, account_snapshot)
         if balance_sampler is not None:
             try:
-                sampled = balance_sampler.run_once()  # type: ignore[attr-defined]
+                sampled = self._call_with_optional_account_snapshot(
+                    balance_sampler.run_once,  # type: ignore[attr-defined]
+                    account_snapshot,
+                )
                 if isinstance(sampled, dict):
                     wallet_summary = sampled
                 LOGGER.info("service wallet snapshot account=%s: %s", account_id, wallet_summary)
@@ -1076,6 +1086,22 @@ class StrategyRuntimeService:
             "portfolio_take_profit": portfolio_take_profit_result,
             "portfolio_loss_cut": portfolio_result,
         }
+
+    @staticmethod
+    def _call_with_optional_account_snapshot(callable_obj: Callable[..., Any], account_snapshot: Any) -> Any:
+        if account_snapshot is None:
+            return callable_obj()
+        try:
+            parameters = inspect.signature(callable_obj).parameters
+            accepts_kwargs = any(
+                parameter.kind == inspect.Parameter.VAR_KEYWORD
+                for parameter in parameters.values()
+            )
+            if "account_snapshot" in parameters or accepts_kwargs:
+                return callable_obj(account_snapshot=account_snapshot)
+        except (TypeError, ValueError):
+            pass
+        return callable_obj()
 
     def _record_account_failure(self, account_id: str, error_text: str) -> None:
         state = self.account_states.setdefault(account_id, AccountRuntimeState())
@@ -1223,6 +1249,7 @@ class StrategyRuntimeService:
     ) -> None:
         local_dt = now_local or datetime.now(self.timezone)
         mono = now_monotonic if now_monotonic is not None else time.monotonic()
+        self._run_cashflow_sync_if_due(local_dt)
         self._run_entry_if_due(local_dt)
         self._run_daily_loss_cut_if_due(local_dt)
         self._run_noon_protection_if_due(local_dt)
@@ -1231,6 +1258,43 @@ class StrategyRuntimeService:
         self._run_orphan_exit_order_cleanup_if_due(local_dt)
         self._run_manage_if_due(mono, now_local=local_dt)
         self._run_balance_snapshot_for_readonly_accounts(mono)
+
+    def _run_cashflow_sync_if_due(self, now_local: datetime) -> None:
+        """Run one unfiltered income request per account/minute at staggered seconds."""
+        account_ids = [
+            aid
+            for aid, ctx in sorted(self.account_runtimes.items())
+            if str(ctx.get("mode", "full")).strip().lower() == "full"
+            and ctx.get("balance_sampler") is not None
+            and bool(getattr(ctx.get("balance_sampler"), "sync_cashflows", False))
+        ]
+        if not account_ids:
+            return
+
+        default_slots = (5, 20, 35, 50)
+        minute_key = now_local.strftime("%Y-%m-%dT%H:%M")
+        for index, aid in enumerate(account_ids):
+            ctx = self.account_runtimes[aid]
+            configured_slot = ctx.get("cashflow_second_offset")
+            try:
+                slot = int(configured_slot) if configured_slot is not None else default_slots[index % 4]
+            except (TypeError, ValueError):
+                slot = default_slots[index % 4]
+            slot = max(0, min(59, slot))
+            if now_local.second < slot or self._last_cashflow_minute_by_account.get(aid) == minute_key:
+                continue
+
+            # Mark before I/O: a timeout must not cause repeated 30-weight calls
+            # within the same minute.
+            self._last_cashflow_minute_by_account[aid] = minute_key
+            sampler = ctx["balance_sampler"]
+            try:
+                result = sampler.sync_cashflows_once(  # type: ignore[attr-defined]
+                    now_utc=now_local.astimezone(timezone.utc),
+                )
+                LOGGER.info("service cashflow sync account=%s inserted=%s", aid, result)
+            except Exception as exc:  # noqa: BLE001
+                LOGGER.warning("service cashflow sync failed account=%s: %s", aid, exc)
 
     def _run_balance_snapshot_for_readonly_accounts(self, now_monotonic: float) -> None:
         """为 readonly 账户执行余额快照采集。"""
@@ -1262,6 +1326,23 @@ class StrategyRuntimeService:
 
     def run_forever(self, stop_event: Optional[threading.Event] = None) -> None:
         stopper = stop_event or threading.Event()
+        market_streams: Dict[int, Any] = {}
+        for aid, ctx in self.account_runtimes.items():
+            market_stream = ctx.get("market_data_stream")
+            if market_stream is not None:
+                market_streams[id(market_stream)] = market_stream
+            user_stream = ctx.get("user_stream")
+            if user_stream is None or not hasattr(user_stream, "start"):
+                continue
+            try:
+                user_stream.start()  # type: ignore[attr-defined]
+            except Exception as exc:  # noqa: BLE001
+                LOGGER.warning("failed to start user stream account=%s: %s", aid, exc)
+        for market_stream in market_streams.values():
+            try:
+                market_stream.start()
+            except Exception as exc:  # noqa: BLE001
+                LOGGER.warning("failed to start daily-open market stream: %s", exc)
         LOGGER.info(
             "runtime service started: tz=%s entry=%02d:%02d manage_interval=%ss grace=%smin catchup=%s",
             self.timezone.key,
@@ -1279,7 +1360,18 @@ class StrategyRuntimeService:
                     LOGGER.exception("runtime service cycle failed: %s", exc)
                 stopper.wait(timeout=max(0.2, self.cfg.loop_sleep_sec))
         finally:
+            for market_stream in market_streams.values():
+                try:
+                    market_stream.stop()
+                except Exception as exc:  # noqa: BLE001
+                    LOGGER.warning("failed to stop daily-open market stream: %s", exc)
             for ctx in self.account_runtimes.values():
+                user_stream = ctx.get("user_stream")
+                if user_stream is not None and hasattr(user_stream, "stop"):
+                    try:
+                        user_stream.stop()  # type: ignore[attr-defined]
+                    except Exception as exc:  # noqa: BLE001
+                        LOGGER.warning("failed to stop user stream during service shutdown: %s", exc)
                 strategy = ctx.get("strategy")
                 if strategy is not None and hasattr(strategy, "request_entry_wait_stop"):
                     try:

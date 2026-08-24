@@ -1,6 +1,7 @@
 import sqlite3
 import tempfile
 import unittest
+from datetime import datetime, timezone
 from pathlib import Path
 
 from core.balance_sampler import WalletSnapshotSampler
@@ -68,7 +69,7 @@ class BalanceSamplerTest(unittest.TestCase):
             ).fetchone()[0]
         self.assertIn("position risk unavailable", str(error))
 
-    def test_cashflow_pagination_advances_past_unpersisted_rows(self) -> None:
+    def test_cashflow_sync_uses_one_unfiltered_request_and_local_filtering(self) -> None:
         class ClientStub:
             def __init__(self):
                 self.calls = []
@@ -81,36 +82,21 @@ class BalanceSamplerTest(unittest.TestCase):
 
             def get_income_history(self, **kwargs):
                 self.calls.append(kwargs)
-                if kwargs.get("income_type") == "WELCOME_BONUS":
-                    return []
-                if len([call for call in self.calls if call.get("income_type") == "TRANSFER"]) == 1:
-                    rows = [
-                        {
-                            "time": 1000,
-                            "incomeType": "TRANSFER",
-                            "asset": "USDT",
-                            "income": "1.0",
-                            "tranId": "transfer-1",
-                        }
-                    ]
-                    rows.extend(
-                        {
-                            "time": 2000,
-                            "incomeType": "OTHER",
-                            "asset": "USDT",
-                            "income": "0.0",
-                        }
-                        for _ in range(999)
-                    )
-                    return rows
                 return [
                     {
-                        "time": 3000,
+                        "time": 1000,
                         "incomeType": "TRANSFER",
                         "asset": "USDT",
-                        "income": "2.0",
-                        "tranId": "transfer-2",
-                    }
+                        "income": "1.0",
+                        "tranId": "transfer-1",
+                    },
+                    {
+                        "time": 2000,
+                        "incomeType": "OTHER",
+                        "asset": "USDT",
+                        "income": "9.0",
+                        "tranId": "other-1",
+                    },
                 ]
 
         client = ClientStub()
@@ -125,10 +111,69 @@ class BalanceSamplerTest(unittest.TestCase):
 
         inserted = sampler._sync_cashflows()
 
-        self.assertEqual(inserted, 2)
-        transfer_calls = [call for call in client.calls if call.get("income_type") == "TRANSFER"]
-        self.assertEqual(len(transfer_calls), 2)
-        self.assertGreater(int(transfer_calls[1]["start_time"]), 2000)
+        self.assertEqual(inserted, 1)
+        self.assertEqual(len(client.calls), 1)
+        self.assertIsNone(client.calls[0]["income_type"])
+        cursor = self.store.get_lock_state("cashflow_income_cursor_v2")
+        self.assertIsNotNone(cursor)
+        self.assertEqual(cursor["last_row_count"], 2)
+
+    def test_cashflow_full_page_continues_same_window_on_next_minute(self) -> None:
+        class ClientStub:
+            def __init__(self):
+                self.calls = []
+
+            def get_income_history(self, **kwargs):
+                self.calls.append(kwargs)
+                page = int(kwargs.get("page") or 1)
+                if page == 1:
+                    return [
+                        {
+                            "time": 1500,
+                            "incomeType": "TRANSFER",
+                            "asset": "USDT",
+                            "income": "1",
+                            "tranId": f"transfer-{index}",
+                        }
+                        for index in range(1000)
+                    ]
+                return [
+                    {
+                        "time": 1500,
+                        "incomeType": "TRANSFER",
+                        "asset": "USDT",
+                        "income": "1",
+                        "tranId": "transfer-1000",
+                    }
+                ]
+
+        client = ClientStub()
+        sampler = WalletSnapshotSampler(
+            client=client,
+            store=self.store,
+            asset="USDT",
+            sync_cashflows=True,
+            cashflow_income_types=["TRANSFER"],
+        )
+        sampler._resolve_cashflow_start_ms = lambda income_type=None: 1000
+
+        first_inserted = sampler.sync_cashflows_once(
+            now_utc=datetime.fromtimestamp(5, tz=timezone.utc)
+        )
+        second_inserted = sampler.sync_cashflows_once(
+            now_utc=datetime.fromtimestamp(65, tz=timezone.utc)
+        )
+
+        self.assertEqual(first_inserted, 1000)
+        self.assertEqual(second_inserted, 1)
+        self.assertEqual(len(client.calls), 2)
+        self.assertEqual(client.calls[0]["page"], 1)
+        self.assertEqual(client.calls[1]["page"], 2)
+        self.assertEqual(client.calls[1]["start_time"], client.calls[0]["start_time"])
+        self.assertEqual(client.calls[1]["end_time"], client.calls[0]["end_time"])
+        cursor = self.store.get_lock_state("cashflow_income_cursor_v2")
+        self.assertFalse(cursor["draining_full_page"])
+        self.assertEqual(cursor["cursor_ms"], 5000)
 
 
 if __name__ == "__main__":

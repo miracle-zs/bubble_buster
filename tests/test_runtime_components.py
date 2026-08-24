@@ -93,6 +93,12 @@ serverchan_sendkey =
     assert strategy is account_runtimes["good"]["strategy"]
     assert manager is account_runtimes["good"]["manager"]
     assert wallet_sampler is account_runtimes["good"]["balance_sampler"]
+    snapshot_provider = account_runtimes["good"]["snapshot_provider"]
+    assert strategy.snapshot_provider is snapshot_provider
+    assert manager.snapshot_provider is snapshot_provider
+    assert wallet_sampler.snapshot_provider is snapshot_provider
+    assert manager.order_state is account_runtimes["good"]["user_stream"]
+    assert wallet_sampler.cashflow_inline is False
     assert runtime_cfg.get("default_account_id") == "good"
     assert service_cfg.max_account_workers >= 1
 

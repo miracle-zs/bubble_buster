@@ -20,7 +20,7 @@
   - CLI 主入口，支持 `entry / manage / loss-cut / service / dashboard`。
   - 启动前做文件锁，防止重复执行。
 - `core/runtime_components.py`
-  - 统一装配 `BinanceFuturesClient / StateStore / Strategy / PositionManager / WalletSnapshotSampler`。
+  - 统一装配 `BinanceFuturesClient / AccountSnapshotProvider / User Stream / StateStore / Strategy / PositionManager / WalletSnapshotSampler`。
 - `core/runtime_service.py`
   - 内置调度器（替代 cron），按时驱动 `entry + daily loss-cut + morning protection + noon protection + hourly take-profit + manage`。
 - `core/strategy_top10_short.py`
@@ -31,10 +31,11 @@
     - `tracked`：只处理策略数据库中 OPEN 仓位；
     - `exchange`：扫描交易所账户当前全部持仓并对浮亏仓位平仓。
 - `core/balance_sampler.py`
-  - 采集权益快照（钱包余额 + 持仓未实现盈亏），可选同步现金流（如 TRANSFER）。
+  - 从每账户每分钟共享的 `/fapi/v3/account` 快照采集权益；现金流每分钟一次无 `incomeType` 增量同步并在本地筛选。
 - `dashboard_fastapi.py` + `dashboard_server.py`
   - Dashboard API 与前端页面渲染。
   - 支持策略权益曲线、账户权益曲线、回撤统计、仓位/事件/日志。
+  - HTTP 请求路径只读取 SQLite，不直接调用 Binance。
 - `infra/binance_futures_client.py`
   - 交易 API 封装（签名、重试、规则归一化、条件单 fallback）。
 - `core/state_store.py` + `schema.sql`
@@ -52,6 +53,16 @@
   - `service` 内置的 daily loss-cut 是严格 1 分钟窗口，错过当天跳过。
 - 可运维性：
   - `log_dir/db_path/lock_file` 可配置，支持多实例隔离（比如账户 A、B）。
+
+### Binance 权重控制
+
+- 每账户同一分钟只抓取一次完整账户快照，权益、组合止盈/止损、仓位巡检与 Dashboard 共享该状态。
+- `positionRisk` 只在启动、重连、状态不确定、成交后本地风险字段尚不完整或 5 分钟 REST 校验时按账户全量读取；正常巡检不做 symbol 级请求。
+- TP/SL 状态由 `ORDER_TRADE_UPDATE`、`ALGO_UPDATE` 和 `ACCOUNT_UPDATE` 写入本地表，REST 仅作校验兜底。
+- 4 个实盘账户现金流在每分钟的 05/20/35/50 秒各发一次无类型过滤的 `/income` 请求，使用持久游标、20 分钟默认重叠和 `tranId/tradeId` 去重。
+- readonly 账户仅首次回填 30 天原始流水/成交，之后每 15～30 分钟增量同步并从 SQLite 计算统计；无新 `REALIZED_PNL` 时不调用 `userTrades`。
+- 排名使用本地 UTC 日开盘、每日最多一次全市场 ticker 与 24 小时 `exchangeInfo` 缓存；REST 补齐受 200 weight/min 限制。
+- 进程内统一非交易预算为 300 weight/min，后台任务预算为 200 weight/min；收到 429/418 后所有非交易 REST 共享冷却。
 
 ---
 
@@ -268,7 +279,7 @@ protection_exempt_symbols = XAUUSDT
 
 - `enabled`：启用账户列表（逗号分隔），示例 `enabled = acc01,acc02,55`
 - `mode.<account_id>`：账户模式，支持 `full` / `loss_cut_only` / `readonly`
-- `readonly` 账户仅从交易所实时读取当前持仓、活动止盈止损订单和仓位保证金，不写入策略持仓；收益率同时展示名义价值收益率与实际仓位初始保证金收益率。
+- `readonly` 账户由后台账户快照与 User Stream 写入本地状态，不写入策略持仓；Dashboard 只读本地持仓、活动止盈止损和仓位保证金，收益率同时展示名义价值收益率与实际仓位初始保证金收益率。
 - 账户覆盖节：
   - `[account.<id>.binance]`
   - `[account.<id>.strategy]`
@@ -297,6 +308,10 @@ protection_exempt_symbols = XAUUSDT
 - `fills`：从订单回报抽取的成交快照（成交量/均价/手续费/已实现PnL）。
 - `wallet_snapshots`：权益快照。
 - `cashflow_events`：现金流流水（去重）。
+- `account_state` / `account_position_state`：每账户最新共享权益与持仓快照。
+- `exchange_order_state`：User Stream 驱动的本地订单状态。
+- `binance_income_records` / `binance_user_trades`：readonly 原始增量统计账本。
+- `daily_open_prices` / `market_data_cache`：UTC 日开盘、ticker 与 `exchangeInfo` 缓存。
 - `rebalance_cycles`：每次再平衡周期汇总（目标/执行结果/跳过原因）。
 - `rebalance_actions`：再平衡逐仓动作明细（偏离度/调整量/结果）。
 - `equity_recovery_events`：旧版 24h 低点反弹止盈触发事件（窗口最低点、触发权益、减仓结果与明细）。

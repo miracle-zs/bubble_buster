@@ -30,7 +30,7 @@ entry_wait_close_retry_count = 5
 entry_wait_max_hours = 16
 entry_preclose_sec = 10
 ranker_max_workers = 24
-ranker_weight_limit_per_minute = 1000
+ranker_weight_limit_per_minute = 200
 ranker_min_request_interval_ms = 20
 rebalance_enabled = true
 rebalance_pre_entry_reduce = true
@@ -93,6 +93,9 @@ wallet_snapshot_asset = USDT
 readonly_wallet_snapshot_interval_sec = 60
 sync_cashflows = true
 cashflow_income_types = TRANSFER,WELCOME_BONUS
+cashflow_overlap_minutes = 20
+user_stream_rest_verify_interval_sec = 300
+dashboard_trade_stats_refresh_sec = 900
 dashboard_host = 127.0.0.1
 dashboard_port = 8787
 dashboard_refresh_sec = 5
@@ -177,6 +180,7 @@ equity_recovery_reduce_ratio = 0.50
 fixed_take_profit_enabled = false
 
 [account.acc01.runtime]
+cashflow_second_offset = 5
 portfolio_take_profit_enabled = true
 portfolio_take_profit_pct = 2.5
 portfolio_take_profit_giveback_pct = 15.0
@@ -185,6 +189,7 @@ portfolio_take_profit_minute = 0
 portfolio_take_profit_reduce_ratio = 0.50
 
 [account.acc03.runtime]
+cashflow_second_offset = 35
 daily_loss_cut_enabled = true
 portfolio_take_profit_enabled = true
 portfolio_take_profit_pct = 2.5
@@ -194,6 +199,7 @@ portfolio_take_profit_minute = 0
 portfolio_take_profit_reduce_ratio = 1.0
 
 [account.acc02.runtime]
+cashflow_second_offset = 20
 entry_hour = 7
 entry_minute = 45
 entry_initial_delay_sec = 30
@@ -208,6 +214,7 @@ portfolio_take_profit_minute = 0
 portfolio_take_profit_reduce_ratio = 1.0
 
 [account.acc04.runtime]
+cashflow_second_offset = 50
 portfolio_take_profit_enabled = false
 
 

@@ -1,4 +1,5 @@
 import configparser
+import json
 import logging
 import os
 import threading
@@ -8,6 +9,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta, timezone
 from functools import wraps
 from typing import Any, Dict, List, Optional
+from urllib.parse import urlparse
 
 import requests
 from requests.adapters import HTTPAdapter
@@ -181,18 +183,27 @@ def retry(
         @wraps(func)
         def wrapper(*args, **kwargs):
             _retries, _delay = retries, delay
+            endpoint_by_function = {
+                "get_exchange_info": "/fapi/v1/exchangeInfo",
+                "get_24hr_ticker_data": "/fapi/v1/ticker/24hr",
+                "get_klines_data": "/fapi/v1/klines",
+            }
+            endpoint = endpoint_by_function.get(func.__name__, "/")
+            try:
+                request_weight = max(1, int(kwargs.get("request_weight") or 1))
+            except (TypeError, ValueError):
+                request_weight = 1
             while _retries > 1:
                 try:
                     return func(*args, **kwargs)
                 except BinanceRateLimitTriggered:
                     raise
-                except requests.exceptions.RequestException as e:
+                except requests.exceptions.RequestException:
                     _retries -= 1
                     logging.warning(
-                        "Error in %s with args %s: %s. Retrying in %ss... (%s/%s)",
-                        func.__name__,
-                        args,
-                        e,
+                        "Binance market REST retry endpoint=%s weight=%s retry_in_sec=%s attempt=%s/%s",
+                        endpoint,
+                        request_weight,
                         _delay,
                         retries - _retries,
                         retries,
@@ -204,10 +215,16 @@ def retry(
                 return func(*args, **kwargs)
             except BinanceRateLimitTriggered:
                 raise
-            except requests.exceptions.RequestException as e:
-                logging.error("Final attempt for %s failed with args %s: %s", func.__name__, args, e)
+            except requests.exceptions.RequestException as exc:
+                logging.error(
+                    "Binance market REST failed endpoint=%s weight=%s",
+                    endpoint,
+                    request_weight,
+                )
                 if raise_on_failure:
-                    raise
+                    raise MarketDataUnavailableError(
+                        f"request failed endpoint={endpoint} weight={request_weight}"
+                    ) from exc
                 if default_return_value is not None:
                     return default_return_value
 
@@ -232,7 +249,11 @@ def get_exchange_info(
     if rate_limiter:
         rate_limiter.acquire(weight=request_weight)
     if rate_limit_coordinator:
-        rate_limit_coordinator.wait_for_available()
+        rate_limit_coordinator.acquire(
+            path="/fapi/v1/exchangeInfo",
+            weight=request_weight,
+            background=True,
+        )
     endpoint = f"{base_url}/fapi/v1/exchangeInfo"
     response = (session or SESSION).get(endpoint, timeout=10)
     _raise_if_rate_limited(response, rate_limit_coordinator)
@@ -246,7 +267,7 @@ def get_exchange_info(
     return symbols
 
 
-@retry(default_return_value=[], raise_on_failure=True)
+@retry(retries=1, default_return_value=[], raise_on_failure=True)
 def get_24hr_ticker_data(
     session: Optional[requests.Session] = None,
     base_url: str = BINANCE_API_BASE,
@@ -258,7 +279,11 @@ def get_24hr_ticker_data(
     if rate_limiter:
         rate_limiter.acquire(weight=request_weight)
     if rate_limit_coordinator:
-        rate_limit_coordinator.wait_for_available()
+        rate_limit_coordinator.acquire(
+            path="/fapi/v1/ticker/24hr",
+            weight=request_weight,
+            background=True,
+        )
     endpoint = f"{base_url}/fapi/v1/ticker/24hr"
     response = (session or SESSION).get(endpoint, timeout=10)
     _raise_if_rate_limited(response, rate_limit_coordinator)
@@ -283,7 +308,11 @@ def get_klines_data(
     if rate_limiter:
         rate_limiter.acquire(weight=request_weight)
     if rate_limit_coordinator:
-        rate_limit_coordinator.wait_for_available()
+        rate_limit_coordinator.acquire(
+            path="/fapi/v1/klines",
+            weight=request_weight,
+            background=True,
+        )
     endpoint = f"{base_url}/fapi/v1/klines"
     params = {
         'symbol': symbol,
@@ -360,6 +389,7 @@ def build_top_gainers(
     weight_limit_per_minute: int = 1000,
     min_request_interval_ms: int = 20,
     rate_limit_coordinator: Optional[BinanceRateLimitCoordinator] = None,
+    state_store: Optional[Any] = None,
 ) -> List[Dict[str, float]]:
     """Builds top gainers ranked by UTC-midnight-based percentage change."""
     started_at = time.perf_counter()
@@ -373,18 +403,32 @@ def build_top_gainers(
         min_request_interval_ms,
     )
     weight_limiter = ApiWeightLimiter(
-        max_weight_per_minute=max(100, int(weight_limit_per_minute)),
+        max_weight_per_minute=min(200, max(100, int(weight_limit_per_minute))),
         min_request_interval_ms=max(0, int(min_request_interval_ms)),
     )
 
-    stage_started = time.perf_counter()
-    symbols = get_exchange_info(
-        session=session,
-        base_url=base_url,
-        rate_limiter=weight_limiter,
-        request_weight=1,
-        rate_limit_coordinator=rate_limit_coordinator,
+    now_utc = datetime.now(timezone.utc)
+    day_utc = now_utc.date().isoformat()
+    next_midnight_utc = (now_utc + timedelta(days=1)).replace(
+        hour=0, minute=0, second=0, microsecond=0
     )
+
+    stage_started = time.perf_counter()
+    symbols = state_store.get_market_data_cache("exchange_info") if state_store is not None else None
+    if not isinstance(symbols, list) or not symbols:
+        symbols = get_exchange_info(
+            session=session,
+            base_url=base_url,
+            rate_limiter=weight_limiter,
+            request_weight=1,
+            rate_limit_coordinator=rate_limit_coordinator,
+        )
+        if state_store is not None and symbols:
+            state_store.put_market_data_cache(
+                "exchange_info",
+                symbols,
+                (now_utc + timedelta(hours=24)).replace(microsecond=0).isoformat(),
+            )
     if not symbols:
         raise MarketDataUnavailableError("exchange info unavailable or empty")
     logging.info(
@@ -394,13 +438,34 @@ def build_top_gainers(
     )
 
     stage_started = time.perf_counter()
-    ticker_data = get_24hr_ticker_data(
-        session=session,
-        base_url=base_url,
-        rate_limiter=weight_limiter,
-        request_weight=40,
-        rate_limit_coordinator=rate_limit_coordinator,
-    )
+    ticker_cache_key = f"ticker_24hr:{day_utc}"
+    ticker_attempt_key = f"ticker_24hr_attempt:{day_utc}"
+    ticker_data = state_store.get_market_data_cache(ticker_cache_key) if state_store is not None else None
+    if not isinstance(ticker_data, list) or not ticker_data:
+        if state_store is not None:
+            # Persist before I/O so concurrent account rankings and process
+            # retries cannot issue a second all-market request that day.
+            claimed = state_store.claim_market_data_attempt(
+                ticker_attempt_key,
+                next_midnight_utc.isoformat(),
+            )
+            if not claimed:
+                raise MarketDataUnavailableError(
+                    "all-market 24h ticker was already requested once for this UTC day"
+                )
+        ticker_data = get_24hr_ticker_data(
+            session=session,
+            base_url=base_url,
+            rate_limiter=weight_limiter,
+            request_weight=40,
+            rate_limit_coordinator=rate_limit_coordinator,
+        )
+        if state_store is not None and ticker_data:
+            state_store.put_market_data_cache(
+                ticker_cache_key,
+                ticker_data,
+                next_midnight_utc.isoformat(),
+            )
     if not ticker_data:
         raise MarketDataUnavailableError("24h ticker data unavailable or empty")
     logging.info(
@@ -410,7 +475,7 @@ def build_top_gainers(
     )
 
     ticker_map = {item['symbol']: item for item in ticker_data}
-    midnight_utc_timestamp = get_utc_midnight_timestamp()
+    midnight_utc_timestamp = get_utc_midnight_timestamp(now_utc)
 
     candidates: List[Dict[str, float]] = []
     for symbol in symbols:
@@ -450,15 +515,20 @@ def build_top_gainers(
         workers,
     )
 
-    midnight_open_map: Dict[str, Optional[float]] = {}
-    progress_total = len(candidates)
+    persisted_opens = state_store.get_daily_open_prices(day_utc) if state_store is not None else {}
+    midnight_open_map: Dict[str, Optional[float]] = {
+        str(symbol): float(price) for symbol, price in persisted_opens.items()
+    }
+    missing_candidates = [item for item in candidates if str(item["symbol"]) not in midnight_open_map]
+    progress_total = len(missing_candidates)
     progress_step = max(1, progress_total // 10)
     progress_count = 0
     missing_open_count = 0
     kline_error_count = 0
     stage_started = time.perf_counter()
+    workers = max(1, min(workers, max(1, progress_total)))
     if workers == 1:
-        for item in candidates:
+        for item in missing_candidates:
             symbol = str(item['symbol'])
             try:
                 midnight_open = get_open_price_at_midnight(
@@ -474,6 +544,8 @@ def build_top_gainers(
                 midnight_open = None
                 kline_error_count += 1
             midnight_open_map[symbol] = midnight_open
+            if state_store is not None and midnight_open is not None:
+                state_store.put_daily_open_price(day_utc, symbol, midnight_open, "REST_KLINE")
             progress_count += 1
             if midnight_open is None:
                 missing_open_count += 1
@@ -498,13 +570,15 @@ def build_top_gainers(
                     weight_limiter,
                     rate_limit_coordinator,
                 ): str(item['symbol'])
-                for item in candidates
+                for item in missing_candidates
             }
             for future in as_completed(future_to_symbol):
                 symbol = future_to_symbol[future]
                 try:
                     midnight_open = future.result()
                     midnight_open_map[symbol] = midnight_open
+                    if state_store is not None and midnight_open is not None:
+                        state_store.put_daily_open_price(day_utc, symbol, midnight_open, "REST_KLINE")
                     if midnight_open is None:
                         missing_open_count += 1
                 except Exception as exc:  # noqa: BLE001
@@ -528,7 +602,7 @@ def build_top_gainers(
         missing_open_count,
         progress_total,
     )
-    if kline_error_count >= progress_total:
+    if progress_total > 0 and kline_error_count >= progress_total:
         raise MarketDataUnavailableError(
             f"midnight kline data unavailable for all candidates ({kline_error_count}/{progress_total})"
         )
@@ -570,6 +644,160 @@ def build_top_gainers(
         preview,
     )
     return top_list
+
+
+class DailyOpenPriceStream:
+    """Persist each symbol's UTC daily open from the public kline stream."""
+
+    def __init__(
+        self,
+        *,
+        state_store: Any,
+        base_url: str = BINANCE_API_BASE,
+        session: Optional[requests.Session] = None,
+        rate_limit_coordinator: Optional[BinanceRateLimitCoordinator] = None,
+    ) -> None:
+        self.state_store = state_store
+        self.base_url = base_url
+        self.session = session
+        self.rate_limit_coordinator = rate_limit_coordinator
+        self._stop_event = threading.Event()
+        self._thread: Optional[threading.Thread] = None
+        self._app: Any = None
+        self._known_open_lock = threading.Lock()
+        self._known_open_day: Optional[str] = None
+        self._known_open_symbols: set[str] = set()
+
+    def start(self) -> None:
+        if self._thread is not None and self._thread.is_alive():
+            return
+        self._stop_event.clear()
+        self._thread = threading.Thread(
+            target=self._run,
+            name="binance-daily-open-stream",
+            daemon=True,
+        )
+        self._thread.start()
+
+    def stop(self, timeout_sec: float = 10.0) -> None:
+        self._stop_event.set()
+        if self._app is not None:
+            try:
+                self._app.close()
+            except Exception:  # noqa: BLE001
+                pass
+        if self._thread is not None and self._thread.is_alive() and self._thread is not threading.current_thread():
+            self._thread.join(timeout=max(0.0, float(timeout_sec)))
+        self._thread = None
+
+    def handle_message(self, payload: Dict[str, Any]) -> None:
+        event = payload.get("data") if isinstance(payload.get("data"), dict) else payload
+        if not isinstance(event, dict) or str(event.get("e") or "") != "kline":
+            return
+        kline = event.get("k")
+        if not isinstance(kline, dict) or str(kline.get("i") or "") != "1d":
+            return
+        symbol = str(kline.get("s") or event.get("s") or "").strip().upper()
+        try:
+            open_time_ms = int(kline.get("t") or 0)
+            open_price = float(kline.get("o") or 0.0)
+        except (TypeError, ValueError):
+            return
+        if not symbol or open_time_ms <= 0 or open_price <= 0:
+            return
+        open_time = datetime.fromtimestamp(open_time_ms / 1000.0, tz=timezone.utc)
+        if any((open_time.hour, open_time.minute, open_time.second, open_time.microsecond)):
+            return
+        day_utc = open_time.date().isoformat()
+        with self._known_open_lock:
+            if self._known_open_day != day_utc:
+                persisted = self.state_store.get_daily_open_prices(day_utc)
+                self._known_open_day = day_utc
+                self._known_open_symbols = {
+                    str(persisted_symbol).strip().upper()
+                    for persisted_symbol in persisted
+                }
+            if symbol in self._known_open_symbols:
+                return
+            self.state_store.put_daily_open_price(
+                day_utc,
+                symbol,
+                open_price,
+                "KLINE_WEBSOCKET",
+            )
+            self._known_open_symbols.add(symbol)
+
+    def _symbols(self) -> List[str]:
+        symbols = self.state_store.get_market_data_cache("exchange_info")
+        if isinstance(symbols, list) and symbols:
+            return [str(symbol).upper() for symbol in symbols if str(symbol).strip()]
+        limiter = ApiWeightLimiter(max_weight_per_minute=200)
+        symbols = get_exchange_info(
+            session=self.session,
+            base_url=self.base_url,
+            rate_limiter=limiter,
+            request_weight=1,
+            rate_limit_coordinator=self.rate_limit_coordinator,
+        )
+        if symbols:
+            self.state_store.put_market_data_cache(
+                "exchange_info",
+                symbols,
+                (datetime.now(timezone.utc) + timedelta(hours=24)).replace(microsecond=0).isoformat(),
+            )
+        return symbols
+
+    def _websocket_url(self) -> str:
+        host = (urlparse(self.base_url).hostname or "").lower()
+        if "testnet" in host or "demo" in host or "binancefuture" in host:
+            return "wss://fstream.binancefuture.com/ws"
+        # Klines are market-data streams in Binance's current split namespace;
+        # user data uses a separate /private endpoint.
+        return "wss://fstream.binance.com/market/stream"
+
+    def _run(self) -> None:
+        try:
+            import websocket  # type: ignore[import-not-found]
+        except ImportError:
+            logging.error("websocket-client is required for UTC daily-open streaming")
+            return
+
+        while not self._stop_event.is_set():
+            try:
+                symbols = self._symbols()
+                if not symbols:
+                    raise MarketDataUnavailableError("exchange info unavailable for daily-open stream")
+
+                def on_open(app: Any) -> None:
+                    streams = [f"{symbol.lower()}@kline_1d" for symbol in symbols]
+                    # Keep subscribe frames comfortably below websocket message
+                    # limits while retaining one connection for the whole market.
+                    for offset in range(0, len(streams), 150):
+                        app.send(json.dumps({"method": "SUBSCRIBE", "params": streams[offset:offset + 150], "id": offset + 1}))
+
+                def on_message(_app: Any, message: str) -> None:
+                    try:
+                        decoded = json.loads(message)
+                    except (TypeError, ValueError):
+                        return
+                    if isinstance(decoded, dict):
+                        self.handle_message(decoded)
+
+                def on_error(_app: Any, error: Any) -> None:
+                    logging.warning("Daily-open websocket error: %s", error)
+
+                self._app = websocket.WebSocketApp(
+                    self._websocket_url(),
+                    on_open=on_open,
+                    on_message=on_message,
+                    on_error=on_error,
+                )
+                self._app.run_forever(ping_interval=180, ping_timeout=30)
+            except Exception as exc:  # noqa: BLE001
+                logging.warning("Daily-open websocket loop failed: %s", exc)
+            finally:
+                self._app = None
+            self._stop_event.wait(5.0)
 
 
 def send_server_chan_notification(

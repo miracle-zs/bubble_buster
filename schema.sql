@@ -93,8 +93,140 @@ CREATE TABLE IF NOT EXISTS cashflow_events (
 );
 
 CREATE INDEX IF NOT EXISTS idx_cashflow_events_time ON cashflow_events(event_time_utc);
+CREATE INDEX IF NOT EXISTS idx_cashflow_events_account_tran
+    ON cashflow_events(account_id, tran_id);
 CREATE INDEX IF NOT EXISTS idx_cashflow_events_asset_time ON cashflow_events(asset, event_time_utc);
 CREATE INDEX IF NOT EXISTS idx_cashflow_events_account_asset_time ON cashflow_events(account_id, asset, event_time_utc);
+
+-- Latest account state shared by the scheduler, position manager and dashboard.
+-- Wallet history remains in wallet_snapshots; these tables intentionally keep
+-- only the current exchange view so dashboard requests never call Binance.
+CREATE TABLE IF NOT EXISTS account_state (
+    account_id TEXT PRIMARY KEY,
+    captured_at_utc TEXT NOT NULL,
+    wallet_balance REAL NOT NULL,
+    unrealized_pnl REAL NOT NULL,
+    equity REAL NOT NULL,
+    available_balance REAL NOT NULL,
+    stream_status TEXT NOT NULL DEFAULT 'REST',
+    raw_json TEXT,
+    updated_at_utc TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS account_position_state (
+    account_id TEXT NOT NULL,
+    symbol TEXT NOT NULL,
+    position_side TEXT NOT NULL DEFAULT 'BOTH',
+    position_amt REAL NOT NULL DEFAULT 0,
+    entry_price REAL,
+    break_even_price REAL,
+    mark_price REAL,
+    unrealized_pnl REAL,
+    liquidation_price REAL,
+    leverage REAL,
+    notional REAL,
+    isolated_margin REAL,
+    initial_margin REAL,
+    captured_at_utc TEXT NOT NULL,
+    raw_json TEXT,
+    PRIMARY KEY(account_id, symbol, position_side)
+);
+
+CREATE INDEX IF NOT EXISTS idx_account_position_state_account_amt
+    ON account_position_state(account_id, position_amt);
+
+CREATE TABLE IF NOT EXISTS exchange_order_state (
+    account_id TEXT NOT NULL,
+    order_key TEXT NOT NULL,
+    symbol TEXT NOT NULL,
+    order_id TEXT,
+    client_order_id TEXT,
+    type TEXT,
+    side TEXT,
+    position_side TEXT,
+    status TEXT,
+    execution_type TEXT,
+    price REAL,
+    stop_price REAL,
+    avg_price REAL,
+    original_qty REAL,
+    executed_qty REAL,
+    reduce_only INTEGER,
+    close_position INTEGER,
+    event_time_utc TEXT NOT NULL,
+    source TEXT NOT NULL,
+    raw_json TEXT,
+    PRIMARY KEY(account_id, order_key)
+);
+
+CREATE INDEX IF NOT EXISTS idx_exchange_order_state_lookup
+    ON exchange_order_state(account_id, symbol, order_id, client_order_id);
+CREATE INDEX IF NOT EXISTS idx_exchange_order_state_status
+    ON exchange_order_state(account_id, status);
+
+-- Raw readonly statistics ledger.  The dashboard aggregates these local rows;
+-- Binance is touched only by the background incremental synchronizer.
+CREATE TABLE IF NOT EXISTS binance_income_records (
+    account_id TEXT NOT NULL,
+    unique_key TEXT NOT NULL,
+    tran_id TEXT,
+    trade_id TEXT,
+    symbol TEXT,
+    income_type TEXT NOT NULL,
+    asset TEXT,
+    income REAL NOT NULL,
+    event_time_ms INTEGER NOT NULL,
+    raw_json TEXT,
+    created_at_utc TEXT NOT NULL,
+    PRIMARY KEY(account_id, unique_key)
+);
+
+CREATE INDEX IF NOT EXISTS idx_binance_income_account_time
+    ON binance_income_records(account_id, event_time_ms);
+CREATE INDEX IF NOT EXISTS idx_binance_income_account_type_time
+    ON binance_income_records(account_id, income_type, event_time_ms);
+CREATE INDEX IF NOT EXISTS idx_binance_income_account_tran
+    ON binance_income_records(account_id, tran_id);
+
+CREATE TABLE IF NOT EXISTS binance_user_trades (
+    account_id TEXT NOT NULL,
+    symbol TEXT NOT NULL,
+    trade_id TEXT NOT NULL,
+    order_id TEXT,
+    event_time_ms INTEGER NOT NULL,
+    realized_pnl REAL NOT NULL DEFAULT 0,
+    commission REAL NOT NULL DEFAULT 0,
+    commission_asset TEXT,
+    side TEXT,
+    qty REAL,
+    price REAL,
+    quote_qty REAL,
+    raw_json TEXT,
+    created_at_utc TEXT NOT NULL,
+    PRIMARY KEY(account_id, symbol, trade_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_binance_user_trades_account_time
+    ON binance_user_trades(account_id, event_time_ms);
+CREATE INDEX IF NOT EXISTS idx_binance_user_trades_account_order
+    ON binance_user_trades(account_id, symbol, order_id);
+
+-- Market ranking inputs are project-wide (not account scoped).
+CREATE TABLE IF NOT EXISTS daily_open_prices (
+    day_utc TEXT NOT NULL,
+    symbol TEXT NOT NULL,
+    open_price REAL NOT NULL,
+    source TEXT NOT NULL,
+    updated_at_utc TEXT NOT NULL,
+    PRIMARY KEY(day_utc, symbol)
+);
+
+CREATE TABLE IF NOT EXISTS market_data_cache (
+    cache_key TEXT PRIMARY KEY,
+    payload_json TEXT NOT NULL,
+    expires_at_utc TEXT NOT NULL,
+    updated_at_utc TEXT NOT NULL
+);
 
 CREATE TABLE IF NOT EXISTS rebalance_cycles (
     id INTEGER PRIMARY KEY AUTOINCREMENT,

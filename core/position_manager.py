@@ -1,5 +1,6 @@
 import logging
 import hashlib
+import json
 import threading
 from collections import deque
 from datetime import date, datetime, timedelta, timezone
@@ -7,6 +8,7 @@ from functools import wraps
 from typing import Any, Dict, List, Optional, Set
 from uuid import uuid4
 
+from core.account_snapshot import AccountSnapshot, AccountSnapshotProvider
 from core.entry_structure_protection import EntryStructureProtectionState
 from core.market_fill_reconciler import MarketFillReconciler
 from core.state_store import StateStore
@@ -62,6 +64,8 @@ class PositionManager:
         account_id: str = "default",
         protection_exempt_symbols: Optional[Set[str]] = None,
         mutation_lock: Optional[Any] = None,
+        snapshot_provider: Optional[AccountSnapshotProvider] = None,
+        order_state: Optional[Any] = None,
     ):
         self.client = client
         self.store = store
@@ -78,6 +82,9 @@ class PositionManager:
         self._entry_structure_protection_state = EntryStructureProtectionState(store)
         self._market_fill_reconciler = MarketFillReconciler(client, store)
         self._mutation_lock = mutation_lock or threading.RLock()
+        self.snapshot_provider = snapshot_provider
+        self.order_state = order_state
+        self._active_account_snapshot: Optional[AccountSnapshot] = None
 
     def _is_protection_exempt(self, symbol: str) -> bool:
         return str(symbol or "").strip().upper() in self.protection_exempt_symbols
@@ -100,7 +107,7 @@ class PositionManager:
         }
         error_symbols: List[str] = []
         active_symbols = set()
-        risks = self.client.get_position_risk()
+        risks = self._get_all_position_risks()
         for risk in risks:
             position_amt = self._safe_float(risk.get("positionAmt"), default=0.0)
             if position_amt >= 0:
@@ -180,7 +187,7 @@ class PositionManager:
             "errors": 0,
         }
 
-        risks = self.client.get_position_risk()
+        risks = self._get_all_position_risks()
         for risk in risks:
             position_amt = self._safe_float(risk.get("positionAmt"), default=0.0)
             if position_amt >= 0:
@@ -995,7 +1002,7 @@ class PositionManager:
         later price. A missing mark price is treated as a plan error rather
         than silently falling back to an entry price.
         """
-        risks = self.client.get_position_risk()
+        risks = self._get_all_position_risks()
         plan: List[Dict[str, object]] = []
         for risk in risks:
             symbol = str(risk.get("symbol") or "").strip().upper()
@@ -1131,7 +1138,7 @@ class PositionManager:
         failed_symbols: List[str] = []
 
         try:
-            risks = self.client.get_position_risk()
+            risks = self._get_all_position_risks()
         except Exception as exc:  # noqa: BLE001
             LOGGER.exception("Portfolio take-profit failed to query exchange positions: %s", exc)
             summary["errors"] = 1
@@ -1539,7 +1546,7 @@ class PositionManager:
         self,
         reduce_ratio: float,
     ) -> List[Dict[str, object]]:
-        risks = self.client.get_position_risk()
+        risks = self._get_all_position_risks()
         plan: List[Dict[str, object]] = []
         for risk in risks:
             symbol = str(risk.get("symbol") or "").strip().upper()
@@ -1586,7 +1593,7 @@ class PositionManager:
         details: Dict[str, List[str]] = {"adjusted_take_profit": [], "errors": []}
         adjusted_symbols: List[str] = []
         failed_symbols: List[str] = []
-        risks = self.client.get_position_risk()
+        risks = self._get_all_position_risks()
         risk_map: Dict[tuple[str, str], Dict[str, Any]] = {}
         for risk in risks:
             symbol = str(risk.get("symbol") or "").strip().upper()
@@ -1797,7 +1804,7 @@ class PositionManager:
         closed_symbols: List[str] = []
         failed_symbols: List[str] = []
         try:
-            risks = self.client.get_position_risk()
+            risks = self._get_all_position_risks()
         except Exception as exc:  # noqa: BLE001
             LOGGER.exception("Portfolio loss-cut failed to query exchange positions: %s", exc)
             summary["errors"] = 1
@@ -1879,7 +1886,7 @@ class PositionManager:
                 tracked_by_symbol[symbol] = pos
 
         try:
-            risks = self.client.get_position_risk()
+            risks = self._get_all_position_risks()
         except Exception as exc:  # noqa: BLE001
             LOGGER.exception("Noon protection failed to query exchange positions: %s", exc)
             return {
@@ -2117,7 +2124,7 @@ class PositionManager:
                 tracked_by_symbol[symbol] = pos
 
         try:
-            risks = self.client.get_position_risk()
+            risks = self._get_all_position_risks()
         except Exception as exc:  # noqa: BLE001
             LOGGER.exception("Morning protection failed to query exchange positions: %s", exc)
             return {
@@ -2417,7 +2424,7 @@ class PositionManager:
         failed_symbols: List[str] = []
 
         try:
-            risks = self.client.get_position_risk()
+            risks = self._get_all_position_risks()
         except Exception as exc:  # noqa: BLE001
             LOGGER.exception("Daily loss-cut failed to query exchange positions: %s", exc)
             summary["errors"] += 1
@@ -2494,7 +2501,32 @@ class PositionManager:
         return summary
 
     @_serialized_account_mutation
-    def run_once(self) -> Dict[str, int]:
+    def run_once(self, account_snapshot: Optional[AccountSnapshot] = None) -> Dict[str, int]:
+        self._active_account_snapshot = account_snapshot
+        try:
+            return self._run_once_impl()
+        finally:
+            self._active_account_snapshot = None
+
+    def _run_once_impl(self) -> Dict[str, int]:
+        if self.order_state is not None and not self.order_state.is_certain():
+            if not self.order_state.verify_rest(
+                force_account_snapshot=self._active_account_snapshot is None,
+            ):
+                positions = self.store.list_open_positions()
+                LOGGER.warning(
+                    "Position management paused while user stream state is uncertain account=%s",
+                    self.account_id,
+                )
+                return {
+                    "total": len(positions),
+                    "closed_tp": 0,
+                    "closed_sl": 0,
+                    "closed_timeout": 0,
+                    "closed_external": 0,
+                    "updated_sl": 0,
+                    "errors": 1,
+                }
         try:
             discovered_fills = self._market_fill_reconciler.reconcile_persisted_missing()
             fill_reconciliation = self._market_fill_reconciler.reconcile_pending()
@@ -2603,7 +2635,7 @@ class PositionManager:
             return {"canceled": 0, "failed": 0, "details": []}
 
         try:
-            risks = self.client.get_position_risk()
+            risks = self._get_all_position_risks()
         except Exception as exc:  # noqa: BLE001
             return {"canceled": 0, "failed": 1, "details": [f"fetch_position_risk_failed: {exc}"]}
         active_by_key = {
@@ -2669,14 +2701,27 @@ class PositionManager:
         return datetime.now().astimezone().date().isoformat()
 
     def _cleanup_orphan_exit_orders(self) -> Dict[str, object]:
-        risks = self.client.get_position_risk()
+        risks = self._get_all_position_risks()
         active_short_symbols = {
             str(row.get("symbol") or "").strip()
             for row in risks
             if str(row.get("symbol") or "").strip()
             and self._safe_float(row.get("positionAmt"), default=0.0) < 0
         }
-        open_orders = self.client.get_open_orders()
+        if self.order_state is None:
+            # Compatibility adapter for legacy standalone callers. Production
+            # runtimes consume the User Stream / periodic verification ledger.
+            open_orders = self.client.get_open_orders()
+        else:
+            open_orders = []
+            for local_order in self.store.list_exchange_order_state(active_only=True):
+                resolved = self._get_order(
+                    symbol=str(local_order.get("symbol") or ""),
+                    order_id=local_order.get("order_id"),
+                    client_order_id=local_order.get("client_order_id"),
+                )
+                if resolved is not None:
+                    open_orders.append(resolved)
         canceled = 0
         failed = 0
         details: List[str] = []
@@ -3065,7 +3110,14 @@ class PositionManager:
         rules = self.client.get_symbol_rules().get(symbol)
         min_delta = rules.tick_size if rules else 0.0
 
-        sl_is_live = sl_status in {"NEW", "PENDING", "PARTIALLY_FILLED"}
+        sl_is_live = sl_status in {
+            "NEW",
+            "PENDING",
+            "ACTIVE",
+            "PARTIALLY_FILLED",
+            "TRIGGERING",
+            "TRIGGERED",
+        }
         if old_sl_price and abs(new_sl_price - old_sl_price) <= max(min_delta, 1e-12) and sl_is_live:
             return None
 
@@ -3139,7 +3191,14 @@ class PositionManager:
         if not tp_price:
             return None
         symbol = str(pos["symbol"])
-        if tp_status in {"NEW", "PENDING", "PARTIALLY_FILLED"}:
+        if tp_status in {
+            "NEW",
+            "PENDING",
+            "ACTIVE",
+            "PARTIALLY_FILLED",
+            "TRIGGERING",
+            "TRIGGERED",
+        }:
             return None
 
         position_amt = self._safe_float(risk.get("positionAmt"), default=0.0)
@@ -3218,6 +3277,42 @@ class PositionManager:
     ) -> Optional[Dict[str, Any]]:
         if not order_id and not client_order_id:
             return None
+        if self.order_state is not None:
+            row = self.store.get_exchange_order_state(
+                symbol=symbol,
+                order_id=order_id,
+                client_order_id=client_order_id,
+            )
+            if row is None:
+                return None
+            payload: Dict[str, Any] = {}
+            raw_json = row.get("raw_json")
+            if isinstance(raw_json, str) and raw_json.strip():
+                try:
+                    parsed = json.loads(raw_json)
+                    if isinstance(parsed, dict):
+                        payload.update(parsed)
+                except (TypeError, ValueError):
+                    pass
+            payload.update(
+                {
+                    "symbol": row.get("symbol"),
+                    "orderId": row.get("order_id"),
+                    "clientOrderId": row.get("client_order_id"),
+                    "type": row.get("type"),
+                    "side": row.get("side"),
+                    "positionSide": row.get("position_side"),
+                    "status": row.get("status"),
+                    "price": row.get("price"),
+                    "stopPrice": row.get("stop_price"),
+                    "avgPrice": row.get("avg_price"),
+                    "origQty": row.get("original_qty"),
+                    "executedQty": row.get("executed_qty"),
+                    "reduceOnly": bool(row.get("reduce_only")) if row.get("reduce_only") is not None else None,
+                    "closePosition": bool(row.get("close_position")) if row.get("close_position") is not None else None,
+                }
+            )
+            return payload
         try:
             parsed_order_id = int(order_id) if order_id else None
             parsed_client_order_id = str(client_order_id) if client_order_id else None
@@ -3332,11 +3427,13 @@ class PositionManager:
         try:
             parsed_order_id = int(order_id) if order_id else None
             parsed_client_order_id = str(client_order_id) if client_order_id else None
-            self.client.cancel_order(
+            canceled = self.client.cancel_order(
                 symbol=symbol,
                 order_id=parsed_order_id,
                 orig_client_order_id=parsed_client_order_id,
             )
+            if isinstance(canceled, dict):
+                self.store.upsert_exchange_order_state(canceled, source="LOCAL_CANCEL")
             return True
         except BinanceAPIError as exc:
             LOGGER.warning("cancel_order failed for %s/%s/%s: %s", symbol, order_id, client_order_id, exc)
@@ -3846,8 +3943,16 @@ class PositionManager:
             normalized_side = "BOTH_SHORT" if position_amt < 0 else "BOTH_LONG"
         return f"EX:{symbol}:{normalized_side}"
 
+    def _get_all_position_risks(self) -> List[Dict[str, Any]]:
+        snapshot = self._active_account_snapshot
+        if snapshot is None and self.snapshot_provider is not None:
+            snapshot = self.snapshot_provider.capture()
+        if snapshot is not None:
+            return [dict(row) for row in snapshot.positions]
+        return self.client.get_position_risk()
+
     def _get_symbol_position_risk(self, symbol: str) -> Optional[Dict[str, str]]:
-        rows = self.client.get_position_risk(symbol=symbol)
+        rows = self._get_all_position_risks()
         fallback = None
         for row in rows:
             if row.get("symbol") != symbol:

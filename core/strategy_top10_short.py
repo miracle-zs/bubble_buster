@@ -17,6 +17,7 @@ from core.entry_structure_protection import (
     EntryStructureProtectionState,
 )
 from core.market_fill_reconciler import MarketFillReconciler
+from core.account_snapshot import AccountSnapshotProvider
 from core.state_store import StateStore
 from infra.binance_futures_client import (
     BinanceAPIError,
@@ -155,6 +156,8 @@ class Top10ShortStrategy:
         account_id: str = "default",
         protection_exempt_symbols: Optional[Set[str]] = None,
         mutation_lock: Optional[Any] = None,
+        order_state: Optional[Any] = None,
+        snapshot_provider: Optional[AccountSnapshotProvider] = None,
     ):
         self.client = client
         self.store = store
@@ -217,6 +220,8 @@ class Top10ShortStrategy:
         self._entry_structure_protection_state = EntryStructureProtectionState(store)
         self._market_fill_reconciler = MarketFillReconciler(client, store)
         self._mutation_lock = mutation_lock or threading.RLock()
+        self.order_state = order_state
+        self.snapshot_provider = snapshot_provider
 
     def _is_protection_exempt(self, symbol: str) -> bool:
         return str(symbol or "").strip().upper() in self.protection_exempt_symbols
@@ -281,6 +286,20 @@ class Top10ShortStrategy:
         trade_day_utc: Optional[str] = None,
         shared_top_gainers: Optional[List[Dict[str, Any]]] = None,
     ) -> Dict[str, object]:
+        if self.order_state is not None and not self.order_state.entry_allowed():
+            if not self.order_state.verify_rest():
+                LOGGER.warning(
+                    "Entry paused because user stream state is uncertain account=%s",
+                    self.account_id,
+                )
+                return {
+                    "status": "SKIPPED",
+                    "reason": "USER_STREAM_STATE_UNCERTAIN",
+                    "opened": 0,
+                    "failed": 0,
+                    "entry_failed": 0,
+                    "exit_setup_failed": 0,
+                }
         trade_day = (trade_day_utc or "").strip() or datetime.now(timezone.utc).date().isoformat()
         trade_day_utc = trade_day
         # A portfolio-loss stop can interrupt a bearish-hour wait. The event is
@@ -394,6 +413,7 @@ class Top10ShortStrategy:
                     weight_limit_per_minute=self.ranker_weight_limit_per_minute,
                     min_request_interval_ms=self.ranker_min_request_interval_ms,
                     rate_limit_coordinator=getattr(self.client, "rate_limit_coordinator", None),
+                    state_store=self.store,
                 )
             else:
                 top_gainers = shared_top_gainers
@@ -484,7 +504,7 @@ class Top10ShortStrategy:
                     except Exception as exc:  # noqa: BLE001
                         LOGGER.exception("Pre-entry rebalance failed: %s", exc)
 
-            available_balance = self.client.get_available_balance("USDT")
+            available_balance = self._get_available_balance_usdt()
             if available_balance <= 0:
                 self.store.finalize_run(run_id, "FAILED", "No available USDT balance")
                 self.notifier.send(
@@ -534,7 +554,7 @@ class Top10ShortStrategy:
             entry_target_mode = "available_balance"
             if self.rebalance_enabled and expected_total_positions > 0:
                 try:
-                    risk_rows_for_entry_sizing = self.client.get_position_risk()
+                    risk_rows_for_entry_sizing = self._get_all_position_risks()
                     equity_for_entry_sizing = self._compute_account_equity_usdt(
                         risk_rows=risk_rows_for_entry_sizing
                     )
@@ -2338,7 +2358,7 @@ class Top10ShortStrategy:
         detail_rows: List[Dict[str, object]] = []
         risk_rows: List[Dict[str, Any]] = []
         try:
-            risk_rows = self.client.get_position_risk()
+            risk_rows = self._get_all_position_risks()
         except Exception as exc:  # noqa: BLE001
             LOGGER.warning("Failed to fetch position risk in equity recovery stage, fallback per-symbol query: %s", exc)
         risk_map: Dict[str, Dict[str, Any]] = {
@@ -2497,7 +2517,7 @@ class Top10ShortStrategy:
         if not position_rows:
             return set()
         try:
-            risk_rows = self.client.get_position_risk()
+            risk_rows = self._refresh_all_position_risks()
             risk_map: Dict[str, Dict[str, Any]] = {
                 str(row.get("symbol") or "").strip(): row
                 for row in risk_rows
@@ -2956,7 +2976,7 @@ class Top10ShortStrategy:
             skip_reason = "NO_OPEN_POSITIONS"
             return _finalize_and_return(skip_reason)
 
-        risk_rows = self.client.get_position_risk()
+        risk_rows = self._get_all_position_risks()
         risk_map: Dict[str, Dict[str, Any]] = {
             str(row.get("symbol") or "").strip(): row
             for row in risk_rows
@@ -3361,6 +3381,8 @@ class Top10ShortStrategy:
                 )
 
     def _compute_account_equity_usdt(self, risk_rows: Optional[List[Dict[str, Any]]] = None) -> float:
+        if self.snapshot_provider is not None:
+            return float(self.snapshot_provider.capture().equity)
         balances = self.client.get_balance()
         wallet_balance = 0.0
         for item in balances:
@@ -3830,7 +3852,7 @@ class Top10ShortStrategy:
         available_balance: Optional[float] = None
         available_balance_err: Optional[str] = None
         try:
-            available_balance = float(self.client.get_available_balance("USDT"))
+            available_balance = float(self._get_available_balance_usdt())
         except Exception as fetch_exc:  # noqa: BLE001
             available_balance_err = str(fetch_exc)
         shortfall = (
@@ -3857,7 +3879,17 @@ class Top10ShortStrategy:
         max_retries = 8
         base_delay = 0.2
         for attempt in range(max_retries):
-            risk_rows = self.client.get_position_risk(symbol=symbol)
+            if self.snapshot_provider is not None:
+                risk_rows = self._local_position_risks()
+                if not self._find_short_position(risk_rows, symbol) and attempt == 0:
+                    # Entry/rebalance changed exchange state after the minute
+                    # snapshot. Reconcile once with an all-symbol request; the
+                    # second call in exit setup then reuses this local result.
+                    risk_rows = self._refresh_all_position_risks()
+            else:
+                # Legacy adapter for isolated callers. Runtime wiring always
+                # provides the shared snapshot module.
+                risk_rows = self.client.get_position_risk(symbol=symbol)
             for row in risk_rows:
                 if row.get("symbol") != symbol:
                     continue
@@ -3876,6 +3908,64 @@ class Top10ShortStrategy:
             time.sleep(delay)
         LOGGER.warning("Position not found after %s retries: symbol=%s", max_retries, symbol)
         return None
+
+    @staticmethod
+    def _find_short_position(
+        rows: List[Dict[str, Any]],
+        symbol: str,
+    ) -> Optional[Dict[str, Any]]:
+        normalized_symbol = str(symbol or "").strip().upper()
+        for row in rows or []:
+            if str(row.get("symbol") or "").strip().upper() != normalized_symbol:
+                continue
+            try:
+                if float(row.get("positionAmt") or 0.0) < 0:
+                    return row
+            except (TypeError, ValueError):
+                continue
+        return None
+
+    def _get_available_balance_usdt(self) -> float:
+        if self.snapshot_provider is not None:
+            return float(self.snapshot_provider.capture().available_balance)
+        return float(self.client.get_available_balance("USDT"))
+
+    def _get_all_position_risks(self) -> List[Dict[str, Any]]:
+        if self.snapshot_provider is not None:
+            return [dict(row) for row in self.snapshot_provider.capture().positions]
+        return self.client.get_position_risk()
+
+    def _local_position_risks(self) -> List[Dict[str, Any]]:
+        """Return the stream/REST ledger as Binance-shaped position rows."""
+        if self.snapshot_provider is None:
+            return self.client.get_position_risk()
+        persisted = self.store.list_account_position_state(active_only=True)
+        rows: List[Dict[str, Any]] = []
+        for row in persisted:
+            rows.append(
+                {
+                    "symbol": row.get("symbol"),
+                    "positionSide": row.get("position_side") or "BOTH",
+                    "positionAmt": row.get("position_amt"),
+                    "entryPrice": row.get("entry_price"),
+                    "breakEvenPrice": row.get("break_even_price"),
+                    "markPrice": row.get("mark_price"),
+                    "unRealizedProfit": row.get("unrealized_pnl"),
+                    "liquidationPrice": row.get("liquidation_price"),
+                    "leverage": row.get("leverage"),
+                    "notional": row.get("notional"),
+                    "isolatedMargin": row.get("isolated_margin"),
+                    "positionInitialMargin": row.get("initial_margin"),
+                }
+            )
+        return rows
+
+    def _refresh_all_position_risks(self) -> List[Dict[str, Any]]:
+        """Exceptional post-trade/verification read; never symbol-scoped."""
+        rows = self.client.get_position_risk()
+        if self.snapshot_provider is not None:
+            self.snapshot_provider.merge_position_risks(rows)
+        return rows
 
     def _create_exit_order_with_fallback(
         self,

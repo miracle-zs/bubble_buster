@@ -277,22 +277,46 @@ class DashboardServerTest(unittest.TestCase):
             status="OPEN",
         )
 
-        live_client = Mock()
-        live_client.get_position_risk.return_value = [
+        self.store.replace_account_state(
+            captured_at_utc=now.isoformat(),
+            wallet_balance=1000.0,
+            unrealized_pnl=-10.0,
+            equity=990.0,
+            available_balance=800.0,
+            positions=[
+                {
+                    "symbol": "BTCUSDT",
+                    "positionAmt": "-0.01",
+                    "positionSide": "BOTH",
+                    "entryPrice": "50000",
+                    "markPrice": "51000",
+                    "unRealizedProfit": "-10",
+                    "liquidationPrice": "60000",
+                    "isolatedMargin": "100",
+                }
+            ],
+        )
+        self.store.upsert_exchange_order_state(
             {
                 "symbol": "BTCUSDT",
-                "positionAmt": "-0.01",
-                "positionSide": "BOTH",
-                "markPrice": "51000",
-                "unRealizedProfit": "-10",
-                "liquidationPrice": "60000",
-                "isolatedMargin": "100",
-            }
-        ]
-        live_client.get_open_orders.return_value = [
-            {"symbol": "BTCUSDT", "orderId": 1001, "clientOrderId": "tp-x", "status": "NEW"},
-            {"symbol": "BTCUSDT", "orderId": 1002, "clientOrderId": "sl-x", "status": "NEW"},
-        ]
+                "orderId": 1001,
+                "clientOrderId": "tp-x",
+                "type": "TAKE_PROFIT_MARKET",
+                "status": "NEW",
+            },
+            source="USER_STREAM",
+        )
+        self.store.upsert_exchange_order_state(
+            {
+                "symbol": "BTCUSDT",
+                "orderId": 1002,
+                "clientOrderId": "sl-x",
+                "type": "STOP_MARKET",
+                "status": "NEW",
+            },
+            source="USER_STREAM",
+        )
+        live_client = Mock()
 
         provider = DashboardDataProvider(
             db_path=self.db_path,
@@ -313,31 +337,41 @@ class DashboardServerTest(unittest.TestCase):
         self.assertEqual(row["notional_source"], "MARK_PRICE")
         self.assertEqual(row["tp_order_status"], "NEW")
         self.assertEqual(row["sl_order_status"], "NEW")
+        live_client.get_position_risk.assert_not_called()
+        live_client.get_open_orders.assert_not_called()
 
     def test_readonly_snapshot_shows_exchange_positions_without_strategy_rows(self) -> None:
         live_client = Mock()
         default_client = Mock()
-        default_client.get_position_risk.return_value = []
-        live_client.get_position_risk.return_value = [
-            {
-                "symbol": "BTCUSDT",
-                "positionAmt": "-0.25",
-                "positionSide": "BOTH",
-                "entryPrice": "65000",
-                "markPrice": "64000",
-                "unRealizedProfit": "250",
-                "liquidationPrice": "72000",
-                "isolatedMargin": "1000",
-                "notional": "16000",
-                "leverage": "16",
-            },
-            {
-                "symbol": "ETHUSDT",
-                "positionAmt": "0",
-                "positionSide": "BOTH",
-            },
-        ]
-        live_client.get_open_orders.return_value = [
+        readonly_store = self.store.scoped("readonly01")
+        readonly_store.replace_account_state(
+            captured_at_utc=datetime.now(timezone.utc).replace(microsecond=0).isoformat(),
+            wallet_balance=1000.0,
+            unrealized_pnl=250.0,
+            equity=1250.0,
+            available_balance=500.0,
+            positions=[
+                {
+                    "symbol": "BTCUSDT",
+                    "positionAmt": "-0.25",
+                    "positionSide": "BOTH",
+                    "entryPrice": "65000",
+                    "markPrice": "64000",
+                    "unRealizedProfit": "250",
+                    "liquidationPrice": "72000",
+                    "isolatedMargin": "1000",
+                    "positionInitialMargin": "1000",
+                    "notional": "16000",
+                    "leverage": "16",
+                },
+                {
+                    "symbol": "ETHUSDT",
+                    "positionAmt": "0",
+                    "positionSide": "BOTH",
+                },
+            ],
+        )
+        readonly_store.upsert_exchange_order_state(
             {
                 "symbol": "BTCUSDT",
                 "orderId": 1001,
@@ -349,6 +383,9 @@ class DashboardServerTest(unittest.TestCase):
                 "status": "NEW",
                 "closePosition": True,
             },
+            source="USER_STREAM",
+        )
+        readonly_store.upsert_exchange_order_state(
             {
                 "symbol": "BTCUSDT",
                 "orderId": 1002,
@@ -360,16 +397,8 @@ class DashboardServerTest(unittest.TestCase):
                 "status": "NEW",
                 "closePosition": True,
             },
-        ]
-        live_client.get_account.return_value = {
-            "positions": [
-                {
-                    "symbol": "BTCUSDT",
-                    "positionSide": "BOTH",
-                    "positionInitialMargin": "1000",
-                }
-            ]
-        }
+            source="USER_STREAM",
+        )
 
         provider = DashboardDataProvider(
             db_path=self.db_path,
@@ -392,11 +421,11 @@ class DashboardServerTest(unittest.TestCase):
 
         self.assertEqual(snapshot["summary"]["open_positions"], 1)
         self.assertEqual(snapshot["summary"]["open_symbols"], 1)
-        self.assertEqual(snapshot["live_position_source"], "EXCHANGE_READONLY")
+        self.assertEqual(snapshot["live_position_source"], "LOCAL_ACCOUNT_STATE")
         self.assertEqual(len(snapshot["open_positions"]), 1)
         row = snapshot["open_positions"][0]
         self.assertTrue(row["readonly_live"])
-        self.assertEqual(row["live_position_source"], "EXCHANGE_READONLY")
+        self.assertEqual(row["live_position_source"], "LOCAL_ACCOUNT_STATE")
         self.assertEqual(row["symbol"], "BTCUSDT")
         self.assertEqual(row["side"], "SHORT")
         self.assertAlmostEqual(row["qty"], 0.25)
@@ -415,16 +444,16 @@ class DashboardServerTest(unittest.TestCase):
         self.assertEqual(row["sl_order_status"], "NEW")
         self.assertEqual(row["tp_order_id"], 1001)
         self.assertEqual(row["sl_order_id"], 1002)
-        self.assertEqual(live_client.get_position_risk.call_count, 1)
-        self.assertEqual(live_client.get_open_orders.call_count, 1)
-        self.assertEqual(live_client.get_account.call_count, 1)
+        live_client.get_position_risk.assert_not_called()
+        live_client.get_open_orders.assert_not_called()
+        live_client.get_account.assert_not_called()
         default_client.get_position_risk.assert_not_called()
 
         summary_row = provider.accounts_summary()["accounts"][0]
         self.assertEqual(summary_row["account_id"], "readonly01")
         self.assertEqual(summary_row["open_positions"], 1)
         self.assertEqual(summary_row["open_symbols"], 1)
-        self.assertEqual(live_client.get_position_risk.call_count, 1)
+        live_client.get_position_risk.assert_not_called()
 
     def test_snapshot_without_trade_stats_still_returns_curve_stats(self) -> None:
         now = datetime.now(timezone.utc).replace(microsecond=0)

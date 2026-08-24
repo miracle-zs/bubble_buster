@@ -67,7 +67,7 @@ class TradeStatsBackgroundRefresher:
             for account_id, fetcher in (fetchers or {}).items()
             if str(account_id).strip() and fetcher is not None
         }
-        self.refresh_interval_sec = max(60, int(refresh_interval_sec))
+        self.refresh_interval_sec = min(1800, max(900, int(refresh_interval_sec)))
         self.lookback_days = max(1, int(lookback_days))
         self._stop_event = threading.Event()
         self._thread: Optional[threading.Thread] = None
@@ -91,7 +91,13 @@ class TradeStatsBackgroundRefresher:
         self._thread = None
 
     def _run(self) -> None:
-        next_refresh_at = {account_id: 0.0 for account_id in sorted(self.fetchers)}
+        ordered_accounts = sorted(self.fetchers)
+        started_at = time.monotonic()
+        spread = self.refresh_interval_sec / max(1, len(ordered_accounts))
+        next_refresh_at = {
+            account_id: started_at + (index * spread)
+            for index, account_id in enumerate(ordered_accounts)
+        }
         while not self._stop_event.is_set():
             did_refresh = False
             now = time.monotonic()
@@ -188,9 +194,9 @@ def create_dashboard_context(config_path: str) -> DashboardRuntimeContext:
     portfolio_loss_cut_hour = int(runtime_cfg.get("portfolio_loss_cut_hour", 8)) % 24
     portfolio_loss_cut_minute = int(runtime_cfg.get("portfolio_loss_cut_minute", 0)) % 60
     refresh_sec = max(15, int(runtime_cfg.get("dashboard_refresh_sec", 15)))
-    trade_stats_refresh_sec = max(
-        60,
-        int(runtime_cfg.get("dashboard_trade_stats_refresh_sec", 300)),
+    trade_stats_refresh_sec = min(
+        1800,
+        max(900, int(runtime_cfg.get("dashboard_trade_stats_refresh_sec", 900))),
     )
     curve_points = max(100, int(runtime_cfg.get("dashboard_curve_points", 600)))
     balance_refresh_sec = max(5, int(runtime_cfg.get("manager_interval_sec", 60)))
@@ -245,6 +251,14 @@ def create_dashboard_context(config_path: str) -> DashboardRuntimeContext:
         # the legacy recovery rule and the new fixed daily-baseline rule.
         account_equity_recovery_enabled[aid] = legacy_enabled or daily_enabled
 
+    schema_path = str((Path(__file__).parent / "schema.sql").resolve())
+    root_store = StateStore(
+        db_path=db_path,
+        schema_path=schema_path,
+        account_id=default_account_id,
+    )
+    root_store.init_schema()
+
     balance_fetcher = None
     close_price_fetcher = None
     live_position_clients = {}
@@ -268,91 +282,8 @@ def create_dashboard_context(config_path: str) -> DashboardRuntimeContext:
                 proxies=build_proxies(cfg),
                 rate_limit_coordinator=rate_limit_coordinator,
             )
-            live_position_clients[default_account_id] = client
-
-            def _fetch_wallet_balance_usdt() -> float:
-                balances = client.get_balance()
-                wallet_balance = None
-                for item in balances:
-                    if str(item.get("asset", "")).upper() == "USDT":
-                        raw = item.get("balance")
-                        if raw is None:
-                            raw = item.get("crossWalletBalance")
-                        if raw is None:
-                            raw = item.get("availableBalance")
-                        wallet_balance = float(raw or 0.0)
-                        break
-                if wallet_balance is None:
-                    raise ValueError("USDT balance not found from /fapi/v2/balance")
-                unrealized = 0.0
-                try:
-                    positions = client.get_position_risk()
-                    for row in positions:
-                        unrealized += float(row.get("unRealizedProfit") or 0.0)
-                except Exception as exc:  # noqa: BLE001
-                    logging.getLogger(__name__).warning(
-                        "Dashboard direct fetch failed to get position risk, fallback wallet balance only: %s",
-                        exc,
-                    )
-                return wallet_balance + unrealized
-            if not run_with_dashboard:
-                balance_fetcher = _fetch_wallet_balance_usdt
-
-            def _avg_price_from_order_trades(symbol: str, target_order_id: int) -> Optional[float]:
-                trades = client.get_user_trades(symbol=symbol, order_id=target_order_id, limit=1000)
-                if not trades:
-                    return None
-                total_qty = 0.0
-                total_quote = 0.0
-                for tr in trades:
-                    qty = float(tr.get("qty") or tr.get("executedQty") or 0.0)
-                    price = float(tr.get("price") or 0.0)
-                    quote = float(tr.get("quoteQty") or 0.0)
-                    if qty <= 0:
-                        continue
-                    if quote > 0:
-                        total_quote += quote
-                    elif price > 0:
-                        total_quote += price * qty
-                    total_qty += qty
-                if total_qty <= 0 or total_quote <= 0:
-                    return None
-                return total_quote / total_qty
-
-            def _fetch_close_price(symbol: str, order_id: int) -> Optional[float]:
-                tried = set()
-
-                def _try(order_id_candidate: Optional[int]) -> Optional[float]:
-                    if order_id_candidate is None or order_id_candidate <= 0:
-                        return None
-                    if order_id_candidate in tried:
-                        return None
-                    tried.add(order_id_candidate)
-                    return _avg_price_from_order_trades(symbol=symbol, target_order_id=order_id_candidate)
-
-                direct = _try(int(order_id))
-                if direct is not None:
-                    return direct
-
-                # For algo conditional orders, /fapi/v1/algoOrder returns actualOrderId.
-                # We must resolve and then query /fapi/v1/userTrades by that real order id.
-                try:
-                    order_payload = client.get_order(symbol=symbol, order_id=int(order_id))
-                except Exception:  # noqa: BLE001
-                    return None
-
-                actual_order_id = order_payload.get("actualOrderId")
-                try:
-                    parsed_actual_order_id = int(actual_order_id) if actual_order_id is not None else None
-                except (TypeError, ValueError):
-                    parsed_actual_order_id = None
-
-                resolved = _try(parsed_actual_order_id)
-                if resolved is not None:
-                    return resolved
-                return None
-
-            close_price_fetcher = _fetch_close_price
+            # The dashboard process never calls this client from an HTTP path.
+            # Full-account snapshots are persisted by StrategyRuntimeService.
 
     # 为 readonly 账户创建 TradeStatsFetcher
     trade_stats_fetchers = {}
@@ -392,21 +323,17 @@ def create_dashboard_context(config_path: str) -> DashboardRuntimeContext:
                 proxies=build_proxies(cfg),
                 rate_limit_coordinator=rate_limit_coordinator,
             )
-            live_position_clients[aid] = readonly_client
-            trade_stats_fetchers[aid] = TradeStatsFetcher(client=readonly_client, cache_ttl_sec=300)
+            trade_stats_fetchers[aid] = TradeStatsFetcher(
+                client=readonly_client,
+                store=root_store.scoped(aid),
+                cache_ttl_sec=trade_stats_refresh_sec,
+            )
         except Exception as exc:  # noqa: BLE001
             logging.getLogger(__name__).warning(
                 "Failed to create TradeStatsFetcher for readonly account=%s: %s",
                 aid,
                 exc,
             )
-
-    schema_path = str((Path(__file__).parent / "schema.sql").resolve())
-    StateStore(
-        db_path=db_path,
-        schema_path=schema_path,
-        account_id=default_account_id,
-    ).init_schema()
 
     provider = DashboardDataProvider(
         db_path=db_path,
@@ -571,16 +498,6 @@ def _startup_background_service(app: FastAPI, config_path: str) -> None:
             cfg=service_cfg,
             balance_sampler=wallet_sampler,
             account_runtimes=account_runtimes,
-        )
-        app.state.ctx.provider.set_live_position_clients(
-            {
-                aid: runtime_ctx.get("manager").client
-                if runtime_ctx.get("manager") is not None
-                else runtime_ctx.get("balance_sampler").client
-                if runtime_ctx.get("balance_sampler") is not None
-                else None
-                for aid, runtime_ctx in account_runtimes.items()
-            }
         )
         stop_event = threading.Event()
         thread = threading.Thread(
