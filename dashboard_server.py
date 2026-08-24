@@ -2892,7 +2892,7 @@ class DashboardDataProvider:
                 if not isinstance(parsed, dict):
                     continue
                 status = str(parsed.get("status") or "").upper()
-                if status not in {"TRIGGERED", "TRIGGERED_RETRY"}:
+                if status not in {"TRIGGERED", "TRIGGERED_RETRY", "ALREADY_TRIGGERED"}:
                     continue
                 time_local = self._log_time_from_line(line)
                 if not time_local:
@@ -2994,17 +2994,22 @@ class DashboardDataProvider:
                 )
                 events.append(retry_event)
 
-            completed_retries = [item for item in retry_events if item["close_complete"]]
-            if completed_retries:
-                completed_retry = completed_retries[-1]
-                completed_event = public_event(completed_retry)
+            completion_events = [
+                item
+                for item in group_events
+                if item["status"] in {"TRIGGERED_RETRY", "ALREADY_TRIGGERED"}
+                and item["close_complete"]
+            ]
+            if completion_events:
+                completed_event_raw = completion_events[0]
+                completed_event = public_event(completed_event_raw)
                 completed_event.update(
                     {
                         "status": "ALREADY_TRIGGERED",
                         "label": "组合止盈完成",
                         "retry_count": len(retry_events),
-                        "first_retry_at_utc": retry_events[0]["t_utc"],
-                        "last_retry_at_utc": retry_events[-1]["t_utc"],
+                        "first_retry_at_utc": retry_events[0]["t_utc"] if retry_events else None,
+                        "last_retry_at_utc": retry_events[-1]["t_utc"] if retry_events else None,
                         "close_complete": True,
                         "pending": 0,
                     }

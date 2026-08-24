@@ -574,6 +574,7 @@ class DashboardServerTest(unittest.TestCase):
                         "2026-08-10 03:01:00,000 - WARNING - core.runtime_service - service portfolio take-profit account=acc01 result={'status': 'TRIGGERED_RETRY', 'cycle_date': '2026-08-10', 'close_complete': False, 'actual_profit_pct': 2.4, 'pending': 4, 'errors': 0}",
                         "2026-08-10 03:02:00,000 - WARNING - core.runtime_service - service portfolio take-profit account=acc01 result={'status': 'TRIGGERED_RETRY', 'cycle_date': '2026-08-10', 'close_complete': False, 'actual_profit_pct': 2.3, 'pending': 2, 'errors': 0}",
                         "2026-08-10 03:03:00,000 - WARNING - core.runtime_service - service portfolio take-profit account=acc01 result={'status': 'TRIGGERED_RETRY', 'cycle_date': '2026-08-10', 'close_complete': True, 'actual_profit_pct': 2.2, 'pending': 0, 'errors': 0}",
+                        "2026-08-10 03:04:00,000 - WARNING - core.runtime_service - service portfolio take-profit account=acc01 result={'status': 'ALREADY_TRIGGERED', 'cycle_date': '2026-08-10', 'close_complete': True, 'actual_profit_pct': 2.1, 'pending': 0, 'errors': 0}",
                     ]
                 )
                 + "\n"
@@ -600,6 +601,7 @@ class DashboardServerTest(unittest.TestCase):
         self.assertEqual(events[2]["status"], "ALREADY_TRIGGERED")
         self.assertTrue(events[2]["close_complete"])
         self.assertEqual(events[2]["retry_count"], 3)
+        self.assertEqual(events[2]["t_utc"], "2026-08-10T03:03:00+00:00")
 
     def test_accounts_equity_comparison_excludes_readonly_accounts(self) -> None:
         self.store.scoped("acc01").add_wallet_snapshot(
