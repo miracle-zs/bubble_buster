@@ -108,6 +108,8 @@ portfolio_take_profit_enabled = true
             self.assertIn("pathPrefix + \"/api/accounts/equity-comparison?\"", comparison_page.text)
             self.assertNotIn('class="events-panel"', comparison_page.text)
             self.assertIn("策略事件不叠加到主图", comparison_page.text)
+            self.assertIn('year: "numeric"', comparison_page.text)
+            self.assertIn('if (withSeconds) options.second = "2-digit";', comparison_page.text)
 
             compact = client.get("/account/acc01/")
             self.assertEqual(compact.status_code, 200)

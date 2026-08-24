@@ -436,17 +436,20 @@
       var date = new Date(value);
       if (!Number.isFinite(date.getTime())) return String(value).replace("T", " ").slice(0, withSeconds ? 19 : 16);
       try {
-        return new Intl.DateTimeFormat("zh-CN", {
+        var options = {
           timeZone: "Asia/Shanghai",
+          year: "numeric",
           month: "2-digit",
           day: "2-digit",
           hour: "2-digit",
           minute: "2-digit",
-          second: !!withSeconds,
           hour12: false
-        }).format(date).replace(/\//g, "-");
+        };
+        if (withSeconds) options.second = "2-digit";
+        return new Intl.DateTimeFormat("zh-CN", options).format(date).replace(/\//g, "-");
       } catch (error) {
-        return date.toISOString().slice(0, withSeconds ? 19 : 16).replace("T", " ");
+        var beijingDate = new Date(date.getTime() + 8 * 60 * 60 * 1000);
+        return beijingDate.toISOString().slice(0, withSeconds ? 19 : 16).replace("T", " ");
       }
     }
 
