@@ -106,8 +106,8 @@ portfolio_take_profit_enabled = true
             self.assertIn("四账户权益，放在同一条时间线上", comparison_page.text)
             self.assertIn("../../static/vendor/echarts.min.js", comparison_page.text)
             self.assertIn("pathPrefix + \"/api/accounts/equity-comparison?\"", comparison_page.text)
-            self.assertIn("组合止盈完成", comparison_page.text)
-            self.assertIn("连续检查", comparison_page.text)
+            self.assertNotIn('class="events-panel"', comparison_page.text)
+            self.assertIn("策略事件不叠加到主图", comparison_page.text)
 
             compact = client.get("/account/acc01/")
             self.assertEqual(compact.status_code, 200)

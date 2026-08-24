@@ -279,43 +279,6 @@
     .legend-button.is-muted { opacity: 0.42; }
     .legend-swatch { width: 8px; height: 8px; border-radius: 50%; background: var(--account-color); }
     .legend-value { color: #91adbb; font-family: ui-monospace, Menlo, Monaco, Consolas, monospace; font-size: 10px; font-weight: 500; }
-    .events-panel {
-      display: grid;
-      grid-template-columns: auto minmax(0, 1fr);
-      gap: 16px;
-      align-items: start;
-      margin-top: 14px;
-      padding: 14px 16px;
-      border: 1px solid #24485d;
-      border-radius: 11px;
-      background: rgba(11, 25, 35, 0.72);
-    }
-    .events-label { color: #8eabba; font-size: 11px; font-weight: 800; padding-top: 4px; }
-    .events-list { display: flex; flex-wrap: wrap; gap: 7px; min-height: 23px; }
-    .event-chip {
-      display: inline-flex;
-      align-items: center;
-      gap: 7px;
-      padding: 4px 8px;
-      border: 1px solid #34566a;
-      border-radius: 4px;
-      color: #bfd4df;
-      background: #102431;
-      font-size: 10px;
-    }
-    .event-chip strong { color: #f1f8fb; font-weight: 800; }
-    .event-chip .event-kind { color: #d0e5ee; }
-    .event-chip.is-retry {
-      border-color: rgba(255, 179, 64, 0.52);
-      background: rgba(59, 42, 22, 0.74);
-    }
-    .event-chip.is-retry .event-kind { color: #ffc875; }
-    .event-chip.is-complete {
-      border-color: rgba(77, 213, 163, 0.52);
-      background: rgba(17, 57, 53, 0.72);
-    }
-    .event-chip.is-complete .event-kind { color: #72e2b5; }
-    .event-empty { color: #688596; font-size: 11px; padding-top: 4px; }
     .footnote {
       display: flex;
       flex-wrap: wrap;
@@ -356,7 +319,6 @@
       .chart-head { display: block; }
       .chart-meta { margin-top: 7px; text-align: left; }
       #equity-chart, .chart-empty { height: 375px; }
-      .events-panel { grid-template-columns: 1fr; gap: 7px; padding: 11px; }
       .footnote { display: block; }
       .footnote span { display: block; }
     }
@@ -402,18 +364,13 @@
       <div class="chart-head">
         <div>
           <h2 id="chart-title" class="chart-title">相对权益变化（%）</h2>
-          <p id="chart-subtitle" class="chart-subtitle">组合止盈上线后的首个有效快照 = 0%；悬停查看每个账户的绝对权益。</p>
+          <p id="chart-subtitle" class="chart-subtitle">组合止盈上线后的首个有效快照 = 0%；策略事件不叠加到主图。</p>
         </div>
         <div id="chart-meta" class="chart-meta">--</div>
       </div>
       <div id="equity-chart" role="img" aria-label="四个账户权益对比曲线"></div>
       <div id="chart-empty" class="chart-empty">当前窗口没有可用权益快照</div>
       <div id="legend" class="legend" aria-label="账户图例"></div>
-    </section>
-
-    <section class="events-panel">
-      <div class="events-label">策略节点</div>
-      <div id="events-list" class="events-list"></div>
     </section>
 
     <div class="footnote">
@@ -536,33 +493,6 @@
       }).join("");
     }
 
-    function renderEvents() {
-      var events = (payload && payload.events) || [];
-      if (!events.length) {
-        el("events-list").innerHTML = '<span class="event-empty">当前范围未捕获到组合止盈触发日志；图中虚线 0% 代表各账户上线后的首个快照。</span>';
-        return;
-      }
-      el("events-list").innerHTML = events.map(function (event) {
-        var status = String(event.status || "").toUpperCase();
-        var isComplete = Boolean(event.close_complete) || status === "ALREADY_TRIGGERED";
-        var isRetry = status === "TRIGGERED_RETRY" && !isComplete;
-        var eventLabel = event.label || (isComplete ? "组合止盈完成" : (isRetry ? "组合止盈重试" : "组合止盈首次触发"));
-        var classes = isRetry ? " is-retry" : (isComplete ? " is-complete" : "");
-        var retryCount = Number(event.retry_count || 0);
-        var timeText = formatLocalTime(event.t_utc, true);
-        if (isRetry && event.first_retry_at_utc && event.last_retry_at_utc && event.first_retry_at_utc !== event.last_retry_at_utc) {
-          timeText = formatLocalTime(event.first_retry_at_utc, true) + " → " + formatLocalTime(event.last_retry_at_utc, true);
-        }
-        var details = [];
-        if (event.actual_profit_pct != null) details.push("触发时 +" + Number(event.actual_profit_pct).toFixed(2) + "%");
-        if (isRetry && retryCount > 0) details.push("连续检查 " + retryCount + " 次");
-        if (isRetry && event.pending != null) details.push("待处理 " + Number(event.pending));
-        if (isComplete && retryCount > 0) details.push("期间检查 " + retryCount + " 次");
-        var detail = details.length ? " · " + details.join(" · ") : "";
-        return '<span class="event-chip' + classes + '"><strong>' + escapeHtml(event.account_id) + '</strong><span class="event-kind">' + escapeHtml(eventLabel) + '</span><span>' + timeText + detail + '</span></span>';
-      }).join("");
-    }
-
     function renderChart() {
       var rows = seriesRows();
       var chartElement = el("equity-chart");
@@ -574,8 +504,8 @@
       emptyElement.style.display = activeRows.length ? "none" : "flex";
       el("chart-title").textContent = mode === "relative" ? "相对权益变化（%）" : "账户权益（USDT）";
       el("chart-subtitle").textContent = mode === "relative"
-        ? "组合止盈上线后的首个有效快照 = 0%；竖线表示组合止盈生命周期，首次触发/等待/完成见下方节点。"
-        : "显示服务器记录的权益快照；竖线表示组合止盈事件，悬停查看相对变化。";
+        ? "组合止盈上线后的首个有效快照 = 0%；策略事件不叠加到主图，避免跨账户时间差造成视觉干扰。"
+        : "显示服务器记录的权益快照；策略事件不叠加到主图。";
       if (!chart) chart = echarts.init(chartElement, null, { renderer: "canvas" });
       var chartSeries = activeRows.map(function (row, index) {
         var color = colorFor(row.account_id, index);
@@ -600,44 +530,6 @@
           } : undefined
         };
       });
-      var eventGroups = [];
-      ((payload && payload.events) || []).slice().sort(function (left, right) {
-        return new Date(left.t_utc).getTime() - new Date(right.t_utc).getTime();
-      }).forEach(function (event) {
-        var eventMs = new Date(event.t_utc).getTime();
-        var previous = eventGroups[eventGroups.length - 1];
-        var isSameMoment = previous && Number.isFinite(eventMs) && Number.isFinite(previous.timeMs)
-          && Math.abs(eventMs - previous.timeMs) <= 5000;
-        if (!isSameMoment) {
-          previous = { time: event.t_utc, timeMs: eventMs, events: [] };
-          eventGroups.push(previous);
-        }
-        previous.events.push(event);
-      });
-      var eventLines = eventGroups.map(function (group, index) {
-        return {
-          xAxis: group.time,
-          name: "组合止盈事件",
-          lineStyle: { color: "rgba(255, 179, 64, 0.72)", type: "dashed", width: 1 },
-          label: index === eventGroups.length - 1
-            ? {
-                show: true,
-                formatter: "组合止盈事件",
-                position: "insideEndTop",
-                rotate: 0,
-                color: "#ffd38a",
-                fontSize: 10,
-                backgroundColor: "rgba(7, 16, 25, 0.9)",
-                padding: [3, 5],
-                borderRadius: 3
-              }
-            : { show: false }
-        };
-      });
-      if (chartSeries.length && eventLines.length) {
-        chartSeries[0].markLine = chartSeries[0].markLine || { data: [] };
-        chartSeries[0].markLine.data = (chartSeries[0].markLine.data || []).concat(eventLines);
-      }
       chart.setOption({
         animationDuration: 480,
         animationEasing: "cubicOut",
@@ -701,7 +593,6 @@
       renderSummary();
       renderLegend();
       renderChart();
-      renderEvents();
       renderMeta();
     }
 
