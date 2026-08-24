@@ -2935,6 +2935,70 @@ class DashboardDataProvider:
                     }
                 )
 
+        # Once a cycle is complete, runtime_service returns ALREADY_TRIGGERED
+        # and intentionally does not emit the warning above.  The manage
+        # summary still contains that latched state, so use it as the
+        # completion edge for accounts such as acc03 that have no final
+        # TRIGGERED_RETRY warning in the log.
+        for path in self._task_log_files():
+            for line in self._read_task_log_lines(path, ("service manage summary: ",)):
+                if "ALREADY_TRIGGERED" not in line or "close_complete': True" not in line:
+                    continue
+                matched = re.search(r"service manage summary:\s+(\{.*\})", line)
+                if not matched:
+                    continue
+                try:
+                    parsed_summary = ast.literal_eval(matched.group(1).strip())
+                except (SyntaxError, ValueError):
+                    continue
+                if not isinstance(parsed_summary, dict):
+                    continue
+                time_local = self._log_time_from_line(line)
+                if not time_local:
+                    continue
+                try:
+                    event_dt = datetime.strptime(time_local, "%Y-%m-%d %H:%M:%S").replace(
+                        tzinfo=self.local_tz
+                    )
+                    event_utc = event_dt.astimezone(timezone.utc).replace(microsecond=0).isoformat()
+                except (TypeError, ValueError):
+                    continue
+                if window_start_utc and event_utc < window_start_utc:
+                    continue
+                if event_utc > end_utc:
+                    continue
+                for account_id, account_summary in parsed_summary.items():
+                    if not isinstance(account_summary, dict):
+                        continue
+                    portfolio_state = account_summary.get("portfolio_take_profit")
+                    if not isinstance(portfolio_state, dict):
+                        continue
+                    status = str(portfolio_state.get("status") or "").upper()
+                    if status != "ALREADY_TRIGGERED" or not portfolio_state.get("close_complete"):
+                        continue
+                    account_id = str(account_id).strip()
+                    if not account_id:
+                        continue
+                    key = (account_id, event_utc)
+                    if key in seen:
+                        continue
+                    seen.add(key)
+                    cycle_key = str(portfolio_state.get("cycle_date") or time_local[:10]).strip() or time_local[:10]
+                    raw_events.append(
+                        {
+                            "account_id": account_id,
+                            "cycle_key": cycle_key,
+                            "t_utc": event_utc,
+                            "status": "ALREADY_TRIGGERED",
+                            "actual_profit_pct": self._safe_float(portfolio_state.get("actual_profit_pct")),
+                            "closed_take_profit": self._safe_int(portfolio_state.get("closed_take_profit"), 0),
+                            "adjusted_take_profit": self._safe_int(portfolio_state.get("adjusted_take_profit"), 0),
+                            "close_complete": True,
+                            "pending": 0,
+                            "errors": 0,
+                        }
+                    )
+
         grouped: Dict[Tuple[str, str], List[Dict[str, Any]]] = {}
         for raw_event in sorted(
             raw_events,
