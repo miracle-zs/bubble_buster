@@ -367,6 +367,106 @@ class StrategyOrderRetryTest(unittest.TestCase):
         self.assertIsNone(update_kwargs["tp_price"])
         self.assertEqual(update_kwargs["sl_order_id"], 222)
 
+    @patch("core.strategy_top10_short.time.sleep")
+    def test_place_exit_orders_retries_when_liquidation_price_is_temporarily_missing(
+        self,
+        sleep_mock: MagicMock,
+    ) -> None:
+        client = MagicMock()
+        client.normalize_trigger_price.return_value = 118.8
+        client.format_trigger_price.return_value = "118.8"
+        client.format_order_qty.return_value = "2"
+        client.create_order.return_value = {
+            "orderId": 223,
+            "clientOrderId": "sl-after-retry",
+            "type": "STOP_MARKET",
+            "side": "BUY",
+            "origQty": "2",
+            "status": "NEW",
+        }
+        strategy = self._build_strategy(client, fixed_take_profit_enabled=False)
+        strategy._load_short_position = MagicMock(
+            side_effect=[
+                {"symbol": "ABCUSDT", "entryPrice": "100", "liquidationPrice": "0", "positionAmt": "-2"},
+                {"symbol": "ABCUSDT", "entryPrice": "100", "liquidationPrice": "", "positionAmt": "-2"},
+                {"symbol": "ABCUSDT", "entryPrice": "100", "liquidationPrice": "120", "positionAmt": "-2"},
+            ]
+        )
+
+        strategy._place_exit_orders(position_id=123, symbol="ABCUSDT")
+
+        self.assertEqual(strategy._load_short_position.call_count, 3)
+        self.assertEqual(sleep_mock.call_args_list, [unittest.mock.call(1.0), unittest.mock.call(2.0)])
+        client.create_order.assert_called_once()
+        self.assertEqual(client.create_order.call_args.kwargs["stopPrice"], "118.8")
+        self.assertEqual(strategy.store.update_position_orders.call_args.kwargs["liq_price_latest"], 120.0)
+
+    @patch("core.strategy_top10_short.time.sleep")
+    def test_liquidation_price_retry_refreshes_shared_position_risk(
+        self,
+        sleep_mock: MagicMock,
+    ) -> None:
+        client = MagicMock()
+        client.get_position_risk.return_value = [
+            {
+                "symbol": "ABCUSDT",
+                "entryPrice": "100",
+                "liquidationPrice": "120",
+                "positionAmt": "-2",
+            }
+        ]
+        client.normalize_trigger_price.return_value = 118.8
+        client.format_trigger_price.return_value = "118.8"
+        client.create_order.return_value = {
+            "orderId": 224,
+            "clientOrderId": "sl-shared-refresh",
+            "type": "STOP_MARKET",
+            "side": "BUY",
+            "origQty": "2",
+            "status": "NEW",
+        }
+        strategy = self._build_strategy(client, fixed_take_profit_enabled=False)
+        strategy.snapshot_provider = MagicMock()
+        strategy._load_short_position = MagicMock(
+            return_value={
+                "symbol": "ABCUSDT",
+                "entryPrice": "100",
+                "liquidationPrice": "0",
+                "positionAmt": "-2",
+            }
+        )
+
+        strategy._place_exit_orders(position_id=123, symbol="ABCUSDT")
+
+        self.assertEqual(sleep_mock.call_args_list, [unittest.mock.call(1.0)])
+        client.get_position_risk.assert_called_once_with()
+        strategy.snapshot_provider.merge_position_risks.assert_called_once_with(
+            client.get_position_risk.return_value
+        )
+        self.assertEqual(strategy.store.update_position_orders.call_args.kwargs["liq_price_latest"], 120.0)
+
+    @patch("core.strategy_top10_short.time.sleep")
+    def test_place_exit_orders_still_fails_closed_when_liquidation_price_stays_missing(
+        self,
+        sleep_mock: MagicMock,
+    ) -> None:
+        client = MagicMock()
+        strategy = self._build_strategy(client, fixed_take_profit_enabled=False)
+        strategy._load_short_position = MagicMock(
+            return_value={
+                "symbol": "ABCUSDT",
+                "entryPrice": "100",
+                "liquidationPrice": "0",
+                "positionAmt": "-2",
+            }
+        )
+
+        with self.assertRaisesRegex(RuntimeError, "No liquidation price available"):
+            strategy._place_exit_orders(position_id=123, symbol="ABCUSDT")
+
+        self.assertEqual(sleep_mock.call_args_list, [unittest.mock.call(1.0), unittest.mock.call(2.0)])
+        client.create_order.assert_not_called()
+
     def test_place_exit_orders_skips_all_initial_exit_orders_for_exempt_symbol(self) -> None:
         client = MagicMock()
         store = MagicMock()

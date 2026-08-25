@@ -105,6 +105,7 @@ class Top10ShortStrategy:
     ENTRY_WAIT_LOCK_NAME = "bearish_hour_entry_wait_v1"
     PRECLOSE_STRUCTURE_DEFERRED_BEFORE_NOON = "DEFERRED_BEFORE_NOON"
     PENDING_EXIT_SETUP_RECOVERY_GRACE_SEC = 30.0
+    LIQUIDATION_PRICE_RETRY_DELAYS_SEC = (1.0, 2.0)
 
     def __init__(
         self,
@@ -2728,7 +2729,7 @@ class Top10ShortStrategy:
         if self._is_protection_exempt(symbol):
             LOGGER.info("Skip initial exit orders for exempt symbol account=%s symbol=%s", self.account_id, symbol)
             return
-        position_risk = self._load_short_position(symbol)
+        position_risk = self._load_exit_position_with_liquidation_price(symbol)
         if not position_risk:
             raise RuntimeError(f"Cannot place exits, no position risk for {symbol}")
 
@@ -2823,6 +2824,49 @@ class Top10ShortStrategy:
             event_time_utc=self._utc_now_iso(),
             order_payload=sl_order,
         )
+
+    def _load_exit_position_with_liquidation_price(self, symbol: str) -> Optional[Dict[str, str]]:
+        """Wait briefly for Binance to populate liquidationPrice after a fill."""
+        position_risk = self._load_short_position(symbol)
+        if not position_risk:
+            return None
+        if self._safe_positive_float(position_risk.get("liquidationPrice")):
+            return position_risk
+
+        retry_count = len(self.LIQUIDATION_PRICE_RETRY_DELAYS_SEC)
+        for attempt, delay_sec in enumerate(self.LIQUIDATION_PRICE_RETRY_DELAYS_SEC, start=1):
+            LOGGER.warning(
+                "Liquidation price unavailable after entry, retrying: account=%s symbol=%s "
+                "attempt=%s/%s delay_sec=%.1f",
+                self.account_id,
+                symbol,
+                attempt,
+                retry_count,
+                delay_sec,
+            )
+            time.sleep(delay_sec)
+            if self.snapshot_provider is not None:
+                # The normal runtime reads position risk from the shared
+                # ledger. Force a fresh all-symbol verification here; simply
+                # reading the ledger again could return the same empty field.
+                refreshed = self._find_short_position(
+                    self._refresh_all_position_risks(),
+                    symbol,
+                )
+            else:
+                refreshed = self._load_short_position(symbol)
+            if refreshed is not None:
+                position_risk = refreshed
+            if self._safe_positive_float(position_risk.get("liquidationPrice")):
+                LOGGER.info(
+                    "Liquidation price became available after retry: account=%s symbol=%s attempt=%s",
+                    self.account_id,
+                    symbol,
+                    attempt,
+                )
+                return position_risk
+
+        return position_risk
 
     @_serialized_account_mutation
     def _force_close_position(self, position_id: int, symbol: str, reason: str) -> Dict[str, object]:
