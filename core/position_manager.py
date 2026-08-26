@@ -49,6 +49,10 @@ class PositionManager:
         "REJECTED",
     }
     NOON_PROTECTION_PRE_ENTRY_HOURS = 2
+    # The runtime manager may inspect an account snapshot captured immediately
+    # before a background entry order is filled. Do not infer an external close
+    # from that stale snapshot while the new position is still settling.
+    RECENT_ENTRY_POSITION_RISK_GRACE_SEC = 90.0
     # An untracked position has no fill timestamp; assume the normal 08:00 entry
     # and include the two completed hourly candles immediately before it.
     NOON_PROTECTION_UNTRACKED_ENTRY_OFFSET = timedelta(hours=8)
@@ -3035,17 +3039,11 @@ class PositionManager:
         symbol = str(pos["symbol"])
 
         risk = self._get_symbol_position_risk(symbol)
-        if risk is None:
-            close_result = self._close_if_recorded_exit_filled(pos)
-            if close_result:
-                return close_result
-            close_result = self._close_if_portfolio_take_profit_filled(pos)
-            if close_result:
-                return close_result
-            return self._close_external_missing_short(pos)
+        position_amt = None
+        if risk is not None:
+            position_amt = self._safe_float(risk.get("positionAmt"), default=0.0)
 
-        position_amt = float(risk.get("positionAmt", "0") or 0)
-        if position_amt >= 0:
+        if risk is None or position_amt >= 0:
             close_result = self._close_if_recorded_exit_filled(pos)
             if close_result:
                 return close_result
@@ -3053,7 +3051,31 @@ class PositionManager:
             if close_result:
                 return close_result
 
-            return self._close_external_missing_short(pos)
+            # A background entry and the periodic manager can overlap. The
+            # manager receives a per-minute snapshot, so a just-filled short
+            # can be absent even though the exchange already has it. Keep the
+            # tracked position and its existing exit orders intact for one
+            # short grace period; a later patrol will make the authoritative
+            # decision from a fresh exchange read.
+            if self._is_recent_entry_position(pos):
+                self._defer_missing_position_risk(pos, refresh_ok=None)
+                return None
+
+            refreshed_risk, refresh_ok = self._refresh_symbol_position_risk(symbol)
+            refreshed_amt = None
+            if refreshed_risk is not None:
+                refreshed_amt = self._safe_float(refreshed_risk.get("positionAmt"), default=0.0)
+            if refreshed_risk is not None and refreshed_amt < 0:
+                risk = refreshed_risk
+                position_amt = refreshed_amt
+            else:
+                # A failed confirmation must never be treated as proof that a
+                # live exchange position disappeared. Only a successful,
+                # fresh read may authorize CLOSED_EXTERNAL.
+                if not refresh_ok:
+                    self._defer_missing_position_risk(pos, refresh_ok=False)
+                    return None
+                return self._close_external_missing_short(pos)
 
         if self._is_protection_exempt(symbol):
             return None
@@ -4264,8 +4286,11 @@ class PositionManager:
             return [dict(row) for row in snapshot.positions]
         return self.client.get_position_risk()
 
-    def _get_symbol_position_risk(self, symbol: str) -> Optional[Dict[str, str]]:
-        rows = self._get_all_position_risks()
+    @staticmethod
+    def _find_symbol_position_risk(
+        rows: List[Dict[str, Any]],
+        symbol: str,
+    ) -> Optional[Dict[str, Any]]:
         fallback = None
         for row in rows:
             if row.get("symbol") != symbol:
@@ -4273,10 +4298,75 @@ class PositionManager:
             if fallback is None:
                 fallback = row
             position_side = str(row.get("positionSide") or "BOTH").strip().upper()
-            position_amt = self._safe_float(row.get("positionAmt"), default=0.0)
+            try:
+                position_amt = float(row.get("positionAmt", "0") or 0)
+            except (TypeError, ValueError):
+                position_amt = 0.0
             if position_side == "SHORT" or position_amt < 0:
                 return row
         return fallback
+
+    def _get_symbol_position_risk(self, symbol: str) -> Optional[Dict[str, str]]:
+        return self._find_symbol_position_risk(self._get_all_position_risks(), symbol)
+
+    def _refresh_symbol_position_risk(
+        self,
+        symbol: str,
+    ) -> tuple[Optional[Dict[str, Any]], bool]:
+        """Read one symbol from a fresh account snapshot before external-close.
+
+        ``run_once`` normally uses a shared snapshot to avoid duplicate REST
+        calls. This exceptional path is intentionally allowed to force one
+        fresh read, because a stale snapshot must not close a live short.
+        """
+        try:
+            if self.snapshot_provider is not None:
+                snapshot = self.snapshot_provider.capture(force=True)
+                rows = [dict(row) for row in snapshot.positions]
+            else:
+                rows = self.client.get_position_risk()
+        except Exception as exc:  # noqa: BLE001
+            LOGGER.warning(
+                "Fresh position risk confirmation failed account=%s symbol=%s error_type=%s",
+                self.account_id,
+                symbol,
+                type(exc).__name__,
+            )
+            return None, False
+        return self._find_symbol_position_risk(rows, symbol), True
+
+    def _is_recent_entry_position(self, pos: Dict[str, object]) -> bool:
+        opened_at_text = str(pos.get("opened_at_utc") or "").strip()
+        if not opened_at_text:
+            return False
+        try:
+            age_sec = (self._utc_now_datetime() - self._parse_iso_utc(opened_at_text)).total_seconds()
+        except (TypeError, ValueError):
+            return False
+        return age_sec < self.RECENT_ENTRY_POSITION_RISK_GRACE_SEC
+
+    def _defer_missing_position_risk(
+        self,
+        pos: Dict[str, object],
+        refresh_ok: Optional[bool],
+    ) -> None:
+        opened_at_text = str(pos.get("opened_at_utc") or "").strip()
+        age_sec: Optional[float] = None
+        if opened_at_text:
+            try:
+                age_sec = (self._utc_now_datetime() - self._parse_iso_utc(opened_at_text)).total_seconds()
+            except (TypeError, ValueError):
+                pass
+        LOGGER.warning(
+            "Defer external-close decision after missing position risk account=%s position_id=%s "
+            "symbol=%s age_sec=%s grace_sec=%.1f refresh_ok=%s",
+            self.account_id,
+            int(pos["id"]),
+            str(pos["symbol"]),
+            f"{age_sec:.1f}" if age_sec is not None else "unknown",
+            self.RECENT_ENTRY_POSITION_RISK_GRACE_SEC,
+            refresh_ok,
+        )
 
     @classmethod
     def _normalize_daily_loss_cut_scope(cls, scope: str) -> str:

@@ -329,6 +329,7 @@ class PositionManagerTest(unittest.TestCase):
             tp_price=40000.0,
             sl_price=59000.0,
             expire_in_hours=24,
+            opened_at_utc=datetime.now(timezone.utc) - timedelta(minutes=5),
         )
 
         client = MagicMock()
@@ -365,6 +366,41 @@ class PositionManagerTest(unittest.TestCase):
         self.assertEqual(row["status"], "CLOSED_EXTERNAL")
         self.assertEqual(row["close_reason"], "SHORT_POSITION_NOT_FOUND")
         self.assertIsNone(row["last_error"])
+
+    def test_recent_missing_position_risk_is_deferred_without_canceling_exits(self) -> None:
+        position_id = self._insert_open_position(
+            symbol="BTCUSDT",
+            qty=0.02,
+            tp_order_id=101,
+            sl_order_id=202,
+            tp_price=40000.0,
+            sl_price=59000.0,
+            expire_in_hours=24,
+            opened_at_utc=datetime.now(timezone.utc) - timedelta(seconds=5),
+        )
+
+        client = MagicMock()
+        client.get_position_risk.return_value = []
+        client.get_order.side_effect = [
+            {"orderId": 101, "clientOrderId": "tp-old", "status": "NEW"},
+            {"orderId": 202, "clientOrderId": "sl-old", "status": "NEW"},
+        ]
+
+        manager = PositionManager(
+            client=client,
+            store=self.store,
+            notifier=MagicMock(),
+            sl_liq_buffer_pct=1.0,
+            trigger_price_type="CONTRACT_PRICE",
+        )
+
+        summary = manager.run_once()
+
+        self.assertEqual(summary["closed_external"], 0)
+        client.cancel_order.assert_not_called()
+        row = self._get_position(position_id)
+        self.assertEqual(row["status"], "OPEN")
+        self.assertIsNone(row["close_reason"])
 
     def test_portfolio_limit_fill_is_not_classified_as_external(self) -> None:
         position_id = self._insert_open_position(
@@ -3501,8 +3537,9 @@ class PositionManagerTest(unittest.TestCase):
         tp_price: float,
         sl_price: float,
         expire_in_hours: float,
+        opened_at_utc: datetime | None = None,
     ) -> int:
-        now = datetime.now(timezone.utc).replace(microsecond=0)
+        now = opened_at_utc or datetime.now(timezone.utc).replace(microsecond=0)
         expire_at = now + timedelta(hours=expire_in_hours)
         return self.store.insert_position(
             run_id=self.run_id,
