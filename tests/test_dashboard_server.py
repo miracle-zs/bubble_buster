@@ -777,6 +777,74 @@ class DashboardServerTest(unittest.TestCase):
         self.assertIn("acc01", account_ids)
         self.assertIn("acc02", account_ids)
 
+    def test_task_status_parser_reads_only_appended_log_data(self) -> None:
+        with open(self.log_file, "w", encoding="utf-8") as f:
+            f.write(
+                "2026-08-28 07:40:15,865 - INFO - core.runtime_service - "
+                "service entry result: {'acc01': {'status': 'SUCCESS', 'opened': 1, 'failed': 0, 'skipped': 0}}\n"
+            )
+
+        provider = DashboardDataProvider(
+            db_path=self.db_path,
+            log_file=self.log_file,
+            timezone_name="UTC",
+            entry_hour=7,
+            entry_minute=40,
+        )
+
+        first = provider._parse_task_statuses_from_logs()
+        self.assertEqual(first["acc01"]["entry"]["status"], "SUCCESS")
+
+        with open(self.log_file, "a", encoding="utf-8") as f:
+            f.write(
+                "2026-08-28 08:00:15,865 - INFO - core.runtime_service - "
+                "service manage summary: {'acc01': {'account_id': 'acc01', 'summary': {'total': 2, 'errors': 0}}}\n"
+            )
+
+        second = provider._parse_task_statuses_from_logs()
+        self.assertEqual(second["acc01"]["entry"]["status"], "SUCCESS")
+        self.assertEqual(second["acc01"]["manage"]["status"], "SUCCESS")
+        self.assertIs(first, second)
+
+    def test_accounts_summary_fast_omits_expensive_task_details(self) -> None:
+        provider = DashboardDataProvider(
+            db_path=self.db_path,
+            log_file=self.log_file,
+            timezone_name="UTC",
+            entry_hour=7,
+            entry_minute=40,
+            overview_account_ids=["acc01"],
+        )
+
+        payload = provider.accounts_summary(include_details=False)
+
+        self.assertEqual(payload["accounts"][0]["account_id"], "acc01")
+        self.assertNotIn("tasks", payload["accounts"][0])
+        self.assertNotIn("entry_progress", payload["accounts"][0])
+
+    def test_accounts_summary_cache_serves_fast_and_details_views(self) -> None:
+        provider = DashboardDataProvider(
+            db_path=self.db_path,
+            log_file=self.log_file,
+            timezone_name="UTC",
+            entry_hour=7,
+            entry_minute=40,
+            overview_account_ids=["acc01"],
+        )
+
+        provider.refresh_accounts_summary_cache()
+        provider.accounts_summary = Mock(side_effect=AssertionError("cache should be warm"))  # type: ignore[method-assign]
+
+        fast = provider.cached_accounts_summary_fast()
+        details = provider.cached_accounts_summary_details()
+        complete = provider.cached_accounts_summary()
+
+        self.assertEqual(fast["accounts"][0]["account_id"], "acc01")
+        self.assertNotIn("tasks", fast["accounts"][0])
+        self.assertTrue(details["ready"])
+        self.assertIn("tasks", details["accounts"][0])
+        self.assertIn("tasks", complete["accounts"][0])
+
     def test_accounts_summary_uses_configured_accounts_without_wallet_account_scan(self) -> None:
         run1, _ = self.store.create_run("2026-02-13", account_id="acc01")
         now = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
@@ -826,6 +894,9 @@ class DashboardServerTest(unittest.TestCase):
         combined_sql = "\n".join(seen_sql)
         self.assertNotIn("SELECT DISTINCT account_id FROM wallet_snapshots", combined_sql)
         self.assertNotIn("MAX(id) AS max_id FROM wallet_snapshots GROUP BY account_id", combined_sql)
+        wallet_queries = [sql for sql in seen_sql if "FROM wallet_snapshots" in sql]
+        self.assertEqual(len(wallet_queries), 1)
+        self.assertIn("WHERE account_id IN", wallet_queries[0])
 
     def test_accounts_summary_reads_cached_trade_stats_without_live_fetch(self) -> None:
         class CachedFetcher:
@@ -1904,6 +1975,9 @@ class DashboardServerTest(unittest.TestCase):
         self.assertIn(".task-result", html)
         self.assertIn("组合止盈监控", html)
         self.assertIn('href="accounts/comparison/"', html)
+        self.assertIn('var summaryFastApi = summaryApi + "/fast";', html)
+        self.assertIn('var summaryDetailsApi = summaryApi + "/details";', html)
+        self.assertIn("setInterval(fetchSummaryDetails, Math.max(15, refreshSec) * 1000)", html)
         self.assertIn("巡检内触发", html)
         self.assertIn("portfolioStopStates[aid] = r.portfolio_loss_cut || null", html)
         self.assertIn('status === "TRIGGERED_COMPLETE"', html)

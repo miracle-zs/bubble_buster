@@ -1,10 +1,12 @@
 import ast
+import copy
 import json
 import logging
 import os
 import sqlite3
 import glob
 import re
+import threading
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -69,6 +71,14 @@ class DashboardDataProvider:
         self._close_price_cache: Dict[Tuple[str, int], Optional[float]] = {}
         self._task_status_cache_key: Optional[Tuple[Tuple[str, int, int], ...]] = None
         self._task_status_cache_value: Optional[Dict[str, Dict[str, Dict[str, Any]]]] = None
+        self._task_log_file_identity: Optional[Tuple[Tuple[str, int], ...]] = None
+        self._task_log_parse_state: Dict[str, Tuple[int, int]] = {}
+        self._task_status_lock = threading.RLock()
+        self._accounts_summary_cache_lock = threading.RLock()
+        self._accounts_summary_refresh_lock = threading.Lock()
+        self._accounts_summary_fast_compute_lock = threading.Lock()
+        self._accounts_summary_cache_value: Optional[Dict[str, Any]] = None
+        self._accounts_summary_fast_cache_value: Optional[Dict[str, Any]] = None
         self.account_strategy_notes = {
             str(k).strip(): str(v).strip()
             for k, v in (account_strategy_notes or {}).items()
@@ -931,6 +941,41 @@ class DashboardDataProvider:
             return []
         return lines
 
+    @staticmethod
+    def _read_task_log_lines_from_offset(
+        path: str,
+        start_offset: int,
+        markers: Tuple[str, ...],
+    ) -> Tuple[List[str], int]:
+        """Read only the newly appended portion of a task log.
+
+        The dashboard log is append-only during normal operation. Keeping the
+        byte offset avoids rescanning tens of megabytes on every overview
+        refresh while still allowing callers to reset to offset zero after a
+        rotation or truncation.
+        """
+        if not os.path.exists(path):
+            return [], 0
+        lines: List[str] = []
+        try:
+            with open(path, "rb") as f:
+                file_size = os.fstat(f.fileno()).st_size
+                offset = max(0, int(start_offset))
+                if offset > file_size:
+                    offset = 0
+                f.seek(offset)
+                while True:
+                    line = f.readline()
+                    if not line:
+                        break
+                    text = line.decode("utf-8", errors="replace")
+                    if any(marker in text for marker in markers):
+                        lines.append(text.rstrip("\r\n"))
+                end_offset = f.tell()
+        except OSError:
+            return [], 0
+        return lines, end_offset
+
     def _task_log_files(self) -> List[str]:
         files: List[str] = []
         rotated = sorted(glob.glob(f"{self.log_file}.*"))
@@ -951,18 +996,21 @@ class DashboardDataProvider:
         for path in files:
             try:
                 stat = os.stat(path)
-                signature.append((path, int(stat.st_mtime), int(stat.st_size)))
+                signature.append((path, int(stat.st_ino), int(stat.st_size)))
             except OSError:
                 continue
         return tuple(signature)
 
     def _parse_task_statuses_from_logs(self) -> Dict[str, Dict[str, Dict[str, Any]]]:
+        with self._task_status_lock:
+            return self._parse_task_statuses_from_logs_locked()
+
+    def _parse_task_statuses_from_logs_locked(self) -> Dict[str, Dict[str, Dict[str, Any]]]:
         file_paths = self._task_log_files()
         signature = self._task_status_cache_signature(file_paths)
         if self._task_status_cache_key == signature and self._task_status_cache_value is not None:
             return self._task_status_cache_value
 
-        statuses: Dict[str, Dict[str, Dict[str, Any]]] = {}
         markers = {
             "entry": "service entry result:",
             "daily_loss_cut": "service daily loss-cut result:",
@@ -973,8 +1021,41 @@ class DashboardDataProvider:
             "service equity recovery take-profit ",
             "service portfolio take-profit ",
         )
+
+        current_identity = tuple((path, inode) for path, inode, _size in signature)
+        rebuild = self._task_status_cache_value is None or self._task_log_file_identity != current_identity
+        if not rebuild:
+            for path, inode, size in signature:
+                previous = self._task_log_parse_state.get(path)
+                if previous is None or previous[0] != inode or size < previous[1]:
+                    rebuild = True
+                    break
+
+        if rebuild:
+            statuses: Dict[str, Dict[str, Dict[str, Any]]] = {}
+            self._task_log_parse_state = {}
+        else:
+            # The parser owns this dictionary under _task_status_lock. Reusing
+            # it preserves the latest status while merging only new lines.
+            statuses = self._task_status_cache_value or {}
+
         for path in file_paths:
-            for line in self._read_task_log_lines(path, log_markers):
+            stat_entry = next((item for item in signature if item[0] == path), None)
+            if stat_entry is None:
+                continue
+            inode = stat_entry[1]
+            start_offset = 0
+            if not rebuild:
+                previous = self._task_log_parse_state.get(path)
+                if previous is not None and previous[0] == inode:
+                    start_offset = previous[1]
+            lines, end_offset = self._read_task_log_lines_from_offset(
+                path,
+                start_offset,
+                log_markers,
+            )
+            self._task_log_parse_state[path] = (inode, end_offset)
+            for line in lines:
                 if "service portfolio take-profit " in line:
                     time_local = self._log_time_from_line(line)
                     matched_result = re.search(
@@ -1089,6 +1170,7 @@ class DashboardDataProvider:
                         self._task_status_from_payload(task_key, account_payload, time_local)
                     )
 
+        self._task_log_file_identity = current_identity
         self._task_status_cache_key = signature
         self._task_status_cache_value = statuses
         return statuses
@@ -3083,7 +3165,7 @@ class DashboardDataProvider:
         events.sort(key=lambda item: (str(item.get("t_utc") or ""), str(item.get("account_id") or "")))
         return events
 
-    def accounts_summary(self) -> Dict[str, Any]:
+    def accounts_summary(self, *, include_details: bool = True) -> Dict[str, Any]:
         now_utc = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
         payload = {"generated_at_utc": now_utc, "accounts": []}
         if not os.path.exists(self.db_path):
@@ -3199,17 +3281,21 @@ class DashboardDataProvider:
                     if live_position_error:
                         row["live_position_error"] = live_position_error
 
-                task_statuses = self._latest_task_statuses_for_accounts(
-                    list(by_account.keys()),
-                    conn=conn,
-                )
-                entry_progresses = self._entry_progresses_from_db(
-                    conn,
-                    list(by_account.keys()),
-                )
+                task_statuses = {}
+                entry_progresses = {}
+                if include_details:
+                    task_statuses = self._latest_task_statuses_for_accounts(
+                        list(by_account.keys()),
+                        conn=conn,
+                    )
+                    entry_progresses = self._entry_progresses_from_db(
+                        conn,
+                        list(by_account.keys()),
+                    )
                 for aid, row in by_account.items():
-                    row["tasks"] = task_statuses.get(aid, self._task_status_template())
-                    row["entry_progress"] = entry_progresses.get(aid)
+                    if include_details:
+                        row["tasks"] = task_statuses.get(aid, self._task_status_template())
+                        row["entry_progress"] = entry_progresses.get(aid)
                     # 为 readonly 账户添加交易统计
                     if self.account_modes.get(aid, "full") == "readonly":
                         fetcher = self.trade_stats_fetchers.get(aid)
@@ -3241,6 +3327,95 @@ class DashboardDataProvider:
         except sqlite3.Error as exc:
             payload["db_error"] = str(exc)
             return payload
+
+    @staticmethod
+    def _summary_without_task_details(payload: Dict[str, Any]) -> Dict[str, Any]:
+        compact = copy.deepcopy(payload)
+        for row in compact.get("accounts", []):
+            if not isinstance(row, dict):
+                continue
+            row.pop("tasks", None)
+            row.pop("entry_progress", None)
+        return compact
+
+    def refresh_accounts_summary_cache(self) -> Dict[str, Any]:
+        """Refresh the complete overview snapshot outside the HTTP request path."""
+        if not self._accounts_summary_refresh_lock.acquire(blocking=False):
+            return self.cached_accounts_summary()
+        try:
+            full_payload = self.accounts_summary(include_details=True)
+            fast_payload = self._summary_without_task_details(full_payload)
+            with self._accounts_summary_cache_lock:
+                self._accounts_summary_cache_value = full_payload
+                self._accounts_summary_fast_cache_value = fast_payload
+            return copy.deepcopy(full_payload)
+        finally:
+            self._accounts_summary_refresh_lock.release()
+
+    def cached_accounts_summary_fast(self) -> Dict[str, Any]:
+        """Return the lightweight account snapshot without log-derived details."""
+        with self._accounts_summary_cache_lock:
+            cached = self._accounts_summary_fast_cache_value
+            full = self._accounts_summary_cache_value
+            if cached is None and full is not None:
+                cached = self._summary_without_task_details(full)
+                self._accounts_summary_fast_cache_value = cached
+            if cached is not None:
+                return copy.deepcopy(cached)
+
+        # This path is only used before the first background refresh. It still
+        # avoids the expensive task-log parser and is safe for a fast first UI.
+        with self._accounts_summary_fast_compute_lock:
+            with self._accounts_summary_cache_lock:
+                cached = self._accounts_summary_fast_cache_value
+                if cached is not None:
+                    return copy.deepcopy(cached)
+            fast_payload = self.accounts_summary(include_details=False)
+            with self._accounts_summary_cache_lock:
+                if self._accounts_summary_fast_cache_value is None:
+                    self._accounts_summary_fast_cache_value = fast_payload
+                cached = self._accounts_summary_fast_cache_value
+            return copy.deepcopy(cached or fast_payload)
+
+    def cached_accounts_summary(self) -> Dict[str, Any]:
+        """Return the latest complete snapshot, falling back to fast data on cold start."""
+        with self._accounts_summary_cache_lock:
+            cached = self._accounts_summary_cache_value
+            if cached is not None:
+                return copy.deepcopy(cached)
+
+        fast_payload = self.cached_accounts_summary_fast()
+        fast_payload["details_pending"] = True
+        return fast_payload
+
+    def cached_accounts_summary_details(self) -> Dict[str, Any]:
+        """Return only task/progress fields from the latest complete snapshot."""
+        with self._accounts_summary_cache_lock:
+            cached = self._accounts_summary_cache_value
+            if cached is None:
+                return {
+                    "ready": False,
+                    "generated_at_utc": None,
+                    "accounts": [],
+                }
+            full_payload = copy.deepcopy(cached)
+
+        details = {
+            "ready": True,
+            "generated_at_utc": full_payload.get("generated_at_utc"),
+            "accounts": [
+                {
+                    "account_id": row.get("account_id"),
+                    "tasks": row.get("tasks", self._task_status_template()),
+                    "entry_progress": row.get("entry_progress"),
+                }
+                for row in full_payload.get("accounts", [])
+                if isinstance(row, dict)
+            ],
+        }
+        if full_payload.get("db_error"):
+            details["db_error"] = full_payload["db_error"]
+        return details
 
     def _configured_accounts_summary_rows(
         self,
@@ -3276,6 +3451,20 @@ class DashboardDataProvider:
             """,
             tuple(account_ids),
         )
+        latest_wallet_rows = self._query_rows(
+            conn,
+            f"""
+            SELECT ws.account_id, ws.balance_usdt
+            FROM wallet_snapshots ws
+            INNER JOIN (
+                SELECT account_id, MAX(id) AS max_id
+                FROM wallet_snapshots
+                WHERE account_id IN ({placeholders}) AND error IS NULL
+                GROUP BY account_id
+            ) latest ON latest.account_id = ws.account_id AND latest.max_id = ws.id
+            """,
+            tuple(account_ids),
+        )
         open_by_account = {
             str(row.get("account_id") or ""): self._safe_int(row.get("open_positions"), 0)
             for row in open_rows
@@ -3284,21 +3473,14 @@ class DashboardDataProvider:
             str(row.get("account_id") or ""): row
             for row in latest_run_rows
         }
+        wallet_by_account = {
+            str(row.get("account_id") or ""): row
+            for row in latest_wallet_rows
+        }
         rows: List[Dict[str, Any]] = []
         for aid in account_ids:
-            wallet_rows = self._query_rows(
-                conn,
-                """
-                SELECT balance_usdt
-                FROM wallet_snapshots
-                WHERE account_id = ? AND error IS NULL
-                ORDER BY id DESC
-                LIMIT 1
-                """,
-                (aid,),
-            )
             latest_run = run_by_account.get(aid, {})
-            latest_wallet = wallet_rows[0] if wallet_rows else {}
+            latest_wallet = wallet_by_account.get(aid, {})
             rows.append(
                 {
                     "account_id": aid,
@@ -6788,6 +6970,8 @@ ACCOUNTS_OVERVIEW_HTML = """<!doctype html>
   var pathPrefix = (window.location.pathname || "/").replace(/[/]+$/, "");
   if (!pathPrefix) pathPrefix = "";
   var summaryApi = pathPrefix + "/api/accounts/summary";
+  var summaryFastApi = summaryApi + "/fast";
+  var summaryDetailsApi = summaryApi + "/details";
   var healthApi = pathPrefix + "/healthz";
   var portfolioStopEnabled = "__PORTFOLIO_STOP_ENABLED__" === "true";
   var portfolioStopPct = Number("__PORTFOLIO_STOP_PCT__") || 3.5;
@@ -6811,6 +6995,9 @@ ACCOUNTS_OVERVIEW_HTML = """<!doctype html>
   var taskFilter = "anomaly";
   var entryDetailsExpanded = false;
   var curveTtlMs = Math.max(60000, Math.max(15, refreshSec) * 3000);
+  var summaryRequestInFlight = false;
+  var summaryDetailsRequestInFlight = false;
+  var detailsRetryTimer = null;
 
   function escapeHtml(text) {
     return String(text || "")
@@ -7851,19 +8038,94 @@ ACCOUNTS_OVERVIEW_HTML = """<!doctype html>
     }
   }
 
-  function fetchSummary() {
+  function mergeFastRows(rows) {
+    var previousByAccount = {};
+    for (var i = 0; i < (summaryRows || []).length; i += 1) {
+      var previous = summaryRows[i] || {};
+      var previousAid = String(previous.account_id || "");
+      if (previousAid) previousByAccount[previousAid] = previous;
+    }
+    return (rows || []).map(function (row) {
+      var next = row || {};
+      var old = previousByAccount[String(next.account_id || "")];
+      if (old) {
+        if (!Object.prototype.hasOwnProperty.call(next, "tasks") && old.tasks) next.tasks = old.tasks;
+        if (!Object.prototype.hasOwnProperty.call(next, "entry_progress") && old.entry_progress) {
+          next.entry_progress = old.entry_progress;
+        }
+      }
+      return next;
+    });
+  }
+
+  function mergeSummaryDetails(payload) {
+    if (!payload || payload.ready !== true) {
+      if (!detailsRetryTimer) {
+        detailsRetryTimer = window.setTimeout(function () {
+          detailsRetryTimer = null;
+          fetchSummaryDetails();
+        }, 1000);
+      }
+      return;
+    }
+    if (detailsRetryTimer) {
+      window.clearTimeout(detailsRetryTimer);
+      detailsRetryTimer = null;
+    }
+    var detailsByAccount = {};
+    var detailRows = payload.accounts || [];
+    for (var i = 0; i < detailRows.length; i += 1) {
+      var detail = detailRows[i] || {};
+      var aid = String(detail.account_id || "");
+      if (aid) detailsByAccount[aid] = detail;
+    }
+    for (var j = 0; j < summaryRows.length; j += 1) {
+      var row = summaryRows[j] || {};
+      var rowDetail = detailsByAccount[String(row.account_id || "")];
+      if (!rowDetail) continue;
+      if (Object.prototype.hasOwnProperty.call(rowDetail, "tasks")) row.tasks = rowDetail.tasks;
+      if (Object.prototype.hasOwnProperty.call(rowDetail, "entry_progress")) {
+        row.entry_progress = rowDetail.entry_progress;
+      }
+    }
+    renderCommandBar(payload);
+    renderEntryProgress();
+    renderTaskBoard();
+  }
+
+  function fetchSummaryDetails() {
+    if (summaryDetailsRequestInFlight) return;
+    summaryDetailsRequestInFlight = true;
     var xhr = new XMLHttpRequest();
-    xhr.open("GET", summaryApi + "?_=" + Date.now(), true);
+    xhr.open("GET", summaryDetailsApi + "?_=" + Date.now(), true);
     xhr.onreadystatechange = function () {
       if (xhr.readyState !== 4) return;
+      summaryDetailsRequestInFlight = false;
       if (xhr.status < 200 || xhr.status >= 300) return;
       var payload = {};
       try { payload = JSON.parse(xhr.responseText || "{}"); } catch (e) { return; }
-      summaryRows = payload.accounts || [];
+      mergeSummaryDetails(payload);
+    };
+    xhr.send();
+  }
+
+  function fetchSummary() {
+    if (summaryRequestInFlight) return;
+    summaryRequestInFlight = true;
+    var xhr = new XMLHttpRequest();
+    xhr.open("GET", summaryFastApi + "?_=" + Date.now(), true);
+    xhr.onreadystatechange = function () {
+      if (xhr.readyState !== 4) return;
+      summaryRequestInFlight = false;
+      if (xhr.status < 200 || xhr.status >= 300) return;
+      var payload = {};
+      try { payload = JSON.parse(xhr.responseText || "{}"); } catch (e) { return; }
+      summaryRows = mergeFastRows(payload.accounts || []);
       renderCommandBar(payload);
       renderCards();
       renderEntryProgress();
       renderTaskBoard();
+      fetchSummaryDetails();
     };
     xhr.send();
   }
@@ -7919,6 +8181,7 @@ ACCOUNTS_OVERVIEW_HTML = """<!doctype html>
     });
   }
   setInterval(fetchSummary, Math.max(15, refreshSec) * 1000);
+  setInterval(fetchSummaryDetails, Math.max(15, refreshSec) * 1000);
   setInterval(fetchHealth, Math.max(30, refreshSec * 2) * 1000);
 })();
 </script>

@@ -47,6 +47,7 @@ class DashboardRuntimeContext:
     portfolio_loss_cut_hour: int
     portfolio_loss_cut_minute: int
     refresh_sec: int
+    summary_refresh_sec: int
     trade_stats_refresh_sec: int
     echarts_src: str
     provider: DashboardDataProvider
@@ -127,6 +128,46 @@ class TradeStatsBackgroundRefresher:
                 self._stop_event.wait(1.0)
 
 
+class DashboardSummaryBackgroundRefresher:
+    """Keep the complete account overview warm outside the HTTP request path."""
+
+    def __init__(self, provider: DashboardDataProvider, *, refresh_interval_sec: int = 5):
+        self.provider = provider
+        self.refresh_interval_sec = min(60, max(5, int(refresh_interval_sec)))
+        self._stop_event = threading.Event()
+        self._thread: Optional[threading.Thread] = None
+
+    def start(self) -> None:
+        if self._thread is not None and self._thread.is_alive():
+            return
+        self._stop_event.clear()
+        self._thread = threading.Thread(
+            target=self._run,
+            name="bubble-buster-summary-cache",
+            daemon=True,
+        )
+        self._thread.start()
+
+    def stop(self, timeout_sec: float = 10.0) -> None:
+        self._stop_event.set()
+        thread = self._thread
+        if thread is not None and thread.is_alive() and thread is not threading.current_thread():
+            thread.join(timeout=max(0.0, float(timeout_sec)))
+        self._thread = None
+
+    def _run(self) -> None:
+        while not self._stop_event.is_set():
+            if self._stop_event.wait(self.refresh_interval_sec):
+                break
+            try:
+                self.provider.refresh_accounts_summary_cache()
+            except Exception as exc:  # noqa: BLE001
+                logging.getLogger(__name__).warning(
+                    "Background account summary refresh failed: %s",
+                    exc,
+                )
+
+
 class RuntimeFileLock:
     def __init__(self, lock_file: str, wait_sec: int = 30, poll_sec: float = 0.2):
         self.lock_file = lock_file
@@ -194,6 +235,10 @@ def create_dashboard_context(config_path: str) -> DashboardRuntimeContext:
     portfolio_loss_cut_hour = int(runtime_cfg.get("portfolio_loss_cut_hour", 8)) % 24
     portfolio_loss_cut_minute = int(runtime_cfg.get("portfolio_loss_cut_minute", 0)) % 60
     refresh_sec = max(15, int(runtime_cfg.get("dashboard_refresh_sec", 15)))
+    summary_refresh_sec = min(
+        60,
+        max(5, int(runtime_cfg.get("dashboard_summary_cache_sec", 5))),
+    )
     trade_stats_refresh_sec = min(
         1800,
         max(900, int(runtime_cfg.get("dashboard_trade_stats_refresh_sec", 900))),
@@ -368,6 +413,7 @@ def create_dashboard_context(config_path: str) -> DashboardRuntimeContext:
         portfolio_loss_cut_hour=portfolio_loss_cut_hour,
         portfolio_loss_cut_minute=portfolio_loss_cut_minute,
         refresh_sec=refresh_sec,
+        summary_refresh_sec=summary_refresh_sec,
         trade_stats_refresh_sec=trade_stats_refresh_sec,
         echarts_src=echarts_src,
         provider=provider,
@@ -556,6 +602,23 @@ def _start_trade_stats_background_refresh(app: FastAPI) -> None:
     app.state.trade_stats_refresher = refresher
 
 
+def _start_summary_background_refresh(app: FastAPI) -> None:
+    ctx: DashboardRuntimeContext = app.state.ctx
+    refresher = DashboardSummaryBackgroundRefresher(
+        ctx.provider,
+        refresh_interval_sec=ctx.summary_refresh_sec,
+    )
+    refresher.start()
+    app.state.summary_refresher = refresher
+
+
+def _shutdown_summary_background_refresh(app: FastAPI) -> None:
+    refresher = getattr(app.state, "summary_refresher", None)
+    if refresher is not None:
+        refresher.stop()
+    app.state.summary_refresher = None
+
+
 def _shutdown_trade_stats_background_refresh(app: FastAPI) -> None:
     refresher = getattr(app.state, "trade_stats_refresher", None)
     if refresher is not None:
@@ -577,7 +640,10 @@ def create_app(config_path: Optional[str] = None) -> FastAPI:
                 content={"detail": "Dashboard is read-only"},
                 headers={"Allow": "GET, HEAD, OPTIONS"},
             )
-        return await call_next(request)
+        response = await call_next(request)
+        if request.url.path.startswith("/static/") and response.status_code in {200, 304}:
+            response.headers["Cache-Control"] = "public, max-age=604800, stale-while-revalidate=86400"
+        return response
 
     @app.on_event("startup")
     def _startup() -> None:
@@ -585,11 +651,22 @@ def create_app(config_path: Optional[str] = None) -> FastAPI:
         app.state.config_path = path
         app.state.ctx = create_dashboard_context(path)
         _ensure_strategy_log_handler(app.state.ctx.log_file)
+        try:
+            # Warm the full snapshot once before accepting requests. Later
+            # refreshes run in the background and use the incremental log cache.
+            app.state.ctx.provider.refresh_accounts_summary_cache()
+        except Exception as exc:  # noqa: BLE001
+            logging.getLogger(__name__).warning(
+                "Initial account summary cache warmup failed: %s",
+                exc,
+            )
+        _start_summary_background_refresh(app)
         _start_trade_stats_background_refresh(app)
         _startup_background_service(app, path)
 
     @app.on_event("shutdown")
     def _shutdown() -> None:
+        _shutdown_summary_background_refresh(app)
         _shutdown_trade_stats_background_refresh(app)
         _shutdown_background_service(app)
 
@@ -662,11 +739,27 @@ def create_app(config_path: Optional[str] = None) -> FastAPI:
         except Exception as exc:  # noqa: BLE001
             raise HTTPException(status_code=500, detail=f"dashboard snapshot failed: {exc}") from exc
 
+    @app.get("/api/accounts/summary/fast")
+    def accounts_summary_fast(request: Request):
+        ctx: DashboardRuntimeContext = request.app.state.ctx
+        try:
+            return JSONResponse(ctx.provider.cached_accounts_summary_fast())
+        except Exception as exc:  # noqa: BLE001
+            raise HTTPException(status_code=500, detail=f"fast accounts summary failed: {exc}") from exc
+
+    @app.get("/api/accounts/summary/details")
+    def accounts_summary_details(request: Request):
+        ctx: DashboardRuntimeContext = request.app.state.ctx
+        try:
+            return JSONResponse(ctx.provider.cached_accounts_summary_details())
+        except Exception as exc:  # noqa: BLE001
+            raise HTTPException(status_code=500, detail=f"account summary details failed: {exc}") from exc
+
     @app.get("/api/accounts/summary")
     def accounts_summary(request: Request):
         ctx: DashboardRuntimeContext = request.app.state.ctx
         try:
-            return JSONResponse(ctx.provider.accounts_summary())
+            return JSONResponse(ctx.provider.cached_accounts_summary())
         except Exception as exc:  # noqa: BLE001
             raise HTTPException(status_code=500, detail=f"accounts summary failed: {exc}") from exc
 

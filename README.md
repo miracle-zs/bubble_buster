@@ -273,6 +273,7 @@ protection_exempt_symbols = XAUUSDT
 - `run_service_with_dashboard`：
   - `true`：Dashboard 启动时同时拉起后台服务；
   - `false`：Dashboard 只做展示（适合你已有 systemd 服务时）。
+- `dashboard_summary_cache_sec`：账户总览完整摘要的后台刷新间隔，默认 `5` 秒，范围 `5`–`60` 秒。
 - `db_path` / `log_dir` / `lock_file`：实例隔离关键参数。
 
 ### `[accounts]`（单进程多账户）
@@ -287,6 +288,8 @@ protection_exempt_symbols = XAUUSDT
   - `[account.<id>.notify]`
 - Dashboard 新接口：
   - `GET /api/accounts/summary`
+  - `GET /api/accounts/summary/fast`（轻量账户数据，优先返回）
+  - `GET /api/accounts/summary/details`（后台缓存的任务与开单进度详情）
   - `GET /api/account/{account_id}/snapshot`
 
 ### `[notify]`

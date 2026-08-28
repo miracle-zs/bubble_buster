@@ -92,6 +92,30 @@ portfolio_take_profit_enabled = true
 
         self.assertEqual(calls, [("readonly01", 30)])
 
+    def test_accounts_summary_fast_details_and_static_cache_headers(self) -> None:
+        app = create_app(config_path=str(self.config_path))
+        with TestClient(app) as client:
+            fast = client.get("/api/accounts/summary/fast")
+            self.assertEqual(fast.status_code, 200)
+            fast_rows = fast.json()["accounts"]
+            self.assertEqual({row["account_id"] for row in fast_rows}, {"55", "acc01", "acc02"})
+            self.assertNotIn("tasks", fast_rows[0])
+            self.assertNotIn("entry_progress", fast_rows[0])
+
+            details = client.get("/api/accounts/summary/details")
+            self.assertEqual(details.status_code, 200)
+            details_payload = details.json()
+            self.assertTrue(details_payload["ready"])
+            details_by_account = {
+                row["account_id"]: row for row in details_payload["accounts"]
+            }
+            self.assertIn("tasks", details_by_account["acc01"])
+            self.assertIn("entry_progress", details_by_account["acc01"])
+
+            static = client.get("/static/vendor/echarts.min.js")
+            self.assertEqual(static.status_code, 200)
+            self.assertIn("max-age=", static.headers.get("cache-control", ""))
+
     def test_app_health_and_dashboard_api(self) -> None:
         app = create_app(config_path=str(self.config_path))
         with TestClient(app) as client:
