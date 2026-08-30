@@ -35,6 +35,76 @@ class StateStoreTest(unittest.TestCase):
         self.assertGreaterEqual(int(busy_timeout), 30000)
         self.assertEqual(str(journal_mode).lower(), "wal")
 
+    def test_income_records_keep_same_tran_id_across_income_types(self) -> None:
+        common = {
+            "symbol": "BTCUSDT",
+            "asset": "USDT",
+            "time": 1770000000000,
+            "tranId": "same-fill",
+            "tradeId": "trade-1",
+        }
+        records = [
+            common | {"incomeType": "REALIZED_PNL", "income": "1.25"},
+            common | {"incomeType": "COMMISSION", "income": "-0.05"},
+        ]
+
+        self.assertEqual(len(self.store.add_binance_income_records(records)), 2)
+        self.assertEqual(self.store.add_binance_income_records(records), [])
+
+        with self.store._connect_ctx() as conn:
+            rows = conn.execute(
+                """
+                SELECT income_type, income
+                FROM binance_income_records
+                WHERE account_id = ? AND tran_id = ?
+                ORDER BY income_type
+                """,
+                (self.store.account_id, "same-fill"),
+            ).fetchall()
+
+        self.assertEqual(
+            [(row["income_type"], row["income"]) for row in rows],
+            [("COMMISSION", -0.05), ("REALIZED_PNL", 1.25)],
+        )
+
+    def test_income_records_keep_legacy_rows_idempotent_after_identity_fix(self) -> None:
+        with self.store._connect_ctx() as conn:
+            conn.execute(
+                """
+                INSERT INTO binance_income_records (
+                    account_id, unique_key, tran_id, trade_id, symbol,
+                    income_type, asset, income, event_time_ms, raw_json, created_at_utc
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    self.store.account_id,
+                    "legacy-key",
+                    "same-fill",
+                    "trade-1",
+                    "BTCUSDT",
+                    "REALIZED_PNL",
+                    "USDT",
+                    1.25,
+                    1770000000000,
+                    None,
+                    "2026-01-01T00:00:00+00:00",
+                ),
+            )
+
+        realized = {
+            "symbol": "BTCUSDT",
+            "asset": "USDT",
+            "time": 1770000000000,
+            "tranId": "same-fill",
+            "tradeId": "trade-1",
+            "incomeType": "REALIZED_PNL",
+            "income": "1.25",
+        }
+        commission = realized | {"incomeType": "COMMISSION", "income": "-0.05"}
+
+        self.assertEqual(self.store.add_binance_income_records([realized]), [])
+        self.assertEqual(len(self.store.add_binance_income_records([commission])), 1)
+
     def test_insert_and_close_position(self) -> None:
         run_id, _ = self.store.create_run("2026-02-13")
         position_id = self.store.insert_position(
