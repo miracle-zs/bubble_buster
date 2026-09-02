@@ -106,6 +106,7 @@ class Top10ShortStrategy:
     ENTRY_WAIT_LOCK_NAME = "bearish_hour_entry_wait_v1"
     ENTRY_SCALE_IN_MODE_NONE = "none"
     ENTRY_SCALE_IN_MODE_AFTER_BULLISH_BEARISH = "after_bullish_bearish"
+    ENTRY_SCALE_IN_MODE_AFTER_BULLISH_BEARISH_INDEPENDENT = "after_bullish_bearish_independent"
     ENTRY_STAGE_INITIAL = "INITIAL"
     ENTRY_STAGE_SCALE_IN = "SCALE_IN"
     ENTRY_PHASE_INITIAL = "INITIAL"
@@ -640,12 +641,17 @@ class Top10ShortStrategy:
                         scale_result = self._add_scale_in_tranche(
                             ready_entry=ready_entry,
                             full_target_notional=target_notional,
+                            run_id=run_id,
                         )
                         if str(scale_result.get("status") or "").upper() == "ADDED":
                             scale_in_added_count += 1
                             symbol = str(scale_result.get("symbol") or entry.symbol)
                             if symbol not in scale_in_symbols:
                                 scale_in_symbols.append(symbol)
+                            if scale_result.get("independent"):
+                                opened_count += 1
+                                if symbol not in opened_symbols:
+                                    opened_symbols.append(symbol)
                         else:
                             scale_in_skipped_count += 1
                         continue
@@ -1712,7 +1718,7 @@ class Top10ShortStrategy:
         run_id: Optional[str] = None,
         trade_day_utc: Optional[str] = None,
     ) -> Iterator[ReadyEntry]:
-        if self.entry_scale_in_mode == self.ENTRY_SCALE_IN_MODE_AFTER_BULLISH_BEARISH:
+        if self._is_bullish_then_bearish_scale_in_mode():
             yield from self._iter_ready_entries_after_bullish_then_bearish(
                 candidates=candidates,
                 signal_base_time_utc=signal_base_time_utc,
@@ -2033,7 +2039,8 @@ class Top10ShortStrategy:
                     hour_open = self._parse_iso_utc(str(item["hour_open_utc"]))
                 except (KeyError, TypeError, ValueError):
                     continue
-                if entry.symbol.strip().upper() in active_symbols:
+                phase = str(item.get("phase") or self.ENTRY_PHASE_INITIAL).strip().upper()
+                if phase == self.ENTRY_PHASE_INITIAL and entry.symbol.strip().upper() in active_symbols:
                     LOGGER.warning(
                         "Drop already-active symbol from persisted entry wait: account=%s symbol=%s run_id=%s",
                         self.account_id,
@@ -3903,6 +3910,10 @@ class Top10ShortStrategy:
             "after_bullish_bearish": cls.ENTRY_SCALE_IN_MODE_AFTER_BULLISH_BEARISH,
             "bull_then_bear": cls.ENTRY_SCALE_IN_MODE_AFTER_BULLISH_BEARISH,
             "bullish_then_bearish": cls.ENTRY_SCALE_IN_MODE_AFTER_BULLISH_BEARISH,
+            "after_bullish_bearish_independent": cls.ENTRY_SCALE_IN_MODE_AFTER_BULLISH_BEARISH_INDEPENDENT,
+            "after_bullish_bearish_signal_independent": cls.ENTRY_SCALE_IN_MODE_AFTER_BULLISH_BEARISH_INDEPENDENT,
+            "bull_then_bear_independent": cls.ENTRY_SCALE_IN_MODE_AFTER_BULLISH_BEARISH_INDEPENDENT,
+            "bullish_then_bearish_independent": cls.ENTRY_SCALE_IN_MODE_AFTER_BULLISH_BEARISH_INDEPENDENT,
         }
         mode = aliases.get(normalized)
         if mode is None:
@@ -3914,8 +3925,17 @@ class Top10ShortStrategy:
             return cls.ENTRY_SCALE_IN_MODE_NONE
         return mode
 
+    def _is_bullish_then_bearish_scale_in_mode(self) -> bool:
+        return self.entry_scale_in_mode in {
+            self.ENTRY_SCALE_IN_MODE_AFTER_BULLISH_BEARISH,
+            self.ENTRY_SCALE_IN_MODE_AFTER_BULLISH_BEARISH_INDEPENDENT,
+        }
+
+    def _is_signal_independent_scale_in_mode(self) -> bool:
+        return self.entry_scale_in_mode == self.ENTRY_SCALE_IN_MODE_AFTER_BULLISH_BEARISH_INDEPENDENT
+
     def _entry_ratio_for_stage(self, entry_stage: str) -> float:
-        if self.entry_scale_in_mode != self.ENTRY_SCALE_IN_MODE_AFTER_BULLISH_BEARISH:
+        if not self._is_bullish_then_bearish_scale_in_mode():
             return 1.0
         if str(entry_stage or "").strip().upper() == self.ENTRY_STAGE_SCALE_IN:
             return self.entry_scale_in_second_ratio
@@ -4124,12 +4144,15 @@ class Top10ShortStrategy:
         self,
         ready_entry: ReadyEntry,
         full_target_notional: float,
+        run_id: Optional[str] = None,
     ) -> Dict[str, object]:
         """Add the second tranche to the existing logical position.
 
         Binance one-way mode exposes one aggregate position per symbol, so
         the second tranche must update the first position row and replace its
         exit orders instead of creating a second active row for the symbol.
+        In signal-independent mode, a closed first tranche is allowed to open
+        a new position row for the later signal.
         """
         symbol = ready_entry.entry.symbol.strip().upper()
         open_positions = self.store.list_open_positions()
@@ -4144,6 +4167,43 @@ class Top10ShortStrategy:
             None,
         )
         if existing is None:
+            if self._is_signal_independent_scale_in_mode():
+                if not run_id:
+                    raise RuntimeError(
+                        f"signal-independent scale-in requires run_id for {symbol}"
+                    )
+                active_symbols_reader = getattr(self.store, "list_active_symbols", None)
+                if callable(active_symbols_reader):
+                    active_symbols = {
+                        str(item or "").strip().upper()
+                        for item in (active_symbols_reader() or set())
+                        if str(item or "").strip()
+                    }
+                    if symbol in active_symbols:
+                        LOGGER.info(
+                            "Skip independent scale-in because a local pending position still exists: "
+                            "account=%s symbol=%s",
+                            self.account_id,
+                            symbol,
+                        )
+                        return {"status": "SKIPPED_ACTIVE_LOCAL_POSITION", "symbol": symbol}
+
+                risk_before = self._load_short_position(symbol)
+                if risk_before and abs(self._safe_float(risk_before.get("positionAmt"), default=0.0)) > 0:
+                    LOGGER.info(
+                        "Skip independent scale-in because exchange position is still active: "
+                        "account=%s symbol=%s",
+                        self.account_id,
+                        symbol,
+                    )
+                    return {"status": "SKIPPED_EXCHANGE_POSITION_ACTIVE", "symbol": symbol}
+
+                return self._open_independent_scale_in_tranche(
+                    ready_entry=ready_entry,
+                    full_target_notional=full_target_notional,
+                    run_id=run_id,
+                )
+
             LOGGER.info(
                 "Skip scale-in because first tranche is no longer open: account=%s symbol=%s",
                 self.account_id,
@@ -4180,6 +4240,9 @@ class Top10ShortStrategy:
 
         target_notional = full_target_notional * self.entry_scale_in_second_ratio
         reference_price = float(ready_entry.reference_price)
+        entry_structure_window = None
+        if self._is_signal_independent_scale_in_mode():
+            entry_structure_window = self._prepare_entry_structure_window(ready_entry)
         diagnose = getattr(self.client, "diagnose_order_qty", None)
         if callable(diagnose):
             diagnostic = diagnose(symbol, target_notional, reference_price)
@@ -4208,6 +4271,7 @@ class Top10ShortStrategy:
         audited_order["entry_audit"] = {
             "entry_mode": "CONFIRMED_CLOSE",
             "entry_stage": self.ENTRY_STAGE_SCALE_IN,
+            "signal_independent": self._is_signal_independent_scale_in_mode(),
             "signal_hour_open_utc": (
                 ready_entry.signal_hour_open_utc.isoformat()
                 if isinstance(ready_entry.signal_hour_open_utc, datetime)
@@ -4245,11 +4309,43 @@ class Top10ShortStrategy:
 
         self.store.set_position_qty(position_id, qty_now, entry_price_now)
         try:
+            effective_structure_protection = None
+            if self._is_signal_independent_scale_in_mode():
+                new_structure_protection = self._complete_entry_structure_protection(
+                    symbol=symbol,
+                    window=entry_structure_window,
+                    fill_time_utc=opened_at,
+                    entry_price=entry_price_now,
+                )
+                stored_structure_protection = self._entry_structure_protection_state.get(position_id)
+                if new_structure_protection is not None and (
+                    stored_structure_protection is None
+                    or new_structure_protection.stop_price < stored_structure_protection.stop_price
+                ):
+                    effective_structure_protection = new_structure_protection
+                    self._entry_structure_protection_state.put(
+                        position_id=position_id,
+                        protection=new_structure_protection,
+                    )
+                else:
+                    effective_structure_protection = stored_structure_protection
+
             old_tp_order_id = existing.get("tp_order_id")
             old_tp_client_order_id = existing.get("tp_client_order_id")
             old_sl_order_id = existing.get("sl_order_id")
             old_sl_client_order_id = existing.get("sl_client_order_id")
-            self._place_exit_orders(position_id=position_id, symbol=symbol)
+            if self._is_signal_independent_scale_in_mode():
+                self._place_exit_orders(
+                    position_id=position_id,
+                    symbol=symbol,
+                    entry_structure_stop_price=(
+                        effective_structure_protection.stop_price
+                        if effective_structure_protection is not None
+                        else None
+                    ),
+                )
+            else:
+                self._place_exit_orders(position_id=position_id, symbol=symbol)
             self._cancel_order_if_exists(symbol, old_tp_order_id, old_tp_client_order_id)
             self._cancel_order_if_exists(symbol, old_sl_order_id, old_sl_client_order_id)
             self.store.clear_position_error(position_id)
@@ -4291,6 +4387,197 @@ class Top10ShortStrategy:
             "position_id": position_id,
             "qty": qty_now,
             "entry_price": entry_price_now,
+        }
+
+    def _open_independent_scale_in_tranche(
+        self,
+        ready_entry: ReadyEntry,
+        full_target_notional: float,
+        run_id: str,
+    ) -> Dict[str, object]:
+        """Open the later signal as a fresh position after the first one closed.
+
+        The exchange still has one aggregate position per symbol, but once the
+        first tranche is flat there is no position to merge into.  A new local
+        position row keeps the later signal's lifecycle, protection window and
+        exits independent from the already-closed first row.
+        """
+        symbol = ready_entry.entry.symbol.strip().upper()
+        reference_price = float(ready_entry.reference_price)
+        target_notional = full_target_notional * self.entry_scale_in_second_ratio
+
+        self.client.ensure_isolated_and_leverage(symbol, self.leverage)
+        diagnose = getattr(self.client, "diagnose_order_qty", None)
+        planned_qty = 0.0
+        if callable(diagnose):
+            diagnostic = diagnose(symbol, target_notional, reference_price)
+            if isinstance(diagnostic, dict):
+                planned_qty = float(diagnostic.get("normalized_qty") or 0.0)
+            if planned_qty <= 0:
+                raise RuntimeError(
+                    f"signal-independent scale-in qty normalized to zero for {symbol}: "
+                    f"target_notional={target_notional:.6f}"
+                )
+        else:
+            planned_qty = float(self.client.normalize_order_qty(symbol, target_notional, reference_price))
+            if planned_qty <= 0:
+                raise RuntimeError(
+                    f"signal-independent scale-in qty normalized to zero for {symbol}: "
+                    f"target_notional={target_notional:.6f}"
+                )
+
+        entry_structure_window = self._prepare_entry_structure_window(ready_entry)
+        intent_opened_at = self._utc_now_datetime()
+        position_id = self.store.insert_position(
+            run_id=run_id,
+            symbol=symbol,
+            side="SHORT",
+            qty=planned_qty,
+            entry_price=reference_price,
+            liq_price_open=None,
+            tp_price=None,
+            sl_price=None,
+            tp_order_id=None,
+            sl_order_id=None,
+            tp_client_order_id=None,
+            sl_client_order_id=None,
+            opened_at_utc=intent_opened_at.isoformat(),
+            expire_at_utc=(intent_opened_at + timedelta(hours=self.max_hold_hours)).isoformat(),
+            status="PENDING_ENTRY",
+        )
+
+        try:
+            add_order, retry_count_used = self._place_market_short_with_shrink_retry(
+                symbol=symbol,
+                target_notional=target_notional,
+                reference_price=reference_price,
+                client_id_tag="add",
+            )
+            observed_fill_time = self._utc_now_datetime()
+            opened_at = self._resolve_entry_fill_time(add_order, observed_fill_time)
+            entry_event_id = self.store.add_order_event(
+                symbol=symbol,
+                position_id=position_id,
+                event_time_utc=opened_at.isoformat(),
+                order_payload=add_order,
+            )
+
+            position_risk = self._load_short_position(symbol)
+            if not position_risk:
+                raise RuntimeError(f"No short position returned after independent scale-in for {symbol}")
+            qty_now = abs(self._safe_float(position_risk.get("positionAmt"), default=0.0))
+            if qty_now <= 0:
+                raise RuntimeError(f"Invalid position quantity after independent scale-in for {symbol}")
+            entry_price = (
+                self._safe_positive_float(position_risk.get("entryPrice"))
+                or reference_price
+            )
+            liq_price = self._safe_positive_float(position_risk.get("liquidationPrice"))
+            expire_at = opened_at + timedelta(hours=self.max_hold_hours)
+            self.store.set_position_entry_fill(
+                position_id=position_id,
+                qty=qty_now,
+                entry_price=entry_price,
+                liq_price_open=liq_price,
+                opened_at_utc=opened_at.isoformat(),
+                expire_at_utc=expire_at.isoformat(),
+            )
+
+            audited_order = dict(add_order)
+            audited_order["entry_audit"] = {
+                "entry_mode": "CONFIRMED_CLOSE",
+                "entry_stage": self.ENTRY_STAGE_SCALE_IN,
+                "signal_independent": True,
+                "signal_hour_open_utc": (
+                    ready_entry.signal_hour_open_utc.isoformat()
+                    if isinstance(ready_entry.signal_hour_open_utc, datetime)
+                    else None
+                ),
+                "signal_close_time_utc": (
+                    ready_entry.bearish_close_time_utc.isoformat()
+                    if isinstance(ready_entry.bearish_close_time_utc, datetime)
+                    else None
+                ),
+                "reference_price": reference_price,
+                "filled_at_utc": opened_at.isoformat(),
+                "target_notional_usdt": target_notional,
+                "retry_count": retry_count_used,
+            }
+            update_order_event = getattr(self.store, "update_order_event", None)
+            if callable(update_order_event) and entry_event_id:
+                update_order_event(
+                    order_event_id=entry_event_id,
+                    symbol=symbol,
+                    position_id=position_id,
+                    event_time_utc=opened_at.isoformat(),
+                    order_payload=audited_order,
+                )
+
+            entry_structure_protection = self._complete_entry_structure_protection(
+                symbol=symbol,
+                window=entry_structure_window,
+                fill_time_utc=opened_at,
+                entry_price=entry_price,
+            )
+            if entry_structure_protection is not None:
+                self._entry_structure_protection_state.put(
+                    position_id=position_id,
+                    protection=entry_structure_protection,
+                )
+                self._place_exit_orders(
+                    position_id=position_id,
+                    symbol=symbol,
+                    entry_structure_stop_price=entry_structure_protection.stop_price,
+                )
+            else:
+                self._place_exit_orders(position_id=position_id, symbol=symbol)
+            self.store.mark_position_open(position_id)
+        except Exception as exc:
+            if not self._is_rate_limit_error(exc):
+                try:
+                    current = self.store.get_position(position_id)
+                    if current is not None and str(current.get("status") or "") in {
+                        "PENDING_ENTRY",
+                        "PENDING_EXIT_SETUP",
+                    }:
+                        risk = self._load_short_position(symbol)
+                        if risk is None:
+                            self.store.mark_position_closed(
+                                position_id=position_id,
+                                status="ENTRY_FAILED",
+                                close_reason="ENTRY_NOT_FOUND_AFTER_FAILURE",
+                            )
+                        else:
+                            self._force_close_position(
+                                position_id=position_id,
+                                symbol=symbol,
+                                reason="ENTRY_WORKFLOW_FAILED",
+                            )
+                except Exception as recovery_exc:  # noqa: BLE001
+                    LOGGER.exception(
+                        "Failed to recover independent scale-in account=%s position_id=%s symbol=%s: %s",
+                        self.account_id,
+                        position_id,
+                        symbol,
+                        recovery_exc,
+                    )
+            raise
+
+        LOGGER.info(
+            "Independent scale-in entry completed: account=%s symbol=%s position_id=%s qty=%s entry_price=%s",
+            self.account_id,
+            symbol,
+            position_id,
+            qty_now,
+            entry_price,
+        )
+        return {
+            "status": "ADDED",
+            "symbol": symbol,
+            "position_id": position_id,
+            "qty": qty_now,
+            "entry_price": entry_price,
+            "independent": True,
         }
 
     def _place_market_short_with_shrink_retry(

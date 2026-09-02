@@ -31,6 +31,8 @@ entry_wait_max_hours = 16
 entry_preclose_sec = 10
 # 可选：首根阴线先开 50%，出现 1h 阳线后再等下一根阴线开剩余 50%。
 # entry_scale_in_mode = after_bullish_bearish
+# 信号独立模式：第一笔已退出时，后续阳线后阴线信号仍新建第二笔独立仓位。
+# entry_scale_in_mode = after_bullish_bearish_independent
 # entry_scale_in_first_ratio = 0.50
 ranker_max_workers = 24
 ranker_weight_limit_per_minute = 200
@@ -119,10 +121,10 @@ mode.acc04 = full
 # mode.55 = loss_cut_only
 mode.readonly01 = readonly
 mode.readonly02 = readonly
-strategy_note.acc01 = 每日08:00权益+9%组合减仓50% / 组合止损3.5% / 中午保护止损ON / 早盘保护止损ON / 盈利18%回撤止盈保护
-strategy_note.acc02 = 每日08:00权益+9%组合清仓 / 组合止损3.5% / 中午保护止损ON / 早盘保护止损ON / 盈利18%回撤止盈保护
-strategy_note.acc03 = 每日08:00权益+9%组合清仓 / 组合止损3.5% / 中午保护止损ON / 早盘保护止损ON / 盈利18%回撤止盈保护
-strategy_note.acc04 = 组合止盈OFF / 组合止损3.5% / 中午保护止损ON / 早盘保护止损ON / 盈利18%回撤止盈保护
+strategy_note.acc01 = 每日08:00权益+9%组合减仓50% / 组合止损3.5% / 中午保护止损ON / 早盘保护止损ON / 盈利18%回撤止盈保护 / 先阳后阴两段·信号独立开仓
+strategy_note.acc02 = 每日08:00权益+9%组合清仓 / 组合止损3.5% / 中午保护止损ON / 早盘保护止损ON / 盈利18%回撤止盈保护 / 先阳后阴两段·信号独立开仓
+strategy_note.acc03 = 每日08:00权益+9%组合清仓 / 组合止损3.5% / 中午保护止损ON / 早盘保护止损ON / 盈利18%回撤止盈保护 / 先阳后阴两段·信号独立开仓
+strategy_note.acc04 = 组合止盈OFF / 组合止损3.5% / 中午保护止损ON / 早盘保护止损ON / 盈利18%回撤止盈保护 / 先阳后阴两段·信号独立开仓
 # strategy_note.55 = loss_cut_only / 中午保护止损ON / 盈利18%回撤止盈保护
 strategy_note.readonly01 = 只读监控账户 / 余额曲线 / 交易统计
 strategy_note.readonly02 = 只读监控账户 / 余额曲线 / 交易统计
@@ -162,14 +164,14 @@ api_secret = REPLACE_WITH_READONLY02_API_SECRET
 equity_recovery_take_profit_enabled = false
 equity_recovery_trigger_pct = 0.09
 equity_recovery_reduce_ratio = 0.50
-entry_scale_in_mode = after_bullish_bearish
+entry_scale_in_mode = after_bullish_bearish_independent
 entry_scale_in_first_ratio = 0.50
 
 [account.acc02.strategy]
 equity_recovery_take_profit_enabled = false
 equity_recovery_trigger_pct = 0.09
 equity_recovery_reduce_ratio = 1.0
-entry_scale_in_mode = after_bullish_bearish
+entry_scale_in_mode = after_bullish_bearish_independent
 entry_scale_in_first_ratio = 0.50
 
 
@@ -177,14 +179,14 @@ entry_scale_in_first_ratio = 0.50
 equity_recovery_take_profit_enabled = false
 equity_recovery_trigger_pct = 0.09
 equity_recovery_reduce_ratio = 1.0
-entry_scale_in_mode = after_bullish_bearish
+entry_scale_in_mode = after_bullish_bearish_independent
 entry_scale_in_first_ratio = 0.50
 
 [account.acc04.strategy]
 equity_recovery_take_profit_enabled = false
 equity_recovery_trigger_pct = 0.09
 equity_recovery_reduce_ratio = 0.50
-entry_scale_in_mode = after_bullish_bearish
+entry_scale_in_mode = after_bullish_bearish_independent
 entry_scale_in_first_ratio = 0.50
 
 [account.55.strategy]

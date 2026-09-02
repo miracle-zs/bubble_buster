@@ -755,6 +755,231 @@ class StrategyRebalanceTest(unittest.TestCase):
             ],
         )
 
+    def test_signal_independent_scale_in_opens_new_position_after_first_closed(self) -> None:
+        client = MagicMock()
+        client.diagnose_order_qty.return_value = {"normalized_qty": 5.0}
+        store = MagicMock()
+        store.list_open_positions.return_value = []
+        store.list_active_symbols.return_value = set()
+        store.insert_position.return_value = 17
+        store.add_order_event.return_value = 23
+
+        strategy = self._build_strategy(
+            client,
+            store,
+            entry_scale_in_mode="after_bullish_bearish_independent",
+        )
+        strategy._load_short_position = MagicMock(
+            side_effect=[
+                None,
+                {
+                    "symbol": "AAAUSDT",
+                    "positionAmt": "-5",
+                    "entryPrice": "9.5",
+                    "liquidationPrice": "12",
+                },
+            ]
+        )
+        strategy._place_market_short_with_shrink_retry = MagicMock(
+            return_value=(
+                {
+                    "orderId": 99,
+                    "clientOrderId": "t10s-add-AAAUSDT",
+                    "symbol": "AAAUSDT",
+                    "side": "SELL",
+                    "type": "MARKET",
+                    "status": "FILLED",
+                    "origQty": "5",
+                    "executedQty": "5",
+                    "avgPrice": "9.5",
+                },
+                0,
+            )
+        )
+        strategy._prepare_entry_structure_window = MagicMock(return_value=None)
+        strategy._place_exit_orders = MagicMock()
+        strategy._utc_now_datetime = MagicMock(
+            return_value=datetime(2025, 12, 1, 2, tzinfo=timezone.utc)
+        )
+
+        result = strategy._add_scale_in_tranche(
+            ready_entry=ReadyEntry(
+                entry=RankEntry("AAAUSDT", 15.0, 9.0, 100.0),
+                reference_price=9.0,
+                signal_time_utc=datetime(2025, 12, 1, 0, tzinfo=timezone.utc),
+                bearish_close_time_utc=datetime(2025, 12, 1, 2, tzinfo=timezone.utc),
+                entry_stage="SCALE_IN",
+                signal_hour_open_utc=datetime(2025, 12, 1, 1, tzinfo=timezone.utc),
+            ),
+            full_target_notional=100.0,
+            run_id="run-1",
+        )
+
+        self.assertEqual(result["status"], "ADDED")
+        self.assertTrue(result["independent"])
+        self.assertEqual(result["position_id"], 17)
+        self.assertEqual(
+            store.insert_position.call_args.kwargs,
+            {
+                "run_id": "run-1",
+                "symbol": "AAAUSDT",
+                "side": "SHORT",
+                "qty": 5.0,
+                "entry_price": 9.0,
+                "liq_price_open": None,
+                "tp_price": None,
+                "sl_price": None,
+                "tp_order_id": None,
+                "sl_order_id": None,
+                "tp_client_order_id": None,
+                "sl_client_order_id": None,
+                "opened_at_utc": "2025-12-01T02:00:00+00:00",
+                "expire_at_utc": "2025-12-03T01:30:00+00:00",
+                "status": "PENDING_ENTRY",
+            },
+        )
+        self.assertEqual(
+            strategy._place_market_short_with_shrink_retry.call_args.kwargs["target_notional"],
+            50.0,
+        )
+        store.set_position_entry_fill.assert_called_once_with(
+            position_id=17,
+            qty=5.0,
+            entry_price=9.5,
+            liq_price_open=12.0,
+            opened_at_utc="2025-12-01T02:00:00+00:00",
+            expire_at_utc="2025-12-03T01:30:00+00:00",
+        )
+        strategy._place_exit_orders.assert_called_once_with(position_id=17, symbol="AAAUSDT")
+        store.mark_position_open.assert_called_once_with(17)
+
+    def test_signal_independent_scale_in_tightens_active_position_with_new_structure_signal(self) -> None:
+        client = MagicMock()
+        client.diagnose_order_qty.return_value = {"normalized_qty": 5.0}
+        store = MagicMock()
+        store.list_open_positions.return_value = [
+            {
+                "id": 7,
+                "symbol": "AAAUSDT",
+                "status": "OPEN",
+                "entry_price": 10.0,
+                "tp_order_id": 11,
+                "tp_client_order_id": "old-tp",
+                "sl_order_id": 12,
+                "sl_client_order_id": "old-sl",
+            }
+        ]
+        store.has_position_order_event_with_client_prefix.return_value = False
+        strategy = self._build_strategy(
+            client,
+            store,
+            entry_scale_in_mode="after_bullish_bearish_independent",
+        )
+        strategy._load_short_position = MagicMock(
+            side_effect=[
+                {"symbol": "AAAUSDT", "positionAmt": "-10", "entryPrice": "10"},
+                {"symbol": "AAAUSDT", "positionAmt": "-20", "entryPrice": "9.5"},
+            ]
+        )
+        strategy._place_market_short_with_shrink_retry = MagicMock(
+            return_value=(
+                {
+                    "orderId": 99,
+                    "clientOrderId": "t10s-add-AAAUSDT",
+                    "symbol": "AAAUSDT",
+                    "side": "SELL",
+                    "type": "MARKET",
+                    "status": "FILLED",
+                    "origQty": "10",
+                    "executedQty": "10",
+                    "avgPrice": "9.0",
+                },
+                0,
+            )
+        )
+        strategy._prepare_entry_structure_window = MagicMock(
+            return_value=EntryStructureWindow(
+                bearish_close_time_utc=datetime(2025, 12, 1, 2, tzinfo=timezone.utc),
+                window_start_utc=datetime(2025, 12, 1, 0, tzinfo=timezone.utc),
+                highest_price=11.0,
+            )
+        )
+        strategy._complete_entry_structure_protection = MagicMock(
+            return_value=EntryStructureProtection(
+                stop_price=8.0,
+                bearish_close_time_utc=datetime(2025, 12, 1, 2, tzinfo=timezone.utc),
+                window_start_utc=datetime(2025, 12, 1, 0, tzinfo=timezone.utc),
+                window_end_utc=datetime(2025, 12, 1, 3, tzinfo=timezone.utc),
+            )
+        )
+        strategy._place_exit_orders = MagicMock()
+        strategy._cancel_order_if_exists = MagicMock()
+        strategy._utc_now_datetime = MagicMock(return_value=datetime(2025, 12, 1, 3, tzinfo=timezone.utc))
+
+        result = strategy._add_scale_in_tranche(
+            ready_entry=ReadyEntry(
+                entry=RankEntry("AAAUSDT", 15.0, 9.0, 100.0),
+                reference_price=9.0,
+                signal_time_utc=datetime(2025, 12, 1, 0, tzinfo=timezone.utc),
+                bearish_close_time_utc=datetime(2025, 12, 1, 2, tzinfo=timezone.utc),
+                entry_stage="SCALE_IN",
+                signal_hour_open_utc=datetime(2025, 12, 1, 1, tzinfo=timezone.utc),
+            ),
+            full_target_notional=100.0,
+            run_id="run-1",
+        )
+
+        self.assertEqual(result["status"], "ADDED")
+        strategy._complete_entry_structure_protection.assert_called_once()
+        strategy._place_exit_orders.assert_called_once_with(
+            position_id=7,
+            symbol="AAAUSDT",
+            entry_structure_stop_price=8.0,
+        )
+        self.assertEqual(
+            strategy._cancel_order_if_exists.call_args_list,
+            [
+                unittest.mock.call("AAAUSDT", 11, "old-tp"),
+                unittest.mock.call("AAAUSDT", 12, "old-sl"),
+            ],
+        )
+
+    def test_restored_scale_in_wait_survives_active_symbol_filter(self) -> None:
+        client = MagicMock()
+        store = MagicMock()
+        persisted = {
+            "run_id": "run-1",
+            "pending": {
+                "0": {
+                    "symbol": "AAAUSDT",
+                    "pct_change": 15.0,
+                    "last_price": 10.0,
+                    "quote_volume": 100.0,
+                    "signal_time_utc": "2025-12-01T00:00:00+00:00",
+                    "hour_open_utc": "2025-12-01T03:00:00+00:00",
+                    "phase": "WAIT_BEARISH",
+                    "bullish_seen": True,
+                }
+            },
+        }
+        store.get_lock_state.return_value = persisted
+        store.list_active_symbols.return_value = {"AAAUSDT"}
+        strategy = self._build_strategy(
+            client,
+            store,
+            entry_scale_in_mode="after_bullish_bearish_independent",
+        )
+
+        restored = strategy._restore_or_create_entry_wait(
+            candidates=[],
+            signal_base_time_utc=datetime(2025, 12, 1, 0, tzinfo=timezone.utc),
+            run_id="run-1",
+            trade_day_utc="2025-12-01",
+        )
+
+        self.assertIn(0, restored)
+        self.assertEqual(restored[0]["phase"], "WAIT_BEARISH")
+
     def test_closed_hour_kline_retry_uses_second_level_interval(self) -> None:
         strategy = self._build_strategy(
             MagicMock(),
