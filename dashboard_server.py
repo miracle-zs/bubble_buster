@@ -1364,12 +1364,15 @@ class DashboardDataProvider:
                         next_check = None
                 if next_check is not None:
                     next_checks.append(next_check)
+                entry_phase = str(item.get("phase") or "INITIAL").strip().upper()
                 waiting_symbols.append(
                     {
                         "symbol": symbol,
                         "signal_time_local": self._format_utc_as_local(item.get("signal_time_utc")),
                         "observing_hour_local": self._format_utc_as_local(hour_open_raw),
                         "next_check_local": self._format_utc_as_local(next_check.isoformat()) if next_check else None,
+                        "entry_phase": entry_phase,
+                        "bullish_seen": bool(item.get("bullish_seen", False)),
                     }
                 )
 
@@ -6262,6 +6265,284 @@ ACCOUNTS_OVERVIEW_HTML = """<!doctype html>
     }
   </style>
   <style>
+    /* Entry progress is an execution control surface: prioritize the next
+       decision and make the two-stage signal state legible at a glance. */
+    .entry-progress-panel {
+      margin-top:24px;
+      border:1px solid #21475c;
+      border-radius:18px;
+      overflow:hidden;
+      background:linear-gradient(145deg,rgba(12,31,43,0.98),rgba(7,18,27,0.98));
+      box-shadow:0 18px 42px rgba(0,0,0,0.22), 0 0 0 1px rgba(78,193,255,0.035) inset;
+    }
+    .entry-progress-heading {
+      margin:0;
+      padding:18px 20px 16px;
+      align-items:flex-start;
+      border-bottom:1px solid rgba(49,91,112,0.72);
+      background:linear-gradient(135deg,rgba(13,37,51,0.86),rgba(10,25,35,0.55));
+    }
+    .entry-progress-heading-copy { min-width:0; }
+    .entry-progress-kicker {
+      color:#69c8ee;
+      font-size:10px;
+      font-weight:800;
+      letter-spacing:0.16em;
+      text-transform:uppercase;
+      margin-bottom:5px;
+    }
+    .entry-progress-heading .section-title {
+      display:flex;
+      align-items:center;
+      flex-wrap:wrap;
+      gap:8px;
+      color:#f4fbff;
+      font-size:18px;
+    }
+    .entry-progress-strategy-badge {
+      display:inline-flex;
+      align-items:center;
+      min-height:22px;
+      padding:3px 9px;
+      border:1px solid rgba(78,193,255,0.42);
+      border-radius:999px;
+      color:#bcecff;
+      background:rgba(27,102,135,0.22);
+      font-size:10px;
+      font-weight:800;
+      letter-spacing:0.02em;
+      white-space:nowrap;
+    }
+    .entry-progress-heading-note {
+      margin:5px 0 0;
+      color:#88a9ba;
+      font-size:11px;
+      line-height:1.45;
+    }
+    .entry-progress-heading .section-heading-actions {
+      align-items:flex-end;
+      flex-wrap:wrap;
+      justify-content:flex-end;
+      gap:8px 12px;
+    }
+    .entry-progress-updated { color:#91afbe; font-size:11px; }
+    .entry-progress-zone {
+      color:#6f99ae;
+      font-size:10px;
+      white-space:nowrap;
+    }
+    .entry-progress-shell { border:0; background:rgba(5,16,24,0.32); }
+    .entry-progress-overview {
+      display:grid;
+      grid-template-columns:minmax(220px,1.2fr) repeat(3,minmax(100px,0.55fr)) minmax(190px,0.9fr);
+      gap:10px;
+      min-height:0;
+      padding:14px 16px;
+      border-bottom:1px solid rgba(35,71,92,0.72);
+    }
+    .entry-progress-overview-primary,
+    .entry-progress-stat,
+    .entry-progress-next-action {
+      min-width:0;
+      min-height:64px;
+      padding:11px 13px;
+      border:1px solid rgba(39,79,99,0.9);
+      border-radius:12px;
+      background:rgba(11,31,43,0.72);
+    }
+    .entry-progress-overview-primary {
+      display:flex;
+      flex-direction:column;
+      justify-content:center;
+    }
+    .entry-progress-overview-primary strong {
+      color:#f1f8fc;
+      font-size:20px;
+      line-height:1.15;
+    }
+    .entry-progress-overview-primary span { margin-top:5px; color:#86a8ba; font-size:10px; }
+    .entry-progress-stat {
+      display:flex;
+      flex-direction:column;
+      align-items:flex-start;
+      justify-content:center;
+      gap:3px;
+      color:#86a8ba;
+      font-size:10px;
+    }
+    .entry-progress-stat strong { color:#dcecf6; font-size:20px; line-height:1; }
+    .entry-progress-stat.ok { border-color:rgba(38,208,124,0.28); }
+    .entry-progress-stat.warn { border-color:rgba(255,179,64,0.35); }
+    .entry-progress-stat.bad { border-color:rgba(255,93,93,0.35); }
+    .entry-progress-stat.ok strong { color:#4be39a; }
+    .entry-progress-stat.warn strong { color:#ffc15d; }
+    .entry-progress-stat.bad strong { color:#ff7777; }
+    .entry-progress-next-action {
+      display:flex;
+      flex-direction:column;
+      justify-content:center;
+      border-color:rgba(78,193,255,0.46);
+      background:linear-gradient(135deg,rgba(25,77,101,0.36),rgba(11,36,49,0.66));
+    }
+    .entry-progress-next-action .entry-progress-next-label {
+      color:#8db4c7;
+      font-size:10px;
+      font-weight:700;
+      letter-spacing:0.06em;
+      text-transform:uppercase;
+    }
+    .entry-progress-next-action strong { color:#effaff; font-size:18px; line-height:1.2; }
+    .entry-progress-next-action small { color:#73c7e9; font-size:10px; margin-top:4px; }
+    .entry-progress-timeline {
+      display:block;
+      padding:14px 16px 15px;
+      border-bottom:1px solid rgba(35,71,92,0.72);
+    }
+    .entry-progress-timeline-head {
+      display:flex;
+      align-items:center;
+      justify-content:space-between;
+      gap:12px;
+      margin-bottom:11px;
+    }
+    .entry-progress-timeline-label {
+      padding:0;
+      color:#b6d8e8;
+      font-size:11px;
+      font-weight:800;
+      letter-spacing:0.03em;
+    }
+    .entry-progress-timeline-legend { color:#708f9f; font-size:10px; }
+    .entry-progress-timeline-track {
+      display:flex;
+      align-items:stretch;
+      gap:10px;
+      min-width:0;
+      overflow-x:auto;
+      padding:2px 2px 4px;
+      scrollbar-color:#2b5e76 transparent;
+    }
+    .entry-progress-timeline-event {
+      position:relative;
+      flex:1 1 0;
+      min-width:145px;
+      min-height:55px;
+      padding:10px 12px 9px 16px;
+      border:1px solid #28566d;
+      border-radius:10px;
+      background:rgba(13,38,52,0.72);
+    }
+    .entry-progress-timeline-event::before {
+      left:7px;
+      top:14px;
+      width:6px;
+      height:6px;
+      background:#55c9f4;
+      box-shadow:0 0 0 3px #0b202c;
+    }
+    .entry-progress-timeline-event time { margin-bottom:5px; color:#e2f5fd; font-size:12px; }
+    .entry-progress-timeline-event span { color:#9ec2d2; font-size:10px; line-height:1.45; }
+    .entry-progress-timeline-next {
+      border-style:dashed;
+      border-color:rgba(255,179,64,0.65);
+      background:rgba(104,70,24,0.18);
+    }
+    .entry-progress-timeline-next::before { background:#ffb340; }
+    .entry-progress-timeline-next time { color:#ffd387; }
+    .entry-progress-header,
+    .entry-progress-row {
+      display:grid;
+      grid-template-columns:100px minmax(210px,0.95fr) minmax(150px,0.82fr) minmax(130px,0.72fr) minmax(220px,1.28fr) minmax(92px,0.55fr);
+      column-gap:14px;
+      align-items:center;
+    }
+    .entry-progress-header {
+      min-height:34px;
+      padding:0 16px;
+      color:#7195aa;
+      background:rgba(17,38,52,0.72);
+      font-size:10px;
+      font-weight:800;
+      letter-spacing:0.05em;
+    }
+    .entry-progress-row {
+      min-height:88px;
+      padding:12px 16px;
+      border-top:1px solid rgba(35,71,92,0.52);
+      transition:background 140ms ease;
+    }
+    .entry-progress-row:hover { background:rgba(31,75,96,0.12); }
+    .entry-progress-account { gap:4px; }
+    .entry-progress-account strong { color:#62c9f5; font-size:14px; }
+    .entry-progress-account span { color:#7898a8; font-size:9px; }
+    .entry-progress-meter-wrap { min-width:0; }
+    .entry-progress-counts { gap:8px; margin-bottom:7px; color:#91b0bf; font-size:10px; }
+    .entry-progress-counts strong { color:#f0f8fd; font-size:16px; }
+    .entry-progress-meter { height:6px; border-radius:999px; background:#162e3d; }
+    .entry-progress-meter-opened { background:linear-gradient(90deg,#1fca7b,#4be39a); }
+    .entry-progress-meter-waiting { background:#ffb340; }
+    .entry-progress-meter-failed { background:#ff5d5d; }
+    .entry-progress-phase { min-width:0; display:flex; flex-direction:column; gap:4px; }
+    .entry-progress-phase-label { color:#f7c56d; font-size:11px; font-weight:800; }
+    .entry-progress-phase-label.ok { color:#55dda0; }
+    .entry-progress-phase-label.bad { color:#ff7777; }
+    .entry-progress-phase-note { color:#7899aa; font-size:10px; line-height:1.4; }
+    .entry-progress-window { color:#a0becb; font-size:10px; line-height:1.45; }
+    .entry-progress-waiting-list { display:flex; flex-wrap:wrap; gap:5px; min-width:0; }
+    .entry-progress-waiting-chip {
+      display:inline-flex;
+      flex-direction:column;
+      align-items:flex-start;
+      max-width:100%;
+      padding:5px 7px;
+      border:1px solid rgba(255,179,64,0.38);
+      border-radius:7px;
+      background:rgba(111,74,22,0.18);
+    }
+    .entry-progress-waiting-chip strong { color:#ffd387; font-size:10px; line-height:1.2; }
+    .entry-progress-waiting-chip small { color:#c59c5b; font-size:8px; line-height:1.3; }
+    .entry-progress-waiting-empty { color:#6f929f; font-size:10px; }
+    .entry-progress-next-cell { display:flex; flex-direction:column; gap:3px; }
+    .entry-progress-next-cell strong { color:#dff5ff; font-size:11px; }
+    .entry-progress-next-cell span { color:#73c7e9; font-size:9px; }
+    .entry-progress-detail { display:block; color:#9db8c8; font-size:10px; line-height:1.5; }
+    .entry-progress-detail.ok { color:#7898aa; }
+    .entry-progress-detail.warn { color:#ffd08a; }
+    .entry-progress-detail.bad { color:#ff8c8c; }
+    @media (max-width: 1180px) {
+      .entry-progress-overview { grid-template-columns:minmax(190px,1.1fr) repeat(3,minmax(90px,0.6fr)); }
+      .entry-progress-next-action { grid-column:1 / -1; min-height:54px; }
+      .entry-progress-header,
+      .entry-progress-row { grid-template-columns:92px minmax(180px,0.95fr) minmax(140px,0.82fr) minmax(120px,0.72fr) minmax(190px,1.2fr) 86px; column-gap:10px; }
+    }
+    @media (max-width: 820px) {
+      .entry-progress-heading { flex-direction:column; gap:12px; }
+      .entry-progress-heading .section-heading-actions { width:100%; align-items:center; justify-content:space-between; }
+      .entry-progress-header,
+      .entry-progress-row { grid-template-columns:92px minmax(170px,1fr) minmax(135px,0.85fr) minmax(180px,1.15fr); }
+      .entry-progress-header span:nth-child(4),
+      .entry-progress-row .entry-progress-window,
+      .entry-progress-header span:nth-child(6),
+      .entry-progress-row .entry-progress-next-cell { display:none; }
+    }
+    @media (max-width: 640px) {
+      .entry-progress-heading { padding:15px 14px 14px; }
+      .entry-progress-heading .section-heading-actions { align-items:flex-start; flex-direction:column; gap:8px; }
+      .entry-progress-overview { grid-template-columns:1fr 1fr; padding:12px 10px; }
+      .entry-progress-overview-primary { grid-column:1 / -1; }
+      .entry-progress-timeline { padding:13px 10px 14px; }
+      .entry-progress-timeline-head { align-items:flex-start; flex-direction:column; gap:4px; }
+      .entry-progress-timeline-track { margin:0 -2px; }
+      .entry-progress-timeline-event { min-width:170px; }
+      .entry-progress-header { display:none; }
+      .entry-progress-row { grid-template-columns:1fr; row-gap:10px; min-height:0; padding:14px 10px; }
+      .entry-progress-account { flex-direction:row; align-items:baseline; justify-content:space-between; }
+      .entry-progress-phase { padding-top:1px; }
+      .entry-progress-row .entry-progress-window { display:block; }
+      .entry-progress-row .entry-progress-next-cell { display:flex; }
+    }
+  </style>
+  <style>
     html { background:#071019; }
     body {
       min-height:100vh;
@@ -6937,9 +7218,14 @@ ACCOUNTS_OVERVIEW_HTML = """<!doctype html>
     <section id="cards" class="accounts-area"></section>
     <section class="entry-progress-panel">
       <div class="entry-progress-heading">
-        <h2 class="section-title">今日开单进度</h2>
+        <div class="entry-progress-heading-copy">
+          <div class="entry-progress-kicker">Execution control</div>
+          <h2 class="section-title">今日开单进度 <span class="entry-progress-strategy-badge">先阳后阴 · 信号独立开仓</span></h2>
+          <p class="entry-progress-heading-note">首笔先等 1h 阴线；第二笔在出现阳线后，等待下一根阴线独立开仓。</p>
+        </div>
         <div class="section-heading-actions">
           <div id="entry-progress-updated" class="entry-progress-updated">数据更新时间 --</div>
+          <span class="entry-progress-zone">北京时间 UTC+8</span>
           <button id="entry-progress-toggle" class="section-toggle" type="button">查看账号明细</button>
         </div>
       </div>
@@ -6994,6 +7280,7 @@ ACCOUNTS_OVERVIEW_HTML = """<!doctype html>
   var summaryRows = [];
   var taskFilter = "anomaly";
   var entryDetailsExpanded = false;
+  var nextEntryCheckRaw = "";
   var curveTtlMs = Math.max(60000, Math.max(15, refreshSec) * 3000);
   var summaryRequestInFlight = false;
   var summaryDetailsRequestInFlight = false;
@@ -7369,7 +7656,7 @@ ACCOUNTS_OVERVIEW_HTML = """<!doctype html>
   function entryProgressStatus(status) {
     var raw = String(status || "UNKNOWN").toUpperCase();
     if (raw === "COMPLETED") return { text: "已完成", cls: "status-ok" };
-    if (raw === "WAITING") return { text: "等待1h阴线", cls: "status-warn" };
+    if (raw === "WAITING") return { text: "等待先阳后阴", legacyText: "等待1h阴线", cls: "status-warn" };
     if (raw === "RUNNING") return { text: "执行中", cls: "status-warn" };
     if (raw === "PARTIAL") return { text: "部分完成", cls: "status-warn" };
     if (raw === "SKIPPED") return { text: "已跳过", cls: "status-warn" };
@@ -7380,6 +7667,93 @@ ACCOUNTS_OVERVIEW_HTML = """<!doctype html>
   function compactLocalTime(value) {
     var raw = String(value || "");
     return raw.length >= 16 ? raw.slice(11, 16) : raw;
+  }
+
+  function parseShanghaiLocalTime(value) {
+    var raw = String(value || "").trim();
+    if (!raw) return NaN;
+    var normalized = raw.replace(" ", "T");
+    if (!/[zZ]|[+-]\\d{2}:?\\d{2}$/.test(normalized)) normalized += "+08:00";
+    var parsed = Date.parse(normalized);
+    return Number.isFinite(parsed) ? parsed : NaN;
+  }
+
+  function formatEntryCountdown(milliseconds) {
+    var totalSeconds = Math.max(0, Math.ceil(Number(milliseconds || 0) / 1000));
+    var hours = Math.floor(totalSeconds / 3600);
+    var minutes = Math.floor((totalSeconds % 3600) / 60);
+    var seconds = totalSeconds % 60;
+    if (hours > 0) return "剩余 " + hours + "小时" + String(minutes).padStart(2, "0") + "分";
+    return "剩余 " + String(minutes).padStart(2, "0") + "分" + String(seconds).padStart(2, "0") + "秒";
+  }
+
+  function updateEntryProgressCountdown() {
+    var countdown = document.getElementById("entry-progress-countdown");
+    if (!countdown) return;
+    var targetMs = parseShanghaiLocalTime(nextEntryCheckRaw);
+    if (!Number.isFinite(targetMs)) {
+      countdown.textContent = nextEntryCheckRaw ? "等待时间同步" : "今日无待检查任务";
+      return;
+    }
+    var remainingMs = targetMs - Date.now();
+    countdown.textContent = remainingMs <= 0 ? "正在检查" : formatEntryCountdown(remainingMs);
+  }
+
+  function entryPhaseMeta(item) {
+    var phase = String((item || {}).entry_phase || "INITIAL").toUpperCase();
+    if (phase === "WAIT_BULLISH") return { label: "第二笔 · 等阳", note: "先阳后阴信号", cls: "warn" };
+    if (phase === "WAIT_BEARISH") return { label: "第二笔 · 阳后等阴", note: "确认后独立开仓", cls: "warn" };
+    if (phase === "POST_INITIAL_CANDLE") return { label: "首笔 · 确认中", note: "等待阴线收盘", cls: "warn" };
+    if (phase === "COMPLETE") return { label: "已完成", note: "信号已消费", cls: "ok" };
+    return { label: "第一笔 · 等阴线", note: "等待首根1h阴线", cls: "warn" };
+  }
+
+  function entryProgressPhase(progress) {
+    var waitingRows = progressItems(progress && progress.waiting_symbols);
+    if (waitingRows.length) {
+      var phaseCounts = {};
+      for (var i = 0; i < waitingRows.length; i += 1) {
+        var phase = String((waitingRows[i] || {}).entry_phase || "INITIAL").toUpperCase();
+        phaseCounts[phase] = Number(phaseCounts[phase] || 0) + 1;
+      }
+      if (phaseCounts.WAIT_BEARISH) {
+        return { label: "第二笔 · 阳后等阴", note: "先阳后阴 · 信号独立开仓", cls: "warn" };
+      }
+      if (phaseCounts.WAIT_BULLISH) {
+        return { label: "第二笔 · 等待阳线", note: "下一根阳线后才等阴线", cls: "warn" };
+      }
+      if (phaseCounts.POST_INITIAL_CANDLE) {
+        return { label: "首笔 · 确认中", note: "等待当前1h K线收盘", cls: "warn" };
+      }
+      if (phaseCounts.INITIAL) {
+        return { label: "第一笔 · 等待阴线", note: "首根1h阴线确认后开仓", cls: "warn" };
+      }
+      return { label: "等待信号", note: "策略信号尚未确认", cls: "warn" };
+    }
+    var status = String((progress && progress.status) || "UNKNOWN").toUpperCase();
+    if (status === "FAILED" || Number((progress || {}).failed_count || 0) > 0) {
+      return { label: "需要处理", note: "存在失败或部分完成任务", cls: "bad" };
+    }
+    if (status === "COMPLETED") return { label: "今日已完成", note: "没有待处理的开仓信号", cls: "ok" };
+    if (status === "PARTIAL") return { label: "部分完成", note: "请查看异常与任务", cls: "warn" };
+    return { label: "执行中", note: "等待后端状态同步", cls: "warn" };
+  }
+
+  function entryProgressWaitingHtml(progress) {
+    var waitingRows = progressItems(progress && progress.waiting_symbols);
+    if (!waitingRows.length) return '<div class="entry-progress-waiting-empty">无待处理信号</div>';
+    var html = '<div class="entry-progress-waiting-list">';
+    for (var i = 0; i < waitingRows.length; i += 1) {
+      var item = waitingRows[i] || {};
+      var meta = entryPhaseMeta(item);
+      var next = compactLocalTime(item.next_check_local || (progress && progress.next_check_local));
+      var title = meta.label + (next ? "，下次检查 " + next : "");
+      html += '<span class="entry-progress-waiting-chip" aria-label="' + escapeHtml(title) + '">'
+        + '<strong>' + escapeHtml(String(item.symbol || "--")) + '</strong>'
+        + '<small>' + escapeHtml(meta.label.split(" · ").pop() + (next ? " · " + next : "")) + '</small>'
+        + '</span>';
+    }
+    return html + '</div>';
   }
 
   function progressItems(value) {
@@ -7475,6 +7849,7 @@ ACCOUNTS_OVERVIEW_HTML = """<!doctype html>
       if (updated && (!latest || updated > latest)) latest = updated;
     }
     if (!accountRows.length) {
+      nextEntryCheckRaw = "";
       entryProgressBoard.innerHTML = '<div class="entry-progress-empty">暂无完整策略账号</div>';
       if (entryProgressUpdated) entryProgressUpdated.textContent = "数据更新时间 --";
       if (entryProgressToggle) entryProgressToggle.hidden = true;
@@ -7486,6 +7861,7 @@ ACCOUNTS_OVERVIEW_HTML = """<!doctype html>
     var openedTotal = 0;
     var waitingTotal = 0;
     var failedTotal = 0;
+    var nextCheckRaw = "";
     for (var j = 0; j < todayRows.length; j += 1) {
       var summary = todayRows[j];
       if (String(summary.status || "").toUpperCase() === "COMPLETED") completedAccounts += 1;
@@ -7493,7 +7869,10 @@ ACCOUNTS_OVERVIEW_HTML = """<!doctype html>
       openedTotal += Math.max(0, Number(summary.opened_count || 0));
       waitingTotal += Math.max(0, Number(summary.waiting_count || 0));
       failedTotal += Math.max(0, Number(summary.failed_count || 0));
+      var summaryNextCheck = String(summary.next_check_local || "");
+      if (summaryNextCheck && (!nextCheckRaw || summaryNextCheck < nextCheckRaw)) nextCheckRaw = summaryNextCheck;
     }
+    nextEntryCheckRaw = waitingTotal > 0 ? nextCheckRaw : "";
     var timeline = buildCommonEntryTimeline(todayRows);
     var hasIssues = todayRows.length !== accountRows.length
       || completedAccounts !== accountRows.length
@@ -7505,13 +7884,16 @@ ACCOUNTS_OVERVIEW_HTML = """<!doctype html>
       entryProgressToggle.hidden = hasIssues;
       entryProgressToggle.textContent = showDetails ? "收起账号明细" : "查看账号明细";
     }
+    var nextCheckLabel = nextCheckRaw ? compactLocalTime(nextCheckRaw) : "--";
+    var nextActionLabel = waitingTotal > 0 ? "等待信号检查" : (completedAccounts === accountRows.length ? "今日已完成" : "等待状态同步");
     var html = '<div class="entry-progress-overview">'
-      + '<div class="entry-progress-overview-primary"><strong>' + completedAccounts + ' / ' + accountRows.length + ' 账号完成</strong><span>今日榜单执行概览</span></div>'
-      + '<div class="entry-progress-stat ok"><strong>' + openedTotal + '</strong><span>/ ' + targetTotal + ' 已开</span></div>'
-      + '<div class="entry-progress-stat warn"><strong>' + waitingTotal + '</strong><span>等待</span></div>'
-      + '<div class="entry-progress-stat bad"><strong>' + failedTotal + '</strong><span>失败</span></div>'
+      + '<div class="entry-progress-overview-primary"><strong>' + openedTotal + ' / ' + targetTotal + ' 个任务已开</strong><span>' + completedAccounts + ' / ' + accountRows.length + ' 个账号完成 · 今日执行概览</span></div>'
+      + '<div class="entry-progress-stat ok"><strong>' + openedTotal + '</strong><span>已开任务</span></div>'
+      + '<div class="entry-progress-stat warn"><strong>' + waitingTotal + '</strong><span>等待信号</span></div>'
+      + '<div class="entry-progress-stat bad"><strong>' + failedTotal + '</strong><span>失败任务</span></div>'
+      + '<div class="entry-progress-next-action"><span class="entry-progress-next-label">下一动作</span><strong>' + escapeHtml(nextCheckLabel) + '</strong><small>' + escapeHtml(nextActionLabel) + ' · <span id="entry-progress-countdown">--</span></small></div>'
       + '</div>';
-    html += '<div class="entry-progress-timeline"><div class="entry-progress-timeline-label">共同开仓时间线</div><div class="entry-progress-timeline-track">';
+    html += '<div class="entry-progress-timeline"><div class="entry-progress-timeline-head"><div class="entry-progress-timeline-label">共同实际开仓窗口</div><div class="entry-progress-timeline-legend">已完成窗口 · 下一检查</div></div><div class="entry-progress-timeline-track">';
     if (timeline.groups.length) {
       for (var k = 0; k < timeline.groups.length; k += 1) {
         var group = timeline.groups[k];
@@ -7521,9 +7903,12 @@ ACCOUNTS_OVERVIEW_HTML = """<!doctype html>
     } else {
       html += '<div class="entry-progress-detail warn">各账号榜单存在差异，见下方账号明细</div>';
     }
+    if (nextCheckRaw) {
+      html += '<div class="entry-progress-timeline-event entry-progress-timeline-next"><time>' + escapeHtml(nextCheckLabel) + '</time><span>待检查 ' + waitingTotal + ' 个信号</span></div>';
+    }
     html += '</div></div>'
       + '<div class="entry-progress-details' + (showDetails ? "" : " is-collapsed") + '">'
-      + '<div class="entry-progress-header"><span>账号</span><span>完成度</span><span>状态</span><span>时间</span><span>差异 / 等待</span></div>';
+      + '<div class="entry-progress-header"><span>账号</span><span>完成度</span><span>当前阶段</span><span>最近执行</span><span>等待信号</span><span>下一步</span></div>';
 
     for (var n = 0; n < accountRows.length; n += 1) {
       var account = accountRows[n] || {};
@@ -7533,8 +7918,10 @@ ACCOUNTS_OVERVIEW_HTML = """<!doctype html>
         html += '<div class="entry-progress-row">'
           + '<div class="entry-progress-account"><strong>' + aid + '</strong><span>今日尚未执行</span></div>'
           + '<div class="entry-progress-meter-wrap"><div class="entry-progress-counts"><strong>0</strong><span>/ 0</span></div><div class="entry-progress-meter"></div></div>'
-          + '<div class="entry-progress-state"><span class="entry-progress-status status-warn">未开始</span><span class="entry-progress-next">--</span></div>'
-          + '<div class="entry-progress-window">--</div><div class="entry-progress-detail warn">等待今日榜单</div></div>';
+          + '<div class="entry-progress-phase"><span class="entry-progress-phase-label">未开始</span><span class="entry-progress-phase-note">等待今日榜单</span></div>'
+          + '<div class="entry-progress-window">--</div>'
+          + '<div class="entry-progress-waiting-list"><div class="entry-progress-waiting-empty">等待今日榜单</div></div>'
+          + '<div class="entry-progress-next-cell"><strong>--</strong><span>尚未开始</span></div></div>';
         continue;
       }
       var target = Math.max(0, Number(progress.target_count || 0));
@@ -7547,19 +7934,25 @@ ACCOUNTS_OVERVIEW_HTML = """<!doctype html>
       var waitingPct = Math.min(100 - openedPct, waiting / denom * 100);
       var failedPct = Math.min(100 - openedPct - waitingPct, entryFailed / denom * 100);
       var status = entryProgressStatus(progress.status);
-      var nextText = progress.next_check_local ? ("下次 " + compactLocalTime(progress.next_check_local)) : "无等待任务";
+      var phase = entryProgressPhase(progress);
+      var nextText = progress.next_check_local ? compactLocalTime(progress.next_check_local) : "--";
       var detail = entryProgressDetail(progress, timeline.commonKeys);
+      var waitingHtml = waiting ? entryProgressWaitingHtml(progress) : '<div class="entry-progress-detail ' + detail.cls + '">' + escapeHtml(detail.text) + '</div>';
+      var statusTitle = status.legacyText ? status.text + "（" + status.legacyText + "）" : status.text;
+      var nextNote = waiting ? "按小时收盘检查" : (failed ? "请查看任务日志" : "无需动作");
       html += '<div class="entry-progress-row">'
         + '<div class="entry-progress-account"><strong>' + aid + '</strong><span>' + escapeHtml(String(progress.started_at_local || "--")) + '</span></div>'
-        + '<div class="entry-progress-meter-wrap"><div class="entry-progress-counts"><strong>' + opened + '</strong><span>/ ' + target + ' 已开</span>'
+        + '<div class="entry-progress-meter-wrap"><div class="entry-progress-counts"><strong>' + opened + '</strong><span>/ ' + target + ' 个任务</span>'
         + (waiting ? '<span>等待 ' + waiting + '</span>' : '') + (failed ? '<span>失败 ' + failed + '</span>' : '') + '</div>'
         + '<div class="entry-progress-meter"><span class="entry-progress-meter-opened" style="width:' + openedPct.toFixed(2) + '%"></span><span class="entry-progress-meter-waiting" style="width:' + waitingPct.toFixed(2) + '%"></span><span class="entry-progress-meter-failed" style="width:' + failedPct.toFixed(2) + '%"></span></div></div>'
-        + '<div class="entry-progress-state"><span class="entry-progress-status ' + status.cls + '">' + status.text + '</span><span class="entry-progress-next">' + escapeHtml(nextText) + '</span></div>'
+        + '<div class="entry-progress-phase" aria-label="' + escapeHtml(statusTitle) + '"><span class="entry-progress-phase-label ' + phase.cls + '">' + escapeHtml(phase.label) + '</span><span class="entry-progress-phase-note">' + escapeHtml(phase.note) + '</span></div>'
         + '<div class="entry-progress-window">' + escapeHtml(entryProgressWindow(progress)) + '</div>'
-        + '<div class="entry-progress-detail ' + detail.cls + '">' + escapeHtml(detail.text) + '</div></div>';
+        + waitingHtml
+        + '<div class="entry-progress-next-cell"><strong>' + escapeHtml(nextText) + '</strong><span>' + escapeHtml(nextNote) + '</span></div></div>';
     }
     html += "</div>";
     entryProgressBoard.innerHTML = html;
+    updateEntryProgressCountdown();
     if (entryProgressUpdated) entryProgressUpdated.textContent = "数据更新时间 " + (latest || "--");
   }
 
@@ -8183,6 +8576,7 @@ ACCOUNTS_OVERVIEW_HTML = """<!doctype html>
   setInterval(fetchSummary, Math.max(15, refreshSec) * 1000);
   setInterval(fetchSummaryDetails, Math.max(15, refreshSec) * 1000);
   setInterval(fetchHealth, Math.max(30, refreshSec * 2) * 1000);
+  setInterval(updateEntryProgressCountdown, 1000);
 })();
 </script>
 </body>
