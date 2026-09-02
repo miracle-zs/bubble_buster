@@ -66,6 +66,7 @@ class ReadyEntry:
     reference_price: float
     signal_time_utc: datetime
     bearish_close_time_utc: Optional[datetime]
+    entry_stage: str = "INITIAL"
     preclose_entry: bool = False
     preclose_time_utc: Optional[datetime] = None
     signal_hour_open_utc: Optional[datetime] = None
@@ -103,6 +104,15 @@ class Top10ShortStrategy:
     REBALANCE_MODE_AGE_DECAY = "age_decay"
     EQUITY_RECOVERY_LOCK_NAME = "equity_recovery_take_profit_v1"
     ENTRY_WAIT_LOCK_NAME = "bearish_hour_entry_wait_v1"
+    ENTRY_SCALE_IN_MODE_NONE = "none"
+    ENTRY_SCALE_IN_MODE_AFTER_BULLISH_BEARISH = "after_bullish_bearish"
+    ENTRY_STAGE_INITIAL = "INITIAL"
+    ENTRY_STAGE_SCALE_IN = "SCALE_IN"
+    ENTRY_PHASE_INITIAL = "INITIAL"
+    ENTRY_PHASE_POST_INITIAL_CANDLE = "POST_INITIAL_CANDLE"
+    ENTRY_PHASE_WAIT_BULLISH = "WAIT_BULLISH"
+    ENTRY_PHASE_WAIT_BEARISH = "WAIT_BEARISH"
+    ENTRY_PHASE_COMPLETE = "COMPLETE"
     PRECLOSE_STRUCTURE_DEFERRED_BEFORE_NOON = "DEFERRED_BEFORE_NOON"
     PENDING_EXIT_SETUP_RECOVERY_GRACE_SEC = 30.0
     LIQUIDATION_PRICE_RETRY_DELAYS_SEC = (1.0, 2.0)
@@ -151,6 +161,8 @@ class Top10ShortStrategy:
         entry_wait_close_retry_count: int = 5,
         entry_wait_max_hours: float = 16.0,
         entry_preclose_sec: float = 0.0,
+        entry_scale_in_mode: str = ENTRY_SCALE_IN_MODE_NONE,
+        entry_scale_in_first_ratio: float = 0.50,
         cooling_off_retry_count: int = 0,
         cooling_off_retry_delay_sec: int = 0,
         runtime_timezone: str = "Asia/Shanghai",
@@ -202,6 +214,11 @@ class Top10ShortStrategy:
         self.entry_wait_close_retry_count = max(1, int(entry_wait_close_retry_count))
         self.entry_wait_max_hours = max(1.0, float(entry_wait_max_hours))
         self.entry_preclose_sec = min(59.0, max(0.0, float(entry_preclose_sec)))
+        self.entry_scale_in_mode = self._normalize_entry_scale_in_mode(entry_scale_in_mode)
+        self.entry_scale_in_first_ratio = min(0.95, max(0.05, float(entry_scale_in_first_ratio)))
+        self.entry_scale_in_second_ratio = 1.0 - self.entry_scale_in_first_ratio
+        if self.entry_scale_in_mode != self.ENTRY_SCALE_IN_MODE_NONE:
+            self.entry_wait_bearish_hour_enabled = True
         self.cooling_off_retry_count = max(0, int(cooling_off_retry_count))
         self.cooling_off_retry_delay_sec = max(0, int(cooling_off_retry_delay_sec))
         self.runtime_timezone_name = (runtime_timezone or "").strip() or "UTC"
@@ -380,8 +397,12 @@ class Top10ShortStrategy:
         entry_deferred_count = 0
         exit_setup_failed_count = 0
         exit_setup_deferred_count = 0
+        scale_in_added_count = 0
+        scale_in_failed_count = 0
+        scale_in_skipped_count = 0
         skipped_symbols: List[str] = []
         opened_symbols: List[str] = []
+        scale_in_symbols: List[str] = []
         entry_failure_details: List[str] = []
         entry_deferred_details: List[str] = []
         exit_setup_failure_details: List[str] = []
@@ -596,6 +617,7 @@ class Top10ShortStrategy:
                 else self._utc_now_datetime()
             )
             self._last_entry_wait_expired_symbols: List[str] = []
+            self._last_entry_scale_in_expired_symbols: List[str] = []
             ready_entries = self._iter_ready_entries_after_bearish_hour(
                 candidates=candidates,
                 signal_base_time_utc=entry_signal_base_time,
@@ -608,25 +630,46 @@ class Top10ShortStrategy:
                     break
                 entry = ready_entry.entry
                 reference_price = ready_entry.reference_price
+                entry_stage = str(getattr(ready_entry, "entry_stage", self.ENTRY_STAGE_INITIAL)).strip().upper()
                 position_id: Optional[int] = None
                 mutation_acquired = False
                 try:
-                    entry_structure_window = self._prepare_entry_structure_window(ready_entry)
                     self._mutation_lock.acquire()
                     mutation_acquired = True
+                    if entry_stage == self.ENTRY_STAGE_SCALE_IN:
+                        scale_result = self._add_scale_in_tranche(
+                            ready_entry=ready_entry,
+                            full_target_notional=target_notional,
+                        )
+                        if str(scale_result.get("status") or "").upper() == "ADDED":
+                            scale_in_added_count += 1
+                            symbol = str(scale_result.get("symbol") or entry.symbol)
+                            if symbol not in scale_in_symbols:
+                                scale_in_symbols.append(symbol)
+                        else:
+                            scale_in_skipped_count += 1
+                        continue
+
+                    entry_structure_window = self._prepare_entry_structure_window(ready_entry)
                     normalized_entry_symbol = entry.symbol.strip().upper()
                     if normalized_entry_symbol not in self._entry_prewarmed_leverage_symbols:
                         self.client.ensure_isolated_and_leverage(entry.symbol, self.leverage)
-                    qty_diagnostic = self.client.diagnose_order_qty(entry.symbol, target_notional, reference_price)
+                    entry_ratio = self._entry_ratio_for_stage(entry_stage)
+                    entry_target_notional = target_notional * entry_ratio
+                    qty_diagnostic = self.client.diagnose_order_qty(
+                        entry.symbol,
+                        entry_target_notional,
+                        reference_price,
+                    )
                     qty = float(qty_diagnostic["normalized_qty"])
                     plan = PlannedOrder(
                         symbol=entry.symbol,
-                        base_margin_usdt=base_margin,
-                        target_notional_usdt=target_notional,
+                        base_margin_usdt=base_margin * entry_ratio,
+                        target_notional_usdt=entry_target_notional,
                         qty=qty,
                     )
                     if plan.qty <= 0:
-                        failed_notional += target_notional
+                        failed_notional += entry_target_notional
                         entry_failed_count += 1
                         entry_failure_details.append(
                             f"{entry.symbol}: qty归一化后为0(不满足最小下单规则)"
@@ -637,7 +680,7 @@ class Top10ShortStrategy:
                             "normalized_qty=%.10f normalized_notional=%.10f step_size=%s "
                             "min_qty=%s min_notional=%s reject_reason=%s",
                             entry.symbol,
-                            target_notional,
+                            entry_target_notional,
                             reference_price,
                             qty_diagnostic["has_rules"],
                             float(qty_diagnostic["raw_qty"]),
@@ -916,10 +959,15 @@ class Top10ShortStrategy:
                                 entry.symbol,
                                 recovery_exc,
                             )
-                    failed_notional += target_notional
-                    entry_failed_count += 1
-                    entry_failure_details.append(f"{entry.symbol}: {exc}")
-                    LOGGER.exception("Initial entry failed for %s: %s", entry.symbol, exc)
+                    failed_notional += target_notional * self._entry_ratio_for_stage(entry_stage)
+                    if entry_stage == self.ENTRY_STAGE_SCALE_IN:
+                        scale_in_failed_count += 1
+                        entry_failure_details.append(f"{entry.symbol}: SCALE_IN {exc}")
+                        LOGGER.exception("Scale-in entry failed for %s: %s", entry.symbol, exc)
+                    else:
+                        entry_failed_count += 1
+                        entry_failure_details.append(f"{entry.symbol}: {exc}")
+                        LOGGER.exception("Initial entry failed for %s: %s", entry.symbol, exc)
                 finally:
                     if mutation_acquired:
                         self._mutation_lock.release()
@@ -942,6 +990,7 @@ class Top10ShortStrategy:
             for symbol in self._last_entry_wait_expired_symbols:
                 entry_failed_count += 1
                 entry_failure_details.append(f"{symbol}: WAIT_BEARISH_HOUR_EXPIRED")
+            scale_in_skipped_count += len(self._last_entry_scale_in_expired_symbols)
 
             if self._entry_wait_interrupted:
                 LOGGER.info(
@@ -953,19 +1002,26 @@ class Top10ShortStrategy:
                     "status": "INTERRUPTED",
                     "run_id": run_id,
                     "opened": opened_count,
-                "failed": entry_failed_count + exit_setup_failed_count,
-                "entry_failed": entry_failed_count,
-                "entry_deferred": entry_deferred_count,
-                "exit_setup_failed": exit_setup_failed_count,
-                "exit_setup_deferred": exit_setup_deferred_count,
-            }
+                    "failed": entry_failed_count + exit_setup_failed_count + scale_in_failed_count,
+                    "entry_failed": entry_failed_count,
+                    "entry_deferred": entry_deferred_count,
+                    "exit_setup_failed": exit_setup_failed_count,
+                    "exit_setup_deferred": exit_setup_deferred_count,
+                    "scale_in_added": scale_in_added_count,
+                    "scale_in_failed": scale_in_failed_count,
+                    "scale_in_skipped": scale_in_skipped_count,
+                }
 
-            failed_count = entry_failed_count + exit_setup_failed_count
+            failed_count = entry_failed_count + exit_setup_failed_count + scale_in_failed_count
             summary = (
                 f"run_id={run_id}, opened={opened_count}, failed={failed_count}, "
                 f"entry_failed={entry_failed_count}, entry_deferred={entry_deferred_count}, "
                 f"exit_setup_failed={exit_setup_failed_count}, "
                 f"exit_setup_deferred={exit_setup_deferred_count}, "
+                f"entry_scale_in_mode={self.entry_scale_in_mode}, "
+                f"scale_in_added={scale_in_added_count}, "
+                f"scale_in_failed={scale_in_failed_count}, "
+                f"scale_in_skipped={scale_in_skipped_count}, "
                 f"skipped_existing={len(skipped_symbols)}, failed_notional={failed_notional:.4f}, "
                 f"fee_buffer_pct={self.entry_fee_buffer_pct:.2f}, shrink_retry_success={len(shrink_retry_details)}, "
                 f"entry_target_mode={entry_target_mode}, entry_target_notional={target_notional:.4f}, "
@@ -1010,6 +1066,10 @@ class Top10ShortStrategy:
                 "entry_deferred": entry_deferred_count,
                 "exit_setup_failed": exit_setup_failed_count,
                 "exit_setup_deferred": exit_setup_deferred_count,
+                "scale_in_added": scale_in_added_count,
+                "scale_in_failed": scale_in_failed_count,
+                "scale_in_skipped": scale_in_skipped_count,
+                "scale_in_symbols": scale_in_symbols,
                 "skipped": len(skipped_symbols),
                 "skipped_symbols": skipped_symbols,
                 "entry_failed_symbols": self._extract_symbol_prefixes(entry_failure_details),
@@ -1038,11 +1098,14 @@ class Top10ShortStrategy:
                 "run_id": run_id,
                 "error": str(exc),
                 "opened": opened_count,
-                "failed": entry_failed_count + exit_setup_failed_count,
+                "failed": entry_failed_count + exit_setup_failed_count + scale_in_failed_count,
                 "entry_failed": entry_failed_count,
                 "entry_deferred": entry_deferred_count,
                 "exit_setup_failed": exit_setup_failed_count,
                 "exit_setup_deferred": exit_setup_deferred_count,
+                "scale_in_added": scale_in_added_count,
+                "scale_in_failed": scale_in_failed_count,
+                "scale_in_skipped": scale_in_skipped_count,
                 "skipped_symbols": [],
                 "entry_failed_symbols": self._extract_symbol_prefixes(entry_failure_details),
                 "entry_deferred_symbols": self._extract_symbol_prefixes(entry_deferred_details),
@@ -1335,6 +1398,313 @@ class Top10ShortStrategy:
                 summary["skipped"] += 1
         return summary
 
+    def _iter_ready_entries_after_bullish_then_bearish(
+        self,
+        candidates: List[RankEntry],
+        signal_base_time_utc: datetime,
+        run_id: Optional[str] = None,
+        trade_day_utc: Optional[str] = None,
+    ) -> Iterator[ReadyEntry]:
+        """Yield the first tranche, then an add-on after bullish then bearish candles.
+
+        The first bearish candle opens the initial tranche.  The same hourly
+        candle is not reused for the add-on unless it was entered pre-close;
+        in that case its finalized direction is evaluated once the candle is
+        closed.  After a bullish candle is observed, the next later bearish
+        candle opens the remaining tranche.
+        """
+        pending = self._restore_or_create_entry_wait(
+            candidates=candidates,
+            signal_base_time_utc=signal_base_time_utc,
+            run_id=run_id,
+            trade_day_utc=trade_day_utc,
+        )
+
+        while pending:
+            if self._entry_wait_stop_event.is_set():
+                self._entry_wait_interrupted = True
+                return
+
+            now = self._utc_now_datetime()
+            wait_state = self._load_entry_wait_state()
+            deadline_raw = str(wait_state.get("deadline_utc") or "").strip()
+            deadline = self._parse_iso_utc(deadline_raw) if deadline_raw else None
+            if deadline is not None and now >= deadline:
+                self._last_entry_wait_expired_symbols = [
+                    str(state["entry"].symbol)
+                    for state in pending.values()
+                    if isinstance(state.get("entry"), RankEntry)
+                    and str(state.get("phase") or self.ENTRY_PHASE_INITIAL).strip().upper()
+                    == self.ENTRY_PHASE_INITIAL
+                ]
+                self._last_entry_scale_in_expired_symbols = [
+                    str(state["entry"].symbol)
+                    for state in pending.values()
+                    if isinstance(state.get("entry"), RankEntry)
+                    and str(state.get("phase") or self.ENTRY_PHASE_INITIAL).strip().upper()
+                    != self.ENTRY_PHASE_INITIAL
+                ]
+                LOGGER.warning(
+                    "Entry bullish-then-bearish wait expired: account=%s run_id=%s initial_symbols=%s "
+                    "scale_in_symbols=%s deadline=%s",
+                    self.account_id,
+                    run_id,
+                    self._last_entry_wait_expired_symbols,
+                    self._last_entry_scale_in_expired_symbols,
+                    deadline.isoformat(timespec="seconds"),
+                )
+                pending.clear()
+                self._clear_entry_wait_state()
+                break
+
+            ready_this_round: List[Tuple[int, ReadyEntry]] = []
+            next_check_times: List[datetime] = []
+            due_preclose_states: List[Tuple[int, RankEntry, datetime]] = []
+            due_final_states: List[Tuple[int, RankEntry, datetime]] = []
+
+            for idx, state in list(pending.items()):
+                entry = state.get("entry")
+                hour_open = state.get("hour_open")
+                if not isinstance(entry, RankEntry) or not isinstance(hour_open, datetime):
+                    continue
+
+                phase = str(state.get("phase") or self.ENTRY_PHASE_INITIAL).strip().upper()
+                if phase == self.ENTRY_PHASE_COMPLETE:
+                    pending.pop(idx, None)
+                    continue
+
+                hour_close = hour_open + timedelta(hours=1)
+                preclose_checked = bool(state.get("preclose_checked", False))
+                if (
+                    phase == self.ENTRY_PHASE_INITIAL
+                    and self.entry_preclose_sec > 0
+                    and not preclose_checked
+                ):
+                    available_at = hour_close - timedelta(seconds=self.entry_preclose_sec)
+                    if now < available_at:
+                        next_check_times.append(available_at)
+                        continue
+                    final_available_at = hour_close + timedelta(seconds=self.entry_wait_close_grace_sec)
+                    if now >= final_available_at:
+                        due_final_states.append((idx, entry, hour_open))
+                        continue
+                    due_preclose_states.append((idx, entry, hour_open))
+                    continue
+
+                available_at = hour_close + timedelta(seconds=self.entry_wait_close_grace_sec)
+                if now < available_at:
+                    next_check_times.append(available_at)
+                    continue
+                due_final_states.append((idx, entry, hour_open))
+
+            preclose_candle_results = self._fetch_hour_candles_parallel(
+                due_preclose_states,
+                snapshot_as_of_utc=now,
+            )
+            final_candle_results = self._fetch_hour_candles_parallel(due_final_states)
+            retry_round_pause_sec = min(
+                float(self.entry_wait_poll_sec),
+                max(
+                    self.entry_wait_close_retry_sec,
+                    self.entry_wait_close_retry_sec * self.entry_wait_close_retry_count,
+                ),
+            )
+
+            for idx, entry, hour_open in due_preclose_states:
+                state = pending.get(idx)
+                if state is None:
+                    continue
+                candle = preclose_candle_results.get(idx)
+                if candle is None:
+                    next_check_times.append(now + timedelta(seconds=retry_round_pause_sec))
+                    continue
+
+                open_price, close_price, _snapshot_time = candle
+                state["preclose_checked"] = True
+                self._persist_entry_wait_pending(
+                    pending=pending,
+                    run_id=run_id,
+                    trade_day_utc=trade_day_utc,
+                    signal_base_time_utc=signal_base_time_utc,
+                )
+                if close_price < open_price:
+                    ready_this_round.append(
+                        (
+                            idx,
+                            ReadyEntry(
+                                entry=entry,
+                                reference_price=close_price,
+                                signal_time_utc=(
+                                    state["signal_time"]
+                                    if isinstance(state.get("signal_time"), datetime)
+                                    else signal_base_time_utc
+                                ),
+                                bearish_close_time_utc=None,
+                                entry_stage=self.ENTRY_STAGE_INITIAL,
+                                preclose_entry=True,
+                                preclose_time_utc=now,
+                                signal_hour_open_utc=hour_open,
+                                provisional_open_price=open_price,
+                                provisional_close_price=close_price,
+                            ),
+                        )
+                    )
+                    state["phase"] = self.ENTRY_PHASE_POST_INITIAL_CANDLE
+                    state["hour_open"] = hour_open
+                    LOGGER.info(
+                        "Entry scale-in first tranche preclose ready: account=%s symbol=%s hour_open=%s",
+                        self.account_id,
+                        entry.symbol,
+                        hour_open.isoformat(timespec="seconds"),
+                    )
+                else:
+                    next_check_times.append(hour_open + timedelta(hours=1, seconds=self.entry_wait_close_grace_sec))
+
+            for idx, entry, hour_open in due_final_states:
+                state = pending.get(idx)
+                if state is None:
+                    continue
+                candle = final_candle_results.get(idx)
+                if candle is None:
+                    next_check_times.append(now + timedelta(seconds=retry_round_pause_sec))
+                    continue
+
+                open_price, close_price, close_time = candle
+                phase = str(state.get("phase") or self.ENTRY_PHASE_INITIAL).strip().upper()
+                if phase == self.ENTRY_PHASE_INITIAL:
+                    if close_price < open_price:
+                        ready_this_round.append(
+                            (
+                                idx,
+                                ReadyEntry(
+                                    entry=entry,
+                                    reference_price=close_price,
+                                    signal_time_utc=(
+                                        state["signal_time"]
+                                        if isinstance(state.get("signal_time"), datetime)
+                                        else signal_base_time_utc
+                                    ),
+                                    bearish_close_time_utc=close_time,
+                                    entry_stage=self.ENTRY_STAGE_INITIAL,
+                                    signal_hour_open_utc=hour_open,
+                                ),
+                            )
+                        )
+                        state["phase"] = self.ENTRY_PHASE_WAIT_BULLISH
+                        state["hour_open"] = hour_open + timedelta(hours=1)
+                        state["preclose_checked"] = False
+                        LOGGER.info(
+                            "Entry scale-in first tranche ready: account=%s symbol=%s signal=%s",
+                            self.account_id,
+                            entry.symbol,
+                            close_time.isoformat(timespec="seconds"),
+                        )
+                    else:
+                        state["hour_open"] = hour_open + timedelta(hours=1)
+                        state["preclose_checked"] = False
+
+                elif phase == self.ENTRY_PHASE_POST_INITIAL_CANDLE:
+                    state["phase"] = (
+                        self.ENTRY_PHASE_WAIT_BEARISH
+                        if close_price > open_price
+                        else self.ENTRY_PHASE_WAIT_BULLISH
+                    )
+                    state["bullish_seen"] = close_price > open_price
+                    state["hour_open"] = hour_open + timedelta(hours=1)
+                    state["preclose_checked"] = False
+                    LOGGER.info(
+                        "Entry scale-in initial candle finalized: account=%s symbol=%s open=%.10f close=%.10f phase=%s",
+                        self.account_id,
+                        entry.symbol,
+                        open_price,
+                        close_price,
+                        state["phase"],
+                    )
+
+                elif phase == self.ENTRY_PHASE_WAIT_BULLISH:
+                    if close_price > open_price:
+                        state["phase"] = self.ENTRY_PHASE_WAIT_BEARISH
+                        state["bullish_seen"] = True
+                    state["hour_open"] = hour_open + timedelta(hours=1)
+                    state["preclose_checked"] = False
+                    LOGGER.info(
+                        "Entry scale-in bullish scan: account=%s symbol=%s open=%.10f close=%.10f phase=%s",
+                        self.account_id,
+                        entry.symbol,
+                        open_price,
+                        close_price,
+                        state["phase"],
+                    )
+
+                elif phase == self.ENTRY_PHASE_WAIT_BEARISH:
+                    if close_price < open_price:
+                        ready_this_round.append(
+                            (
+                                idx,
+                                ReadyEntry(
+                                    entry=entry,
+                                    reference_price=close_price,
+                                    signal_time_utc=(
+                                        state["signal_time"]
+                                        if isinstance(state.get("signal_time"), datetime)
+                                        else signal_base_time_utc
+                                    ),
+                                    bearish_close_time_utc=close_time,
+                                    entry_stage=self.ENTRY_STAGE_SCALE_IN,
+                                    signal_hour_open_utc=hour_open,
+                                ),
+                            )
+                        )
+                        state["phase"] = self.ENTRY_PHASE_COMPLETE
+                        LOGGER.info(
+                            "Entry scale-in second tranche ready: account=%s symbol=%s signal=%s",
+                            self.account_id,
+                            entry.symbol,
+                            close_time.isoformat(timespec="seconds"),
+                        )
+                    else:
+                        state["hour_open"] = hour_open + timedelta(hours=1)
+                    state["preclose_checked"] = False
+
+                self._persist_entry_wait_pending(
+                    pending=pending,
+                    run_id=run_id,
+                    trade_day_utc=trade_day_utc,
+                    signal_base_time_utc=signal_base_time_utc,
+                )
+
+            if ready_this_round:
+                for _idx, item in sorted(
+                    ready_this_round,
+                    key=lambda pair: (
+                        pair[1].bearish_close_time_utc or pair[1].signal_time_utc,
+                        pair[0],
+                    ),
+                ):
+                    yield item
+                    if item.entry_stage == self.ENTRY_STAGE_SCALE_IN:
+                        pending.pop(_idx, None)
+                    self._persist_entry_wait_pending(
+                        pending=pending,
+                        run_id=run_id,
+                        trade_day_utc=trade_day_utc,
+                        signal_base_time_utc=signal_base_time_utc,
+                    )
+
+            if not pending:
+                break
+            sleep_sec = 0.0 if (due_preclose_states or due_final_states) and not next_check_times else float(
+                self.entry_wait_poll_sec
+            )
+            if next_check_times:
+                wait_until = min(next_check_times)
+                sleep_sec = min(sleep_sec, max(0.0, (wait_until - now).total_seconds()))
+            if sleep_sec <= 0:
+                continue
+            if self._entry_wait_stop_event.wait(timeout=sleep_sec):
+                self._entry_wait_interrupted = True
+                return
+
     def _iter_ready_entries_after_bearish_hour(
         self,
         candidates: List[RankEntry],
@@ -1342,6 +1712,15 @@ class Top10ShortStrategy:
         run_id: Optional[str] = None,
         trade_day_utc: Optional[str] = None,
     ) -> Iterator[ReadyEntry]:
+        if self.entry_scale_in_mode == self.ENTRY_SCALE_IN_MODE_AFTER_BULLISH_BEARISH:
+            yield from self._iter_ready_entries_after_bullish_then_bearish(
+                candidates=candidates,
+                signal_base_time_utc=signal_base_time_utc,
+                run_id=run_id,
+                trade_day_utc=trade_day_utc,
+            )
+            return
+
         if not self.entry_wait_bearish_hour_enabled:
             for idx, entry in enumerate(candidates):
                 yield ReadyEntry(
@@ -1667,6 +2046,8 @@ class Top10ShortStrategy:
                     "signal_time": signal_time,
                     "hour_open": hour_open,
                     "preclose_checked": bool(item.get("preclose_checked", False)),
+                    "phase": str(item.get("phase") or self.ENTRY_PHASE_INITIAL).strip().upper(),
+                    "bullish_seen": bool(item.get("bullish_seen", False)),
                 }
             if restored:
                 if len(restored) != len(raw_pending):
@@ -1697,6 +2078,8 @@ class Top10ShortStrategy:
                 "signal_time": signal_time,
                 "hour_open": self._floor_to_utc_hour(signal_time),
                 "preclose_checked": False,
+                "phase": self.ENTRY_PHASE_INITIAL,
+                "bullish_seen": False,
             }
         self._persist_entry_wait_pending(
             pending=pending,
@@ -1742,12 +2125,15 @@ class Top10ShortStrategy:
                 "signal_time_utc": signal_time.astimezone(timezone.utc).isoformat(),
                 "hour_open_utc": hour_open.astimezone(timezone.utc).isoformat(),
                 "preclose_checked": bool(state.get("preclose_checked", False)),
+                "phase": str(state.get("phase") or self.ENTRY_PHASE_INITIAL).strip().upper(),
+                "bullish_seen": bool(state.get("bullish_seen", False)),
             }
         self.store.set_lock_state(
             self.ENTRY_WAIT_LOCK_NAME,
             {
                 "run_id": run_id,
                 "trade_day_utc": trade_day_utc,
+                "entry_scale_in_mode": self.entry_scale_in_mode,
                 "signal_base_time_utc": signal_base_time_utc.astimezone(timezone.utc).isoformat(),
                 "deadline_utc": deadline.astimezone(timezone.utc).isoformat(),
                 "pending": serialized,
@@ -3507,6 +3893,35 @@ class Top10ShortStrategy:
         )
 
     @classmethod
+    def _normalize_entry_scale_in_mode(cls, raw_mode: str) -> str:
+        normalized = str(raw_mode or "").strip().lower().replace("-", "_")
+        aliases = {
+            "": cls.ENTRY_SCALE_IN_MODE_NONE,
+            "off": cls.ENTRY_SCALE_IN_MODE_NONE,
+            "disabled": cls.ENTRY_SCALE_IN_MODE_NONE,
+            "none": cls.ENTRY_SCALE_IN_MODE_NONE,
+            "after_bullish_bearish": cls.ENTRY_SCALE_IN_MODE_AFTER_BULLISH_BEARISH,
+            "bull_then_bear": cls.ENTRY_SCALE_IN_MODE_AFTER_BULLISH_BEARISH,
+            "bullish_then_bearish": cls.ENTRY_SCALE_IN_MODE_AFTER_BULLISH_BEARISH,
+        }
+        mode = aliases.get(normalized)
+        if mode is None:
+            LOGGER.warning(
+                "Invalid entry_scale_in_mode=%s, fallback to %s",
+                normalized,
+                cls.ENTRY_SCALE_IN_MODE_NONE,
+            )
+            return cls.ENTRY_SCALE_IN_MODE_NONE
+        return mode
+
+    def _entry_ratio_for_stage(self, entry_stage: str) -> float:
+        if self.entry_scale_in_mode != self.ENTRY_SCALE_IN_MODE_AFTER_BULLISH_BEARISH:
+            return 1.0
+        if str(entry_stage or "").strip().upper() == self.ENTRY_STAGE_SCALE_IN:
+            return self.entry_scale_in_second_ratio
+        return self.entry_scale_in_first_ratio
+
+    @classmethod
     def _normalize_rebalance_mode(cls, raw_mode: str) -> str:
         normalized = str(raw_mode or "").strip().lower()
         if normalized in {cls.REBALANCE_MODE_EQUAL_RISK, cls.REBALANCE_MODE_AGE_DECAY}:
@@ -3704,6 +4119,179 @@ class Top10ShortStrategy:
             except Exception:  # noqa: BLE001
                 continue
         return ranked
+
+    def _add_scale_in_tranche(
+        self,
+        ready_entry: ReadyEntry,
+        full_target_notional: float,
+    ) -> Dict[str, object]:
+        """Add the second tranche to the existing logical position.
+
+        Binance one-way mode exposes one aggregate position per symbol, so
+        the second tranche must update the first position row and replace its
+        exit orders instead of creating a second active row for the symbol.
+        """
+        symbol = ready_entry.entry.symbol.strip().upper()
+        open_positions = self.store.list_open_positions()
+        if not isinstance(open_positions, list):
+            open_positions = []
+        existing = next(
+            (
+                row
+                for row in open_positions
+                if str(row.get("symbol") or "").strip().upper() == symbol
+            ),
+            None,
+        )
+        if existing is None:
+            LOGGER.info(
+                "Skip scale-in because first tranche is no longer open: account=%s symbol=%s",
+                self.account_id,
+                symbol,
+            )
+            return {"status": "SKIPPED_NO_OPEN_POSITION", "symbol": symbol}
+
+        position_id = int(existing["id"])
+        already_added_checker = getattr(
+            self.store,
+            "has_position_order_event_with_client_prefix",
+            None,
+        )
+        if callable(already_added_checker):
+            already_added = already_added_checker(position_id, "t10s-add-")
+            if already_added is True:
+                LOGGER.info(
+                    "Skip duplicate scale-in after restart: account=%s symbol=%s position_id=%s",
+                    self.account_id,
+                    symbol,
+                    position_id,
+                )
+                return {"status": "SKIPPED_ALREADY_ADDED", "symbol": symbol, "position_id": position_id}
+
+        risk_before = self._load_short_position(symbol)
+        if not risk_before or abs(self._safe_float(risk_before.get("positionAmt"), default=0.0)) <= 0:
+            LOGGER.info(
+                "Skip scale-in because exchange position is already closed: account=%s symbol=%s position_id=%s",
+                self.account_id,
+                symbol,
+                position_id,
+            )
+            return {"status": "SKIPPED_EXCHANGE_POSITION_CLOSED", "symbol": symbol, "position_id": position_id}
+
+        target_notional = full_target_notional * self.entry_scale_in_second_ratio
+        reference_price = float(ready_entry.reference_price)
+        diagnose = getattr(self.client, "diagnose_order_qty", None)
+        if callable(diagnose):
+            diagnostic = diagnose(symbol, target_notional, reference_price)
+            if isinstance(diagnostic, dict) and float(diagnostic.get("normalized_qty") or 0.0) <= 0:
+                raise RuntimeError(
+                    f"scale-in qty normalized to zero for {symbol}: target_notional={target_notional:.6f}"
+                )
+
+        add_order, retry_count_used = self._place_market_short_with_shrink_retry(
+            symbol=symbol,
+            target_notional=target_notional,
+            reference_price=reference_price,
+            client_id_tag="add",
+        )
+        if retry_count_used > 0:
+            LOGGER.info(
+                "Scale-in entry used margin retry: account=%s symbol=%s retries=%s",
+                self.account_id,
+                symbol,
+                retry_count_used,
+            )
+
+        observed_fill_time = self._utc_now_datetime()
+        opened_at = self._resolve_entry_fill_time(add_order, observed_fill_time)
+        audited_order = dict(add_order)
+        audited_order["entry_audit"] = {
+            "entry_mode": "CONFIRMED_CLOSE",
+            "entry_stage": self.ENTRY_STAGE_SCALE_IN,
+            "signal_hour_open_utc": (
+                ready_entry.signal_hour_open_utc.isoformat()
+                if isinstance(ready_entry.signal_hour_open_utc, datetime)
+                else None
+            ),
+            "signal_close_time_utc": (
+                ready_entry.bearish_close_time_utc.isoformat()
+                if isinstance(ready_entry.bearish_close_time_utc, datetime)
+                else None
+            ),
+            "reference_price": reference_price,
+            "filled_at_utc": opened_at.isoformat(),
+            "target_notional_usdt": target_notional,
+            "retry_count": retry_count_used,
+        }
+        self.store.add_order_event(
+            symbol=symbol,
+            position_id=position_id,
+            event_time_utc=opened_at.isoformat(),
+            order_payload=audited_order,
+        )
+
+        position_risk = self._load_short_position(symbol)
+        if not position_risk:
+            raise RuntimeError(f"No short position returned after scale-in order for {symbol}")
+        qty_now = abs(self._safe_float(position_risk.get("positionAmt"), default=0.0))
+        if qty_now <= 0:
+            raise RuntimeError(f"Invalid position quantity after scale-in order for {symbol}")
+        entry_price_now = (
+            self._safe_positive_float(position_risk.get("entryPrice"))
+            or self._safe_positive_float(existing.get("entry_price"))
+        )
+        if entry_price_now is None:
+            raise RuntimeError(f"Invalid position entry price after scale-in order for {symbol}")
+
+        self.store.set_position_qty(position_id, qty_now, entry_price_now)
+        try:
+            old_tp_order_id = existing.get("tp_order_id")
+            old_tp_client_order_id = existing.get("tp_client_order_id")
+            old_sl_order_id = existing.get("sl_order_id")
+            old_sl_client_order_id = existing.get("sl_client_order_id")
+            self._place_exit_orders(position_id=position_id, symbol=symbol)
+            self._cancel_order_if_exists(symbol, old_tp_order_id, old_tp_client_order_id)
+            self._cancel_order_if_exists(symbol, old_sl_order_id, old_sl_client_order_id)
+            self.store.clear_position_error(position_id)
+        except Exception as exc:
+            LOGGER.exception(
+                "Scale-in exit order replacement failed; force closing aggregate position: "
+                "account=%s symbol=%s position_id=%s",
+                self.account_id,
+                symbol,
+                position_id,
+            )
+            try:
+                self._force_close_position(
+                    position_id=position_id,
+                    symbol=symbol,
+                    reason="SCALE_IN_EXIT_REFRESH_FAILED",
+                )
+            except Exception as close_exc:  # noqa: BLE001
+                LOGGER.exception(
+                    "Scale-in risk-off failed: account=%s symbol=%s position_id=%s error=%s",
+                    self.account_id,
+                    symbol,
+                    position_id,
+                    close_exc,
+                )
+            raise RuntimeError(f"scale-in exit refresh failed for {symbol}: {exc}") from exc
+
+        LOGGER.info(
+            "Scale-in entry completed: account=%s symbol=%s position_id=%s qty=%s entry_price=%s",
+            self.account_id,
+            symbol,
+            position_id,
+            qty_now,
+            entry_price_now,
+        )
+        return {
+            "status": "ADDED",
+            "symbol": symbol,
+            "position_id": position_id,
+            "qty": qty_now,
+            "entry_price": entry_price_now,
+        }
 
     def _place_market_short_with_shrink_retry(
         self,

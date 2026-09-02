@@ -80,6 +80,8 @@ class StrategyRebalanceTest(unittest.TestCase):
             entry_wait_close_retry_sec=overrides.get("entry_wait_close_retry_sec", 1.0),
             entry_wait_close_retry_count=overrides.get("entry_wait_close_retry_count", 5),
             entry_preclose_sec=overrides.get("entry_preclose_sec", 0),
+            entry_scale_in_mode=overrides.get("entry_scale_in_mode", "none"),
+            entry_scale_in_first_ratio=overrides.get("entry_scale_in_first_ratio", 0.50),
             runtime_timezone=overrides.get("runtime_timezone", "Asia/Shanghai"),
         )
 
@@ -583,6 +585,174 @@ class StrategyRebalanceTest(unittest.TestCase):
                 for call in strategy._place_market_short_with_shrink_retry.call_args_list
             ],
             [190.0, 95.0],
+        )
+
+    def test_scale_in_waits_for_bullish_then_later_bearish_candle(self) -> None:
+        client = MagicMock()
+        state = {}
+        store = MagicMock()
+        store.list_active_symbols.return_value = set()
+        store.get_lock_state.side_effect = lambda _name: dict(state)
+
+        def save_state(_name, payload):
+            state.clear()
+            state.update(payload)
+
+        store.set_lock_state.side_effect = save_state
+        strategy = self._build_strategy(
+            client,
+            store,
+            rebalance_enabled=False,
+            entry_scale_in_mode="after_bullish_bearish",
+            entry_scale_in_first_ratio=0.50,
+        )
+        hour_zero = datetime(2025, 12, 1, 0, tzinfo=timezone.utc)
+        hour_ms = int(hour_zero.timestamp() * 1000)
+        candles = {
+            hour_ms: (100.0, 90.0),
+            hour_ms + 3_600_000: (90.0, 95.0),
+            hour_ms + 7_200_000: (95.0, 92.0),
+        }
+
+        def get_klines(**kwargs):
+            prices = candles.get(kwargs["start_time"])
+            if prices is None:
+                return []
+            open_price, close_price = prices
+            return [
+                [
+                    kwargs["start_time"],
+                    str(open_price),
+                    str(max(open_price, close_price)),
+                    str(min(open_price, close_price)),
+                    str(close_price),
+                    "0",
+                    kwargs["start_time"] + 3_599_999,
+                ]
+            ]
+
+        client.get_klines.side_effect = get_klines
+        strategy._utc_now_datetime = MagicMock(
+            return_value=datetime(2025, 12, 1, 3, 1, tzinfo=timezone.utc)
+        )
+        strategy._entry_wait_stop_event.wait = MagicMock(return_value=False)
+
+        events = strategy._iter_ready_entries_after_bearish_hour(
+            candidates=[RankEntry("AAAUSDT", 15.0, 100.0, 100.0)],
+            signal_base_time_utc=datetime(2025, 12, 1, 0, 10, tzinfo=timezone.utc),
+            run_id="run-1",
+            trade_day_utc="2025-12-01",
+        )
+
+        first = next(events)
+        self.assertEqual(first.entry_stage, strategy.ENTRY_STAGE_INITIAL)
+        self.assertEqual(first.reference_price, 90.0)
+        self.assertEqual(state["pending"]["0"]["phase"], strategy.ENTRY_PHASE_WAIT_BULLISH)
+
+        second = next(events)
+        self.assertEqual(second.entry_stage, strategy.ENTRY_STAGE_SCALE_IN)
+        self.assertEqual(second.reference_price, 92.0)
+        self.assertEqual(state["pending"]["0"]["phase"], strategy.ENTRY_PHASE_COMPLETE)
+
+        with self.assertRaises(StopIteration):
+            next(events)
+        self.assertEqual(state, {})
+
+    def test_scale_in_ratio_is_half_and_default_mode_stays_full_size(self) -> None:
+        client = MagicMock()
+        store = MagicMock()
+        split_strategy = self._build_strategy(
+            client,
+            store,
+            entry_scale_in_mode="after_bullish_bearish",
+            entry_scale_in_first_ratio=0.50,
+        )
+        normal_strategy = self._build_strategy(client, store)
+
+        self.assertAlmostEqual(
+            split_strategy._entry_ratio_for_stage(split_strategy.ENTRY_STAGE_INITIAL),
+            0.50,
+        )
+        self.assertAlmostEqual(
+            split_strategy._entry_ratio_for_stage(split_strategy.ENTRY_STAGE_SCALE_IN),
+            0.50,
+        )
+        self.assertAlmostEqual(
+            normal_strategy._entry_ratio_for_stage(normal_strategy.ENTRY_STAGE_INITIAL),
+            1.0,
+        )
+
+    def test_scale_in_updates_existing_position_and_replaces_exit_orders(self) -> None:
+        client = MagicMock()
+        client.diagnose_order_qty.return_value = {"normalized_qty": 5.0}
+        store = MagicMock()
+        store.list_open_positions.return_value = [
+            {
+                "id": 7,
+                "symbol": "AAAUSDT",
+                "status": "OPEN",
+                "entry_price": 10.0,
+                "tp_order_id": 11,
+                "tp_client_order_id": "old-tp",
+                "sl_order_id": 12,
+                "sl_client_order_id": "old-sl",
+            }
+        ]
+        store.has_position_order_event_with_client_prefix.return_value = False
+        strategy = self._build_strategy(
+            client,
+            store,
+            entry_scale_in_mode="after_bullish_bearish",
+        )
+        strategy._load_short_position = MagicMock(
+            side_effect=[
+                {"symbol": "AAAUSDT", "positionAmt": "-10", "entryPrice": "10"},
+                {"symbol": "AAAUSDT", "positionAmt": "-20", "entryPrice": "9.5"},
+            ]
+        )
+        strategy._place_market_short_with_shrink_retry = MagicMock(
+            return_value=(
+                {
+                    "orderId": 99,
+                    "clientOrderId": "t10s-add-AAAUSDT",
+                    "symbol": "AAAUSDT",
+                    "side": "SELL",
+                    "type": "MARKET",
+                    "status": "FILLED",
+                    "origQty": "10",
+                    "executedQty": "10",
+                    "avgPrice": "9.0",
+                },
+                0,
+            )
+        )
+        strategy._place_exit_orders = MagicMock()
+        strategy._cancel_order_if_exists = MagicMock()
+        strategy._utc_now_datetime = MagicMock(return_value=datetime(2025, 12, 1, 2, tzinfo=timezone.utc))
+
+        result = strategy._add_scale_in_tranche(
+            ready_entry=ReadyEntry(
+                entry=RankEntry("AAAUSDT", 15.0, 9.0, 100.0),
+                reference_price=9.0,
+                signal_time_utc=datetime(2025, 12, 1, 0, tzinfo=timezone.utc),
+                bearish_close_time_utc=datetime(2025, 12, 1, 2, tzinfo=timezone.utc),
+                entry_stage="SCALE_IN",
+                signal_hour_open_utc=datetime(2025, 12, 1, 1, tzinfo=timezone.utc),
+            ),
+            full_target_notional=100.0,
+        )
+
+        self.assertEqual(result["status"], "ADDED")
+        store.set_position_qty.assert_called_once_with(7, 20.0, 9.5)
+        store.add_order_event.assert_called_once()
+        self.assertEqual(store.add_order_event.call_args.kwargs["position_id"], 7)
+        strategy._place_exit_orders.assert_called_once_with(position_id=7, symbol="AAAUSDT")
+        self.assertEqual(
+            strategy._cancel_order_if_exists.call_args_list,
+            [
+                unittest.mock.call("AAAUSDT", 11, "old-tp"),
+                unittest.mock.call("AAAUSDT", 12, "old-sl"),
+            ],
         )
 
     def test_closed_hour_kline_retry_uses_second_level_interval(self) -> None:

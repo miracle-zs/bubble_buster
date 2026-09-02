@@ -955,6 +955,33 @@ class StateStore:
             ).fetchone()
             return int(row["id"]) if row is not None else None
 
+    def has_position_order_event_with_client_prefix(
+        self,
+        position_id: int,
+        client_order_id_prefix: str,
+    ) -> bool:
+        """Return whether a position already recorded an order with a prefix.
+
+        This is used by multi-stage entries to make the add-on leg safe to
+        retry after a process restart without creating a second add-on order.
+        """
+        prefix = str(client_order_id_prefix or "")
+        if not prefix:
+            return False
+        with self._connect_ctx() as conn:
+            row = conn.execute(
+                """
+                SELECT 1
+                FROM order_events
+                WHERE account_id = ?
+                  AND position_id = ?
+                  AND client_order_id LIKE ?
+                LIMIT 1
+                """,
+                (self.account_id, int(position_id), f"{prefix}%"),
+            ).fetchone()
+            return row is not None
+
     def list_market_order_events_missing_realized_fill(self, limit: int = 20) -> List[Dict[str, Any]]:
         with self._connect_ctx() as conn:
             rows = conn.execute(

@@ -29,6 +29,9 @@ entry_wait_close_retry_sec = 1
 entry_wait_close_retry_count = 5
 entry_wait_max_hours = 16
 entry_preclose_sec = 10
+# 可选：首根阴线先开 50%，出现 1h 阳线后再等下一根阴线开剩余 50%。
+# entry_scale_in_mode = after_bullish_bearish
+# entry_scale_in_first_ratio = 0.50
 ranker_max_workers = 24
 ranker_weight_limit_per_minute = 200
 ranker_min_request_interval_ms = 20
@@ -159,22 +162,30 @@ api_secret = REPLACE_WITH_READONLY02_API_SECRET
 equity_recovery_take_profit_enabled = false
 equity_recovery_trigger_pct = 0.09
 equity_recovery_reduce_ratio = 0.50
+entry_scale_in_mode = after_bullish_bearish
+entry_scale_in_first_ratio = 0.50
 
 [account.acc02.strategy]
 equity_recovery_take_profit_enabled = false
 equity_recovery_trigger_pct = 0.09
 equity_recovery_reduce_ratio = 1.0
+entry_scale_in_mode = after_bullish_bearish
+entry_scale_in_first_ratio = 0.50
 
 
 [account.acc03.strategy]
 equity_recovery_take_profit_enabled = false
 equity_recovery_trigger_pct = 0.09
 equity_recovery_reduce_ratio = 1.0
+entry_scale_in_mode = after_bullish_bearish
+entry_scale_in_first_ratio = 0.50
 
 [account.acc04.strategy]
 equity_recovery_take_profit_enabled = false
 equity_recovery_trigger_pct = 0.09
 equity_recovery_reduce_ratio = 0.50
+entry_scale_in_mode = after_bullish_bearish
+entry_scale_in_first_ratio = 0.50
 
 [account.55.strategy]
 fixed_take_profit_enabled = false

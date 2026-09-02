@@ -205,6 +205,8 @@ CRON_TZ=Asia/Shanghai
 - `entry_wait_close_retry_sec` / `entry_wait_close_retry_count`：收盘 K 线尚未可读或请求失败时的秒级重试间隔与每轮次数，默认 `1` 秒 / `5` 次；一轮耗尽后按短间隔再次尝试，不再退回 30 秒轮询。
 - `entry_wait_poll_sec`：收盘前的粗粒度唤醒间隔；收盘后的 K 线读取不使用这个 30 秒间隔。
 - `entry_preclose_sec`：提前读取正在形成的小时 K 线并尝试入场的秒数，默认 `10`；设为 `0` 可恢复整点确认后入场。提前入场会在整点后补记最终 K 线结果。
+- `entry_scale_in_mode`：分批入场模式，默认 `none`；设置为 `after_bullish_bearish` 时，首根确认阴线开第一笔，默认开仓目标金额的 50%，确认出现 1h 阳线后再等后续 1h 阴线追加剩余仓位。两笔使用同一个逻辑仓位，追加后会重挂整笔仓位的止盈止损。
+- `entry_scale_in_first_ratio`：分批模式下第一笔占完整目标金额的比例，默认 `0.50`，范围为 `0.05`～`0.95`；第二笔自动使用剩余比例。
 - 旧版低点反弹止盈时间窗口：按 `runtime.timezone` 的本地时间判断，`07:30` 到 `12:00`（含边界）内不会触发；该限制只作用于 `equity_recovery_take_profit_*`，不作用于每日 08:00 基准组合止盈。
 
 ### `[runtime]`
