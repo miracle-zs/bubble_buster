@@ -184,6 +184,49 @@ class RuntimeServiceTest(unittest.TestCase):
         service.run_cycle(now_local=missed_local, now_monotonic=110.0)
         self.assertEqual(strategy.calls, 0)
 
+    def test_entry_waits_for_user_stream_ready_without_completing_the_day(self):
+        service, strategy, _, _ = self._create_service(
+            entry_hour=7,
+            entry_minute=40,
+            entry_misfire_grace_min=120,
+        )
+
+        class UserStreamStub:
+            def __init__(self):
+                self.ready = False
+
+            def entry_allowed(self):
+                return self.ready
+
+        user_stream = UserStreamStub()
+        service.account_runtimes["default"]["user_stream"] = user_stream
+        service._get_entry_ranking = MagicMock(return_value=None)
+        due = datetime(2026, 2, 13, 8, 0, tzinfo=ZoneInfo("UTC"))
+
+        service.run_cycle(now_local=due, now_monotonic=100.0)
+        self.assertEqual(strategy.calls, 0)
+        self.assertNotIn("default", service._last_entry_local_date_by_account)
+
+        user_stream.ready = True
+        service.run_cycle(now_local=due, now_monotonic=101.0)
+        self.assertTrue(
+            _wait_until(
+                lambda: (service._collect_entry_futures(due) or not service._entry_futures),
+            )
+        )
+        self.assertEqual(strategy.calls, 1)
+        self.assertEqual(service._last_entry_local_date_by_account["default"], due.date())
+        self.assertFalse(
+            service._is_entry_result_complete(
+                {"status": "RETRY", "reason": "USER_STREAM_STATE_UNCERTAIN"}
+            )
+        )
+        self.assertFalse(
+            service._is_entry_result_complete(
+                {"status": "SKIPPED", "reason": "USER_STREAM_STATE_UNCERTAIN"}
+            )
+        )
+
     def test_manage_interval_and_catch_up_limit(self):
         service, _, manager, _ = self._create_service(
             run_manage_on_startup=True,

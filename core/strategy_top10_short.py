@@ -117,6 +117,8 @@ class Top10ShortStrategy:
     PRECLOSE_STRUCTURE_DEFERRED_BEFORE_NOON = "DEFERRED_BEFORE_NOON"
     PENDING_EXIT_SETUP_RECOVERY_GRACE_SEC = 30.0
     LIQUIDATION_PRICE_RETRY_DELAYS_SEC = (1.0, 2.0)
+    ENTRY_STATE_RETRY_AFTER_SEC = 10.0
+    ENTRY_STATE_WARNING_INTERVAL_SEC = 60.0
 
     def __init__(
         self,
@@ -235,6 +237,7 @@ class Top10ShortStrategy:
         }
         self._entry_wait_stop_event = threading.Event()
         self._entry_wait_interrupted = False
+        self._last_entry_state_warning_monotonic = 0.0
         self._entry_prewarmed_leverage_symbols: Set[str] = set()
         self._entry_structure_protection_state = EntryStructureProtectionState(store)
         self._market_fill_reconciler = MarketFillReconciler(client, store)
@@ -306,19 +309,34 @@ class Top10ShortStrategy:
         shared_top_gainers: Optional[List[Dict[str, Any]]] = None,
     ) -> Dict[str, object]:
         if self.order_state is not None and not self.order_state.entry_allowed():
-            if not self.order_state.verify_rest():
-                LOGGER.warning(
-                    "Entry paused because user stream state is uncertain account=%s",
-                    self.account_id,
+            wait_until_ready = getattr(self.order_state, "wait_until_entry_allowed", None)
+            if callable(wait_until_ready):
+                state_ready = bool(wait_until_ready())
+            else:
+                state_ready = bool(self.order_state.verify_rest()) and bool(
+                    self.order_state.entry_allowed()
                 )
+            if not state_ready:
+                now_monotonic = time.monotonic()
+                if (
+                    now_monotonic - self._last_entry_state_warning_monotonic
+                    >= self.ENTRY_STATE_WARNING_INTERVAL_SEC
+                ):
+                    self._last_entry_state_warning_monotonic = now_monotonic
+                    LOGGER.warning(
+                        "Entry deferred until user stream state is ready account=%s",
+                        self.account_id,
+                    )
                 return {
-                    "status": "SKIPPED",
+                    "status": "RETRY",
                     "reason": "USER_STREAM_STATE_UNCERTAIN",
+                    "retry_after_sec": self.ENTRY_STATE_RETRY_AFTER_SEC,
                     "opened": 0,
                     "failed": 0,
                     "entry_failed": 0,
                     "exit_setup_failed": 0,
                 }
+            self._last_entry_state_warning_monotonic = 0.0
         trade_day = (trade_day_utc or "").strip() or datetime.now(timezone.utc).date().isoformat()
         trade_day_utc = trade_day
         # A portfolio-loss stop can interrupt a bearish-hour wait. The event is

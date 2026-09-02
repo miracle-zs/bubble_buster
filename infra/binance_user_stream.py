@@ -12,7 +12,11 @@ from urllib.parse import urlparse
 
 from core.account_snapshot import AccountSnapshotProvider
 from core.state_store import StateStore
-from infra.binance_futures_client import BinanceAPIError, BinanceFuturesClient
+from infra.binance_futures_client import (
+    BinanceAPIError,
+    BinanceFuturesClient,
+    BinanceRateLimitError,
+)
 
 
 LOGGER = logging.getLogger(__name__)
@@ -31,6 +35,7 @@ class BinanceUserStreamState:
     """Own stream certainty, REST verification and the persisted local ledger."""
 
     LOCK_NAME = "user_stream_state_v1"
+    VERIFY_RETRY_DELAYS_SEC = (5.0, 10.0, 30.0, 60.0)
 
     def __init__(
         self,
@@ -42,6 +47,7 @@ class BinanceUserStreamState:
         websocket_base_url: Optional[str] = None,
         rest_verify_interval_sec: float = 300.0,
         reconnect_delay_sec: float = 5.0,
+        verify_wait_timeout_sec: float = 30.0,
     ) -> None:
         self.client = client
         self.store = store
@@ -50,6 +56,7 @@ class BinanceUserStreamState:
         self.websocket_base_url = websocket_base_url or self._derive_websocket_base_url(client.base_url)
         self.rest_verify_interval_sec = max(60.0, float(rest_verify_interval_sec))
         self.reconnect_delay_sec = max(1.0, float(reconnect_delay_sec))
+        self.verify_wait_timeout_sec = max(1.0, float(verify_wait_timeout_sec))
         self._lock = threading.RLock()
         self._verify_lock = threading.Lock()
         self._stop_event = threading.Event()
@@ -62,6 +69,8 @@ class BinanceUserStreamState:
         self._last_verified_monotonic = 0.0
         self._last_event_monotonic = 0.0
         self._last_error: Optional[str] = "STARTUP_UNVERIFIED"
+        self._verify_failure_count = 0
+        self._next_verify_monotonic = 0.0
         self._persist_state()
 
     @staticmethod
@@ -110,7 +119,32 @@ class BinanceUserStreamState:
 
     def entry_allowed(self) -> bool:
         """New exposure is allowed only after stream/REST state is reconciled."""
-        return self.is_certain()
+        with self._lock:
+            return bool(self._certain and self._connected)
+
+    def wait_until_entry_allowed(self, timeout_sec: Optional[float] = None) -> bool:
+        """Wait for one completed REST verification and a live user stream."""
+        timeout = self.verify_wait_timeout_sec if timeout_sec is None else max(0.0, float(timeout_sec))
+        deadline = time.monotonic() + timeout
+        while True:
+            if self.entry_allowed():
+                return True
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return False
+            if not self.is_certain():
+                verified = self.verify_rest(
+                    wait_timeout_sec=min(remaining, self.verify_wait_timeout_sec),
+                )
+                if verified:
+                    continue
+                if self._stop_event.wait(timeout=min(0.5, remaining)):
+                    return False
+                continue
+            # REST is already current; wait for the websocket connection without
+            # issuing another account snapshot.
+            if self._stop_event.wait(timeout=min(0.5, remaining)):
+                return False
 
     def mark_uncertain(self, reason: str) -> None:
         with self._lock:
@@ -124,6 +158,7 @@ class BinanceUserStreamState:
         *,
         full_order_scan: bool = True,
         force_account_snapshot: bool = True,
+        wait_timeout_sec: Optional[float] = None,
     ) -> bool:
         """Validate account/order state without any per-position risk reads.
 
@@ -131,9 +166,34 @@ class BinanceUserStreamState:
         five-minute periodic pass skips risk/order endpoints for a genuinely
         empty local and exchange account.
         """
-        if not self._verify_lock.acquire(blocking=False):
-            return self.is_certain()
+        wait_timeout = (
+            self.verify_wait_timeout_sec
+            if wait_timeout_sec is None
+            else max(0.0, float(wait_timeout_sec))
+        )
+        acquired = self._verify_lock.acquire(blocking=False)
+        if not acquired:
+            # Verification is single-flight.  A caller arriving while the
+            # background verifier is reconciling must observe that result,
+            # instead of immediately reporting a false negative to entry or
+            # position management.
+            if wait_timeout <= 0 or not self._verify_lock.acquire(timeout=wait_timeout):
+                LOGGER.debug(
+                    "User stream REST verification still running account=%s wait_timeout_sec=%.2f",
+                    self.account_id,
+                    wait_timeout,
+                )
+                return False
+            try:
+                return self.is_certain()
+            finally:
+                self._verify_lock.release()
         try:
+            with self._lock:
+                next_verify_monotonic = self._next_verify_monotonic
+            if next_verify_monotonic > time.monotonic():
+                return self.is_certain()
+
             with self.client.background_requests():
                 snapshot = self.snapshot_provider.capture(force=force_account_snapshot)
                 has_exchange_positions = any(
@@ -195,17 +255,43 @@ class BinanceUserStreamState:
                 self._certain = True
                 self._last_verified_monotonic = time.monotonic()
                 self._last_error = None
+                self._verify_failure_count = 0
+                self._next_verify_monotonic = 0.0
             self._persist_state()
             return True
         except Exception as exc:  # noqa: BLE001
-            LOGGER.warning("User stream REST verification failed account=%s: %s", self.account_id, exc)
+            retry_delay = self._verification_retry_delay(exc)
+            with self._lock:
+                self._verify_failure_count += 1
+                self._next_verify_monotonic = time.monotonic() + retry_delay
             with self._lock:
                 self._certain = False
                 self._last_error = str(exc)[:500]
+            LOGGER.warning(
+                "User stream REST verification failed account=%s retry_in_sec=%.1f: %s",
+                self.account_id,
+                retry_delay,
+                exc,
+            )
             self._persist_state()
             return False
         finally:
             self._verify_lock.release()
+
+    def _verification_retry_delay(self, exc: Exception) -> float:
+        is_rate_limit = isinstance(exc, BinanceRateLimitError)
+        if not is_rate_limit and isinstance(exc, BinanceAPIError):
+            is_rate_limit = BinanceFuturesClient.is_rate_limit_error(exc)
+        if is_rate_limit:
+            retry_after = getattr(exc, "retry_after_sec", None)
+            try:
+                if retry_after is not None and float(retry_after) > 0:
+                    return float(retry_after)
+            except (TypeError, ValueError):
+                pass
+            return 120.0 if getattr(exc, "http_status", None) == 418 else 60.0
+        index = min(self._verify_failure_count, len(self.VERIFY_RETRY_DELAYS_SEC) - 1)
+        return self.VERIFY_RETRY_DELAYS_SEC[index]
 
     def handle_event(self, payload: Dict[str, Any]) -> None:
         if not isinstance(payload, dict):
@@ -368,7 +454,7 @@ class BinanceUserStreamState:
                 due = (
                     not self._certain
                     or time.monotonic() - self._last_verified_monotonic >= self.rest_verify_interval_sec
-                )
+                ) and time.monotonic() >= self._next_verify_monotonic
             if due:
                 self.verify_rest(
                     full_order_scan=not was_certain,

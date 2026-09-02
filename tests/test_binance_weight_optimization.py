@@ -1,8 +1,10 @@
 import tempfile
+import time
 import unittest
 from contextlib import nullcontext
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from threading import Event, Thread
 from unittest.mock import MagicMock, patch
 from zoneinfo import ZoneInfo
 
@@ -10,7 +12,7 @@ from core.account_snapshot import AccountSnapshotProvider
 from core.position_manager import PositionManager
 from core.runtime_service import ServiceRuntimeConfig, StrategyRuntimeService
 from core.state_store import StateStore
-from infra.binance_futures_client import BinanceFuturesClient
+from infra.binance_futures_client import BinanceFuturesClient, BinanceRateLimitError
 from infra.binance_rate_limit import BinanceRateLimitCoordinator
 from infra.binance_top10_monitor import DailyOpenPriceStream, build_top_gainers
 from infra.binance_user_stream import BinanceUserStreamState
@@ -154,6 +156,75 @@ class BinanceWeightOptimizationTest(unittest.TestCase):
         client.get_account.assert_called_once_with()
         client.get_position_risk.assert_not_called()
         client.get_open_orders.assert_not_called()
+
+    def test_concurrent_rest_verification_waits_for_single_flight_result(self) -> None:
+        client = MagicMock()
+        client.base_url = "https://fapi.binance.com"
+        client.background_requests.side_effect = lambda: nullcontext()
+        client.get_open_orders.return_value = []
+        started = Event()
+        release = Event()
+
+        def get_account():
+            started.set()
+            release.wait(timeout=2.0)
+            return self._account_payload(position_count=0)
+
+        client.get_account.side_effect = get_account
+        provider = AccountSnapshotProvider(
+            client=client,
+            store=self.store,
+            account_id="acc01",
+        )
+        stream = BinanceUserStreamState(
+            client=client,
+            store=self.store,
+            snapshot_provider=provider,
+            account_id="acc01",
+            verify_wait_timeout_sec=1.0,
+        )
+        results = []
+
+        first = Thread(target=lambda: results.append(stream.verify_rest()))
+        first.start()
+        self.assertTrue(started.wait(timeout=1.0))
+        second = Thread(target=lambda: results.append(stream.verify_rest()))
+        second.start()
+        time.sleep(0.05)
+        self.assertTrue(second.is_alive())
+
+        release.set()
+        first.join(timeout=2.0)
+        second.join(timeout=2.0)
+
+        self.assertEqual(results, [True, True])
+        self.assertEqual(client.get_account.call_count, 1)
+
+    def test_rate_limit_verification_enters_backoff_without_repeating_request(self) -> None:
+        client = MagicMock()
+        client.base_url = "https://fapi.binance.com"
+        client.background_requests.side_effect = lambda: nullcontext()
+        client.get_account.side_effect = BinanceRateLimitError(
+            code=-1003,
+            message="Too many requests",
+            http_status=429,
+            retry_after_sec=60.0,
+        )
+        provider = AccountSnapshotProvider(
+            client=client,
+            store=self.store,
+            account_id="acc01",
+        )
+        stream = BinanceUserStreamState(
+            client=client,
+            store=self.store,
+            snapshot_provider=provider,
+            account_id="acc01",
+        )
+
+        self.assertFalse(stream.verify_rest())
+        self.assertFalse(stream.verify_rest())
+        self.assertEqual(client.get_account.call_count, 1)
 
     def test_readonly_refresh_queries_no_user_trades_when_income_is_unchanged(self) -> None:
         now_ms = int(datetime.now(timezone.utc).timestamp() * 1000) - 10_000

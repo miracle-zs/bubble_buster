@@ -149,6 +149,10 @@ def _build_single_account_components(
             60.0,
             runtime_cfg.getfloat("user_stream_rest_verify_interval_sec", fallback=300.0),
         ),
+        verify_wait_timeout_sec=max(
+            1.0,
+            runtime_cfg.getfloat("user_stream_verify_wait_timeout_sec", fallback=30.0),
+        ),
     )
 
     # readonly 模式：只需要 client 和 wallet_sampler，不需要 strategy 和 manager

@@ -100,6 +100,8 @@ sync_cashflows = true
 cashflow_income_types = TRANSFER,WELCOME_BONUS
 cashflow_overlap_minutes = 20
 user_stream_rest_verify_interval_sec = 300
+# Maximum time entry/management waits for an in-flight REST reconciliation.
+user_stream_verify_wait_timeout_sec = 30
 dashboard_trade_stats_refresh_sec = 900
 dashboard_host = 127.0.0.1
 dashboard_port = 8787

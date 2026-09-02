@@ -11,6 +11,10 @@ from zoneinfo import ZoneInfo
 
 LOGGER = logging.getLogger(__name__)
 PROTECTION_RESTART_GRACE = timedelta(hours=2)
+TRANSIENT_ENTRY_REASONS = {
+    "USER_STREAM_STATE_UNCERTAIN",
+    "USER_STREAM_STATE_VERIFY_TIMEOUT",
+}
 
 
 @dataclass(frozen=True)
@@ -114,6 +118,9 @@ class StrategyRuntimeService:
         )
         self._last_entry_local_date_by_account: Dict[str, date] = {}
         self._last_entry_skipped_date_by_account: Dict[str, date] = {}
+        self._entry_retry_not_before_by_account: Dict[str, float] = {}
+        self._entry_retry_day_by_account: Dict[str, date] = {}
+        self._entry_readiness_warned_day_by_account: Dict[str, date] = {}
         self._last_loss_cut_local_date: Optional[date] = None
         self._last_loss_cut_skipped_date: Optional[date] = None
         self._last_noon_protection_local_date: Optional[date] = None
@@ -275,7 +282,69 @@ class StrategyRuntimeService:
         if not isinstance(result, dict):
             return False
         status = str(result.get("status", "")).strip().upper()
-        return status in {"SUCCESS", "SKIPPED", "DISABLED"}
+        if status in {"SUCCESS", "DISABLED"}:
+            return True
+        if status != "SKIPPED":
+            return False
+        reason = str(result.get("reason", "")).strip().upper()
+        return reason not in TRANSIENT_ENTRY_REASONS
+
+    def _entry_state_ready(self, account_id: str, now_local: datetime) -> bool:
+        ctx = self.account_runtimes.get(account_id, {})
+        strategy = ctx.get("strategy")
+        order_state = ctx.get("user_stream")
+        if order_state is None and strategy is not None:
+            order_state = getattr(strategy, "order_state", None)
+        entry_allowed = getattr(order_state, "entry_allowed", None)
+        if not callable(entry_allowed):
+            return True
+        try:
+            ready = bool(entry_allowed())
+        except Exception as exc:  # noqa: BLE001
+            ready = False
+            LOGGER.warning("service entry readiness check failed account=%s: %s", account_id, exc)
+        if ready:
+            self._entry_readiness_warned_day_by_account.pop(account_id, None)
+            return True
+        if self._entry_readiness_warned_day_by_account.get(account_id) != now_local.date():
+            self._entry_readiness_warned_day_by_account[account_id] = now_local.date()
+            LOGGER.warning(
+                "service entry deferred until user stream state is ready account=%s",
+                account_id,
+            )
+        return False
+
+    def _entry_retry_blocked(
+        self,
+        account_id: str,
+        today: date,
+        now_monotonic: Optional[float] = None,
+    ) -> bool:
+        retry_day = self._entry_retry_day_by_account.get(account_id)
+        if retry_day != today:
+            self._entry_retry_day_by_account.pop(account_id, None)
+            self._entry_retry_not_before_by_account.pop(account_id, None)
+            return False
+        current_monotonic = time.monotonic() if now_monotonic is None else now_monotonic
+        return current_monotonic < self._entry_retry_not_before_by_account.get(account_id, 0.0)
+
+    def _schedule_entry_retry(self, account_id: str, trade_day: date, result: object) -> None:
+        if not isinstance(result, dict):
+            return
+        status = str(result.get("status", "")).strip().upper()
+        reason = str(result.get("reason", "")).strip().upper()
+        if status != "RETRY" and reason not in TRANSIENT_ENTRY_REASONS:
+            return
+        try:
+            retry_after_sec = float(result.get("retry_after_sec", 10.0))
+        except (TypeError, ValueError):
+            retry_after_sec = 10.0
+        retry_after_sec = min(60.0, max(1.0, retry_after_sec))
+        self._entry_retry_day_by_account[account_id] = trade_day
+        self._entry_retry_not_before_by_account[account_id] = max(
+            self._entry_retry_not_before_by_account.get(account_id, 0.0),
+            time.monotonic() + retry_after_sec,
+        )
 
     @staticmethod
     def _account_task_succeeded(result: object) -> bool:
@@ -321,9 +390,17 @@ class StrategyRuntimeService:
                 continue
             if self._is_entry_result_complete(result):
                 self._last_entry_local_date_by_account[aid] = trade_day
+                self._entry_retry_day_by_account.pop(aid, None)
+                self._entry_retry_not_before_by_account.pop(aid, None)
+            else:
+                self._schedule_entry_retry(aid, trade_day, result)
             LOGGER.info("service entry background result account=%s: %s", aid, result)
 
-    def _run_entry_if_due(self, now_local: datetime) -> None:
+    def _run_entry_if_due(
+        self,
+        now_local: datetime,
+        now_monotonic: Optional[float] = None,
+    ) -> None:
         self._collect_entry_futures(now_local)
         account_ids = [
             aid
@@ -340,6 +417,8 @@ class StrategyRuntimeService:
         for aid in account_ids:
             if aid in running_account_ids:
                 continue
+            if self._entry_retry_blocked(aid, now_local.date(), now_monotonic=now_monotonic):
+                continue
             strategy = self.account_runtimes[aid].get("strategy")
             has_pending_wait = bool(
                 strategy is not None
@@ -348,7 +427,8 @@ class StrategyRuntimeService:
             )
             pending_wait_by_account[aid] = has_pending_wait
             if has_pending_wait or self._should_run_entry(aid, now_local):
-                due_account_ids.append(aid)
+                if self._entry_state_ready(aid, now_local):
+                    due_account_ids.append(aid)
         if not due_account_ids:
             return
 
@@ -1250,7 +1330,7 @@ class StrategyRuntimeService:
         local_dt = now_local or datetime.now(self.timezone)
         mono = now_monotonic if now_monotonic is not None else time.monotonic()
         self._run_cashflow_sync_if_due(local_dt)
-        self._run_entry_if_due(local_dt)
+        self._run_entry_if_due(local_dt, now_monotonic=mono)
         self._run_daily_loss_cut_if_due(local_dt)
         self._run_noon_protection_if_due(local_dt)
         self._run_morning_protection_if_due(local_dt)
