@@ -1318,6 +1318,7 @@ class DashboardDataProvider:
                 positions_by_run.setdefault(str(position.get("run_id") or ""), []).append(position)
 
         wait_states = self._entry_wait_states_from_db(conn, account_ids)
+        entry_actions_by_account = self._entry_actions_from_db(conn, run_ids)
         current_cycle_date = self._entry_cycle_date(now_local or datetime.now(self.local_tz))
         progress_by_account: Dict[str, Dict[str, Any]] = {}
         for run in run_rows:
@@ -1378,16 +1379,72 @@ class DashboardDataProvider:
 
             message = str(run.get("message") or "").strip()
             persisted_opened = self._run_message_count(message, "opened", default=len(opened_symbols)) or 0
-            opened_count = max(len(opened_symbols), persisted_opened)
+            position_count = len(opened_symbols)
+            legacy_opened_count = max(position_count, persisted_opened)
             failed_count = self._run_message_count(message, "failed", default=0) or 0
             entry_failed_count = self._run_message_count(message, "entry_failed", default=None)
             exit_setup_failed_count = self._run_message_count(message, "exit_setup_failed", default=0) or 0
             if entry_failed_count is None:
                 entry_failed_count = max(0, failed_count - exit_setup_failed_count)
             skipped_count = self._run_message_count(message, "skipped_existing", default=0) or 0
+            entry_deferred_count = self._run_message_count(message, "entry_deferred", default=0) or 0
+            scale_in_failed_count = self._run_message_count(message, "scale_in_failed", default=0) or 0
+            scale_in_skipped_count = self._run_message_count(message, "scale_in_skipped", default=0) or 0
             waiting_count = len(waiting_symbols)
             # Exit-setup failures already had an entry fill and are included in opened_count.
-            target_count = opened_count + waiting_count + entry_failed_count + skipped_count
+            legacy_target_count = legacy_opened_count + waiting_count + entry_failed_count + skipped_count
+            entry_actions = entry_actions_by_account.get(account_id, [])
+            initial_actions = [
+                action for action in entry_actions
+                if str(action.get("entry_stage") or "INITIAL").upper() == "INITIAL"
+            ]
+            scale_in_actions = [
+                action for action in entry_actions
+                if str(action.get("entry_stage") or "").upper() == "SCALE_IN"
+            ]
+            scale_in_mode = str(
+                self._run_message_value(message, "entry_scale_in_mode", default="")
+                or wait_state.get("entry_scale_in_mode")
+                or "none"
+            ).strip().lower()
+            action_data_available = bool(entry_actions)
+            if action_data_available:
+                pending_initial_count = sum(
+                    1
+                    for item in waiting_symbols
+                    if str(item.get("entry_phase") or "INITIAL").upper()
+                    in {"INITIAL", "POST_INITIAL_CANDLE"}
+                )
+                planned_initial_count = max(
+                    len(initial_actions)
+                    + pending_initial_count
+                    + entry_failed_count
+                    + skipped_count,
+                    len(initial_actions),
+                )
+                has_scale_in_stage = bool(
+                    scale_in_actions
+                    or scale_in_failed_count
+                    or scale_in_skipped_count
+                    or scale_in_mode not in {"", "none", "off", "disabled"}
+                )
+                planned_action_count = planned_initial_count * (2 if has_scale_in_stage else 1)
+                action_completed_count = len(entry_actions)
+                action_failed_count = entry_failed_count + scale_in_failed_count
+                action_skipped_count = skipped_count + scale_in_skipped_count
+                action_target_count = max(
+                    planned_action_count,
+                    action_completed_count + action_failed_count + action_skipped_count,
+                )
+                opened_count = action_completed_count
+                target_count = action_target_count
+            else:
+                action_completed_count = legacy_opened_count
+                action_failed_count = entry_failed_count
+                action_skipped_count = skipped_count
+                action_target_count = legacy_target_count
+                opened_count = legacy_opened_count
+                target_count = legacy_target_count
             run_status = str(run.get("status") or "UNKNOWN").strip().upper()
             if waiting_count > 0:
                 progress_status = "WAITING"
@@ -1417,12 +1474,28 @@ class DashboardDataProvider:
                 "status": progress_status,
                 "target_count": target_count,
                 "opened_count": opened_count,
+                "position_count": position_count,
                 "waiting_count": waiting_count,
                 "failed_count": failed_count,
                 "entry_failed_count": entry_failed_count,
                 "exit_setup_failed_count": exit_setup_failed_count,
                 "skipped_count": skipped_count,
                 "opened_symbols": opened_symbols,
+                "entry_actions": entry_actions,
+                "entry_action_completed_count": action_completed_count,
+                "entry_action_target_count": action_target_count,
+                "entry_action_pending_count": max(
+                    0,
+                    action_target_count
+                    - action_completed_count
+                    - action_failed_count
+                    - action_skipped_count,
+                ),
+                "entry_action_failed_count": action_failed_count,
+                "entry_action_skipped_count": action_skipped_count,
+                "entry_action_initial_count": len(initial_actions),
+                "entry_action_scale_in_count": len(scale_in_actions),
+                "entry_action_scale_in_mode": scale_in_mode,
                 "waiting_symbols": waiting_symbols,
                 "next_check_local": self._format_utc_as_local(min(next_checks).isoformat()) if next_checks else None,
                 "deadline_local": self._format_utc_as_local(deadline_raw),
@@ -1460,6 +1533,69 @@ class DashboardDataProvider:
             if isinstance(parsed, dict):
                 states[account_id] = parsed
         return states
+
+    def _entry_actions_from_db(
+        self,
+        conn: sqlite3.Connection,
+        run_ids: List[str],
+    ) -> Dict[str, List[Dict[str, Any]]]:
+        """Load unique initial and scale-in entry orders for the latest runs."""
+        normalized_run_ids = [str(run_id).strip() for run_id in run_ids if str(run_id).strip()]
+        if not normalized_run_ids:
+            return {}
+        placeholders = ",".join("?" for _ in normalized_run_ids)
+        rows = self._query_rows(
+            conn,
+            f"""
+            SELECT
+                oe.id, r.account_id, p.run_id, oe.position_id, oe.symbol,
+                oe.client_order_id, oe.event_time_utc, oe.raw_json
+            FROM order_events oe
+            INNER JOIN positions p ON p.id = oe.position_id
+            INNER JOIN runs r ON r.run_id = p.run_id
+            WHERE p.run_id IN ({placeholders})
+              AND (
+                    LOWER(COALESCE(oe.client_order_id, '')) LIKE 't10s-ent-%'
+                 OR LOWER(COALESCE(oe.client_order_id, '')) LIKE 't10s-add-%'
+              )
+            ORDER BY oe.event_time_utc ASC, oe.id ASC
+            """,
+            tuple(normalized_run_ids),
+        )
+        actions_by_account: Dict[str, List[Dict[str, Any]]] = {}
+        seen: Set[Tuple[str, str, str]] = set()
+        for row in rows:
+            account_id = str(row.get("account_id") or "").strip()
+            run_id = str(row.get("run_id") or "").strip()
+            symbol = str(row.get("symbol") or "").strip().upper()
+            client_order_id = str(row.get("client_order_id") or "").strip()
+            if not account_id or not run_id or not symbol:
+                continue
+            action_stage = "SCALE_IN" if client_order_id.lower().startswith("t10s-add-") else "INITIAL"
+            action_key = (account_id, run_id, client_order_id or f"event-{row.get('id')}")
+            if action_key in seen:
+                continue
+            seen.add(action_key)
+
+            entry_audit: Dict[str, Any] = {}
+            try:
+                raw_payload = json.loads(str(row.get("raw_json") or "{}"))
+            except (TypeError, ValueError, json.JSONDecodeError):
+                raw_payload = {}
+            if isinstance(raw_payload, dict) and isinstance(raw_payload.get("entry_audit"), dict):
+                entry_audit = raw_payload["entry_audit"]
+            independent_raw = entry_audit.get("signal_independent", False)
+            independent = independent_raw is True or str(independent_raw).strip().lower() == "true"
+            actions_by_account.setdefault(account_id, []).append(
+                {
+                    "action_id": client_order_id or f"order_event_{row.get('id')}",
+                    "symbol": symbol,
+                    "opened_at_local": self._format_utc_as_local(row.get("event_time_utc")),
+                    "entry_stage": action_stage,
+                    "signal_independent": independent,
+                }
+            )
+        return actions_by_account
 
     def _entry_status_from_run_row(
         self,
@@ -1501,6 +1637,13 @@ class DashboardDataProvider:
         if matched is None:
             return default
         return int(matched.group(1))
+
+    @staticmethod
+    def _run_message_value(message: str, key: str, default: Optional[str]) -> Optional[str]:
+        matched = re.search(rf"(?:^|[,\s]){re.escape(key)}=([^,\s]+)", message)
+        if matched is None:
+            return default
+        return matched.group(1)
 
     def _format_utc_as_local(self, value: Any) -> Optional[str]:
         text = str(value or "").strip()
@@ -6334,7 +6477,7 @@ ACCOUNTS_OVERVIEW_HTML = """<!doctype html>
     .entry-progress-shell { border:0; background:rgba(5,16,24,0.32); }
     .entry-progress-overview {
       display:grid;
-      grid-template-columns:minmax(220px,1.2fr) repeat(3,minmax(100px,0.55fr)) minmax(190px,0.9fr);
+      grid-template-columns:minmax(220px,1.2fr) repeat(4,minmax(100px,0.55fr)) minmax(190px,0.9fr);
       gap:10px;
       min-height:0;
       padding:14px 16px;
@@ -7337,9 +7480,12 @@ ACCOUNTS_OVERVIEW_HTML = """<!doctype html>
       background:#17313f;
     }
     .entry-progress-summary-meter span { display:block; min-width:0; height:100%; }
+    .summary-meter-initial { background:linear-gradient(90deg,#35b9e8,#69d8f5); }
+    .summary-meter-scale-in { background:linear-gradient(90deg,#ffad3d,#ffd06f); }
     .summary-meter-opened { background:linear-gradient(90deg,#1fc97a,#4be39a); }
     .summary-meter-waiting { background:#ffb340; }
     .summary-meter-failed { background:#ff5d5d; }
+    .summary-meter-skipped { background:#7d8f9b; }
     .entry-progress-summary-legend {
       position:relative;
       z-index:1;
@@ -7352,6 +7498,8 @@ ACCOUNTS_OVERVIEW_HTML = """<!doctype html>
     }
     .entry-progress-summary-legend span { display:inline-flex; align-items:center; gap:5px; }
     .legend-dot { display:inline-block; width:5px; height:5px; border-radius:50%; }
+    .legend-dot.initial { background:#55c9f4; }
+    .legend-dot.scale-in { background:#ffbd55; }
     .legend-dot.opened { background:#45dc95; }
     .legend-dot.waiting { background:#ffb340; }
     .legend-dot.failed { background:#ff6d6d; }
@@ -7520,6 +7668,42 @@ ACCOUNTS_OVERVIEW_HTML = """<!doctype html>
       text-overflow:ellipsis;
       white-space:nowrap;
     }
+    .entry-progress-timeline-event .entry-progress-timeline-actions {
+      display:flex;
+      flex-wrap:wrap;
+      gap:4px 6px;
+      overflow:visible;
+      white-space:normal;
+    }
+    .entry-progress-timeline-symbol {
+      display:inline-flex !important;
+      align-items:center;
+      gap:4px;
+      color:#a7d7e7 !important;
+      font-size:9px !important;
+      line-height:1.3 !important;
+      white-space:nowrap;
+    }
+    .entry-progress-timeline-symbol i {
+      display:inline-block;
+      width:5px;
+      height:5px;
+      border-radius:50%;
+      background:#55c9f4;
+    }
+    .entry-progress-timeline-symbol.is-scale-in,
+    .entry-progress-timeline-symbol.is-independent {
+      color:#ffd184 !important;
+    }
+    .entry-progress-timeline-symbol.is-scale-in i,
+    .entry-progress-timeline-symbol.is-independent i {
+      background:#ffb340;
+    }
+    .entry-progress-timeline-event.is-scale-in {
+      border-color:rgba(255,179,64,0.48);
+      background:rgba(86,59,24,0.19);
+    }
+    .entry-progress-timeline-event.is-scale-in .entry-progress-timeline-event-state { color:#ffc15d !important; }
     .entry-progress-timeline-event.is-complete { border-color:rgba(45,113,132,0.8); }
     .entry-progress-timeline-next,
     .entry-progress-timeline-event.is-next {
@@ -7634,8 +7818,11 @@ ACCOUNTS_OVERVIEW_HTML = """<!doctype html>
     }
     .entry-progress-meter span { display:block; min-width:0; height:100%; }
     .entry-progress-meter-opened { background:linear-gradient(90deg,#1fc97a,#4be39a); }
+    .entry-progress-meter-initial { background:linear-gradient(90deg,#35b9e8,#69d8f5); }
+    .entry-progress-meter-scale-in { background:linear-gradient(90deg,#ffad3d,#ffd06f); }
     .entry-progress-meter-waiting { background:#ffb340; }
     .entry-progress-meter-failed { background:#ff5d5d; }
+    .entry-progress-meter-skipped { background:#7d8f9b; }
     .entry-progress-progress-foot {
       display:flex;
       justify-content:space-between;
@@ -7689,7 +7876,7 @@ ACCOUNTS_OVERVIEW_HTML = """<!doctype html>
     .entry-progress-next-cell span:last-child { color:#6fc4e4; font-size:9px; line-height:1.35; }
     .entry-progress-next-cell.is-waiting strong { color:#ffd387; }
     @media (max-width: 1260px) {
-      .entry-progress-overview { grid-template-columns:minmax(235px,1.25fr) repeat(3,minmax(92px,0.62fr)); }
+      .entry-progress-overview { grid-template-columns:minmax(235px,1.25fr) repeat(2,minmax(92px,0.62fr)); }
       .entry-progress-next-action {
         grid-column:1 / -1;
         min-height:58px;
@@ -7704,7 +7891,7 @@ ACCOUNTS_OVERVIEW_HTML = """<!doctype html>
       .entry-progress-row { grid-template-columns:minmax(260px,1.2fr) minmax(155px,0.82fr) minmax(205px,1fr) 112px; column-gap:12px; }
     }
     @media (max-width: 860px) {
-      .entry-progress-overview { grid-template-columns:repeat(3,minmax(0,1fr)); }
+      .entry-progress-overview { grid-template-columns:repeat(2,minmax(0,1fr)); }
       .entry-progress-overview-primary,
       .entry-progress-next-action { grid-column:1 / -1; }
       .entry-progress-header,
@@ -7752,6 +7939,10 @@ ACCOUNTS_OVERVIEW_HTML = """<!doctype html>
       height:6px;
       border-radius:50%;
     }
+    .entry-progress-phase-legend.is-initial i { background:#55c9f4; box-shadow:0 0 0 3px rgba(85,201,244,0.1); }
+    .entry-progress-phase-legend.is-initial { color:#8fcfe3; }
+    .entry-progress-phase-legend.is-scale-in i { background:#ffb340; box-shadow:0 0 0 3px rgba(255,179,64,0.1); }
+    .entry-progress-phase-legend.is-scale-in { color:#e7b968; }
     .entry-progress-phase-legend.is-wait-bullish i { background:#ffb340; box-shadow:0 0 0 3px rgba(255,179,64,0.1); }
     .entry-progress-phase-legend.is-wait-bullish { color:#e7b968; }
     .entry-progress-phase-legend.is-wait-bearish i { background:#6bd7f5; box-shadow:0 0 0 3px rgba(107,215,245,0.1); }
@@ -8384,16 +8575,27 @@ ACCOUNTS_OVERVIEW_HTML = """<!doctype html>
     return Object.prototype.toString.call(value) === "[object Array]" ? value : [];
   }
 
+  function entryActionMeta(item) {
+    var row = item || {};
+    var stage = String(row.entry_stage || "INITIAL").toUpperCase();
+    if (stage === "SCALE_IN") {
+      if (row.signal_independent) return { label: "二次独立", cls: "is-independent" };
+      return { label: "二次", cls: "is-scale-in" };
+    }
+    return { label: "首笔", cls: "is-initial" };
+  }
+
   function entryProgressKey(item) {
     var row = item || {};
-    return String(row.symbol || "") + "|" + compactLocalTime(row.opened_at_local);
+    return String(row.entry_stage || "INITIAL").toUpperCase()
+      + "|" + String(row.symbol || "") + "|" + compactLocalTime(row.opened_at_local);
   }
 
   function buildCommonEntryTimeline(progressRows) {
     var counts = {};
     var samples = {};
     for (var i = 0; i < progressRows.length; i += 1) {
-      var openedRows = progressItems(progressRows[i].opened_symbols);
+      var openedRows = progressItems(progressRows[i].entry_actions);
       var seen = {};
       for (var j = 0; j < openedRows.length; j += 1) {
         var item = openedRows[j] || {};
@@ -8406,23 +8608,34 @@ ACCOUNTS_OVERVIEW_HTML = """<!doctype html>
     }
     var commonKeys = {};
     var grouped = {};
+    var commonActionCount = 0;
     var expected = progressRows.length;
     Object.keys(counts).forEach(function (key) {
       if (!expected || counts[key] !== expected) return;
       commonKeys[key] = true;
+      commonActionCount += 1;
       var item = samples[key] || {};
       var time = compactLocalTime(item.opened_at_local) || "--";
       if (!grouped[time]) grouped[time] = [];
-      grouped[time].push(String(item.symbol || ""));
+      grouped[time].push({
+        symbol: String(item.symbol || ""),
+        entry_stage: String(item.entry_stage || "INITIAL").toUpperCase(),
+        signal_independent: !!item.signal_independent
+      });
     });
     var groups = Object.keys(grouped).sort().map(function (time) {
-      return { time: time, symbols: grouped[time].sort() };
+      return {
+        time: time,
+        actions: grouped[time].sort(function (left, right) {
+          return String(left.symbol || "").localeCompare(String(right.symbol || ""));
+        })
+      };
     });
-    return { groups: groups, commonKeys: commonKeys };
+    return { groups: groups, commonKeys: commonKeys, commonActionCount: commonActionCount };
   }
 
   function entryProgressWindow(progress) {
-    var times = progressItems(progress.opened_symbols).map(function (item) {
+    var times = progressItems(progress.entry_actions).map(function (item) {
       return compactLocalTime((item || {}).opened_at_local);
     }).filter(Boolean).sort();
     if (!times.length) return "--";
@@ -8446,15 +8659,22 @@ ACCOUNTS_OVERVIEW_HTML = """<!doctype html>
     var failed = Math.max(0, Number(progress.failed_count || 0));
     if (failed > 0) return { text: "失败 " + failed + "，请查看任务日志", cls: "bad" };
     var differences = [];
-    var openedRows = progressItems(progress.opened_symbols);
+    var openedRows = progressItems(progress.entry_actions);
     for (var i = 0; i < openedRows.length; i += 1) {
       var item = openedRows[i] || {};
       var key = entryProgressKey(item);
       if (!item.symbol || commonKeys[key]) continue;
-      differences.push(String(item.symbol) + " " + (compactLocalTime(item.opened_at_local) || "--"));
+      var meta = entryActionMeta(item);
+      differences.push(meta.label + " " + String(item.symbol) + " " + (compactLocalTime(item.opened_at_local) || "--"));
     }
-    if (differences.length) return { text: "差异开仓 " + differences.join(" · "), cls: "warn" };
+    if (differences.length) return { text: "差异入场 " + differences.join(" · "), cls: "warn" };
     return { text: "与共同榜单一致", cls: "ok" };
+  }
+
+  function entryTimelineActionHtml(item) {
+    var meta = entryActionMeta(item);
+    return '<span class="entry-progress-timeline-symbol ' + meta.cls + '"><i></i>'
+      + escapeHtml(meta.label) + ' · ' + escapeHtml(String((item || {}).symbol || "--")) + '</span>';
   }
 
   function renderEntryProgress() {
@@ -8482,17 +8702,31 @@ ACCOUNTS_OVERVIEW_HTML = """<!doctype html>
 
     var completedAccounts = 0;
     var targetTotal = 0;
-    var openedTotal = 0;
+    var entryActionTotal = 0;
+    var initialActionTotal = 0;
+    var scaleInActionTotal = 0;
+    var positionTotal = 0;
     var waitingTotal = 0;
     var failedTotal = 0;
+    var pendingActionTotal = 0;
     var nextCheckRaw = "";
     for (var j = 0; j < todayRows.length; j += 1) {
       var summary = todayRows[j];
       if (String(summary.status || "").toUpperCase() === "COMPLETED") completedAccounts += 1;
-      targetTotal += Math.max(0, Number(summary.target_count || 0));
-      openedTotal += Math.max(0, Number(summary.opened_count || 0));
+      var completedActions = summary.entry_action_completed_count == null
+        ? Number(summary.opened_count || 0)
+        : Number(summary.entry_action_completed_count || 0);
+      var targetActions = summary.entry_action_target_count == null
+        ? Number(summary.target_count || 0)
+        : Number(summary.entry_action_target_count || 0);
+      entryActionTotal += Math.max(0, completedActions);
+      targetTotal += Math.max(0, targetActions);
+      initialActionTotal += Math.max(0, Number(summary.entry_action_initial_count || 0));
+      scaleInActionTotal += Math.max(0, Number(summary.entry_action_scale_in_count || 0));
+      positionTotal += Math.max(0, Number(summary.position_count == null ? summary.opened_count : summary.position_count));
       waitingTotal += Math.max(0, Number(summary.waiting_count || 0));
-      failedTotal += Math.max(0, Number(summary.failed_count || 0));
+      failedTotal += Math.max(0, Number(summary.entry_action_failed_count == null ? summary.failed_count : summary.entry_action_failed_count));
+      pendingActionTotal += Math.max(0, Number(summary.entry_action_pending_count || 0));
       var summaryNextCheck = String(summary.next_check_local || "");
       if (summaryNextCheck && (!nextCheckRaw || summaryNextCheck < nextCheckRaw)) nextCheckRaw = summaryNextCheck;
     }
@@ -8510,34 +8744,50 @@ ACCOUNTS_OVERVIEW_HTML = """<!doctype html>
     }
     var nextCheckLabel = nextCheckRaw ? compactLocalTime(nextCheckRaw) : "--";
     var nextActionLabel = waitingTotal > 0 ? "等待信号检查" : (completedAccounts === accountRows.length ? "今日已完成" : "等待状态同步");
-    var overallPct = targetTotal > 0 ? Math.round(Math.min(100, openedTotal / targetTotal * 100)) : 0;
+    var overallPct = targetTotal > 0 ? Math.round(Math.min(100, entryActionTotal / targetTotal * 100)) : 0;
     var anomalyStatClass = failedTotal > 0 ? "bad" : "clear";
     var anomalyStatNote = failedTotal > 0 ? "需要处理" : "当前无异常";
     var timelineCaption = timeline.groups.length
-      ? timeline.groups.length + " 个共同窗口已完成"
+      ? timeline.groups.length + " 个共同窗口 · " + timeline.commonActionCount + " 个共同入场动作"
       : "暂无共同完成窗口";
+    var initialMeterPct = targetTotal > 0 ? Math.min(100, initialActionTotal / targetTotal * 100) : 0;
+    var scaleInMeterPct = targetTotal > 0 ? Math.min(Math.max(0, 100 - initialMeterPct), scaleInActionTotal / targetTotal * 100) : 0;
+    var failedMeterPct = targetTotal > 0 ? Math.min(Math.max(0, 100 - initialMeterPct - scaleInMeterPct), failedTotal / targetTotal * 100) : 0;
+    var skippedTotal = 0;
+    for (var s = 0; s < todayRows.length; s += 1) {
+      skippedTotal += Math.max(0, Number(todayRows[s].entry_action_skipped_count == null ? todayRows[s].skipped_count : todayRows[s].entry_action_skipped_count));
+    }
+    var skippedMeterPct = targetTotal > 0 ? Math.min(Math.max(0, 100 - initialMeterPct - scaleInMeterPct - failedMeterPct), skippedTotal / targetTotal * 100) : 0;
+    var pendingMeterPct = Math.min(Math.max(0, 100 - initialMeterPct - scaleInMeterPct - failedMeterPct - skippedMeterPct), pendingActionTotal / Math.max(1, targetTotal) * 100);
     var html = '<div class="entry-progress-overview">'
       + '<div class="entry-progress-overview-primary">'
-      + '<div class="entry-progress-hero-row"><div><span class="entry-progress-hero-label">TODAY RUN</span><strong>' + openedTotal + '<small> / ' + targetTotal + '</small></strong></div><span class="entry-progress-hero-percent">' + overallPct + '%</span></div>'
-      + '<div class="entry-progress-hero-caption">个任务已开 · ' + completedAccounts + ' / ' + accountRows.length + ' 个账号完成</div>'
-      + '<div class="entry-progress-summary-meter" role="img" aria-label="' + openedTotal + ' 个任务已开，' + waitingTotal + ' 个等待信号，' + failedTotal + ' 个异常">'
-      + '<span class="summary-meter-opened" style="width:' + (targetTotal > 0 ? (openedTotal / targetTotal * 100).toFixed(2) : 0) + '%"></span>'
-      + '<span class="summary-meter-waiting" style="width:' + (targetTotal > 0 ? (waitingTotal / targetTotal * 100).toFixed(2) : 0) + '%"></span>'
-      + '<span class="summary-meter-failed" style="width:' + (targetTotal > 0 ? (failedTotal / targetTotal * 100).toFixed(2) : 0) + '%"></span>'
+      + '<div class="entry-progress-hero-row"><div><span class="entry-progress-hero-label">ENTRY ACTIONS</span><strong>' + entryActionTotal + '<small> / ' + targetTotal + '</small></strong></div><span class="entry-progress-hero-percent">' + overallPct + '%</span></div>'
+      + '<div class="entry-progress-hero-caption">首笔 ' + initialActionTotal + ' · 二次 ' + scaleInActionTotal + ' · position记录 ' + positionTotal + ' · ' + completedAccounts + ' / ' + accountRows.length + ' 个账号完成</div>'
+      + '<div class="entry-progress-summary-meter" role="img" aria-label="' + entryActionTotal + ' 个入场动作已完成，共 ' + targetTotal + ' 个；' + waitingTotal + ' 个等待信号，' + failedTotal + ' 个异常">'
+      + '<span class="summary-meter-initial" style="width:' + initialMeterPct.toFixed(2) + '%"></span>'
+      + '<span class="summary-meter-scale-in" style="width:' + scaleInMeterPct.toFixed(2) + '%"></span>'
+      + '<span class="summary-meter-waiting" style="width:' + pendingMeterPct.toFixed(2) + '%"></span>'
+      + '<span class="summary-meter-failed" style="width:' + failedMeterPct.toFixed(2) + '%"></span>'
+      + '<span class="summary-meter-skipped" style="width:' + skippedMeterPct.toFixed(2) + '%"></span>'
       + '</div>'
-      + '<div class="entry-progress-summary-legend"><span><i class="legend-dot opened"></i>' + openedTotal + ' 已开</span><span><i class="legend-dot waiting"></i>' + waitingTotal + ' 待触发</span><span><i class="legend-dot failed"></i>' + failedTotal + ' 异常</span></div>'
+      + '<div class="entry-progress-summary-legend"><span><i class="legend-dot initial"></i>' + initialActionTotal + ' 首笔</span><span><i class="legend-dot scale-in"></i>' + scaleInActionTotal + ' 二次</span><span><i class="legend-dot waiting"></i>' + waitingTotal + ' 待触发信号</span><span><i class="legend-dot failed"></i>' + failedTotal + ' 异常</span></div>'
       + '</div>'
       + '<div class="entry-progress-stat warn"><span class="entry-progress-stat-label">待触发</span><strong>' + waitingTotal + '</strong><span class="entry-progress-stat-note">等待信号确认</span></div>'
       + '<div class="entry-progress-stat ' + anomalyStatClass + '"><span class="entry-progress-stat-label">异常</span><strong>' + failedTotal + '</strong><span class="entry-progress-stat-note">' + anomalyStatNote + '</span></div>'
       + '<div class="entry-progress-stat neutral"><span class="entry-progress-stat-label">账号状态</span><strong>' + completedAccounts + ' / ' + accountRows.length + '</strong><span class="entry-progress-stat-note">今日完成账号</span></div>'
+      + '<div class="entry-progress-stat neutral"><span class="entry-progress-stat-label">仓位记录</span><strong>' + positionTotal + '</strong><span class="entry-progress-stat-note">记录行，不等于动作数</span></div>'
       + '<div class="entry-progress-next-action"><span class="entry-progress-next-label">下一检查</span><strong>' + escapeHtml(nextCheckLabel) + '</strong><span class="entry-progress-next-state"><i class="entry-progress-next-pulse"></i>' + escapeHtml(nextActionLabel) + ' · <span id="entry-progress-countdown">--</span></span></div>'
       + '</div>';
-    html += '<div class="entry-progress-timeline"><div class="entry-progress-timeline-head"><div class="entry-progress-timeline-title"><span class="entry-progress-timeline-kicker">EXECUTION RHYTHM</span><strong>共同开仓窗口</strong><span>' + escapeHtml(timelineCaption) + '</span></div><div class="entry-progress-timeline-legend"><span class="entry-progress-phase-legend is-wait-bullish"><i></i>等待阳线</span><span class="entry-progress-phase-legend is-wait-bearish"><i></i>阳线已确认 · 等阴线</span><span class="entry-progress-zone">北京时间 UTC+8</span></div></div><div class="entry-progress-timeline-track">';
+    html += '<div class="entry-progress-timeline"><div class="entry-progress-timeline-head"><div class="entry-progress-timeline-title"><span class="entry-progress-timeline-kicker">EXECUTION RHYTHM</span><strong>共同入场窗口</strong><span>' + escapeHtml(timelineCaption) + '</span></div><div class="entry-progress-timeline-legend"><span class="entry-progress-phase-legend is-initial"><i></i>首笔入场</span><span class="entry-progress-phase-legend is-scale-in"><i></i>二次入场</span><span class="entry-progress-phase-legend is-wait-bullish"><i></i>等待阳线</span><span class="entry-progress-phase-legend is-wait-bearish"><i></i>阳线已确认 · 等阴线</span><span class="entry-progress-zone">北京时间 UTC+8</span></div></div><div class="entry-progress-timeline-track">';
     if (timeline.groups.length) {
       for (var k = 0; k < timeline.groups.length; k += 1) {
         var group = timeline.groups[k];
-        html += '<div class="entry-progress-timeline-event is-complete"><div class="entry-progress-timeline-event-top"><span class="entry-progress-timeline-event-state">已完成</span><time>' + escapeHtml(group.time) + '</time></div><span>'
-          + escapeHtml(group.symbols.join(" · ")) + '</span></div>';
+        var groupActions = group.actions || [];
+        var scaleOnly = groupActions.length > 0 && groupActions.every(function (item) {
+          return String((item || {}).entry_stage || "INITIAL").toUpperCase() === "SCALE_IN";
+        });
+        html += '<div class="entry-progress-timeline-event is-complete' + (scaleOnly ? ' is-scale-in' : '') + '"><div class="entry-progress-timeline-event-top"><span class="entry-progress-timeline-event-state">已完成</span><time>' + escapeHtml(group.time) + '</time></div><span class="entry-progress-timeline-actions">'
+          + groupActions.map(entryTimelineActionHtml).join("") + '</span></div>';
       }
     } else {
       html += '<div class="entry-progress-detail warn">各账号榜单存在差异，见下方账号明细</div>';
@@ -8555,21 +8805,30 @@ ACCOUNTS_OVERVIEW_HTML = """<!doctype html>
       var aid = escapeHtml(String(account.account_id || ""));
       if (!progress || progress.is_today === false) {
         html += '<div class="entry-progress-row">'
-          + '<div class="entry-progress-account progress-account-cell"><div class="entry-progress-account-head"><strong>' + aid + '</strong><span class="entry-progress-account-status status-warn">未开始</span></div><span class="entry-progress-account-meta">今日尚未执行</span><div class="entry-progress-progress-line"><strong>0</strong><span>/ 0 已开</span><em>0%</em></div><div class="entry-progress-meter" role="progressbar" aria-valuenow="0" aria-valuemin="0" aria-valuemax="100"></div></div>'
+          + '<div class="entry-progress-account progress-account-cell"><div class="entry-progress-account-head"><strong>' + aid + '</strong><span class="entry-progress-account-status status-warn">未开始</span></div><span class="entry-progress-account-meta">今日尚未执行</span><div class="entry-progress-progress-line"><strong>0</strong><span>/ 0 入场动作</span><em>0%</em></div><div class="entry-progress-meter" role="progressbar" aria-valuenow="0" aria-valuemin="0" aria-valuemax="100"></div></div>'
           + '<div class="entry-progress-phase"><span class="entry-progress-phase-label phase-initial">未开始</span><span class="entry-progress-phase-note">等待今日榜单</span></div>'
           + '<div class="entry-progress-waiting-cell"><div class="entry-progress-waiting-list"><div class="entry-progress-waiting-empty">等待今日榜单</div></div></div>'
           + '<div class="entry-progress-next-cell"><strong>--</strong><span>尚未开始</span></div></div>';
         continue;
       }
-      var target = Math.max(0, Number(progress.target_count || 0));
-      var opened = Math.max(0, Number(progress.opened_count || 0));
+      var target = Math.max(0, Number(progress.entry_action_target_count == null ? progress.target_count : progress.entry_action_target_count));
+      var opened = Math.max(0, Number(progress.entry_action_completed_count == null ? progress.opened_count : progress.entry_action_completed_count));
+      var positionCount = Math.max(0, Number(progress.position_count == null ? progress.opened_count : progress.position_count));
       var waiting = Math.max(0, Number(progress.waiting_count || 0));
-      var failed = Math.max(0, Number(progress.failed_count || 0));
-      var entryFailed = Math.max(0, Number(progress.entry_failed_count == null ? failed : progress.entry_failed_count));
+      var failed = Math.max(0, Number(progress.entry_action_failed_count == null ? progress.failed_count : progress.entry_action_failed_count));
+      var skipped = Math.max(0, Number(progress.entry_action_skipped_count == null ? progress.skipped_count : progress.entry_action_skipped_count));
+      var pendingActions = Math.max(0, Number(progress.entry_action_pending_count == null ? target - opened - failed - skipped : progress.entry_action_pending_count));
+      var hasActionData = progressItems(progress.entry_actions).length > 0;
+      var initialActions = Math.max(0, Number(progress.entry_action_initial_count || 0));
+      var scaleInActions = Math.max(0, Number(progress.entry_action_scale_in_count || 0));
+      if (!hasActionData && initialActions === 0) initialActions = opened;
       var denom = target > 0 ? target : Math.max(1, opened + waiting + failed);
       var openedPct = Math.min(100, opened / denom * 100);
-      var waitingPct = Math.min(100 - openedPct, waiting / denom * 100);
-      var failedPct = Math.min(100 - openedPct - waitingPct, entryFailed / denom * 100);
+      var initialPct = Math.min(100, initialActions / denom * 100);
+      var scaleInPct = Math.min(Math.max(0, 100 - initialPct), scaleInActions / denom * 100);
+      var failedPct = Math.min(Math.max(0, 100 - initialPct - scaleInPct), failed / denom * 100);
+      var skippedPct = Math.min(Math.max(0, 100 - initialPct - scaleInPct - failedPct), skipped / denom * 100);
+      var waitingPct = Math.min(Math.max(0, 100 - initialPct - scaleInPct - failedPct - skippedPct), pendingActions / denom * 100);
       var status = entryProgressStatus(progress.status);
       var phase = entryProgressPhase(progress);
       var nextText = progress.next_check_local ? compactLocalTime(progress.next_check_local) : "--";
@@ -8578,14 +8837,16 @@ ACCOUNTS_OVERVIEW_HTML = """<!doctype html>
       var statusTitle = status.legacyText ? status.text + "（" + status.legacyText + "）" : status.text;
       var nextNote = waiting ? "按小时收盘检查" : (failed ? "请查看任务日志" : "无需动作");
       var progressNoteParts = [];
+      progressNoteParts.push("首笔 " + initialActions);
+      progressNoteParts.push("二次 " + scaleInActions);
+      progressNoteParts.push("记录 " + positionCount);
       if (waiting) progressNoteParts.push("待触发 " + waiting);
       if (failed) progressNoteParts.push("异常 " + failed);
-      if (!progressNoteParts.length) progressNoteParts.push("无待处理");
       var progressNoteClass = failed ? "bad" : (waiting ? "warn" : "ok");
       var accountStatusText = waiting ? "等待中" : status.text;
       var accountMeta = "启动 " + compactLocalTime(progress.started_at_local) + " · " + entryProgressWindow(progress);
       html += '<div class="entry-progress-row">'
-        + '<div class="entry-progress-account progress-account-cell"><div class="entry-progress-account-head"><strong>' + aid + '</strong><span class="entry-progress-account-status ' + status.cls + '">' + escapeHtml(accountStatusText) + '</span></div><span class="entry-progress-account-meta">' + escapeHtml(accountMeta) + '</span><div class="entry-progress-progress-line"><strong>' + opened + '</strong><span>/ ' + target + ' 已开</span><em>' + Math.round(openedPct) + '%</em></div><div class="entry-progress-meter" role="progressbar" aria-label="' + escapeHtml(aid + ' 开仓进度') + '" aria-valuenow="' + Math.round(openedPct) + '" aria-valuemin="0" aria-valuemax="100"><span class="entry-progress-meter-opened" style="width:' + openedPct.toFixed(2) + '%"></span><span class="entry-progress-meter-waiting" style="width:' + waitingPct.toFixed(2) + '%"></span><span class="entry-progress-meter-failed" style="width:' + failedPct.toFixed(2) + '%"></span></div><div class="entry-progress-progress-foot"><span>任务进度</span><span class="' + progressNoteClass + '">' + escapeHtml(progressNoteParts.join(" · ")) + '</span></div></div>'
+        + '<div class="entry-progress-account progress-account-cell"><div class="entry-progress-account-head"><strong>' + aid + '</strong><span class="entry-progress-account-status ' + status.cls + '">' + escapeHtml(accountStatusText) + '</span></div><span class="entry-progress-account-meta">' + escapeHtml(accountMeta) + '</span><div class="entry-progress-progress-line"><strong>' + opened + '</strong><span>/ ' + target + ' 入场动作</span><em>' + Math.round(openedPct) + '%</em></div><div class="entry-progress-meter" role="progressbar" aria-label="' + escapeHtml(aid + ' 入场动作进度') + '" aria-valuenow="' + Math.round(openedPct) + '" aria-valuemin="0" aria-valuemax="100"><span class="entry-progress-meter-initial" style="width:' + initialPct.toFixed(2) + '%"></span><span class="entry-progress-meter-scale-in" style="width:' + scaleInPct.toFixed(2) + '%"></span><span class="entry-progress-meter-waiting" style="width:' + waitingPct.toFixed(2) + '%"></span><span class="entry-progress-meter-failed" style="width:' + failedPct.toFixed(2) + '%"></span><span class="entry-progress-meter-skipped" style="width:' + skippedPct.toFixed(2) + '%"></span></div><div class="entry-progress-progress-foot"><span>入场动作</span><span class="' + progressNoteClass + '">' + escapeHtml(progressNoteParts.join(" · ")) + '</span></div></div>'
         + '<div class="entry-progress-phase" aria-label="' + escapeHtml(statusTitle) + '"><span class="entry-progress-phase-label ' + phase.cls + ' phase-' + escapeHtml(phase.variant || "unknown") + '">' + escapeHtml(phase.label) + '</span><span class="entry-progress-phase-note">' + escapeHtml(phase.note) + '</span></div>'
         + '<div class="entry-progress-waiting-cell">' + waitingHtml + '</div>'
         + '<div class="entry-progress-next-cell' + (waiting ? ' is-waiting' : '') + '"><span class="entry-progress-next-cell-label">下一检查</span><strong>' + escapeHtml(nextText) + '</strong><span>' + escapeHtml(nextNote) + '</span></div></div>';

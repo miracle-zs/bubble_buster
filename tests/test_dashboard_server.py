@@ -1126,6 +1126,135 @@ class DashboardServerTest(unittest.TestCase):
             ["BTCUSDT", "ETHUSDT"],
         )
 
+    def test_accounts_summary_counts_entry_actions_separately_from_position_rows(self) -> None:
+        run_id, _ = self.store.create_run("2026-07-18", account_id="acc01")
+        account_store = self.store.scoped("acc01")
+        initial_one = self.store.insert_position(
+            run_id=run_id,
+            symbol="BTCUSDT",
+            side="SHORT",
+            qty=1.0,
+            entry_price=100.0,
+            liq_price_open=150.0,
+            tp_price=None,
+            sl_price=120.0,
+            tp_order_id=None,
+            sl_order_id=None,
+            tp_client_order_id=None,
+            sl_client_order_id=None,
+            opened_at_utc="2026-07-18T00:00:00+00:00",
+            expire_at_utc="2026-07-20T00:00:00+00:00",
+            status="OPEN",
+        )
+        initial_two = self.store.insert_position(
+            run_id=run_id,
+            symbol="ETHUSDT",
+            side="SHORT",
+            qty=1.0,
+            entry_price=100.0,
+            liq_price_open=150.0,
+            tp_price=None,
+            sl_price=120.0,
+            tp_order_id=None,
+            sl_order_id=None,
+            tp_client_order_id=None,
+            sl_client_order_id=None,
+            opened_at_utc="2026-07-18T00:00:00+00:00",
+            expire_at_utc="2026-07-20T00:00:00+00:00",
+            status="OPEN",
+        )
+        independent_row = self.store.insert_position(
+            run_id=run_id,
+            symbol="SOLUSDT",
+            side="SHORT",
+            qty=1.0,
+            entry_price=100.0,
+            liq_price_open=150.0,
+            tp_price=None,
+            sl_price=120.0,
+            tp_order_id=None,
+            sl_order_id=None,
+            tp_client_order_id=None,
+            sl_client_order_id=None,
+            opened_at_utc="2026-07-18T02:00:00+00:00",
+            expire_at_utc="2026-07-20T02:00:00+00:00",
+            status="OPEN",
+        )
+
+        for position_id, symbol in ((initial_one, "BTCUSDT"), (initial_two, "ETHUSDT")):
+            account_store.add_order_event(
+                symbol=symbol,
+                position_id=position_id,
+                event_time_utc="2026-07-18T00:00:00+00:00",
+                order_payload={
+                    "orderId": position_id,
+                    "clientOrderId": f"t10s-ent-{symbol}",
+                    "type": "MARKET",
+                    "side": "SELL",
+                    "status": "FILLED",
+                    "origQty": "1",
+                },
+            )
+        account_store.add_order_event(
+            symbol="BTCUSDT",
+            position_id=initial_one,
+            event_time_utc="2026-07-18T01:00:00+00:00",
+            order_payload={
+                "orderId": 101,
+                "clientOrderId": "t10s-add-BTCUSDT",
+                "type": "MARKET",
+                "side": "SELL",
+                "status": "FILLED",
+                "origQty": "1",
+                "entry_audit": {"entry_stage": "SCALE_IN", "signal_independent": False},
+            },
+        )
+        account_store.add_order_event(
+            symbol="SOLUSDT",
+            position_id=independent_row,
+            event_time_utc="2026-07-18T02:00:00+00:00",
+            order_payload={
+                "orderId": 102,
+                "clientOrderId": "t10s-add-SOLUSDT",
+                "type": "MARKET",
+                "side": "SELL",
+                "status": "FILLED",
+                "origQty": "1",
+                "entry_audit": {"entry_stage": "SCALE_IN", "signal_independent": True},
+            },
+        )
+        self.store.finalize_run(
+            run_id,
+            "SUCCESS",
+            "opened=3, failed=0, entry_failed=0, entry_scale_in_mode=after_bullish_bearish_independent, "
+            "scale_in_added=1, scale_in_failed=0, scale_in_skipped=0, skipped_existing=0",
+        )
+
+        provider = DashboardDataProvider(
+            db_path=self.db_path,
+            log_file=self.log_file,
+            timezone_name="UTC",
+            entry_hour=7,
+            entry_minute=40,
+        )
+
+        progress = provider.accounts_summary()["accounts"][0]["entry_progress"]
+        self.assertEqual(progress["position_count"], 3)
+        self.assertEqual(progress["entry_action_completed_count"], 4)
+        self.assertEqual(progress["entry_action_target_count"], 4)
+        self.assertEqual(progress["entry_action_initial_count"], 2)
+        self.assertEqual(progress["entry_action_scale_in_count"], 2)
+        self.assertEqual(
+            [(item["entry_stage"], item["symbol"]) for item in progress["entry_actions"]],
+            [
+                ("INITIAL", "BTCUSDT"),
+                ("INITIAL", "ETHUSDT"),
+                ("SCALE_IN", "BTCUSDT"),
+                ("SCALE_IN", "SOLUSDT"),
+            ],
+        )
+        self.assertTrue(progress["entry_actions"][-1]["signal_independent"])
+
     def test_entry_progress_uses_entry_cycle_instead_of_calendar_day(self) -> None:
         run_id, _ = self.store.create_run("2026-07-24", account_id="acc01")
         with sqlite3.connect(self.db_path) as conn:
