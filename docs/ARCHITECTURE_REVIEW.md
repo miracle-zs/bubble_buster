@@ -186,8 +186,9 @@ timeline
     已完成 (a276cc6) : 订单终态与增量防倒退 : 调度器解耦慢 I/O : 1.5M 历史全表扫描优化 : 353 项回归测试绿灯
     P1.1 已完成 (dd2c7d8) : PositionManager 纯决策与执行器解耦 : 提取纯风控评估模块 : 建立 CentralExitExecutor : 397 项测试通过
     P1.2 已完成 (50c094f) : Top10ShortStrategy 领域解耦 : 提取 MarketRankScanner : 提取 RebalanceCalculator : 提取 TimingController : 415 项测试全绿
-    P2.1 已完成 (当前) : 新建 task_executions 表替代日志爬取 : 调度任务结构化落库 : 彻底解除 Dashboard 日志 IO 瓶颈 : 430 项测试全绿
-    P2.2 (下一阶段) : 抽离 Dashboard 5500 行 HTML 静态化与模板解耦
+    P2.1 已完成 (e6be3e5) : 新建 task_executions 表替代日志爬取 : 调度任务结构化落库 : 彻底解除 Dashboard 日志 IO 瓶颈 : 430 项测试全绿
+    P2.2 已完成 (当前) : 抽离 Dashboard 5500 行 HTML 静态化与模板解耦 : 提取 templates/ 目录 : 建立带 mtime 缓存热重载的 TemplateLoader : 433 项测试全绿
+    P3 (下一阶段) : 仓储层轻量 Unit of Work 规范化与类型系统强化
 ```
 
 ---
@@ -331,7 +332,34 @@ timeline
 
 ---
 
-## 九、目标架构全景图
+## 九、P2.2 改造方案详案：抽离 Dashboard 5500 行 HTML 静态化与模板解耦
+
+### 目标
+解决 `dashboard_server.py` 内部长达 5500+ 行的超长内嵌 HTML/CSS/JS 字符串（`DASHBOARD_HTML` 与 `ACCOUNTS_OVERVIEW_HTML`），消除 Python 转义与字符串拼装导致的维护困难，使 `dashboard_server.py` 从 9400+ 行大幅精简至 3900 行，并提供现代模板加载与热重载支持。
+
+### 实施成果与模块交付 (已完成)
+
+1. **独立模板资源目录 (`templates/`)**：
+   - 提取 `templates/dashboard.html` (2284 行，86.6KB)：单账户控制台看板独立模板；
+   - 提取 `templates/accounts_overview.html` (3233 行，139KB)：多账户总览看板独立模板；
+   - 模板支持现代编辑器原生 HTML/CSS/JS 语法高亮、语法检查与格式化。
+
+2. **带 mtime 缓存热重载的模板加载器 (`core/template_loader.py`)**：
+   - 实现 `load_template(name, base_dir=None)`：采用基于文件修改时间（`mtime`）的内存缓存机制；
+   - **零运行时开销**：生产环境下常驻内存快速渲染；
+   - **开发即时生效**：前端修改 HTML/CSS/JS 文件无需重启服务，刷新浏览器即可自动加载最新页面。
+
+3. **`dashboard_server.py` 瘦身与无缝向后兼容**：
+   - 移除内嵌的 5522 行 HTML 字符串字面量，`dashboard_server.py` 从 9449 行减至 3942 行（**净减少 58% 代码体积**）；
+   - 保留 `get_dashboard_html()`, `get_accounts_overview_html()` 以及模块级属性 `DASHBOARD_HTML`, `ACCOUNTS_OVERVIEW_HTML`，保证已有调用方和测试完全无感知兼容。
+
+4. **自动化测试与回归保障**：
+   - 新增 `tests/test_template_loader.py`（3 个单元测试，覆盖模板加载、异常处理与 mtime 热重载）；
+   - 全量回归测试：**433 项测试全部通过（0 失败，100% 绿灯）**。
+
+---
+
+## 十、目标架构全景图
 
 ```mermaid
 flowchart TD
@@ -376,11 +404,11 @@ flowchart TD
 
 ---
 
-## 十、总结与工程准则
+## 十一、总结与工程准则
 
 通过 9-22 审计报告的客观核验与 `a276cc6` 的成功合入，Bubble Buster 证明了其极高的实战可靠性。
 
 接下来的重构将严格遵循：
 1. **接口不变性（Preserve External Interface）**：所有对外界（`main.py` / `runtime_service.py`）暴露的方法签名和返回值结构严格保持兼容；
 2. **纯函数先行（Pure Functions First）**：先把业务规则写成纯函数，建立 100% 单测，再把老代码替换为对纯函数的调用；
-3. **保持测试绿灯（Keep Green）**：每个小步骤提交前必须确保所有（当前 430 个）测试全部通过。
+3. **保持测试绿灯（Keep Green）**：每个小步骤提交前必须确保所有（当前 433 个）测试全部通过。
