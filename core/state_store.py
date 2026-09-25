@@ -11,36 +11,18 @@ from typing import Any, Dict, List, Optional, Set, Tuple
 from zoneinfo import ZoneInfo
 
 
-@dataclass(frozen=True)
-class RunState:
-    run_id: str
-    account_id: str
-    trade_day_utc: str
-    started_at_utc: str
-    completed_at_utc: Optional[str]
-    status: str
-    reason: Optional[str]
-
-
-@dataclass(frozen=True)
-class PositionState:
-    id: int
-    run_id: str
-    symbol: str
-    side: str
-    qty: float
-    entry_price: float
-    liq_price_open: Optional[float]
-    liq_price_latest: Optional[float]
-    tp_price: Optional[float]
-    sl_price: Optional[float]
-    tp_order_id: Optional[int]
-    sl_order_id: Optional[int]
-    opened_at_utc: str
-    expire_at_utc: str
-    closed_at_utc: Optional[str]
-    status: str
-    close_reason: Optional[str]
+from core.storage.models import (
+    DualAccessRecord,
+    PositionRecord,
+    PositionState,
+    RunRecord,
+    RunState,
+    OrderEventRecord,
+    FillRecord,
+    TaskExecutionRecord,
+    WalletSnapshotRecord,
+)
+from core.storage.uow import UnitOfWork, get_current_uow
 
 
 def utc_now_iso() -> str:
@@ -93,16 +75,37 @@ class StateStore:
         return conn
 
     @contextmanager
-    def _connect_ctx(self):
-        conn = self._connect()
-        try:
+    def _connect_ctx(self, conn: Optional[sqlite3.Connection] = None):
+        if conn is not None:
             yield conn
-            conn.commit()
+            return
+
+        active_uow = get_current_uow()
+        if (
+            active_uow is not None
+            and active_uow.conn is not None
+            and getattr(active_uow.store, "db_path", None) == self.db_path
+        ):
+            yield active_uow.conn
+            return
+
+        standalone_conn = self._connect()
+        try:
+            yield standalone_conn
+            standalone_conn.commit()
         except Exception:
-            conn.rollback()
+            standalone_conn.rollback()
             raise
         finally:
-            conn.close()
+            standalone_conn.close()
+
+    def unit_of_work(self) -> UnitOfWork:
+        """Create a Unit of Work context manager bound to this database."""
+        return UnitOfWork(store=self)
+
+    def uow(self) -> UnitOfWork:
+        """Shorthand alias for unit_of_work."""
+        return self.unit_of_work()
 
     def init_schema(self) -> None:
         # Migrate legacy account columns before schema.sql creates account-scoped indexes.
@@ -162,20 +165,12 @@ class StateStore:
                 (status, message, utc_now_iso(), run_id),
             )
 
-    def get_run(self, run_id: str) -> Optional[RunState]:
-        with self._connect_ctx() as conn:
+    def get_run(self, run_id: str, conn: Optional[sqlite3.Connection] = None) -> Optional[RunRecord]:
+        with self._connect_ctx(conn) as conn:
             row = conn.execute("SELECT * FROM runs WHERE run_id = ?", (run_id,)).fetchone()
             if row is None:
                 return None
-            return RunState(
-                run_id=row["run_id"],
-                account_id=row["account_id"] if "account_id" in row.keys() else "default",
-                trade_day_utc=row["trade_day_utc"],
-                started_at_utc=row["started_at_utc"],
-                completed_at_utc=row["completed_at_utc"],
-                status=row["status"],
-                reason=row["message"],
-            )
+            return RunRecord.from_row(row)
 
     def count_run_opened_positions(self, run_id: str) -> int:
         """Count positions that reached an exchange-backed entry state for a run.
@@ -390,9 +385,10 @@ class StateStore:
         expire_at_utc: str,
         status: str = "OPEN",
         last_error: Optional[str] = None,
+        conn: Optional[sqlite3.Connection] = None,
     ) -> int:
         now_iso = utc_now_iso()
-        with self._connect_ctx() as conn:
+        with self._connect_ctx(conn) as conn:
             if status in ACTIVE_POSITION_STATUSES:
                 existing = conn.execute(
                     """
@@ -449,8 +445,8 @@ class StateStore:
             )
             return int(cursor.lastrowid)
 
-    def list_open_positions(self) -> List[Dict[str, Any]]:
-        with self._connect_ctx() as conn:
+    def list_open_positions(self, conn: Optional[sqlite3.Connection] = None) -> List[PositionRecord]:
+        with self._connect_ctx(conn) as conn:
             rows = conn.execute(
                 """
                 SELECT p.*
@@ -461,10 +457,10 @@ class StateStore:
                 """,
                 (self.account_id,),
             ).fetchall()
-            return [dict(row) for row in rows]
+            return [PositionRecord.from_row(row) for row in rows]
 
-    def list_pending_exit_setup_positions(self) -> List[Dict[str, Any]]:
-        with self._connect_ctx() as conn:
+    def list_pending_exit_setup_positions(self, conn: Optional[sqlite3.Connection] = None) -> List[PositionRecord]:
+        with self._connect_ctx(conn) as conn:
             rows = conn.execute(
                 """
                 SELECT p.*
@@ -476,10 +472,10 @@ class StateStore:
                 """,
                 (self.account_id,),
             ).fetchall()
-            return [dict(row) for row in rows]
+            return [PositionRecord.from_row(row) for row in rows]
 
-    def list_pending_entry_positions(self) -> List[Dict[str, Any]]:
-        with self._connect_ctx() as conn:
+    def list_pending_entry_positions(self, conn: Optional[sqlite3.Connection] = None) -> List[PositionRecord]:
+        with self._connect_ctx(conn) as conn:
             rows = conn.execute(
                 """
                 SELECT p.*
@@ -491,10 +487,10 @@ class StateStore:
                 """,
                 (self.account_id,),
             ).fetchall()
-            return [dict(row) for row in rows]
+            return [PositionRecord.from_row(row) for row in rows]
 
-    def get_position(self, position_id: int) -> Optional[Dict[str, Any]]:
-        with self._connect_ctx() as conn:
+    def get_position(self, position_id: int, conn: Optional[sqlite3.Connection] = None) -> Optional[PositionRecord]:
+        with self._connect_ctx(conn) as conn:
             row = conn.execute(
                 """
                 SELECT p.*
@@ -505,7 +501,7 @@ class StateStore:
                 """,
                 (int(position_id), self.account_id),
             ).fetchone()
-            return dict(row) if row is not None else None
+            return PositionRecord.from_row(row)
 
     def list_open_symbols(self) -> Set[str]:
         with self._connect_ctx() as conn:
@@ -545,8 +541,9 @@ class StateStore:
         tp_price: Optional[float],
         sl_price: Optional[float],
         liq_price_latest: Optional[float] = None,
+        conn: Optional[sqlite3.Connection] = None,
     ) -> None:
-        with self._connect_ctx() as conn:
+        with self._connect_ctx(conn) as conn:
             conn.execute(
                 """
                 UPDATE positions
@@ -580,8 +577,9 @@ class StateStore:
         sl_client_order_id: Optional[str],
         sl_price: float,
         liq_price_latest: Optional[float],
+        conn: Optional[sqlite3.Connection] = None,
     ) -> None:
-        with self._connect_ctx() as conn:
+        with self._connect_ctx(conn) as conn:
             conn.execute(
                 """
                 UPDATE positions
@@ -600,9 +598,10 @@ class StateStore:
         position_id: int,
         tp_order_id: Optional[int],
         tp_client_order_id: Optional[str],
-        tp_price: Optional[float],
+        tp_price: float,
+        conn: Optional[sqlite3.Connection] = None,
     ) -> None:
-        with self._connect_ctx() as conn:
+        with self._connect_ctx(conn) as conn:
             conn.execute(
                 """
                 UPDATE positions
@@ -615,8 +614,14 @@ class StateStore:
                 (tp_order_id, tp_client_order_id, tp_price, utc_now_iso(), int(position_id)),
             )
 
-    def set_position_qty(self, position_id: int, qty: float, entry_price: float) -> None:
-        with self._connect_ctx() as conn:
+    def set_position_qty(
+        self,
+        position_id: int,
+        qty: float,
+        entry_price: float,
+        conn: Optional[sqlite3.Connection] = None,
+    ) -> None:
+        with self._connect_ctx(conn) as conn:
             conn.execute(
                 """
                 UPDATE positions
@@ -634,8 +639,9 @@ class StateStore:
         liq_price_open: Optional[float],
         opened_at_utc: str,
         expire_at_utc: str,
+        conn: Optional[sqlite3.Connection] = None,
     ) -> None:
-        with self._connect_ctx() as conn:
+        with self._connect_ctx(conn) as conn:
             conn.execute(
                 """
                 UPDATE positions
@@ -661,8 +667,12 @@ class StateStore:
                 ),
             )
 
-    def mark_position_open(self, position_id: int) -> None:
-        with self._connect_ctx() as conn:
+    def mark_position_open(
+        self,
+        position_id: int,
+        conn: Optional[sqlite3.Connection] = None,
+    ) -> None:
+        with self._connect_ctx(conn) as conn:
             conn.execute(
                 """
                 UPDATE positions
@@ -679,8 +689,9 @@ class StateStore:
         status: str,
         close_reason: Optional[str],
         close_order_id: Optional[int] = None,
+        conn: Optional[sqlite3.Connection] = None,
     ) -> None:
-        with self._connect_ctx() as conn:
+        with self._connect_ctx(conn) as conn:
             conn.execute(
                 """
                 UPDATE positions
@@ -694,8 +705,13 @@ class StateStore:
                 (status, close_reason, close_order_id, utc_now_iso(), utc_now_iso(), position_id),
             )
 
-    def set_position_error(self, position_id: int, error_message: str) -> None:
-        with self._connect_ctx() as conn:
+    def set_position_error(
+        self,
+        position_id: int,
+        error_message: str,
+        conn: Optional[sqlite3.Connection] = None,
+    ) -> None:
+        with self._connect_ctx(conn) as conn:
             conn.execute(
                 """
                 UPDATE positions
@@ -705,8 +721,12 @@ class StateStore:
                 (error_message[:1000], utc_now_iso(), position_id),
             )
 
-    def clear_position_error(self, position_id: int) -> None:
-        with self._connect_ctx() as conn:
+    def clear_position_error(
+        self,
+        position_id: int,
+        conn: Optional[sqlite3.Connection] = None,
+    ) -> None:
+        with self._connect_ctx(conn) as conn:
             conn.execute(
                 """
                 UPDATE positions
@@ -722,8 +742,9 @@ class StateStore:
         event_time_utc: str,
         order_payload: Dict[str, Any],
         position_id: Optional[int] = None,
+        conn: Optional[sqlite3.Connection] = None,
     ) -> int:
-        with self._connect_ctx() as conn:
+        with self._connect_ctx(conn) as conn:
             cursor = conn.execute(
                 """
                 INSERT INTO order_events (
@@ -757,12 +778,13 @@ class StateStore:
                 event_time_utc=event_time_utc,
                 order_payload=order_payload,
             )
-        self.upsert_exchange_order_state(
-            {**order_payload, "symbol": order_payload.get("symbol") or symbol},
-            source="LOCAL_ORDER_EVENT",
-            event_time_utc=event_time_utc,
-        )
-        return event_id
+            self.upsert_exchange_order_state(
+                {**order_payload, "symbol": order_payload.get("symbol") or symbol},
+                source="LOCAL_ORDER_EVENT",
+                event_time_utc=event_time_utc,
+                conn=conn,
+            )
+            return event_id
 
     def update_order_event(
         self,
@@ -771,8 +793,9 @@ class StateStore:
         event_time_utc: str,
         order_payload: Dict[str, Any],
         position_id: Optional[int] = None,
+        conn: Optional[sqlite3.Connection] = None,
     ) -> None:
-        with self._connect_ctx() as conn:
+        with self._connect_ctx(conn) as conn:
             conn.execute(
                 """
                 UPDATE order_events
@@ -814,11 +837,60 @@ class StateStore:
                 event_time_utc=event_time_utc,
                 order_payload=order_payload,
             )
-        self.upsert_exchange_order_state(
-            {**order_payload, "symbol": order_payload.get("symbol") or symbol},
-            source="LOCAL_ORDER_EVENT",
-            event_time_utc=event_time_utc,
-        )
+            self.upsert_exchange_order_state(
+                {**order_payload, "symbol": order_payload.get("symbol") or symbol},
+                source="LOCAL_ORDER_EVENT",
+                event_time_utc=event_time_utc,
+                conn=conn,
+            )
+
+    def get_order_event(
+        self,
+        order_event_id: int,
+        conn: Optional[sqlite3.Connection] = None,
+    ) -> Optional[OrderEventRecord]:
+        with self._connect_ctx(conn) as conn:
+            row = conn.execute(
+                "SELECT * FROM order_events WHERE id = ? AND account_id = ?",
+                (int(order_event_id), self.account_id),
+            ).fetchone()
+            return OrderEventRecord.from_row(row)
+
+    def list_order_events_for_position(
+        self,
+        position_id: int,
+        conn: Optional[sqlite3.Connection] = None,
+    ) -> List[OrderEventRecord]:
+        with self._connect_ctx(conn) as conn:
+            rows = conn.execute(
+                "SELECT * FROM order_events WHERE position_id = ? AND account_id = ? ORDER BY id ASC",
+                (int(position_id), self.account_id),
+            ).fetchall()
+            return [OrderEventRecord.from_row(row) for row in rows]
+
+    def get_fill_by_order_event_id(
+        self,
+        order_event_id: int,
+        conn: Optional[sqlite3.Connection] = None,
+    ) -> Optional[FillRecord]:
+        with self._connect_ctx(conn) as conn:
+            row = conn.execute(
+                "SELECT * FROM fills WHERE order_event_id = ?",
+                (int(order_event_id),),
+            ).fetchone()
+            return FillRecord.from_row(row)
+
+    def list_fills_for_position(
+        self,
+        position_id: int,
+        conn: Optional[sqlite3.Connection] = None,
+    ) -> List[FillRecord]:
+        with self._connect_ctx(conn) as conn:
+            rows = conn.execute(
+                "SELECT * FROM fills WHERE position_id = ? ORDER BY id ASC",
+                (int(position_id),),
+            ).fetchall()
+            return [FillRecord.from_row(row) for row in rows]
 
     @staticmethod
     def _deferred_structure_boundary_reached(
@@ -1839,6 +1911,7 @@ class StateStore:
         *,
         source: str,
         event_time_utc: Optional[str] = None,
+        conn: Optional[sqlite3.Connection] = None,
     ) -> None:
         event_time = event_time_utc
         if not event_time:
@@ -1874,7 +1947,7 @@ class StateStore:
                 return int(str(value or "").strip().lower() in {"1", "true", "yes"})
             return None
 
-        with self._connect_ctx() as conn:
+        with self._connect_ctx(conn) as conn:
             conn.execute(
                 """
                 INSERT INTO exchange_order_state (

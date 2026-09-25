@@ -187,8 +187,8 @@ timeline
     P1.1 已完成 (dd2c7d8) : PositionManager 纯决策与执行器解耦 : 提取纯风控评估模块 : 建立 CentralExitExecutor : 397 项测试通过
     P1.2 已完成 (50c094f) : Top10ShortStrategy 领域解耦 : 提取 MarketRankScanner : 提取 RebalanceCalculator : 提取 TimingController : 415 项测试全绿
     P2.1 已完成 (e6be3e5) : 新建 task_executions 表替代日志爬取 : 调度任务结构化落库 : 彻底解除 Dashboard 日志 IO 瓶颈 : 430 项测试全绿
-    P2.2 已完成 (当前) : 抽离 Dashboard 5500 行 HTML 静态化与模板解耦 : 提取 templates/ 目录 : 建立带 mtime 缓存热重载的 TemplateLoader : 433 项测试全绿
-    P3 (下一阶段) : 仓储层轻量 Unit of Work 规范化与类型系统强化
+    P2.2 已完成 (dfabe33) : 抽离 Dashboard 5500 行 HTML 静态化与模板解耦 : 提取 templates/ 目录 : 建立带 mtime 缓存热重载的 TemplateLoader : 433 项测试全绿
+    P3 已完成 (当前) : 仓储层轻量 Unit of Work 规范化与类型系统强化 : 提取 core/storage/ : 引入原子事务边界与双访问模型 : 442 项测试全绿
 ```
 
 ---
@@ -359,7 +359,39 @@ timeline
 
 ---
 
-## 十、目标架构全景图
+## 十、P3 改造方案详案：仓储层轻量 Unit of Work 规范化与类型系统强化
+
+### 目标
+解决原有仓储层单表分散提交破坏事务原子性的隐患（如更新仓位状态、记录订单事件与成交流水跨多个独立连接执行）。以**交易聚合根（Trading Aggregate Root）**为边界，建立支持上下文自动传播与嵌套 Savepoint 的轻量 `UnitOfWork`，并引入双访问强类型领域模型（兼具属性访问与字典下标），保证 100% 生产兼容性。
+
+### 实施成果与模块交付 (已完成)
+
+1. **强类型双访问领域模型 (`core/storage/models.py`)**：
+   - `DualAccessRecord`：继承自原生 `dict`，同时支持属性读取/赋值（`rec.symbol = ...`）、字典下标（`rec["symbol"]`）、安全检索（`rec.get(...)`）与标准字典转换（`rec.to_dict()`）；
+   - `PositionRecord` (兼容别名 `PositionState`)：持仓生命周期聚合模型，内建 `is_open`, `is_active`, `is_closed` 计算属性，支持位置参数无缝兼容旧测试；
+   - `RunRecord` (兼容别名 `RunState`)：交易轮次聚合模型，统一 `reason` 与 `message` 字段双向兼容，内建 `is_running`, `is_success`, `is_failed`；
+   - `OrderEventRecord` 与 `FillRecord`：订单事件与成交记录模型，内建 `parsed_payload()` 强壮解析；
+   - `TaskExecutionRecord` 与 `WalletSnapshotRecord`：调度审计与钱包快照模型。
+
+2. **轻量 Unit of Work 事务管理器 (`core/storage/uow.py`)**：
+   - 实现 `UnitOfWork`：基于 Python `ContextVar` 实现环境上下文（Ambient Context）隐式传播；
+   - **嵌套事务保护**：自动检测已有活动 UoW，同库嵌套时动态创建与释放 SQLite `SAVEPOINT`，实现细粒度局部失败回滚；
+   - **生命周期回调钩子**：支持 `add_after_commit(fn)` 与 `add_after_rollback(fn)`；
+   - 提供便捷入口：`store.unit_of_work()` 与 `store.uow()`。
+
+3. **仓储层与执行器无缝协作 (`core/state_store.py` / `core/risk/executor.py`)**：
+   - `StateStore._connect_ctx(conn=None)`：优先复用当前上下文或显式传入的 `conn`，未开启 UoW 时自管理连接与事务，**实现 100% 签名与运行时向后兼容**；
+   - 核心变动接口（`insert_position`, `update_position_orders`, `update_stop_loss`, `mark_position_closed`, `add_order_event`, `update_order_event` 等）均支持显式及隐式上下文汇入；
+   - 新增领域查询接口：`get_order_event`, `list_order_events_for_position`, `get_fill_by_order_event_id`, `list_fills_for_position`；
+   - `CentralExitExecutor`（市价退出与止损下发）原子包裹 `unit_of_work()`，订单事件、仓位终态与成交流水同事务落库。
+
+4. **自动化测试与回归保障**：
+   - 新增 `tests/test_storage_uow.py`（9 个单元测试，覆盖模型双访问模式、原子事务提交、异常整事务回滚、嵌套 Savepoint 隔离、提交/回滚回调、三表原子落库）；
+   - 全量回归测试：**442 项测试全部通过（0 失败，100% 绿灯）**。
+
+---
+
+## 十一、目标架构全景图
 
 ```mermaid
 flowchart TD
@@ -383,13 +415,13 @@ flowchart TD
     PureEval -->|List of ExitIntent| Executor
   end
 
-  subgraph StorageLayer["持久化与仓储 (Storage & UoW)"]
-    UoW["Unit of Work (事务上下文)"]
+  subgraph StorageLayer["持久化与仓储 (Storage & UoW - P3 核心成果)"]
+    UoW["Unit of Work (事务上下文)\n- Ambient ContextVar\n- SQLite Savepoints\n- DualAccess Models"]
     DB[(SQLite: state.db\nPRAGMA journal_mode=WAL)]
     UoW --> DB
   end
 
-  subgraph PresentationLayer["监控与运维 (Presentation)"]
+  subgraph PresentationLayer["监控与运维 (Presentation - P2 核心成果)"]
     FastAPI["FastAPI 路由 (含 Cycle Readiness 指标)"]
     StaticUI["独立 HTML/JS 前端 (淘汰内嵌字符串)"]
     FastAPI --> UoW
@@ -404,11 +436,11 @@ flowchart TD
 
 ---
 
-## 十一、总结与工程准则
+## 十二、总结与工程准则
 
 通过 9-22 审计报告的客观核验与 `a276cc6` 的成功合入，Bubble Buster 证明了其极高的实战可靠性。
 
 接下来的重构将严格遵循：
 1. **接口不变性（Preserve External Interface）**：所有对外界（`main.py` / `runtime_service.py`）暴露的方法签名和返回值结构严格保持兼容；
 2. **纯函数先行（Pure Functions First）**：先把业务规则写成纯函数，建立 100% 单测，再把老代码替换为对纯函数的调用；
-3. **保持测试绿灯（Keep Green）**：每个小步骤提交前必须确保所有（当前 433 个）测试全部通过。
+3. **保持测试绿灯（Keep Green）**：每个小步骤提交前必须确保所有（当前 442 个）测试全部通过。

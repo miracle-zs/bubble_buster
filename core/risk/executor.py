@@ -102,18 +102,19 @@ class CentralExitExecutor:
             create_order_params["positionSide"] = position_side
 
         close_order = self.client.create_order(**create_order_params)
-        self.reconciler.record_market_order(
-            symbol=symbol,
-            position_id=position_id,
-            order=close_order,
-        )
-        if position_id is not None:
-            self.store.mark_position_closed(
+        with self.store.unit_of_work():
+            self.reconciler.record_market_order(
+                symbol=symbol,
                 position_id=position_id,
-                status=close_status,
-                close_reason=close_reason,
-                close_order_id=close_order.get("orderId"),
+                order=close_order,
             )
+            if position_id is not None:
+                self.store.mark_position_closed(
+                    position_id=position_id,
+                    status=close_status,
+                    close_reason=close_reason,
+                    close_order_id=close_order.get("orderId"),
+                )
         return {
             "qty": qty,
             "close_order_id": close_order.get("orderId"),
@@ -243,20 +244,21 @@ class CentralExitExecutor:
 
         # Place succeeded: update state and cancel old stop order
         try:
-            if intent.position_id is not None:
-                self.store.update_stop_loss(
+            with self.store.unit_of_work():
+                if intent.position_id is not None:
+                    self.store.update_stop_loss(
+                        position_id=intent.position_id,
+                        sl_order_id=sl_order.get("orderId"),
+                        sl_client_order_id=sl_order.get("clientOrderId"),
+                        sl_price=intent.target_price,
+                        liq_price_latest=liquidation_price,
+                    )
+                self.store.add_order_event(
+                    symbol=symbol,
                     position_id=intent.position_id,
-                    sl_order_id=sl_order.get("orderId"),
-                    sl_client_order_id=sl_order.get("clientOrderId"),
-                    sl_price=intent.target_price,
-                    liq_price_latest=liquidation_price,
+                    event_time_utc=self.now_iso_fn(),
+                    order_payload=sl_order,
                 )
-            self.store.add_order_event(
-                symbol=symbol,
-                position_id=intent.position_id,
-                event_time_utc=self.now_iso_fn(),
-                order_payload=sl_order,
-            )
         except Exception as exc:
             # Rollback: cancel the newly created order if DB persistence failed
             self.cancel_order_if_exists(symbol, sl_order.get("orderId"), sl_order.get("clientOrderId"))
