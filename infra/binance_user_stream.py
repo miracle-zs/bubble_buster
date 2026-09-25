@@ -27,8 +27,8 @@ def _event_time_iso(payload: Dict[str, Any]) -> str:
     try:
         event_ms = int(raw)
     except (TypeError, ValueError):
-        return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
-    return datetime.fromtimestamp(event_ms / 1000.0, tz=timezone.utc).replace(microsecond=0).isoformat()
+        return datetime.now(timezone.utc).isoformat()
+    return datetime.fromtimestamp(event_ms / 1000.0, tz=timezone.utc).isoformat()
 
 
 class BinanceUserStreamState:

@@ -40,6 +40,7 @@ log_dir = logs
 
 [accounts]
 enabled = acc01,acc02,55
+equity_comparison_accounts = acc01,acc02,55
 mode.acc01 = full
 mode.acc02 = full
 mode.55 = loss_cut_only
@@ -66,6 +67,7 @@ portfolio_take_profit_enabled = true
         self.assertEqual(ctx.portfolio_loss_cut_minute, 0)
         self.assertTrue(ctx.provider.account_equity_recovery_enabled["acc01"])
         self.assertFalse(ctx.provider.account_equity_recovery_enabled["acc02"])
+        self.assertEqual(ctx.provider.equity_comparison_account_ids, {"acc01", "acc02", "55"})
         self.assertTrue(ctx.db_path.endswith("data/state.db"))
         self.assertTrue(ctx.log_file.endswith("logs/strategy.log"))
         self.assertTrue(Path(ctx.db_path).exists())
@@ -123,6 +125,8 @@ portfolio_take_profit_enabled = true
             self.assertEqual(overview.status_code, 200)
             self.assertIn("账户总览", overview.text)
             self.assertIn("组合止损 -3.5% 已启用", overview.text)
+            self.assertIn("本周期权益曲线", overview.text)
+            self.assertNotIn('if (mode !== "readonly") {\n      var latestMs', overview.text)
             self.assertIn('href="accounts/comparison/"', overview.text)
 
             comparison_page = client.get("/accounts/comparison/")
@@ -148,7 +152,7 @@ portfolio_take_profit_enabled = true
             self.assertIn("入场价 / 标记价", compact.text)
             self.assertIn("未实现盈亏", compact.text)
             self.assertIn("止盈 / 止损", compact.text)
-            self.assertIn("实时读取，不写入数据库", compact.text)
+            self.assertIn("名义金额优先按交易所敞口或标记价计算", compact.text)
 
             health = client.get("/healthz")
             self.assertEqual(health.status_code, 200)

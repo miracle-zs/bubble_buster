@@ -154,6 +154,8 @@ class StrategyRuntimeService:
         )
         self._scheduled_futures_by_task_account: Dict[tuple[str, str], Future] = {}
         self._scheduled_future_day_by_task_account: Dict[tuple[str, str], date] = {}
+        self.last_cycle_completed_at_utc: Optional[str] = None
+        self.last_cycle_duration_sec: Optional[float] = None
 
     def _entry_schedule_for_day(self, day: date, account_id: Optional[str] = None) -> datetime:
         account_ctx = self.account_runtimes.get(account_id or "", {})
@@ -1327,6 +1329,7 @@ class StrategyRuntimeService:
         now_local: Optional[datetime] = None,
         now_monotonic: Optional[float] = None,
     ) -> None:
+        start_time = time.monotonic()
         local_dt = now_local or datetime.now(self.timezone)
         mono = now_monotonic if now_monotonic is not None else time.monotonic()
         self._run_cashflow_sync_if_due(local_dt)
@@ -1338,6 +1341,8 @@ class StrategyRuntimeService:
         self._run_orphan_exit_order_cleanup_if_due(local_dt)
         self._run_manage_if_due(mono, now_local=local_dt)
         self._run_balance_snapshot_for_readonly_accounts(mono)
+        self.last_cycle_completed_at_utc = datetime.now(timezone.utc).isoformat()
+        self.last_cycle_duration_sec = time.monotonic() - start_time
 
     def _run_cashflow_sync_if_due(self, now_local: datetime) -> None:
         """Run one unfiltered income request per account/minute at staggered seconds."""
@@ -1353,6 +1358,7 @@ class StrategyRuntimeService:
 
         default_slots = (5, 20, 35, 50)
         minute_key = now_local.strftime("%Y-%m-%dT%H:%M")
+        calls: Dict[str, Callable[[], object]] = {}
         for index, aid in enumerate(account_ids):
             ctx = self.account_runtimes[aid]
             configured_slot = ctx.get("cashflow_second_offset")
@@ -1368,13 +1374,20 @@ class StrategyRuntimeService:
             # within the same minute.
             self._last_cashflow_minute_by_account[aid] = minute_key
             sampler = ctx["balance_sampler"]
-            try:
-                result = sampler.sync_cashflows_once(  # type: ignore[attr-defined]
-                    now_utc=now_local.astimezone(timezone.utc),
-                )
-                LOGGER.info("service cashflow sync account=%s inserted=%s", aid, result)
-            except Exception as exc:  # noqa: BLE001
-                LOGGER.warning("service cashflow sync failed account=%s: %s", aid, exc)
+            utc_time = now_local.astimezone(timezone.utc)
+            calls[aid] = (lambda s=sampler, u=utc_time: s.sync_cashflows_once(now_utc=u))
+
+        if not calls:
+            return
+
+        results = self._run_account_task_calls(calls, "cashflow-sync")
+        for aid, res in results.items():
+            if isinstance(res, dict) and res.get("slow"):
+                LOGGER.warning("service cashflow sync account=%s is slow, continuing in background", aid)
+            elif isinstance(res, dict) and "error" in res:
+                LOGGER.warning("service cashflow sync failed account=%s: %s", aid, res["error"])
+            else:
+                LOGGER.info("service cashflow sync account=%s inserted=%s", aid, res)
 
     def _run_balance_snapshot_for_readonly_accounts(self, now_monotonic: float) -> None:
         """为 readonly 账户执行余额快照采集。"""
@@ -1386,6 +1399,7 @@ class StrategyRuntimeService:
         if not readonly_accounts:
             return
 
+        calls: Dict[str, Callable[[], object]] = {}
         for aid in readonly_accounts:
             ctx = self.account_runtimes.get(aid)
             if not ctx:
@@ -1396,13 +1410,21 @@ class StrategyRuntimeService:
             next_due = self._next_readonly_wallet_snapshot_monotonic_by_account.get(aid, 0.0)
             if now_monotonic < next_due:
                 continue
-            try:
-                wallet_summary = balance_sampler.run_once()  # type: ignore[attr-defined]
-                LOGGER.info("service readonly wallet snapshot account=%s: %s", aid, wallet_summary)
-                interval = max(1.0, float(self.cfg.readonly_wallet_snapshot_interval_sec))
-                self._next_readonly_wallet_snapshot_monotonic_by_account[aid] = now_monotonic + interval
-            except Exception as exc:  # noqa: BLE001
-                LOGGER.warning("service readonly wallet snapshot failed account=%s: %s", aid, exc)
+            interval = max(1.0, float(self.cfg.readonly_wallet_snapshot_interval_sec))
+            self._next_readonly_wallet_snapshot_monotonic_by_account[aid] = now_monotonic + interval
+            calls[aid] = balance_sampler.run_once
+
+        if not calls:
+            return
+
+        results = self._run_account_task_calls(calls, "readonly-wallet-snapshot")
+        for aid, res in results.items():
+            if isinstance(res, dict) and res.get("slow"):
+                LOGGER.warning("service readonly wallet snapshot account=%s is slow, continuing in background", aid)
+            elif isinstance(res, dict) and "error" in res:
+                LOGGER.warning("service readonly wallet snapshot failed account=%s: %s", aid, res["error"])
+            else:
+                LOGGER.info("service readonly wallet snapshot account=%s: %s", aid, res)
 
     def run_forever(self, stop_event: Optional[threading.Event] = None) -> None:
         stopper = stop_event or threading.Event()

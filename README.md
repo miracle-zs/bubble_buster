@@ -281,6 +281,7 @@ protection_exempt_symbols = XAUUSDT
 ### `[accounts]`（单进程多账户）
 
 - `enabled`：启用账户列表（逗号分隔），示例 `enabled = acc01,acc02,55`
+- `equity_comparison_accounts`：权益对比图账户列表；与账户交易模式独立，适合将只读账户纳入同一组曲线比较。
 - `mode.<account_id>`：账户模式，支持 `full` / `loss_cut_only` / `readonly`
 - `readonly` 账户由后台账户快照与 User Stream 写入本地状态，不写入策略持仓；Dashboard 只读本地持仓、活动止盈止损和仓位保证金，收益率同时展示名义价值收益率与实际仓位初始保证金收益率。
 - 账户覆盖节：

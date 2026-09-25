@@ -55,6 +55,7 @@ class DashboardDataProvider:
         account_modes: Optional[Dict[str, str]] = None,
         account_equity_recovery_enabled: Optional[Dict[str, bool]] = None,
         overview_account_ids: Optional[List[str]] = None,
+        equity_comparison_account_ids: Optional[List[str]] = None,
         live_wallet_account_id: str = "default",
         trade_stats_fetchers: Optional[Dict[str, Any]] = None,
         live_position_clients: Optional[Dict[str, Any]] = None,
@@ -96,6 +97,14 @@ class DashboardDataProvider:
         }
         overview_ids = [str(x).strip() for x in (overview_account_ids or []) if str(x).strip()]
         self.overview_account_ids: Optional[Set[str]] = set(overview_ids) if overview_ids else None
+        comparison_ids = [
+            str(x).strip()
+            for x in (equity_comparison_account_ids or [])
+            if str(x).strip()
+        ]
+        self.equity_comparison_account_ids: Optional[Set[str]] = (
+            set(comparison_ids) if comparison_ids else None
+        )
         self.live_wallet_account_id = (live_wallet_account_id or "").strip() or "default"
         self.trade_stats_fetchers = trade_stats_fetchers or {}
         self.live_position_clients = {
@@ -2983,7 +2992,12 @@ class DashboardDataProvider:
 
         try:
             with self._connect_ctx() as conn:
-                if self.overview_account_ids is not None:
+                if self.equity_comparison_account_ids is not None:
+                    configured_ids = self.equity_comparison_account_ids
+                    if self.overview_account_ids is not None:
+                        configured_ids = configured_ids & self.overview_account_ids
+                    account_ids = sorted(configured_ids)
+                elif self.overview_account_ids is not None:
                     account_ids = sorted(
                         account_id
                         for account_id in self.overview_account_ids
@@ -3600,14 +3614,14 @@ class DashboardDataProvider:
         latest_wallet_rows = self._query_rows(
             conn,
             f"""
-            SELECT ws.account_id, ws.balance_usdt
-            FROM wallet_snapshots ws
-            INNER JOIN (
-                SELECT account_id, MAX(id) AS max_id
+            SELECT account_id, balance_usdt
+            FROM (
+                SELECT account_id, balance_usdt,
+                       ROW_NUMBER() OVER (PARTITION BY account_id ORDER BY id DESC) AS rn
                 FROM wallet_snapshots
                 WHERE account_id IN ({placeholders}) AND error IS NULL
-                GROUP BY account_id
-            ) latest ON latest.account_id = ws.account_id AND latest.max_id = ws.id
+            )
+            WHERE rn = 1
             """,
             tuple(account_ids),
         )
@@ -8906,19 +8920,17 @@ ACCOUNTS_OVERVIEW_HTML = """<!doctype html>
     });
     if (points.length < 2) return null;
     var startIndex = 0;
-    if (mode !== "readonly") {
-      var latestMs = new Date(points[points.length - 1].t || "").getTime();
-      if (Number.isFinite(latestMs)) {
-        var targetMs = cycleStartMs(latestMs);
-        var afterIndex = -1;
-        for (var i = 0; i < points.length; i += 1) {
-          var pointMs = new Date(points[i].t || "").getTime();
-          if (!Number.isFinite(pointMs)) continue;
-          if (afterIndex < 0 && pointMs >= targetMs) afterIndex = i;
-        }
-        if (afterIndex < 0) return null;
-        startIndex = afterIndex;
+    var latestMs = new Date(points[points.length - 1].t || "").getTime();
+    if (Number.isFinite(latestMs)) {
+      var targetMs = cycleStartMs(latestMs);
+      var afterIndex = -1;
+      for (var i = 0; i < points.length; i += 1) {
+        var pointMs = new Date(points[i].t || "").getTime();
+        if (!Number.isFinite(pointMs)) continue;
+        if (afterIndex < 0 && pointMs >= targetMs) afterIndex = i;
       }
+      if (afterIndex < 0) return null;
+      startIndex = afterIndex;
     }
     var scoped = points.slice(startIndex);
     if (scoped.length < 2) return null;
@@ -9233,7 +9245,7 @@ ACCOUNTS_OVERVIEW_HTML = """<!doctype html>
           + '<div class="readonly-metric readonly-secondary"><span class="metric-label">盈亏比</span><strong class="metric-value">' + profitFactorText + '</strong></div>'
           + '<div class="readonly-chart"><div>'
           + '<div class="spark-box" data-account-id="' + safeAid + '"><div class="spark-empty">加载中...</div></div>'
-          + '</div><div class="readonly-chart-meta"><span class="metric-label">1D 权益曲线</span><strong class="metric-value spark-delta" data-account-id="' + safeAid + '">--</strong></div></div>'
+          + '</div><div class="readonly-chart-meta"><span class="metric-label">本周期权益曲线</span><strong class="metric-value spark-delta" data-account-id="' + safeAid + '">--</strong></div></div>'
           + '<div class="readonly-action"><a class="detail-link" href="' + base + '">余额曲线 / 交易统计</a></div>'
           + "</article>";
       } else {

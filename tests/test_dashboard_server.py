@@ -663,6 +663,43 @@ class DashboardServerTest(unittest.TestCase):
             ["acc01"],
         )
 
+    def test_accounts_equity_comparison_includes_explicitly_configured_readonly_accounts(self) -> None:
+        for account_id, balance in (
+            ("acc01", 1000.0),
+            ("acc02", 1100.0),
+            ("acc03", 1200.0),
+            ("acc04", 1300.0),
+            ("readonly01", 2000.0),
+        ):
+            self.store.scoped(account_id).add_wallet_snapshot(
+                "2026-08-10T02:00:00+00:00",
+                balance,
+                source="API",
+            )
+
+        provider = DashboardDataProvider(
+            db_path=self.db_path,
+            log_file=self.log_file,
+            timezone_name="UTC",
+            entry_hour=7,
+            entry_minute=40,
+            account_modes={
+                "acc01": "readonly",
+                "acc02": "readonly",
+                "acc03": "readonly",
+                "acc04": "full",
+                "readonly01": "readonly",
+            },
+            overview_account_ids=["acc01", "acc02", "acc03", "acc04", "readonly01"],
+            equity_comparison_account_ids=["acc01", "acc02", "acc03", "acc04"],
+        )
+
+        payload = provider.accounts_equity_comparison(window_hours=None)
+        self.assertEqual(
+            [row["account_id"] for row in payload["series"]],
+            ["acc01", "acc02", "acc03", "acc04"],
+        )
+
     def test_snapshot_without_db_file(self) -> None:
         missing_db = str(Path(self.temp_dir.name) / "missing.db")
         provider = DashboardDataProvider(

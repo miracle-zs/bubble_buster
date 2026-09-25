@@ -259,6 +259,12 @@ def create_dashboard_context(config_path: str) -> DashboardRuntimeContext:
     enabled_accounts_raw = account_cfg.get("enabled", fallback="") if account_cfg else ""
     enabled_accounts = [x.strip() for x in enabled_accounts_raw.split(",") if x.strip()]
     overview_account_ids = list(enabled_accounts)
+    equity_comparison_accounts_raw = (
+        account_cfg.get("equity_comparison_accounts", fallback="", raw=True) if account_cfg else ""
+    )
+    equity_comparison_account_ids = [
+        x.strip() for x in equity_comparison_accounts_raw.split(",") if x.strip()
+    ]
     account_modes = {
         aid: account_cfg.get(f"mode.{aid}", fallback="full", raw=True).strip().lower() or "full"
         for aid in overview_account_ids
@@ -394,6 +400,7 @@ def create_dashboard_context(config_path: str) -> DashboardRuntimeContext:
         account_modes=account_modes,
         account_equity_recovery_enabled=account_equity_recovery_enabled,
         overview_account_ids=overview_account_ids,
+        equity_comparison_account_ids=equity_comparison_account_ids or None,
         live_wallet_account_id=default_account_id,
         trade_stats_fetchers=trade_stats_fetchers,
         live_position_clients=live_position_clients,
@@ -900,11 +907,17 @@ def create_app(config_path: Optional[str] = None) -> FastAPI:
     def healthz(request: Request):
         service_state = getattr(request.app.state, "service_state", {}) or {}
         thread = service_state.get("thread")
+        service = service_state.get("service")
+        running = bool(service_state.get("running", False)) and bool(thread and thread.is_alive())
+        last_cycle_completed_at = getattr(service, "last_cycle_completed_at_utc", None) if service else None
+        last_cycle_duration = getattr(service, "last_cycle_duration_sec", None) if service else None
         return {
             "ok": True,
             "service_enabled": bool(service_state.get("enabled", False)),
-            "service_running": bool(service_state.get("running", False)) and bool(thread and thread.is_alive()),
+            "service_running": running,
             "service_error": service_state.get("error"),
+            "last_cycle_completed_at_utc": last_cycle_completed_at,
+            "last_cycle_duration_sec": last_cycle_duration,
         }
 
     return app

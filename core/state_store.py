@@ -47,6 +47,17 @@ def utc_now_iso() -> str:
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
 
 
+def _is_strictly_newer_iso(t1: Optional[str], t2: Optional[str]) -> bool:
+    if not t1 or not t2:
+        return False
+    try:
+        dt1 = datetime.fromisoformat(str(t1))
+        dt2 = datetime.fromisoformat(str(t2))
+        return dt1 > dt2
+    except Exception:
+        return str(t1) > str(t2)
+
+
 ACCOUNT_ID_MIGRATION_TABLES = {
     "runs",
     "order_events",
@@ -1585,6 +1596,13 @@ class StateStore:
         """Atomically replace the account's shared current snapshot."""
         payload_json = json.dumps(raw_json, ensure_ascii=False) if raw_json is not None else None
         with self._connect_ctx() as conn:
+            current = conn.execute(
+                "SELECT captured_at_utc, stream_status FROM account_state WHERE account_id = ?",
+                (self.account_id,),
+            ).fetchone()
+            current_captured = str(current["captured_at_utc"]) if current and current["captured_at_utc"] else ""
+            if current is not None and _is_strictly_newer_iso(current_captured, captured_at_utc):
+                return
             conn.execute(
                 """
                 INSERT INTO account_state (
@@ -1641,6 +1659,18 @@ class StateStore:
         asset: str = "USDT",
     ) -> None:
         """Merge the changed subset delivered by ACCOUNT_UPDATE."""
+        with self._connect_ctx() as conn:
+            current = conn.execute(
+                "SELECT * FROM account_state WHERE account_id = ?",
+                (self.account_id,),
+            ).fetchone()
+            current_captured = str(current["captured_at_utc"]) if current and current["captured_at_utc"] else ""
+            if (
+                current is not None
+                and str(current["stream_status"] or "").upper() == "STREAM"
+                and _is_strictly_newer_iso(current_captured, captured_at_utc)
+            ):
+                return
         self.upsert_account_position_updates(positions, captured_at_utc=captured_at_utc)
         normalized_asset = str(asset or "USDT").strip().upper()
         balance_row = next(
@@ -1809,7 +1839,17 @@ class StateStore:
         source: str,
         event_time_utc: Optional[str] = None,
     ) -> None:
-        event_time = event_time_utc or utc_now_iso()
+        event_time = event_time_utc
+        if not event_time:
+            raw_time = order.get("updateTime") or order.get("time") or order.get("T") or order.get("E")
+            if raw_time:
+                try:
+                    event_ms = int(raw_time)
+                    event_time = datetime.fromtimestamp(event_ms / 1000.0, tz=timezone.utc).isoformat()
+                except (TypeError, ValueError):
+                    event_time = None
+        if not event_time:
+            event_time = utc_now_iso()
         order_key = self._exchange_order_key(order)
 
         def number(*keys: str) -> Optional[float]:
@@ -1849,18 +1889,69 @@ class StateStore:
                     type = COALESCE(excluded.type, exchange_order_state.type),
                     side = COALESCE(excluded.side, exchange_order_state.side),
                     position_side = COALESCE(excluded.position_side, exchange_order_state.position_side),
-                    status = COALESCE(excluded.status, exchange_order_state.status),
-                    execution_type = COALESCE(excluded.execution_type, exchange_order_state.execution_type),
+                    status = CASE
+                        WHEN exchange_order_state.status IN ('FILLED', 'CANCELED', 'CANCELLED', 'EXPIRED', 'REJECTED', 'FINISHED')
+                             AND (excluded.status IS NULL OR excluded.status NOT IN ('FILLED', 'CANCELED', 'CANCELLED', 'EXPIRED', 'REJECTED', 'FINISHED'))
+                        THEN exchange_order_state.status
+                        WHEN exchange_order_state.status = 'FILLED'
+                        THEN exchange_order_state.status
+                        WHEN exchange_order_state.status = 'PARTIALLY_FILLED'
+                             AND excluded.status IN ('NEW', 'PENDING', 'ACTIVE', 'TRIGGERING', 'TRIGGERED', 'MISSING')
+                        THEN exchange_order_state.status
+                        WHEN excluded.event_time_utc < exchange_order_state.event_time_utc
+                             AND exchange_order_state.status IS NOT NULL
+                        THEN exchange_order_state.status
+                        ELSE COALESCE(excluded.status, exchange_order_state.status)
+                    END,
+                    execution_type = CASE
+                        WHEN exchange_order_state.status IN ('FILLED', 'CANCELED', 'CANCELLED', 'EXPIRED', 'REJECTED', 'FINISHED')
+                             AND (excluded.status IS NULL OR excluded.status NOT IN ('FILLED', 'CANCELED', 'CANCELLED', 'EXPIRED', 'REJECTED', 'FINISHED'))
+                        THEN exchange_order_state.execution_type
+                        WHEN excluded.event_time_utc < exchange_order_state.event_time_utc
+                             AND exchange_order_state.execution_type IS NOT NULL
+                        THEN exchange_order_state.execution_type
+                        ELSE COALESCE(excluded.execution_type, exchange_order_state.execution_type)
+                    END,
                     price = COALESCE(excluded.price, exchange_order_state.price),
                     stop_price = COALESCE(excluded.stop_price, exchange_order_state.stop_price),
-                    avg_price = COALESCE(excluded.avg_price, exchange_order_state.avg_price),
+                    avg_price = CASE
+                        WHEN excluded.event_time_utc < exchange_order_state.event_time_utc
+                             AND exchange_order_state.avg_price IS NOT NULL
+                        THEN exchange_order_state.avg_price
+                        ELSE COALESCE(excluded.avg_price, exchange_order_state.avg_price)
+                    END,
                     original_qty = COALESCE(excluded.original_qty, exchange_order_state.original_qty),
-                    executed_qty = COALESCE(excluded.executed_qty, exchange_order_state.executed_qty),
+                    executed_qty = CASE
+                        WHEN exchange_order_state.executed_qty IS NOT NULL AND excluded.executed_qty IS NOT NULL
+                        THEN MAX(exchange_order_state.executed_qty, excluded.executed_qty)
+                        ELSE COALESCE(excluded.executed_qty, exchange_order_state.executed_qty)
+                    END,
                     reduce_only = COALESCE(excluded.reduce_only, exchange_order_state.reduce_only),
                     close_position = COALESCE(excluded.close_position, exchange_order_state.close_position),
-                    event_time_utc = excluded.event_time_utc,
-                    source = excluded.source,
-                    raw_json = excluded.raw_json
+                    event_time_utc = CASE
+                        WHEN exchange_order_state.status IN ('FILLED', 'CANCELED', 'CANCELLED', 'EXPIRED', 'REJECTED', 'FINISHED')
+                             AND (excluded.status IS NULL OR excluded.status NOT IN ('FILLED', 'CANCELED', 'CANCELLED', 'EXPIRED', 'REJECTED', 'FINISHED'))
+                        THEN exchange_order_state.event_time_utc
+                        WHEN excluded.event_time_utc < exchange_order_state.event_time_utc
+                        THEN exchange_order_state.event_time_utc
+                        ELSE excluded.event_time_utc
+                    END,
+                    source = CASE
+                        WHEN exchange_order_state.status IN ('FILLED', 'CANCELED', 'CANCELLED', 'EXPIRED', 'REJECTED', 'FINISHED')
+                             AND (excluded.status IS NULL OR excluded.status NOT IN ('FILLED', 'CANCELED', 'CANCELLED', 'EXPIRED', 'REJECTED', 'FINISHED'))
+                        THEN exchange_order_state.source
+                        WHEN excluded.event_time_utc < exchange_order_state.event_time_utc
+                        THEN exchange_order_state.source
+                        ELSE excluded.source
+                    END,
+                    raw_json = CASE
+                        WHEN exchange_order_state.status IN ('FILLED', 'CANCELED', 'CANCELLED', 'EXPIRED', 'REJECTED', 'FINISHED')
+                             AND (excluded.status IS NULL OR excluded.status NOT IN ('FILLED', 'CANCELED', 'CANCELLED', 'EXPIRED', 'REJECTED', 'FINISHED'))
+                        THEN exchange_order_state.raw_json
+                        WHEN excluded.event_time_utc < exchange_order_state.event_time_utc
+                        THEN exchange_order_state.raw_json
+                        ELSE excluded.raw_json
+                    END
                 """,
                 (
                     self.account_id,
@@ -1945,7 +2036,14 @@ class StateStore:
                 )
         for order in orders or []:
             if isinstance(order, dict):
-                self.upsert_exchange_order_state(order, source="REST_VERIFY")
+                raw_time = order.get("updateTime") or order.get("time") or order.get("T") or order.get("E")
+                order_time = None
+                if raw_time:
+                    try:
+                        order_time = datetime.fromtimestamp(int(raw_time) / 1000.0, tz=timezone.utc).isoformat()
+                    except (TypeError, ValueError):
+                        order_time = None
+                self.upsert_exchange_order_state(order, source="REST_VERIFY", event_time_utc=order_time)
 
     def get_exchange_order_status(
         self,

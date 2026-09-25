@@ -80,13 +80,18 @@ class AccountSnapshotProvider:
             if not force and self._cached is not None and self._cached_minute == minute_key:
                 return self._cached
 
-            payload = self.client.get_account()
-            if (
-                not isinstance(payload, dict)
-                or not isinstance(payload.get("assets"), list)
-                or not isinstance(payload.get("positions"), list)
-            ):
-                raise ValueError("invalid /fapi/v3/account snapshot payload")
+        payload = self.client.get_account()
+        if (
+            not isinstance(payload, dict)
+            or not isinstance(payload.get("assets"), list)
+            or not isinstance(payload.get("positions"), list)
+        ):
+            raise ValueError("invalid /fapi/v3/account snapshot payload")
+
+        with self._lock:
+            if not force and self._cached is not None and self._cached_minute == minute_key:
+                return self._cached
+
             previous_positions = self.store.list_account_position_state()
             snapshot = self._from_payload(
                 payload,
@@ -103,9 +108,23 @@ class AccountSnapshotProvider:
                 raw_json=payload,
                 stream_status="REST",
             )
-            self._cached = snapshot
+            latest = self.store.get_latest_account_state()
+            latest_captured = str(latest.get("captured_at_utc") or "") if latest else ""
+            if latest and latest_captured > snapshot.captured_at_utc:
+                self._cached = AccountSnapshot(
+                    account_id=snapshot.account_id,
+                    captured_at_utc=latest_captured,
+                    wallet_balance=_number(latest.get("wallet_balance"), snapshot.wallet_balance),
+                    unrealized_pnl=_number(latest.get("unrealized_pnl"), snapshot.unrealized_pnl),
+                    equity=_number(latest.get("equity"), snapshot.equity),
+                    available_balance=_number(latest.get("available_balance"), snapshot.available_balance),
+                    positions=tuple(self._stored_position_payload(p) for p in self.store.list_account_position_state()),
+                    raw=snapshot.raw,
+                )
+            else:
+                self._cached = snapshot
             self._cached_minute = minute_key
-            return snapshot
+            return self._cached
 
     def invalidate(self) -> None:
         with self._lock:

@@ -1,5 +1,6 @@
 import importlib.util
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor
 import unittest
 
@@ -116,7 +117,7 @@ def test_fetch_stats_paginates_realized_pnl_income_history() -> None:
 
 def test_fetch_stats_counts_completed_orders_not_partial_fills() -> None:
     incomes = [0.0616, 0.21175, 0.16852, 0.20574, 0.20466, 0.0567, 0.07182, 0.08671]
-    income_time_ms = 1786708800000
+    income_time_ms = int(time.time() * 1000) - 86400 * 1000
     income_rows = [
         _income_record(i, income)
         | {"symbol": "ONUSDT", "tradeId": str(96910192 + i), "time": income_time_ms}
