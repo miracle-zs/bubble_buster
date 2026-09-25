@@ -184,9 +184,9 @@ flowchart LR
 timeline
     title 调整后的 Bubble Buster 架构演进路线
     已完成 (a276cc6) : 订单终态与增量防倒退 : 调度器解耦慢 I/O : 1.5M 历史全表扫描优化 : 353 项回归测试绿灯
-    P1.1 (当前主线) : PositionManager 纯决策与执行器解耦 : 提取纯风控评估模块 : 建立 CentralExitExecutor
-    P1.2 : Top10ShortStrategy 状态机解耦 : 提取 MarketRankScanner : 提取 TimingController (先阳后阴/分批)
-    P2 : 系统工程治理 : 新建 task_executions 表替代日志爬取 : 抽离 Dashboard 5500 行 HTML 静态化
+    P1.1 已完成 (dd2c7d8) : PositionManager 纯决策与执行器解耦 : 提取纯风控评估模块 : 建立 CentralExitExecutor : 397 项测试通过
+    P1.2 已完成 (当前) : Top10ShortStrategy 领域解耦 : 提取 MarketRankScanner : 提取 RebalanceCalculator : 提取 TimingController : 415 项测试全绿
+    P2 (下一阶段) : 系统工程治理 : 新建 task_executions 表替代日志爬取 : 抽离 Dashboard 5500 行 HTML 静态化
 ```
 
 ---
@@ -243,7 +243,53 @@ timeline
 
 ---
 
-## 七、目标架构全景图
+## 七、P1.2 改造方案详案：Top10ShortStrategy 领域解耦
+
+### 目标
+在保持 `Top10ShortStrategy` 外部公开接口（`run_entry`, `run_rebalance` 等）和所有内部委托方法签名 **100% 不变** 的前提下，将其超长代码（5005 行）中的选币、权重再平衡计算、K线形态确认状态机解耦为纯领域子模块。
+
+### 实施成果与模块交付 (已完成)
+
+1. **不可变实体与领域模型 (`core/strategy/models.py`)**：
+   - `RankEntry`：提取自榜单的标的行情模型
+   - `PlannedOrder`：入场开仓计算出的初始委托意图
+   - `ReadyEntry`：通过形态确认后的就绪标的（含预收盘、正式收盘和批次状态）
+   - `EntryStructureWindow`：结构高点止损参考窗口
+   - `RebalancePlan`：持仓调仓调整方案计划
+
+2. **选币扫描与过滤模块 (`core/strategy/scanner.py` -> `MarketRankScanner`)**：
+   - `build_ranked_entries(top_gainers)`：安全解析交易所 ticker 榜单
+   - `filter_and_sort_ranked_entries(ranked, volume_threshold)`：按涨幅降序与成交额阈值过滤
+   - `select_entry_candidates(ranked, open_symbols, target_count)`：排除现有持仓并补齐至目标席位数
+
+3. **仓位再平衡计算引擎 (`core/strategy/rebalance.py` -> `RebalanceCalculator`)**：
+   - `parse_iso_utc(text)`：标准化时区感知解析
+   - `position_age_hours(pos, now_utc)`：仓位持有小时纯函数
+   - `age_decay_weight(age_hours, half_life_hours)`：指数衰减半衰期权重计算
+   - `build_target_notional_map(...)`：支持 equal_risk 与 age_decay 模式的名义价值分配
+   - `build_rebalance_plan(...)`：偏差度量、死区过滤、单次最大调整限制与委托数量规格化
+
+4. **K线形态确认状态机 (`core/strategy/timing.py` -> `TimingController`)**：
+   - `is_bearish` / `is_bullish`：纯 K 线阴阳线判定
+   - `floor_to_utc_hour` / `closed_hour_boundary` / `resolve_entry_fill_time`：确定性时间算子
+   - `classify_due_states(...)`：将待确认标的按预收盘与整点收盘智能分类及调度下一次唤醒
+   - `evaluate_preclose_candle(...)`：预收盘阴线就绪判定与阶段扭转
+   - `evaluate_single_bearish_final_candle(...)`：单次阴线入场确认
+   - `advance_bullish_bearish_final_candle(...)`：先阳后阴分步加仓状态机（INITIAL -> WAIT_BULLISH -> WAIT_BEARISH -> COMPLETE）
+
+5. **`Top10ShortStrategy` 成为精简的协调 Façade**：
+   - 保持所有模块层级与测试层级向后兼容（`from core.strategy_top10_short import RankEntry, ReadyEntry, RebalancePlan...` 依然完全有效）
+   - 原有方法一键委托至各纯函数模块，策略主体精简 311 行。
+
+6. **自动化测试与回归保障**：
+   - 新增 `tests/test_strategy_scanner.py`（3 个单元测试）
+   - 新增 `tests/test_strategy_rebalance_calc.py`（8 个单元测试）
+   - 新增 `tests/test_strategy_timing.py`（7 个单元测试）
+   - 全量回归测试：**415 项测试全部通过（0 失败，100% 绿灯）**。
+
+---
+
+## 八、目标架构全景图
 
 ```mermaid
 flowchart TD
@@ -288,11 +334,11 @@ flowchart TD
 
 ---
 
-## 八、总结与工程准则
+## 九、总结与工程准则
 
 通过 9-22 审计报告的客观核验与 `a276cc6` 的成功合入，Bubble Buster 证明了其极高的实战可靠性。
 
 接下来的重构将严格遵循：
 1. **接口不变性（Preserve External Interface）**：所有对外界（`main.py` / `runtime_service.py`）暴露的方法签名和返回值结构严格保持兼容；
 2. **纯函数先行（Pure Functions First）**：先把业务规则写成纯函数，建立 100% 单测，再把老代码替换为对纯函数的调用；
-3. **保持测试绿灯（Keep Green）**：每个小步骤提交前必须确保 353 个现有测试全部通过。
+3. **保持测试绿灯（Keep Green）**：每个小步骤提交前必须确保 415 个现有测试全部通过。

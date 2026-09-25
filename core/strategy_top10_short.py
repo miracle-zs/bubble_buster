@@ -44,57 +44,23 @@ def _serialized_account_mutation(method):
     return wrapped
 
 
-@dataclass(frozen=True)
-class RankEntry:
-    symbol: str
-    pct_change: float
-    last_price: float
-    quote_volume: float
-
-
-@dataclass(frozen=True)
-class PlannedOrder:
-    symbol: str
-    base_margin_usdt: float
-    target_notional_usdt: float
-    qty: float
-
-
-@dataclass(frozen=True)
-class ReadyEntry:
-    entry: RankEntry
-    reference_price: float
-    signal_time_utc: datetime
-    bearish_close_time_utc: Optional[datetime]
-    entry_stage: str = "INITIAL"
-    preclose_entry: bool = False
-    preclose_time_utc: Optional[datetime] = None
-    signal_hour_open_utc: Optional[datetime] = None
-    provisional_open_price: Optional[float] = None
-    provisional_close_price: Optional[float] = None
-
-
-@dataclass(frozen=True)
-class EntryStructureWindow:
-    bearish_close_time_utc: datetime
-    window_start_utc: datetime
-    highest_price: float
-
-
-@dataclass(frozen=True)
-class RebalancePlan:
-    position_id: int
-    symbol: str
-    side: str
-    qty: float
-    ref_price: float
-    est_notional: float
-    current_notional: float
-    target_notional: float
-    deviation_notional: float
-    deadband_notional: float
-    max_adjust_notional: float
-    requested_adjust_notional: float
+from core.strategy import (
+    ENTRY_PHASE_COMPLETE,
+    ENTRY_PHASE_INITIAL,
+    ENTRY_PHASE_POST_INITIAL_CANDLE,
+    ENTRY_PHASE_WAIT_BEARISH,
+    ENTRY_PHASE_WAIT_BULLISH,
+    ENTRY_STAGE_INITIAL,
+    ENTRY_STAGE_SCALE_IN,
+    EntryStructureWindow,
+    MarketRankScanner,
+    PlannedOrder,
+    RankEntry,
+    ReadyEntry,
+    RebalanceCalculator,
+    RebalancePlan,
+    TimingController,
+)
 
 
 class Top10ShortStrategy:
@@ -461,9 +427,7 @@ class Top10ShortStrategy:
                 fetch_top_n = max(fetch_top_n, len(top_gainers))
 
             ranked = self._build_ranked_entries(top_gainers)
-            ranked.sort(key=lambda item: item.pct_change, reverse=True)
-            if self.volume_threshold > 0:
-                ranked = [item for item in ranked if item.quote_volume >= self.volume_threshold]
+            ranked = MarketRankScanner.filter_and_sort_ranked_entries(ranked, self.volume_threshold)
 
             if not ranked:
                 self.store.finalize_run(run_id, "SUCCESS", "No ranked symbols")
@@ -1482,44 +1446,17 @@ class Top10ShortStrategy:
                 break
 
             ready_this_round: List[Tuple[int, ReadyEntry]] = []
-            next_check_times: List[datetime] = []
-            due_preclose_states: List[Tuple[int, RankEntry, datetime]] = []
-            due_final_states: List[Tuple[int, RankEntry, datetime]] = []
-
-            for idx, state in list(pending.items()):
-                entry = state.get("entry")
-                hour_open = state.get("hour_open")
-                if not isinstance(entry, RankEntry) or not isinstance(hour_open, datetime):
-                    continue
-
-                phase = str(state.get("phase") or self.ENTRY_PHASE_INITIAL).strip().upper()
-                if phase == self.ENTRY_PHASE_COMPLETE:
+            for idx in list(pending.keys()):
+                if str(pending[idx].get("phase") or "").strip().upper() == self.ENTRY_PHASE_COMPLETE:
                     pending.pop(idx, None)
-                    continue
 
-                hour_close = hour_open + timedelta(hours=1)
-                preclose_checked = bool(state.get("preclose_checked", False))
-                if (
-                    phase == self.ENTRY_PHASE_INITIAL
-                    and self.entry_preclose_sec > 0
-                    and not preclose_checked
-                ):
-                    available_at = hour_close - timedelta(seconds=self.entry_preclose_sec)
-                    if now < available_at:
-                        next_check_times.append(available_at)
-                        continue
-                    final_available_at = hour_close + timedelta(seconds=self.entry_wait_close_grace_sec)
-                    if now >= final_available_at:
-                        due_final_states.append((idx, entry, hour_open))
-                        continue
-                    due_preclose_states.append((idx, entry, hour_open))
-                    continue
-
-                available_at = hour_close + timedelta(seconds=self.entry_wait_close_grace_sec)
-                if now < available_at:
-                    next_check_times.append(available_at)
-                    continue
-                due_final_states.append((idx, entry, hour_open))
+            due_preclose_states, due_final_states, next_check_times = TimingController.classify_due_states(
+                pending=pending,
+                now=now,
+                preclose_sec=self.entry_preclose_sec,
+                close_grace_sec=self.entry_wait_close_grace_sec,
+                allow_preclose_phases={self.ENTRY_PHASE_INITIAL},
+            )
 
             preclose_candle_results = self._fetch_hour_candles_parallel(
                 due_preclose_states,
@@ -1544,37 +1481,22 @@ class Top10ShortStrategy:
                     continue
 
                 open_price, close_price, _snapshot_time = candle
-                state["preclose_checked"] = True
+                ready = TimingController.evaluate_preclose_candle(
+                    entry=entry,
+                    state=state,
+                    open_price=open_price,
+                    close_price=close_price,
+                    now_utc=now,
+                    signal_base_time_utc=signal_base_time_utc,
+                )
                 self._persist_entry_wait_pending(
                     pending=pending,
                     run_id=run_id,
                     trade_day_utc=trade_day_utc,
                     signal_base_time_utc=signal_base_time_utc,
                 )
-                if close_price < open_price:
-                    ready_this_round.append(
-                        (
-                            idx,
-                            ReadyEntry(
-                                entry=entry,
-                                reference_price=close_price,
-                                signal_time_utc=(
-                                    state["signal_time"]
-                                    if isinstance(state.get("signal_time"), datetime)
-                                    else signal_base_time_utc
-                                ),
-                                bearish_close_time_utc=None,
-                                entry_stage=self.ENTRY_STAGE_INITIAL,
-                                preclose_entry=True,
-                                preclose_time_utc=now,
-                                signal_hour_open_utc=hour_open,
-                                provisional_open_price=open_price,
-                                provisional_close_price=close_price,
-                            ),
-                        )
-                    )
-                    state["phase"] = self.ENTRY_PHASE_POST_INITIAL_CANDLE
-                    state["hour_open"] = hour_open
+                if ready is not None:
+                    ready_this_round.append((idx, ready))
                     LOGGER.info(
                         "Entry scale-in first tranche preclose ready: account=%s symbol=%s hour_open=%s",
                         self.account_id,
@@ -1594,29 +1516,18 @@ class Top10ShortStrategy:
                     continue
 
                 open_price, close_price, close_time = candle
-                phase = str(state.get("phase") or self.ENTRY_PHASE_INITIAL).strip().upper()
-                if phase == self.ENTRY_PHASE_INITIAL:
-                    if close_price < open_price:
-                        ready_this_round.append(
-                            (
-                                idx,
-                                ReadyEntry(
-                                    entry=entry,
-                                    reference_price=close_price,
-                                    signal_time_utc=(
-                                        state["signal_time"]
-                                        if isinstance(state.get("signal_time"), datetime)
-                                        else signal_base_time_utc
-                                    ),
-                                    bearish_close_time_utc=close_time,
-                                    entry_stage=self.ENTRY_STAGE_INITIAL,
-                                    signal_hour_open_utc=hour_open,
-                                ),
-                            )
-                        )
-                        state["phase"] = self.ENTRY_PHASE_WAIT_BULLISH
-                        state["hour_open"] = hour_open + timedelta(hours=1)
-                        state["preclose_checked"] = False
+                prev_phase = str(state.get("phase") or self.ENTRY_PHASE_INITIAL).strip().upper()
+                ready = TimingController.advance_bullish_bearish_final_candle(
+                    entry=entry,
+                    state=state,
+                    open_price=open_price,
+                    close_price=close_price,
+                    close_time_utc=close_time,
+                    signal_base_time_utc=signal_base_time_utc,
+                )
+                if ready is not None:
+                    ready_this_round.append((idx, ready))
+                    if ready.entry_stage == self.ENTRY_STAGE_INITIAL:
                         LOGGER.info(
                             "Entry scale-in first tranche ready: account=%s symbol=%s signal=%s",
                             self.account_id,
@@ -1624,18 +1535,13 @@ class Top10ShortStrategy:
                             close_time.isoformat(timespec="seconds"),
                         )
                     else:
-                        state["hour_open"] = hour_open + timedelta(hours=1)
-                        state["preclose_checked"] = False
-
-                elif phase == self.ENTRY_PHASE_POST_INITIAL_CANDLE:
-                    state["phase"] = (
-                        self.ENTRY_PHASE_WAIT_BEARISH
-                        if close_price > open_price
-                        else self.ENTRY_PHASE_WAIT_BULLISH
-                    )
-                    state["bullish_seen"] = close_price > open_price
-                    state["hour_open"] = hour_open + timedelta(hours=1)
-                    state["preclose_checked"] = False
+                        LOGGER.info(
+                            "Entry scale-in second tranche ready: account=%s symbol=%s signal=%s",
+                            self.account_id,
+                            entry.symbol,
+                            close_time.isoformat(timespec="seconds"),
+                        )
+                elif prev_phase == self.ENTRY_PHASE_POST_INITIAL_CANDLE:
                     LOGGER.info(
                         "Entry scale-in initial candle finalized: account=%s symbol=%s open=%.10f close=%.10f phase=%s",
                         self.account_id,
@@ -1644,13 +1550,7 @@ class Top10ShortStrategy:
                         close_price,
                         state["phase"],
                     )
-
-                elif phase == self.ENTRY_PHASE_WAIT_BULLISH:
-                    if close_price > open_price:
-                        state["phase"] = self.ENTRY_PHASE_WAIT_BEARISH
-                        state["bullish_seen"] = True
-                    state["hour_open"] = hour_open + timedelta(hours=1)
-                    state["preclose_checked"] = False
+                elif prev_phase == self.ENTRY_PHASE_WAIT_BULLISH:
                     LOGGER.info(
                         "Entry scale-in bullish scan: account=%s symbol=%s open=%.10f close=%.10f phase=%s",
                         self.account_id,
@@ -1659,36 +1559,6 @@ class Top10ShortStrategy:
                         close_price,
                         state["phase"],
                     )
-
-                elif phase == self.ENTRY_PHASE_WAIT_BEARISH:
-                    if close_price < open_price:
-                        ready_this_round.append(
-                            (
-                                idx,
-                                ReadyEntry(
-                                    entry=entry,
-                                    reference_price=close_price,
-                                    signal_time_utc=(
-                                        state["signal_time"]
-                                        if isinstance(state.get("signal_time"), datetime)
-                                        else signal_base_time_utc
-                                    ),
-                                    bearish_close_time_utc=close_time,
-                                    entry_stage=self.ENTRY_STAGE_SCALE_IN,
-                                    signal_hour_open_utc=hour_open,
-                                ),
-                            )
-                        )
-                        state["phase"] = self.ENTRY_PHASE_COMPLETE
-                        LOGGER.info(
-                            "Entry scale-in second tranche ready: account=%s symbol=%s signal=%s",
-                            self.account_id,
-                            entry.symbol,
-                            close_time.isoformat(timespec="seconds"),
-                        )
-                    else:
-                        state["hour_open"] = hour_open + timedelta(hours=1)
-                    state["preclose_checked"] = False
 
                 self._persist_entry_wait_pending(
                     pending=pending,
@@ -1787,36 +1657,15 @@ class Top10ShortStrategy:
                 self._clear_entry_wait_state()
                 break
             ready_this_round: List[Tuple[int, ReadyEntry]] = []
-            next_check_times: List[datetime] = []
-
-            due_preclose_states: List[Tuple[int, RankEntry, datetime]] = []
-            due_final_states: List[Tuple[int, RankEntry, datetime]] = []
-            for idx, state in list(pending.items()):
-                entry = state.get("entry")
-                hour_open = state.get("hour_open")
-                if not isinstance(entry, RankEntry) or not isinstance(hour_open, datetime):
-                    continue
-                hour_close = hour_open + timedelta(hours=1)
-                preclose_checked = bool(state.get("preclose_checked", False))
-                if self.entry_preclose_sec > 0 and not preclose_checked:
-                    available_at = hour_close - timedelta(seconds=self.entry_preclose_sec)
-                    if now < available_at:
-                        next_check_times.append(available_at)
-                        continue
-                    final_available_at = hour_close + timedelta(seconds=self.entry_wait_close_grace_sec)
-                    if now >= final_available_at:
-                        due_final_states.append((idx, entry, hour_open))
-                        continue
-                    due_preclose_states.append((idx, entry, hour_open))
-                    continue
-
-                available_at = hour_close + timedelta(seconds=self.entry_wait_close_grace_sec)
-                if now < available_at:
-                    next_check_times.append(available_at)
-                    continue
-                due_final_states.append((idx, entry, hour_open))
-
+            due_preclose_states, due_final_states, next_check_times = TimingController.classify_due_states(
+                pending=pending,
+                now=now,
+                preclose_sec=self.entry_preclose_sec,
+                close_grace_sec=self.entry_wait_close_grace_sec,
+                allow_preclose_phases={self.ENTRY_PHASE_INITIAL},
+            )
             due_states = due_preclose_states + due_final_states
+
             preclose_candle_results = self._fetch_hour_candles_parallel(
                 due_preclose_states,
                 snapshot_as_of_utc=now,
@@ -1849,7 +1698,14 @@ class Top10ShortStrategy:
                     continue
 
                 open_price, close_price, _snapshot_time = candle
-                state["preclose_checked"] = True
+                ready_entry = TimingController.evaluate_preclose_candle(
+                    entry=entry,
+                    state=state,
+                    open_price=open_price,
+                    close_price=close_price,
+                    now_utc=now,
+                    signal_base_time_utc=signal_base_time_utc,
+                )
                 self._persist_entry_wait_pending(
                     pending=pending,
                     run_id=run_id,
@@ -1857,18 +1713,7 @@ class Top10ShortStrategy:
                     signal_base_time_utc=signal_base_time_utc,
                 )
                 hour_close = hour_open + timedelta(hours=1)
-                if close_price < open_price:
-                    ready_entry = ReadyEntry(
-                        entry=entry,
-                        reference_price=close_price,
-                        signal_time_utc=state["signal_time"] if isinstance(state["signal_time"], datetime) else signal_base_time_utc,
-                        bearish_close_time_utc=None,
-                        preclose_entry=True,
-                        preclose_time_utc=now,
-                        signal_hour_open_utc=hour_open,
-                        provisional_open_price=open_price,
-                        provisional_close_price=close_price,
-                    )
+                if ready_entry is not None:
                     ready_this_round.append((idx, ready_entry))
                     LOGGER.info(
                         "Entry preclose ready: account=%s symbol=%s trigger=%s hour_open=%s "
@@ -1912,14 +1757,15 @@ class Top10ShortStrategy:
                     continue
 
                 open_price, close_price, close_time = candle
-                if close_price < open_price:
-                    ready_entry = ReadyEntry(
-                        entry=entry,
-                        reference_price=close_price,
-                        signal_time_utc=state["signal_time"] if isinstance(state["signal_time"], datetime) else signal_base_time_utc,
-                        bearish_close_time_utc=close_time,
-                        signal_hour_open_utc=hour_open,
-                    )
+                ready_entry = TimingController.evaluate_single_bearish_final_candle(
+                    entry=entry,
+                    state=state,
+                    open_price=open_price,
+                    close_price=close_price,
+                    close_time_utc=close_time,
+                    signal_base_time_utc=signal_base_time_utc,
+                )
+                if ready_entry is not None:
                     ready_this_round.append((idx, ready_entry))
                     LOGGER.info(
                         "Entry bearish-hour ready: account=%s symbol=%s signal=%s close=%s open=%.10f close_price=%.10f",
@@ -1940,8 +1786,6 @@ class Top10ShortStrategy:
                     open_price,
                     close_price,
                 )
-                state["hour_open"] = hour_open + timedelta(hours=1)
-                state["preclose_checked"] = False
                 self._persist_entry_wait_pending(
                     pending=pending,
                     run_id=run_id,
@@ -2656,26 +2500,15 @@ class Top10ShortStrategy:
 
     @staticmethod
     def _closed_hour_boundary(value: datetime) -> datetime:
-        close_time = value.astimezone(timezone.utc)
-        boundary = close_time.replace(minute=0, second=0, microsecond=0)
-        if close_time > boundary:
-            boundary += timedelta(hours=1)
-        return boundary
+        return TimingController.closed_hour_boundary(value)
 
     @staticmethod
     def _resolve_entry_fill_time(order: Dict[str, object], fallback: datetime) -> datetime:
-        for key in ("updateTime", "transactTime", "time"):
-            try:
-                timestamp_ms = int(order.get(key) or 0)
-            except (TypeError, ValueError):
-                continue
-            if timestamp_ms > 0:
-                return datetime.fromtimestamp(timestamp_ms / 1000.0, tz=timezone.utc)
-        return fallback.astimezone(timezone.utc)
+        return TimingController.resolve_entry_fill_time(order, fallback)
 
     @staticmethod
     def _floor_to_utc_hour(value: datetime) -> datetime:
-        return value.astimezone(timezone.utc).replace(minute=0, second=0, microsecond=0)
+        return TimingController.floor_to_utc_hour(value)
 
     @_serialized_account_mutation
     def run_equity_recovery_take_profit(self) -> Dict[str, object]:
@@ -3628,106 +3461,17 @@ class Top10ShortStrategy:
         target_notional: float,
         reduce_only: bool,
     ) -> tuple[Optional[RebalancePlan], Dict[str, object]]:
-        position_id = int(pos["id"])
-        symbol = str(pos["symbol"])
-        evaluation: Dict[str, object] = {
-            "position_id": position_id,
-            "symbol": symbol,
-            "status": "SKIPPED",
-            "reason": "UNKNOWN",
-            "side": None,
-            "ref_price": None,
-            "current_notional": 0.0,
-            "target_notional": float(target_notional),
-            "deviation_notional": 0.0,
-            "deadband_notional": 0.0,
-            "max_adjust_notional": 0.0,
-            "requested_adjust_notional": 0.0,
-            "qty": 0.0,
-            "est_notional": 0.0,
-        }
-        risk = risk_map.get(symbol)
-        if not risk:
-            evaluation["reason"] = "MISSING_POSITION_RISK"
-            return None, evaluation
-
-        position_amt = self._safe_float(risk.get("positionAmt"), default=0.0)
-        if position_amt >= 0:
-            evaluation["reason"] = "NON_SHORT_POSITION"
-            return None, evaluation
-
-        mark_price = (
-            self._safe_positive_float(risk.get("markPrice"))
-            or self._safe_positive_float(risk.get("entryPrice"))
-            or self._safe_positive_float(pos.get("entry_price"))
+        return RebalanceCalculator.build_rebalance_plan(
+            pos=pos,
+            risk_map=risk_map,
+            target_notional=target_notional,
+            reduce_only=reduce_only,
+            deadband_pct=self.rebalance_deadband_pct,
+            max_single_adjust_pct=self.rebalance_max_single_adjust_pct,
+            min_adjust_notional_usdt=self.rebalance_min_adjust_notional_usdt,
+            normalize_qty_fn=self.client.normalize_order_qty,
         )
-        if not mark_price:
-            evaluation["reason"] = "MISSING_MARK_PRICE"
-            return None, evaluation
 
-        current_notional = abs(position_amt) * mark_price
-        evaluation["ref_price"] = mark_price
-        evaluation["current_notional"] = current_notional
-        if current_notional <= 0:
-            evaluation["reason"] = "NON_POSITIVE_CURRENT_NOTIONAL"
-            return None, evaluation
-
-        deviation_notional = target_notional - current_notional
-        deadband = max(target_notional, 0.0) * self.rebalance_deadband_pct
-        evaluation["deviation_notional"] = deviation_notional
-        evaluation["deadband_notional"] = deadband
-        if abs(deviation_notional) <= deadband:
-            evaluation["reason"] = "WITHIN_DEADBAND"
-            return None, evaluation
-        if reduce_only and deviation_notional > 0:
-            evaluation["reason"] = "REDUCE_ONLY_BLOCKED_INCREASE"
-            return None, evaluation
-
-        max_adjust_notional = current_notional * self.rebalance_max_single_adjust_pct
-        adjust_notional = min(abs(deviation_notional), max_adjust_notional)
-        evaluation["max_adjust_notional"] = max_adjust_notional
-        evaluation["requested_adjust_notional"] = adjust_notional
-        if adjust_notional < self.rebalance_min_adjust_notional_usdt:
-            evaluation["reason"] = "BELOW_MIN_ADJUST_NOTIONAL"
-            return None, evaluation
-
-        qty = self.client.normalize_order_qty(symbol, adjust_notional, mark_price)
-        evaluation["qty"] = qty
-        if qty <= 0:
-            evaluation["reason"] = "QTY_NORMALIZED_ZERO"
-            return None, evaluation
-
-        side = "BUY" if deviation_notional < 0 else "SELL"
-        evaluation["side"] = side
-        if reduce_only and side != "BUY":
-            evaluation["reason"] = "REDUCE_ONLY_BLOCKED_INCREASE"
-            return None, evaluation
-
-        est_notional = qty * mark_price
-        evaluation["est_notional"] = est_notional
-        if est_notional < self.rebalance_min_adjust_notional_usdt:
-            evaluation["reason"] = "EST_NOTIONAL_BELOW_MIN"
-            return None, evaluation
-
-        evaluation["status"] = "PLANNED"
-        evaluation["reason"] = "PLANNED"
-        return (
-            RebalancePlan(
-                position_id=position_id,
-                symbol=symbol,
-                side=side,
-                qty=qty,
-                ref_price=mark_price,
-                est_notional=est_notional,
-                current_notional=current_notional,
-                target_notional=target_notional,
-                deviation_notional=deviation_notional,
-                deadband_notional=deadband,
-                max_adjust_notional=max_adjust_notional,
-                requested_adjust_notional=adjust_notional,
-            ),
-            evaluation,
-        )
 
     def _sync_position_after_adjustment(self, position_id: int, symbol: str, fallback_price: float) -> bool:
         position_risk = self._load_short_position(symbol)
@@ -3751,58 +3495,28 @@ class Top10ShortStrategy:
         target_count: int,
         target_gross_notional: float,
     ) -> tuple[Dict[int, float], int]:
-        if not positions or target_count <= 0 or target_gross_notional <= 0:
-            return {}, 0
-
-        target_per_position = target_gross_notional / float(target_count)
-        if self.rebalance_mode == self.REBALANCE_MODE_EQUAL_RISK:
-            return {int(pos["id"]): target_per_position for pos in positions}, max(0, target_count - len(positions))
-
-        now_utc = self._utc_now_datetime()
-        weighted_rows: List[Tuple[int, float]] = []
-        for pos in positions:
-            position_id = int(pos["id"])
-            age_hours = self._position_age_hours(pos=pos, now_utc=now_utc)
-            weight = self._age_decay_weight(age_hours=age_hours)
-            weighted_rows.append((position_id, weight))
-
-        virtual_slots = max(0, target_count - len(weighted_rows))
-        total_weight = sum(weight for _, weight in weighted_rows) + float(virtual_slots)
-        if total_weight <= 1e-12:
-            return {int(pos["id"]): target_per_position for pos in positions}, virtual_slots
-
-        target_map: Dict[int, float] = {}
-        for position_id, weight in weighted_rows:
-            target_map[position_id] = target_gross_notional * (weight / total_weight)
-        return target_map, virtual_slots
+        return RebalanceCalculator.build_target_notional_map(
+            positions=positions,
+            target_count=target_count,
+            target_gross_notional=target_gross_notional,
+            rebalance_mode=self.rebalance_mode,
+            now_utc=self._utc_now_datetime(),
+            half_life_hours=self.rebalance_age_decay_half_life_hours,
+        )
 
     def _age_decay_weight(self, age_hours: float) -> float:
-        if age_hours <= 0:
-            return 1.0
-        half_life = max(1.0, self.rebalance_age_decay_half_life_hours)
-        decay = math.exp(-math.log(2.0) * (age_hours / half_life))
-        return max(1e-4, decay)
+        return RebalanceCalculator.age_decay_weight(
+            age_hours=age_hours,
+            half_life_hours=self.rebalance_age_decay_half_life_hours,
+        )
 
     @classmethod
     def _position_age_hours(cls, pos: Dict[str, object], now_utc: datetime) -> float:
-        opened_at = str(pos.get("opened_at_utc") or "").strip()
-        if not opened_at:
-            return 0.0
-        try:
-            opened_dt = cls._parse_iso_utc(opened_at)
-        except Exception:  # noqa: BLE001
-            return 0.0
-        delta_sec = (now_utc - opened_dt).total_seconds()
-        if delta_sec <= 0:
-            return 0.0
-        return delta_sec / 3600.0
+        return RebalanceCalculator.position_age_hours(pos=pos, now_utc=now_utc)
 
     @staticmethod
     def _parse_iso_utc(text: str) -> datetime:
-        parsed = datetime.fromisoformat(text)
-        if parsed.tzinfo is None:
-            return parsed.replace(tzinfo=timezone.utc)
-        return parsed.astimezone(timezone.utc)
+        return RebalanceCalculator.parse_iso_utc(text)
 
     def _is_equity_recovery_time_blocked(self, current_time_utc: str) -> bool:
         local_time = self._parse_iso_utc(current_time_utc).astimezone(self.runtime_timezone).timetz().replace(tzinfo=None)
@@ -4127,36 +3841,11 @@ class Top10ShortStrategy:
         open_symbols: set[str],
         target_count: int,
     ) -> tuple[List[RankEntry], List[str]]:
-        candidates: List[RankEntry] = []
-        skipped_symbols: List[str] = []
-        target = max(0, int(target_count))
-        if target == 0:
-            return candidates, skipped_symbols
-        for entry in ranked:
-            if entry.symbol in open_symbols:
-                skipped_symbols.append(entry.symbol)
-                continue
-            candidates.append(entry)
-            if len(candidates) >= target:
-                break
-        return candidates, skipped_symbols
+        return MarketRankScanner.select_entry_candidates(ranked, open_symbols, target_count)
 
     @staticmethod
     def _build_ranked_entries(top_gainers: List[Dict[str, Any]]) -> List[RankEntry]:
-        ranked: List[RankEntry] = []
-        for item in top_gainers:
-            try:
-                ranked.append(
-                    RankEntry(
-                        symbol=str(item["symbol"]),
-                        pct_change=float(item["change"]),
-                        last_price=float(item["current_price"]),
-                        quote_volume=float(item["volume"]),
-                    )
-                )
-            except Exception:  # noqa: BLE001
-                continue
-        return ranked
+        return MarketRankScanner.build_ranked_entries(top_gainers)
 
     def _add_scale_in_tranche(
         self,
