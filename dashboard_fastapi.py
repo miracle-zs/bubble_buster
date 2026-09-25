@@ -798,7 +798,7 @@ def create_app(config_path: Optional[str] = None) -> FastAPI:
     ):
         ctx: DashboardRuntimeContext = request.app.state.ctx
         try:
-            payload = ctx.provider.snapshot(
+            payload = ctx.provider.cached_snapshot(
                 log_lines=log_lines,
                 window_hours=window_hours,
                 curve_points=curve_points,
@@ -825,7 +825,7 @@ def create_app(config_path: Optional[str] = None) -> FastAPI:
     ):
         ctx: DashboardRuntimeContext = request.app.state.ctx
         try:
-            payload = ctx.provider.snapshot(
+            payload = ctx.provider.cached_snapshot(
                 log_lines=0,
                 window_hours=window_hours,
                 curve_points=curve_points,
@@ -858,7 +858,7 @@ def create_app(config_path: Optional[str] = None) -> FastAPI:
     ):
         ctx: DashboardRuntimeContext = request.app.state.ctx
         try:
-            payload = ctx.provider.snapshot(
+            payload = ctx.provider.cached_snapshot(
                 log_lines=0,
                 window_hours=window_hours,
                 curve_points=curve_points,
@@ -882,7 +882,7 @@ def create_app(config_path: Optional[str] = None) -> FastAPI:
     ):
         ctx: DashboardRuntimeContext = request.app.state.ctx
         try:
-            payload = ctx.provider.snapshot(
+            payload = ctx.provider.cached_snapshot(
                 log_lines=log_lines,
                 window_hours=None,
                 curve_points=100,

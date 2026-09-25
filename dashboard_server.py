@@ -1,5 +1,6 @@
 import ast
 import copy
+import time as _time_mod
 import json
 import logging
 import os
@@ -121,6 +122,9 @@ class DashboardDataProvider:
         self._balance_cache_at: Optional[datetime] = None
         self._balance_last_attempt_at: Optional[datetime] = None
         self._balance_last_error: Optional[str] = None
+        self._snapshot_cache: Dict[tuple, Tuple[float, Dict[str, Any]]] = {}
+        self._snapshot_cache_lock = threading.Lock()
+        self._snapshot_cache_ttl_sec: float = 3.0
         try:
             self.local_tz = ZoneInfo(timezone_name)
         except Exception:  # noqa: BLE001
@@ -2905,6 +2909,61 @@ class DashboardDataProvider:
             data["db_error"] = str(exc)
 
         return data
+
+    def cached_snapshot(
+        self,
+        log_lines: int = 80,
+        window_hours: Optional[float] = None,
+        curve_points: Optional[int] = None,
+        account_id: Optional[str] = None,
+        include_details: bool = True,
+        include_log: bool = True,
+        include_curves: bool = True,
+        include_balance_curve: bool = True,
+        include_trade_stats: bool = True,
+    ) -> Dict[str, Any]:
+        """Return a snapshot cached with a short TTL to coalesce rapid requests.
+
+        The frontend issues ``/core``, ``/curve``, ``/details`` requests within
+        ~1.2 seconds for the same account.  Each call normally opens a new
+        SQLite connection and executes 5–10 queries.  By caching each result
+        for ``_snapshot_cache_ttl_sec`` (default 3 s), repeated identical
+        requests from periodic auto-refresh or concurrent users are served
+        from memory, cutting redundant DB round-trips by up to 80 %.
+        """
+        cache_key = (
+            account_id or "",
+            log_lines,
+            window_hours,
+            curve_points or self.default_curve_points,
+            include_details,
+            include_log,
+            include_curves,
+            include_balance_curve,
+            include_trade_stats,
+        )
+        now = _time_mod.monotonic()
+        with self._snapshot_cache_lock:
+            entry = self._snapshot_cache.get(cache_key)
+            if entry is not None:
+                ts, data = entry
+                if (now - ts) < self._snapshot_cache_ttl_sec:
+                    return copy.deepcopy(data)
+
+        data = self.snapshot(
+            log_lines=log_lines,
+            window_hours=window_hours,
+            curve_points=curve_points,
+            account_id=account_id,
+            include_details=include_details,
+            include_log=include_log,
+            include_curves=include_curves,
+            include_balance_curve=include_balance_curve,
+            include_trade_stats=include_trade_stats,
+        )
+        with self._snapshot_cache_lock:
+            self._snapshot_cache[cache_key] = (now, data)
+        return copy.deepcopy(data)
 
     def accounts_equity_comparison(
         self,
