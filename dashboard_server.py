@@ -16,6 +16,7 @@ from urllib.parse import parse_qs, urlparse
 from zoneinfo import ZoneInfo
 
 from core.state_store import SQLITE_BUSY_TIMEOUT_MS
+from core.task_status import format_task_status, task_status_template
 
 LOGGER = logging.getLogger(__name__)
 
@@ -742,13 +743,7 @@ class DashboardDataProvider:
 
     @staticmethod
     def _task_status_template() -> Dict[str, Dict[str, Any]]:
-        return {
-            "entry": {"status": "UNKNOWN", "time_local": None, "summary": "--"},
-            "daily_loss_cut": {"status": "UNKNOWN", "time_local": None, "summary": "--"},
-            "noon_protection": {"status": "UNKNOWN", "time_local": None, "summary": "--"},
-            "manage": {"status": "UNKNOWN", "time_local": None, "summary": "--"},
-            "equity_recovery_take_profit": {"status": "UNKNOWN", "time_local": None, "summary": "--"},
-        }
+        return task_status_template()
 
     @staticmethod
     def _safe_int(value: Any, default: int = 0) -> int:
@@ -808,120 +803,7 @@ class DashboardDataProvider:
         payload: Dict[str, Any],
         time_local: Optional[str],
     ) -> Dict[str, Any]:
-        status = "UNKNOWN"
-        summary = "--"
-        if task_key == "entry":
-            opened = self._safe_int(payload.get("opened"), 0)
-            failed = self._safe_int(payload.get("failed"), 0)
-            skipped = self._safe_int(payload.get("skipped"), 0)
-            status_raw = str(payload.get("status") or "").upper()
-            if status_raw in {"SUCCESS", "FAILED", "SKIPPED", "RUNNING"}:
-                status = status_raw
-            else:
-                status = self._status_from_error_count(failed, opened)
-            entry_failed_symbols = self._format_symbol_field(payload.get("entry_failed_symbols"))
-            skipped_symbols = self._format_symbol_field(payload.get("skipped_symbols"))
-            parts = [f"opened={opened}", f"failed={failed}", f"skipped={skipped}"]
-            self._append_summary_part(parts, "failed_symbols", entry_failed_symbols)
-            self._append_summary_part(parts, "skipped_symbols", skipped_symbols)
-            summary = " ".join(parts)
-        elif task_key == "daily_loss_cut":
-            total = self._safe_int(payload.get("total"), 0)
-            closed_loss_cut = self._safe_int(payload.get("closed_loss_cut"), 0)
-            errors = self._safe_int(payload.get("errors"), 0)
-            status = self._status_from_error_count(errors, max(0, total - errors))
-            closed_symbols = self._format_symbol_field(payload.get("closed_symbols"))
-            failed_symbols = self._format_symbol_field(payload.get("failed_symbols"))
-            parts = [f"total={total}", f"closed={closed_loss_cut}", f"errors={errors}"]
-            self._append_summary_part(parts, "closed_symbols", closed_symbols)
-            self._append_summary_part(parts, "failed_symbols", failed_symbols)
-            summary = " ".join(parts)
-        elif task_key == "noon_protection":
-            total = self._safe_int(payload.get("total"), 0)
-            updated_sl = self._safe_int(payload.get("updated_sl"), 0)
-            skipped = self._safe_int(payload.get("skipped"), 0)
-            errors = self._safe_int(payload.get("errors"), 0)
-            status = self._status_from_error_count(errors, max(0, updated_sl + skipped))
-            failed_symbols = self._format_symbol_field(payload.get("failed_symbols"))
-            parts = [f"total={total}", f"updated={updated_sl}", f"skipped={skipped}", f"errors={errors}"]
-            self._append_summary_part(parts, "failed_symbols", failed_symbols)
-            summary = " ".join(parts)
-        elif task_key == "manage":
-            if payload.get("skipped"):
-                status = "SKIPPED"
-                reason = str(payload.get("reason") or "SKIPPED").strip() or "SKIPPED"
-                summary = f"reason={reason}"
-            elif payload.get("error"):
-                status = "FAILED"
-                summary = f"error={str(payload.get('error'))[:80]}"
-            else:
-                manage_summary = payload.get("summary")
-                if isinstance(manage_summary, dict):
-                    total = self._safe_int(manage_summary.get("total"), 0)
-                    closed_tp = self._safe_int(manage_summary.get("closed_tp"), 0)
-                    closed_sl = self._safe_int(manage_summary.get("closed_sl"), 0)
-                    closed_timeout = self._safe_int(manage_summary.get("closed_timeout"), 0)
-                    updated_sl = self._safe_int(manage_summary.get("updated_sl"), 0)
-                    errors = self._safe_int(manage_summary.get("errors"), 0)
-                    status = self._status_from_error_count(
-                        errors,
-                        max(0, total + closed_tp + closed_sl + closed_timeout + updated_sl),
-                    )
-                    summary = (
-                        f"total={total} tp={closed_tp} sl={closed_sl} "
-                        f"timeout={closed_timeout} updated={updated_sl} errors={errors}"
-                    )
-                else:
-                    status = "SUCCESS"
-                    summary = "ok"
-        elif task_key == "equity_recovery_take_profit":
-            status_raw = str(payload.get("status") or "").upper()
-            if any(
-                key in payload
-                for key in ("baseline_equity", "threshold_equity", "closed_take_profit", "cycle_date")
-            ):
-                if status_raw in {"TRIGGERED", "TRIGGERED_RETRY", "ALREADY_TRIGGERED"}:
-                    status = "SUCCESS"
-                elif status_raw in {"MONITORING", "SKIPPED", "DISABLED"}:
-                    status = "SKIPPED"
-                elif status_raw in {"FAILED", "ERROR"}:
-                    status = "FAILED"
-                else:
-                    status = "UNKNOWN"
-                closed = self._safe_int(payload.get("closed_take_profit"), 0)
-                adjusted = self._safe_int(payload.get("adjusted_take_profit"), closed)
-                errors = self._safe_int(payload.get("errors"), 0)
-                current_equity = self._safe_float(payload.get("current_equity")) or 0.0
-                threshold_equity = self._safe_float(payload.get("threshold_equity")) or 0.0
-                actual_profit_pct = self._safe_float(payload.get("actual_profit_pct")) or 0.0
-                summary = (
-                    f"equity={current_equity:.2f}/{threshold_equity:.2f} "
-                    f"profit={actual_profit_pct:.2f}% adjusted={adjusted} "
-                    f"closed={closed} errors={errors}"
-                )
-                return {
-                    "status": status,
-                    "time_local": time_local,
-                    "summary": summary,
-                }
-            if status_raw in {"TRIGGERED", "PARTIAL"}:
-                status = "SUCCESS"
-            elif status_raw in {"NOT_TRIGGERED", "SKIPPED", "DISABLED"}:
-                status = "SKIPPED"
-            elif status_raw in {"FAILED", "ERROR"}:
-                status = "FAILED"
-            else:
-                status = "UNKNOWN"
-            adjusted = self._safe_int(payload.get("adjusted"), 0)
-            errors = self._safe_int(payload.get("errors"), 0)
-            reduced_notional = self._safe_float(payload.get("reduced_notional")) or 0.0
-            summary = f"adjusted={adjusted} errors={errors} reduced={reduced_notional:.2f}"
-
-        return {
-            "status": status,
-            "time_local": time_local,
-            "summary": summary,
-        }
+        return format_task_status(task_key, payload, time_local)
 
     @staticmethod
     def _read_log_lines(path: str, max_lines: int = 25000) -> List[str]:
@@ -1210,12 +1092,81 @@ class DashboardDataProvider:
                     tasks[key] = dict(value)
 
         if conn is not None:
-            persisted_entries = self._latest_entry_statuses_from_db(conn, normalized_ids)
-            for aid, persisted_entry in persisted_entries.items():
-                current_entry = payload[aid]["entry"]
+            self._merge_persisted_task_statuses(conn, normalized_ids, payload)
+        elif os.path.exists(self.db_path):
+            try:
+                with self._connect_ctx() as ctx_conn:
+                    self._merge_persisted_task_statuses(ctx_conn, normalized_ids, payload)
+            except Exception as exc:  # noqa: BLE001
+                LOGGER.warning("Failed to query task statuses from DB: %s", exc)
+        return payload
+
+    def _merge_persisted_task_statuses(
+        self,
+        conn: sqlite3.Connection,
+        account_ids: List[str],
+        payload: Dict[str, Dict[str, Dict[str, Any]]],
+    ) -> None:
+        persisted_entries = self._latest_entry_statuses_from_db(conn, account_ids)
+        for aid, persisted_entry in persisted_entries.items():
+            if aid in payload:
+                current_entry = payload[aid].get("entry", {})
                 if self._task_status_is_newer(persisted_entry, current_entry):
                     payload[aid]["entry"] = persisted_entry
-        return payload
+
+        persisted_tasks = self._latest_task_executions_from_db(conn, account_ids)
+        for aid, tasks in persisted_tasks.items():
+            if aid not in payload:
+                continue
+            for task_key, task_data in tasks.items():
+                if task_key in payload[aid]:
+                    current_task = payload[aid][task_key]
+                    if self._task_status_is_newer(task_data, current_task):
+                        payload[aid][task_key] = task_data
+
+    def _latest_task_executions_from_db(
+        self,
+        conn: sqlite3.Connection,
+        account_ids: List[str],
+    ) -> Dict[str, Dict[str, Dict[str, Any]]]:
+        if not account_ids:
+            return {}
+        try:
+            table_check = conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='task_executions'"
+            ).fetchone()
+            if table_check is None:
+                return {}
+            placeholders = ",".join("?" for _ in account_ids)
+            rows = self._query_rows(
+                conn,
+                f"""
+                SELECT t.account_id, t.task_name, t.status, t.summary, t.time_local
+                FROM task_executions t
+                INNER JOIN (
+                    SELECT account_id, task_name, MAX(id) AS max_id
+                    FROM task_executions
+                    WHERE account_id IN ({placeholders})
+                    GROUP BY account_id, task_name
+                ) m ON t.id = m.max_id
+                """,
+                tuple(account_ids),
+            )
+            result: Dict[str, Dict[str, Dict[str, Any]]] = {}
+            for row in rows:
+                aid = str(row.get("account_id") or "").strip()
+                tname = str(row.get("task_name") or "").strip()
+                if not aid or not tname:
+                    continue
+                result.setdefault(aid, {})[tname] = {
+                    "status": str(row.get("status") or "UNKNOWN"),
+                    "time_local": row.get("time_local"),
+                    "summary": str(row.get("summary") or "--"),
+                }
+            return result
+        except Exception as exc:  # noqa: BLE001
+            LOGGER.warning("Error querying task_executions from db: %s", exc)
+            return {}
 
     def _task_status_is_newer(self, candidate: Dict[str, Any], current: Dict[str, Any]) -> bool:
         if str(current.get("status") or "UNKNOWN").upper() == "UNKNOWN":

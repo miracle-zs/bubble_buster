@@ -64,6 +64,7 @@ ACCOUNT_ID_MIGRATION_TABLES = {
     "wallet_snapshots",
     "cashflow_events",
     "equity_recovery_events",
+    "task_executions",
 }
 SQLITE_BUSY_TIMEOUT_MS = 30000
 ACTIVE_POSITION_STATUSES = ("PENDING_ENTRY", "PENDING_EXIT_SETUP", "OPEN")
@@ -2467,8 +2468,224 @@ class StateStore:
             ),
         )
 
+    def _ensure_task_executions_table(self, conn: sqlite3.Connection) -> None:
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS task_executions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                account_id TEXT NOT NULL DEFAULT 'default',
+                task_name TEXT NOT NULL,
+                task_cycle TEXT,
+                status TEXT NOT NULL,
+                attempt INTEGER NOT NULL DEFAULT 1,
+                summary TEXT,
+                payload_json TEXT,
+                error TEXT,
+                started_at_utc TEXT NOT NULL,
+                completed_at_utc TEXT,
+                last_heartbeat_utc TEXT,
+                time_local TEXT,
+                created_at_utc TEXT NOT NULL
+            );
+            """
+        )
+        conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_task_executions_account_task_id
+                ON task_executions(account_id, task_name, id DESC);
+            """
+        )
+        conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_task_executions_account_cycle
+                ON task_executions(account_id, task_name, task_cycle);
+            """
+        )
+        conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_task_executions_created
+                ON task_executions(created_at_utc DESC);
+            """
+        )
+
+    def record_task_execution(
+        self,
+        task_name: str,
+        status: str,
+        summary: Optional[str] = None,
+        payload: Optional[Dict[str, Any]] = None,
+        task_cycle: Optional[str] = None,
+        attempt: int = 1,
+        started_at_utc: Optional[str] = None,
+        completed_at_utc: Optional[str] = None,
+        last_heartbeat_utc: Optional[str] = None,
+        time_local: Optional[str] = None,
+        error: Optional[str] = None,
+        account_id: Optional[str] = None,
+    ) -> int:
+        target_account = (account_id or self.account_id or "default").strip() or "default"
+        now_iso = utc_now_iso()
+        started = started_at_utc or now_iso
+        completed = completed_at_utc
+        heartbeat = last_heartbeat_utc or completed or started
+        payload_str = json.dumps(payload, ensure_ascii=False) if payload is not None else None
+
+        with self._connect_ctx() as conn:
+            self._ensure_task_executions_table(conn)
+            cur = conn.execute(
+                """
+                INSERT INTO task_executions (
+                    account_id, task_name, task_cycle, status, attempt, summary,
+                    payload_json, error, started_at_utc, completed_at_utc,
+                    last_heartbeat_utc, time_local, created_at_utc
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    target_account,
+                    task_name,
+                    task_cycle,
+                    status,
+                    attempt,
+                    summary,
+                    payload_str,
+                    error,
+                    started,
+                    completed,
+                    heartbeat,
+                    time_local,
+                    now_iso,
+                ),
+            )
+            return int(cur.lastrowid)
+
+    def get_latest_task_executions(
+        self,
+        account_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        with self._connect_ctx() as conn:
+            self._ensure_task_executions_table(conn)
+            if account_id:
+                target_account = account_id.strip()
+                rows = conn.execute(
+                    """
+                    SELECT t.* FROM task_executions t
+                    INNER JOIN (
+                        SELECT MAX(id) as max_id
+                        FROM task_executions
+                        WHERE account_id = ?
+                        GROUP BY task_name
+                    ) m ON t.id = m.max_id
+                    """,
+                    (target_account,),
+                ).fetchall()
+                result: Dict[str, Dict[str, Any]] = {}
+                for row in rows:
+                    tname = str(row["task_name"])
+                    payload = None
+                    if row["payload_json"]:
+                        try:
+                            payload = json.loads(row["payload_json"])
+                        except Exception:
+                            pass
+                    result[tname] = {
+                        "id": row["id"],
+                        "account_id": row["account_id"],
+                        "task_name": tname,
+                        "task_cycle": row["task_cycle"],
+                        "status": row["status"],
+                        "summary": row["summary"] or "--",
+                        "time_local": row["time_local"],
+                        "error": row["error"],
+                        "started_at_utc": row["started_at_utc"],
+                        "completed_at_utc": row["completed_at_utc"],
+                        "payload": payload,
+                    }
+                return result
+            else:
+                rows = conn.execute(
+                    """
+                    SELECT t.* FROM task_executions t
+                    INNER JOIN (
+                        SELECT MAX(id) as max_id
+                        FROM task_executions
+                        GROUP BY account_id, task_name
+                    ) m ON t.id = m.max_id
+                    """
+                ).fetchall()
+                grouped: Dict[str, Dict[str, Dict[str, Any]]] = {}
+                for row in rows:
+                    aid = str(row["account_id"])
+                    tname = str(row["task_name"])
+                    payload = None
+                    if row["payload_json"]:
+                        try:
+                            payload = json.loads(row["payload_json"])
+                        except Exception:
+                            pass
+                    grouped.setdefault(aid, {})[tname] = {
+                        "id": row["id"],
+                        "account_id": aid,
+                        "task_name": tname,
+                        "task_cycle": row["task_cycle"],
+                        "status": row["status"],
+                        "summary": row["summary"] or "--",
+                        "time_local": row["time_local"],
+                        "error": row["error"],
+                        "started_at_utc": row["started_at_utc"],
+                        "completed_at_utc": row["completed_at_utc"],
+                        "payload": payload,
+                    }
+                return grouped
+
+    def list_task_executions(
+        self,
+        account_id: Optional[str] = None,
+        task_name: Optional[str] = None,
+        limit: int = 100,
+    ) -> List[Dict[str, Any]]:
+        with self._connect_ctx() as conn:
+            self._ensure_task_executions_table(conn)
+            clauses = []
+            params: List[Any] = []
+            if account_id:
+                clauses.append("account_id = ?")
+                params.append(account_id.strip())
+            if task_name:
+                clauses.append("task_name = ?")
+                params.append(task_name.strip())
+            where_sql = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+            query = f"SELECT * FROM task_executions {where_sql} ORDER BY id DESC LIMIT ?"
+            params.append(max(1, int(limit)))
+            rows = conn.execute(query, tuple(params)).fetchall()
+            items = []
+            for row in rows:
+                payload = None
+                if row["payload_json"]:
+                    try:
+                        payload = json.loads(row["payload_json"])
+                    except Exception:
+                        pass
+                items.append({
+                    "id": row["id"],
+                    "account_id": row["account_id"],
+                    "task_name": row["task_name"],
+                    "task_cycle": row["task_cycle"],
+                    "status": row["status"],
+                    "attempt": row["attempt"],
+                    "summary": row["summary"],
+                    "error": row["error"],
+                    "started_at_utc": row["started_at_utc"],
+                    "completed_at_utc": row["completed_at_utc"],
+                    "last_heartbeat_utc": row["last_heartbeat_utc"],
+                    "time_local": row["time_local"],
+                    "created_at_utc": row["created_at_utc"],
+                    "payload": payload,
+                })
+            return items
+
 
 def _safe_float(value: Any) -> Optional[float]:
+
     if value is None:
         return None
     try:

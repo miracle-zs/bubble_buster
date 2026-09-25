@@ -2200,6 +2200,60 @@ class DashboardServerTest(unittest.TestCase):
         self.assertEqual(str(row[0]), "acc01")
         self.assertAlmostEqual(float(row[1]), 321.0)
 
+    def test_task_status_reads_from_task_executions_table(self) -> None:
+        self.store.record_task_execution(
+            task_name="daily_loss_cut",
+            task_cycle="2026-09-25",
+            status="SUCCESS",
+            summary="total=10 closed=0 errors=0",
+            time_local="2026-09-25 11:55:00",
+            account_id="acc01",
+        )
+        self.store.record_task_execution(
+            task_name="noon_protection",
+            task_cycle="2026-09-25",
+            status="SUCCESS",
+            summary="total=10 updated=2 skipped=8 errors=0",
+            time_local="2026-09-25 12:00:00",
+            account_id="acc01",
+        )
+        self.store.record_task_execution(
+            task_name="manage",
+            status="SUCCESS",
+            summary="total=3 tp=1 sl=0 timeout=0 updated=0 errors=0",
+            time_local="2026-09-25 12:01:00",
+            account_id="acc01",
+        )
+        self.store.record_task_execution(
+            task_name="equity_recovery_take_profit",
+            status="SUCCESS",
+            summary="equity=1050.00/1040.00 profit=5.00% adjusted=2 closed=2 errors=0",
+            time_local="2026-09-25 12:02:00",
+            account_id="acc01",
+        )
+
+        provider = DashboardDataProvider(
+            db_path=self.db_path,
+            log_file=self.log_file,
+            timezone_name="UTC",
+            entry_hour=7,
+            entry_minute=40,
+            overview_account_ids=["acc01"],
+        )
+
+        with provider._connect_ctx() as conn:
+            statuses = provider._latest_task_statuses_for_accounts(["acc01"], conn=conn)
+
+        acc01_tasks = statuses["acc01"]
+        self.assertEqual(acc01_tasks["daily_loss_cut"]["status"], "SUCCESS")
+        self.assertEqual(acc01_tasks["daily_loss_cut"]["summary"], "total=10 closed=0 errors=0")
+        self.assertEqual(acc01_tasks["noon_protection"]["status"], "SUCCESS")
+        self.assertEqual(acc01_tasks["noon_protection"]["summary"], "total=10 updated=2 skipped=8 errors=0")
+        self.assertEqual(acc01_tasks["manage"]["status"], "SUCCESS")
+        self.assertEqual(acc01_tasks["manage"]["summary"], "total=3 tp=1 sl=0 timeout=0 updated=0 errors=0")
+        self.assertEqual(acc01_tasks["equity_recovery_take_profit"]["status"], "SUCCESS")
+        self.assertIn("equity=1050.00", acc01_tasks["equity_recovery_take_profit"]["summary"])
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -185,8 +185,9 @@ timeline
     title 调整后的 Bubble Buster 架构演进路线
     已完成 (a276cc6) : 订单终态与增量防倒退 : 调度器解耦慢 I/O : 1.5M 历史全表扫描优化 : 353 项回归测试绿灯
     P1.1 已完成 (dd2c7d8) : PositionManager 纯决策与执行器解耦 : 提取纯风控评估模块 : 建立 CentralExitExecutor : 397 项测试通过
-    P1.2 已完成 (当前) : Top10ShortStrategy 领域解耦 : 提取 MarketRankScanner : 提取 RebalanceCalculator : 提取 TimingController : 415 项测试全绿
-    P2 (下一阶段) : 系统工程治理 : 新建 task_executions 表替代日志爬取 : 抽离 Dashboard 5500 行 HTML 静态化
+    P1.2 已完成 (50c094f) : Top10ShortStrategy 领域解耦 : 提取 MarketRankScanner : 提取 RebalanceCalculator : 提取 TimingController : 415 项测试全绿
+    P2.1 已完成 (当前) : 新建 task_executions 表替代日志爬取 : 调度任务结构化落库 : 彻底解除 Dashboard 日志 IO 瓶颈 : 430 项测试全绿
+    P2.2 (下一阶段) : 抽离 Dashboard 5500 行 HTML 静态化与模板解耦
 ```
 
 ---
@@ -289,7 +290,48 @@ timeline
 
 ---
 
-## 八、目标架构全景图
+## 八、P2.1 改造方案详案：新建 task_executions 表彻底替代日志状态爬取
+
+### 目标
+彻底解决 `dashboard_server.py` 扫描巨量轮转日志文件（`strategy.log.*`）以及通过脆弱的 Python 正则表达式与 `ast.literal_eval` 解析各调度任务（`entry`, `daily_loss_cut`, `noon_protection`, `manage`, `equity_recovery_take_profit`）执行状态的架构性能与可靠性隐患。
+
+### 实施成果与模块交付 (已完成)
+
+1. **统一任务状态归一化库 (`core/task_status.py`)**：
+   - 提取纯函数 `format_task_status(task_name, payload, time_local)`，支持所有五类核心任务的数据清洗与归一化；
+   - 提取 `task_status_template()`、`status_from_error_count()`、`format_symbol_field()` 等纯工具，使得服务层与前端层共享统一的语义标准。
+
+2. **数据库结构与索引设计 (`schema.sql` / `core/state_store.py`)**：
+   - 新建 `task_executions` 核心审计表（记录 `task_name`, `task_cycle`, `status`, `summary`, `time_local`, `payload_json`, `error`, `account_id` 等）；
+   - 建立复合覆盖索引：
+     - `idx_task_executions_account_task_id (account_id, task_name, id DESC)`：支撑 Dashboard 极速提取最新状态；
+     - `idx_task_executions_account_cycle (account_id, task_name, task_cycle)`：支撑按交易日周期幂等审计；
+     - `idx_task_executions_created (created_at_utc)`：支撑时间序列历史审计。
+   - `StateStore` 增加 `record_task_execution(...)`, `get_latest_task_executions(...)`, `list_task_executions(...)`。
+
+3. **调度服务结构化落库 (`core/runtime_service.py`)**：
+   - `StrategyRuntimeService` 增加 `_get_store_for_account` 与 `_record_task_execution`；
+   - 调度任务执行后自动记录结构化执行审计：
+     - 开仓任务：`_collect_entry_futures` 完成与异常时自动落库；
+     - 日常止损：`_run_daily_loss_cut_if_due` 执行结果自动落库；
+     - 午盘保护：`_run_noon_protection_if_due` 执行结果自动落库；
+     - 仓位管理：`_run_manage_if_due` 周期心跳与组合止盈/权益恢复触发及异常时自动落库。
+
+4. **Dashboard 极速查询与零停机平滑降级 (`dashboard_server.py`)**：
+   - `_latest_task_statuses_for_accounts` 改造为优先合并 `task_executions` 数据库表数据；
+   - 移除原 `_task_status_from_payload` 内部上百行冗余重复逻辑，委托统一规范 `format_task_status`；
+   - 保留日志缓存比对机制作为平滑降级底座，确保历史老日志无缝向下兼容。
+
+5. **自动化测试与回归保障**：
+   - 新增 `tests/test_task_status.py`（10 个格式化与归一化单元测试）；
+   - 新增 `tests/test_task_executions_store.py`（3 个数据库持久化与高效查询单测）；
+   - 增强 `tests/test_dashboard_server.py`（验证 DB 最新状态对日志的优先合并）；
+   - 增强 `tests/test_runtime_service.py`（验证调度服务生命周期内自动审计落库）；
+   - 全量回归测试：**430 项测试全部通过（0 失败，100% 绿灯）**。
+
+---
+
+## 九、目标架构全景图
 
 ```mermaid
 flowchart TD
@@ -334,11 +376,11 @@ flowchart TD
 
 ---
 
-## 九、总结与工程准则
+## 十、总结与工程准则
 
 通过 9-22 审计报告的客观核验与 `a276cc6` 的成功合入，Bubble Buster 证明了其极高的实战可靠性。
 
 接下来的重构将严格遵循：
 1. **接口不变性（Preserve External Interface）**：所有对外界（`main.py` / `runtime_service.py`）暴露的方法签名和返回值结构严格保持兼容；
 2. **纯函数先行（Pure Functions First）**：先把业务规则写成纯函数，建立 100% 单测，再把老代码替换为对纯函数的调用；
-3. **保持测试绿灯（Keep Green）**：每个小步骤提交前必须确保 415 个现有测试全部通过。
+3. **保持测试绿灯（Keep Green）**：每个小步骤提交前必须确保所有（当前 430 个）测试全部通过。

@@ -1956,3 +1956,92 @@ def test_hourly_exchange_take_profit_runs_only_once_per_local_hour() -> None:
     )
 
     assert manager.hourly_take_profit_calls == 2
+
+
+def test_runtime_service_records_task_executions(tmp_path) -> None:
+    from core.state_store import StateStore
+
+    db_file = str(tmp_path / "test_exec.db")
+    store = StateStore(db_file, schema_path="schema.sql")
+    store.init_schema()
+
+    class StrategyStub:
+        def __init__(self, store):
+            self.store = store
+
+        def run_entry(self, **kwargs):
+            return {"status": "SUCCESS", "opened": 2, "failed": 0, "skipped": 1}
+
+    class ManagerStub:
+        def __init__(self, store):
+            self.store = store
+
+        def run_once(self):
+            return {"total": 5, "closed_tp": 1, "closed_sl": 0, "closed_timeout": 0, "updated_sl": 0, "errors": 0}
+
+        def run_daily_loss_cut(self):
+            return {"total": 5, "closed_loss_cut": 0, "errors": 0}
+
+        def run_noon_protection_stop(self, **kwargs):
+            return {"total": 5, "updated_sl": 1, "skipped": 4, "errors": 0}
+
+    cfg = ServiceRuntimeConfig(
+        timezone_name="UTC",
+        entry_hour=7,
+        entry_minute=40,
+        entry_misfire_grace_min=120,
+        entry_catchup_enabled=True,
+        daily_loss_cut_enabled=True,
+        daily_loss_cut_hour=11,
+        daily_loss_cut_minute=55,
+        manager_interval_sec=60,
+        manager_max_catch_up_runs=1,
+        loop_sleep_sec=1.0,
+        run_manage_on_startup=False,
+    )
+
+    strat = StrategyStub(store)
+    mgr = ManagerStub(store)
+    service = StrategyRuntimeService(
+        strategy=strat,
+        manager=mgr,
+        cfg=cfg,
+        now_monotonic=0.0,
+        account_runtimes={
+            "acc01": {
+                "mode": "full",
+                "strategy": strat,
+                "manager": mgr,
+                "balance_sampler": None,
+                "daily_loss_cut_enabled": True,
+                "noon_protection_enabled": True,
+            },
+        },
+        max_account_workers=1,
+    )
+
+    # 1. Manage tick
+    summary = service.run_manage_tick(now_local=datetime(2026, 2, 13, 10, 0, tzinfo=ZoneInfo("UTC")))
+    for aid, res in summary.items():
+        service._record_task_execution(account_id=aid, task_name="manage", payload=res)
+
+    # 2. Daily loss cut
+    service._run_daily_loss_cut_if_due(now_local=datetime(2026, 2, 13, 11, 55, tzinfo=ZoneInfo("UTC")))
+
+    # 3. Noon protection
+    service._run_noon_protection_if_due(now_local=datetime(2026, 2, 13, 12, 0, tzinfo=ZoneInfo("UTC")))
+
+    # Verify task executions recorded in DB
+    latest = store.get_latest_task_executions(account_id="acc01")
+    assert "manage" in latest
+    assert latest["manage"]["status"] == "SUCCESS"
+    assert "tp=1" in latest["manage"]["summary"]
+
+    assert "daily_loss_cut" in latest
+    assert latest["daily_loss_cut"]["status"] == "SUCCESS"
+    assert "total=5" in latest["daily_loss_cut"]["summary"]
+
+    assert "noon_protection" in latest
+    assert latest["noon_protection"]["status"] == "SUCCESS"
+    assert "updated=1" in latest["noon_protection"]["summary"]
+

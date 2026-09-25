@@ -345,3 +345,27 @@ CREATE TABLE IF NOT EXISTS equity_recovery_events (
 CREATE INDEX IF NOT EXISTS idx_equity_recovery_cycle ON equity_recovery_events(cycle_key);
 CREATE INDEX IF NOT EXISTS idx_equity_recovery_created ON equity_recovery_events(created_at_utc);
 CREATE INDEX IF NOT EXISTS idx_equity_recovery_account_created ON equity_recovery_events(account_id, created_at_utc);
+
+CREATE TABLE IF NOT EXISTS task_executions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    account_id TEXT NOT NULL DEFAULT 'default',
+    task_name TEXT NOT NULL,
+    task_cycle TEXT,
+    status TEXT NOT NULL,
+    attempt INTEGER NOT NULL DEFAULT 1,
+    summary TEXT,
+    payload_json TEXT,
+    error TEXT,
+    started_at_utc TEXT NOT NULL,
+    completed_at_utc TEXT,
+    last_heartbeat_utc TEXT,
+    time_local TEXT,
+    created_at_utc TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_task_executions_account_task_id
+    ON task_executions(account_id, task_name, id DESC);
+CREATE INDEX IF NOT EXISTS idx_task_executions_account_cycle
+    ON task_executions(account_id, task_name, task_cycle);
+CREATE INDEX IF NOT EXISTS idx_task_executions_created
+    ON task_executions(created_at_utc DESC);

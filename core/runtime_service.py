@@ -8,6 +8,8 @@ from datetime import date, datetime, timedelta, timezone
 from typing import Any, Callable, Dict, List, Optional, Set
 from zoneinfo import ZoneInfo
 
+from core.task_status import format_task_status
+
 
 LOGGER = logging.getLogger(__name__)
 PROTECTION_RESTART_GRACE = timedelta(hours=2)
@@ -389,6 +391,13 @@ class StrategyRuntimeService:
                 result = future.result()
             except Exception as exc:  # noqa: BLE001
                 LOGGER.warning("service entry background failed account=%s: %s", aid, exc)
+                self._record_task_execution(
+                    account_id=aid,
+                    task_name="entry",
+                    payload={"status": "FAILED", "error": str(exc)},
+                    task_cycle=trade_day.isoformat(),
+                    error=str(exc),
+                )
                 continue
             if self._is_entry_result_complete(result):
                 self._last_entry_local_date_by_account[aid] = trade_day
@@ -397,6 +406,12 @@ class StrategyRuntimeService:
             else:
                 self._schedule_entry_retry(aid, trade_day, result)
             LOGGER.info("service entry background result account=%s: %s", aid, result)
+            self._record_task_execution(
+                account_id=aid,
+                task_name="entry",
+                payload=result if isinstance(result, dict) else {},
+                task_cycle=trade_day.isoformat(),
+            )
 
     def _run_entry_if_due(
         self,
@@ -674,6 +689,76 @@ class StrategyRuntimeService:
             results[aid] = {"slow": True, "running": True}
         return results
 
+    def _get_store_for_account(self, account_id: str) -> Optional[Any]:
+        ctx = self.account_runtimes.get(account_id, {})
+        strategy = ctx.get("strategy")
+        if strategy is not None and hasattr(strategy, "store"):
+            return strategy.store
+        manager = ctx.get("manager")
+        if manager is not None and hasattr(manager, "store"):
+            return manager.store
+        sampler = ctx.get("balance_sampler")
+        if sampler is not None and hasattr(sampler, "store"):
+            return sampler.store
+        if hasattr(self, "strategy") and self.strategy is not None and hasattr(self.strategy, "store"):
+            return self.strategy.store
+        if hasattr(self, "manager") and self.manager is not None and hasattr(self.manager, "store"):
+            return self.manager.store
+        return None
+
+    def _record_task_execution(
+        self,
+        account_id: str,
+        task_name: str,
+        payload: Any,
+        started_at_utc: Optional[str] = None,
+        completed_at_utc: Optional[str] = None,
+        task_cycle: Optional[str] = None,
+        error: Optional[str] = None,
+        time_local: Optional[str] = None,
+    ) -> None:
+        store = self._get_store_for_account(account_id)
+        if store is None or not hasattr(store, "record_task_execution"):
+            return
+        now_utc = datetime.now(timezone.utc)
+        if completed_at_utc is None:
+            completed_at_utc = now_utc.isoformat(timespec="seconds")
+        if time_local is None:
+            now_local = now_utc.astimezone(self.timezone)
+            time_local = now_local.strftime("%Y-%m-%d %H:%M:%S")
+
+        if isinstance(payload, dict):
+            status_info = format_task_status(task_name, payload, time_local=time_local)
+            status = status_info["status"]
+            summary = status_info["summary"]
+        else:
+            status = "FAILED" if error else "SUCCESS"
+            summary = f"error={str(error)[:80]}" if error else "--"
+
+        if error is None and status == "FAILED" and isinstance(payload, dict) and payload.get("error"):
+            error = str(payload.get("error"))
+
+        try:
+            store.record_task_execution(
+                task_name=task_name,
+                task_cycle=task_cycle,
+                status=status,
+                summary=summary,
+                time_local=time_local,
+                payload=payload if isinstance(payload, dict) else {"raw": str(payload)},
+                error=error,
+                started_at_utc=started_at_utc,
+                completed_at_utc=completed_at_utc,
+                account_id=account_id,
+            )
+        except Exception as exc:  # noqa: BLE001
+            LOGGER.warning(
+                "Failed to record task execution to DB: task=%s account=%s error=%s",
+                task_name,
+                account_id,
+                exc,
+            )
+
     def _loss_cut_schedule_for_day(self, day: date) -> datetime:
         return datetime(
             year=day.year,
@@ -734,6 +819,13 @@ class StrategyRuntimeService:
             else:
                 calls[aid] = manager.run_daily_loss_cut  # type: ignore[attr-defined]
         results.update(self._run_account_task_calls(calls, "daily-loss-cut", task_day=today))
+        for aid, res in results.items():
+            self._record_task_execution(
+                account_id=aid,
+                task_name="daily_loss_cut",
+                payload=res if isinstance(res, dict) else {},
+                task_cycle=today.isoformat(),
+            )
         if len(results) == len(account_ids) and all(
             self._account_task_succeeded(results.get(aid)) for aid in account_ids
         ):
@@ -829,6 +921,13 @@ class StrategyRuntimeService:
                         noon_time_utc=noon_time_utc,
                     )
         results.update(self._run_account_task_calls(calls, "noon-protection", task_day=today))
+        for aid, res in results.items():
+            self._record_task_execution(
+                account_id=aid,
+                task_name="noon_protection",
+                payload=res if isinstance(res, dict) else {},
+                task_cycle=today.isoformat(),
+            )
         LOGGER.info("service noon protection result: %s", results)
 
         pending_symbols_by_account: Dict[str, Optional[Set[str]]] = {}
@@ -942,6 +1041,13 @@ class StrategyRuntimeService:
 
         if results:
             LOGGER.info("service morning protection result: %s", results)
+            for aid, res in results.items():
+                self._record_task_execution(
+                    account_id=aid,
+                    task_name="morning_protection",
+                    payload=res if isinstance(res, dict) else {},
+                    task_cycle=today.isoformat(),
+                )
 
     def _run_hourly_exchange_take_profit_if_due(self, now_local: datetime) -> None:
         results: Dict[str, object] = {}
@@ -997,6 +1103,13 @@ class StrategyRuntimeService:
 
         if results:
             LOGGER.info("service hourly exchange take-profit result: %s", results)
+            for aid, res in results.items():
+                self._record_task_execution(
+                    account_id=aid,
+                    task_name="hourly_exchange_take_profit",
+                    payload=res if isinstance(res, dict) else {},
+                    task_cycle=hour_key,
+                )
 
     def _run_manage_if_due(self, now_monotonic: float, now_local: Optional[datetime] = None) -> None:
         if now_monotonic < self._next_manage_monotonic:
@@ -1007,6 +1120,13 @@ class StrategyRuntimeService:
             summary = self.run_manage_tick(now_local=now_local)
             run_count += 1
             LOGGER.info("service manage summary: %s", summary)
+            for aid, res in summary.items():
+                if isinstance(res, dict):
+                    self._record_task_execution(
+                        account_id=aid,
+                        task_name="manage",
+                        payload=res,
+                    )
             self._next_manage_monotonic += self.cfg.manager_interval_sec
 
         if now_monotonic >= self._next_manage_monotonic:
@@ -1113,9 +1233,22 @@ class StrategyRuntimeService:
                                 account_id,
                                 result,
                             )
+                            self._record_task_execution(
+                                account_id=account_id,
+                                task_name="equity_recovery_take_profit",
+                                payload=result,
+                                task_cycle=local_dt.date().isoformat(),
+                            )
                 except Exception as exc:  # noqa: BLE001
                     portfolio_take_profit_result = {"status": "ERROR", "error": str(exc)}
                     LOGGER.exception("service portfolio take-profit failed account=%s: %s", account_id, exc)
+                    self._record_task_execution(
+                        account_id=account_id,
+                        task_name="equity_recovery_take_profit",
+                        payload=portfolio_take_profit_result,
+                        error=str(exc),
+                        task_cycle=local_dt.date().isoformat(),
+                    )
 
         enabled, loss_pct, reset_hour, reset_minute = self._portfolio_loss_cut_settings(account_id)
         if enabled and hasattr(manager, "run_portfolio_loss_cut"):
@@ -1155,8 +1288,21 @@ class StrategyRuntimeService:
                 result = strategy.run_equity_recovery_take_profit()  # type: ignore[attr-defined]
                 if isinstance(result, dict) and result.get("status") in {"TRIGGERED", "PARTIAL"}:
                     LOGGER.info("service equity recovery take-profit account=%s result: %s", account_id, result)
+                    self._record_task_execution(
+                        account_id=account_id,
+                        task_name="equity_recovery_take_profit",
+                        payload=result,
+                        task_cycle=local_dt.date().isoformat(),
+                    )
             except Exception as exc:  # noqa: BLE001
                 LOGGER.warning("service equity recovery take-profit failed account=%s: %s", account_id, exc)
+                self._record_task_execution(
+                    account_id=account_id,
+                    task_name="equity_recovery_take_profit",
+                    payload={"status": "FAILED", "error": str(exc)},
+                    error=str(exc),
+                    task_cycle=local_dt.date().isoformat(),
+                )
 
         return {
             "account_id": account_id,
