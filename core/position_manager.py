@@ -11,6 +11,28 @@ from uuid import uuid4
 from core.account_snapshot import AccountSnapshot, AccountSnapshotProvider
 from core.entry_structure_protection import EntryStructureProtectionState
 from core.market_fill_reconciler import MarketFillReconciler
+from core.risk import (
+    CentralExitExecutor,
+    DailyLossCutEvaluationInput,
+    DynamicStopEvaluationInput,
+    ExitActionType,
+    ExitIntent,
+    HourlyExchangeTakeProfitEvaluationInput,
+    MorningProtectionEvaluationInput,
+    NoonProtectionEvaluationInput,
+    calculate_noon_protection_window_start,
+    calculate_portfolio_cycle_window,
+    evaluate_daily_loss_cut_candidate,
+    evaluate_dynamic_stop_candidate,
+    evaluate_hourly_take_profit_candidate,
+    evaluate_morning_protection_candidate,
+    evaluate_noon_protection_candidate,
+    evaluate_portfolio_loss_cut_threshold,
+    evaluate_portfolio_take_profit_threshold,
+    is_immediate_trigger_error,
+    is_morning_protection_hold_satisfied,
+    resolve_morning_protection_old_sl,
+)
 from core.state_store import StateStore
 from infra.binance_futures_client import BinanceAPIError, BinanceFuturesClient, OrderStateUnknownError
 from infra.notifier import (
@@ -89,6 +111,14 @@ class PositionManager:
         self.snapshot_provider = snapshot_provider
         self.order_state = order_state
         self._active_account_snapshot: Optional[AccountSnapshot] = None
+        self.exit_executor = CentralExitExecutor(
+            client=self.client,
+            store=self.store,
+            market_fill_reconciler=self._market_fill_reconciler,
+            trigger_price_type=self.trigger_price_type,
+            new_client_id_fn=self._new_client_id,
+            now_iso_fn=self._utc_now_iso,
+        )
 
     def _is_protection_exempt(self, symbol: str) -> bool:
         return str(symbol or "").strip().upper() in self.protection_exempt_symbols
@@ -214,26 +244,43 @@ class PositionManager:
                     symbol=symbol,
                     now_local=now_local,
                 )
-                if hour_open is None or hour_close is None or hour_close <= hour_open:
-                    summary["skipped"] += 1
-                    continue
-
                 position_side = str(risk.get("positionSide") or "BOTH").strip().upper() or "BOTH"
                 close_side, use_reduce_only = self._resolve_close_side_for_exchange_position(
                     position_amt=position_amt,
                     position_side=position_side,
                 )
                 tracked_position = self._find_open_position_for_exchange_symbol(symbol)
-                close_info = self._close_daily_loss_cut(
+                tracked_position_id = int(tracked_position["id"]) if tracked_position is not None else None
+
+                eval_cand = HourlyExchangeTakeProfitEvaluationInput(
                     symbol=symbol,
-                    qty=abs(position_amt),
-                    side=close_side,
-                    position_id=int(tracked_position["id"]) if tracked_position is not None else None,
-                    cancel_pos=tracked_position,
-                    position_side=position_side if position_side in {"LONG", "SHORT"} else None,
+                    position_amt=position_amt,
+                    position_side=position_side,
+                    close_side=close_side,
                     use_reduce_only=use_reduce_only,
+                    is_exempt=False,
+                    eligible_reached=bool(monitor.get("eligible_reached")),
+                    hour_open=hour_open,
+                    hour_close=hour_close,
+                    tracked_position_id=tracked_position_id,
+                )
+                eval_res = evaluate_hourly_take_profit_candidate(eval_cand)
+                if not eval_res.should_close or eval_res.intent is None:
+                    summary["skipped"] += 1
+                    continue
+
+                intent = eval_res.intent
+                close_info = self.exit_executor.close_position(
+                    symbol=intent.symbol,
+                    qty=intent.qty or 0.0,
+                    side=intent.close_side,
+                    position_id=intent.position_id,
+                    cancel_pos=tracked_position,
+                    position_side=intent.position_side,
+                    use_reduce_only=intent.use_reduce_only,
                     close_status="CLOSED_HOURLY_TAKE_PROFIT",
-                    close_reason="HOURLY_EXCHANGE_TAKE_PROFIT",
+                    close_reason=intent.reason,
+                    client_id_tag="dl",
                 )
                 summary["closed_take_profit"] += 1
                 monitor["last_triggered_hour_key"] = now_local.strftime("%Y-%m-%dT%H")
@@ -517,19 +564,11 @@ class PositionManager:
         reset_hour: int,
         reset_minute: int,
     ) -> tuple[date, datetime, bool]:
-        local_dt = now_local
-        if local_dt.tzinfo is None:
-            local_dt = local_dt.replace(tzinfo=timezone.utc)
-        reset_today = local_dt.replace(
-            hour=reset_hour % 24,
-            minute=reset_minute % 60,
-            second=0,
-            microsecond=0,
+        return calculate_portfolio_cycle_window(
+            now_local=now_local,
+            reset_hour=reset_hour,
+            reset_minute=reset_minute,
         )
-        if local_dt >= reset_today:
-            return local_dt.date(), reset_today, True
-        previous_reset = reset_today - timedelta(days=1)
-        return previous_reset.date(), previous_reset, False
 
     @_serialized_account_mutation
     def run_portfolio_loss_cut(
@@ -596,22 +635,28 @@ class PositionManager:
             self.store.set_lock_state(self.PORTFOLIO_LOSS_CUT_LOCK_NAME, state)
 
         baseline_equity = self._safe_float(state.get("baseline_equity_usdt"), default=0.0)
-        threshold_equity = self._safe_float(state.get("threshold_equity_usdt"), default=0.0)
-        if baseline_equity <= 0 or threshold_equity <= 0:
-            return {"status": "SKIPPED", "reason": "INVALID_BASELINE", "cycle_date": cycle_key}
+        already_triggered = bool(state.get("triggered"))
+        eval_res = evaluate_portfolio_loss_cut_threshold(
+            baseline_equity=baseline_equity,
+            current_equity=current_equity,
+            loss_pct=normalized_loss_pct,
+            already_triggered=already_triggered,
+            close_complete=bool(state.get("close_complete")),
+        )
+        if eval_res.status == "SKIPPED":
+            return {"status": "SKIPPED", "reason": eval_res.reason, "cycle_date": cycle_key}
 
         state["current_equity_usdt"] = current_equity
         state["updated_at_utc"] = self._utc_now_iso()
-        already_triggered = bool(state.get("triggered"))
-        threshold_eps = max(1e-9, abs(threshold_equity) * 1e-12)
-        if not already_triggered and current_equity + threshold_eps > threshold_equity:
+
+        if eval_res.status == "MONITORING":
             self.store.set_lock_state(self.PORTFOLIO_LOSS_CUT_LOCK_NAME, state)
             return {
                 "status": "MONITORING",
                 "cycle_date": cycle_key,
                 "baseline_equity": round(baseline_equity, 8),
                 "current_equity": round(current_equity, 8),
-                "threshold_equity": round(threshold_equity, 8),
+                "threshold_equity": round(eval_res.threshold_equity, 8),
             }
 
         if not already_triggered:
@@ -620,7 +665,7 @@ class PositionManager:
             state["triggered_at_utc"] = self._utc_now_iso()
             self.store.set_lock_state(self.PORTFOLIO_LOSS_CUT_LOCK_NAME, state)
 
-        if bool(state.get("close_complete")):
+        if eval_res.status == "ALREADY_TRIGGERED":
             self.store.set_lock_state(self.PORTFOLIO_LOSS_CUT_LOCK_NAME, state)
             return {
                 "status": "ALREADY_TRIGGERED",
@@ -629,7 +674,7 @@ class PositionManager:
                 "cycle_date": cycle_key,
                 "baseline_equity": round(baseline_equity, 8),
                 "current_equity": round(current_equity, 8),
-                "threshold_equity": round(threshold_equity, 8),
+                "threshold_equity": round(eval_res.threshold_equity, 8),
             }
 
         close_summary = self._close_all_exchange_positions_for_portfolio_loss_cut()
@@ -828,12 +873,26 @@ class PositionManager:
             state.get("peak_equity_usdt"),
             default=current_equity,
         )
-        peak_equity = max(
-            baseline_equity,
-            persisted_peak_equity,
-            current_equity if not already_triggered else persisted_peak_equity,
+        eval_res = evaluate_portfolio_take_profit_threshold(
+            baseline_equity=baseline_equity,
+            current_equity=current_equity,
+            persisted_peak_equity=persisted_peak_equity,
+            profit_pct=active_profit_pct,
+            giveback_pct=active_giveback_pct,
+            reduce_ratio=active_reduce_ratio,
+            armed=bool(state.get("armed")),
+            already_triggered=already_triggered,
+            close_complete=bool(state.get("close_complete")),
         )
-        peak_profit_pct = max(0.0, (peak_equity / baseline_equity - 1.0) * 100.0)
+        if eval_res.status == "SKIPPED":
+            return {"status": "SKIPPED", "reason": eval_res.reason, "cycle_date": cycle_key}
+
+        peak_equity = eval_res.peak_equity
+        peak_profit_pct = eval_res.peak_profit_pct
+        arming_threshold_equity = eval_res.arming_threshold_equity
+        threshold_equity = eval_res.threshold_equity
+        armed = eval_res.armed
+
         if not already_triggered:
             previous_peak = self._safe_float(state.get("peak_equity_usdt"), default=0.0)
             if peak_equity > previous_peak + max(1e-9, abs(peak_equity) * 1e-12):
@@ -843,45 +902,22 @@ class PositionManager:
             state["peak_equity_usdt"] = peak_equity
             state["peak_profit_pct"] = peak_profit_pct
 
-        newly_armed = False
-        armed = bool(state.get("armed")) and active_giveback_pct > 0.0
-        arming_eps = max(1e-9, abs(arming_threshold_equity) * 1e-12)
-        if not already_triggered and active_giveback_pct > 0.0 and not armed:
-            if peak_equity + arming_eps >= arming_threshold_equity:
-                armed = True
-                newly_armed = True
-                state["armed"] = True
-                state["armed_at_utc"] = self._utc_now_iso()
-
-        if active_giveback_pct > 0.0 and armed:
-            trailing_profit_pct = peak_profit_pct * (1.0 - active_giveback_pct / 100.0)
-            threshold_equity = baseline_equity * (1.0 + trailing_profit_pct / 100.0)
-            state["trailing_threshold_profit_pct"] = trailing_profit_pct
-            state["trailing_threshold_equity_usdt"] = threshold_equity
-        else:
-            trailing_profit_pct = None
-            threshold_equity = arming_threshold_equity
+        if eval_res.newly_armed:
+            state["armed"] = True
+            state["armed_at_utc"] = self._utc_now_iso()
+        elif not eval_res.armed:
             state["armed"] = False
-            state["trailing_threshold_profit_pct"] = None
-            state["trailing_threshold_equity_usdt"] = None
+
+        state["trailing_threshold_profit_pct"] = eval_res.trailing_profit_pct
+        state["trailing_threshold_equity_usdt"] = (
+            threshold_equity if armed else None
+        )
         state["threshold_equity_usdt"] = threshold_equity
 
-        threshold_eps = max(1e-9, abs(threshold_equity) * 1e-12)
-        should_trigger = False
-        monitoring_status = "MONITORING"
-        if not already_triggered:
-            if active_giveback_pct <= 0.0:
-                should_trigger = current_equity + threshold_eps >= arming_threshold_equity
-            elif not armed:
-                should_trigger = False
-            else:
-                should_trigger = current_equity <= threshold_equity + threshold_eps
-                monitoring_status = "ARMED" if newly_armed else "TRAILING"
-
-        if not already_triggered and not should_trigger:
+        if not already_triggered and not eval_res.should_trigger:
             self.store.set_lock_state(self.PORTFOLIO_TAKE_PROFIT_LOCK_NAME, state)
             return {
-                "status": monitoring_status,
+                "status": eval_res.status,
                 "cycle_date": cycle_key,
                 "baseline_equity": round(baseline_equity, 8),
                 "current_equity": round(current_equity, 8),
@@ -2243,43 +2279,38 @@ class PositionManager:
 
                 round_up = close_side == "BUY"
                 noon_sl_price = self.client.normalize_trigger_price(symbol, noon_ref_price, round_up=round_up)
-                if old_sl_price:
-                    merged_sl_price = min(old_sl_price, noon_sl_price) if close_side == "BUY" else max(old_sl_price, noon_sl_price)
-                else:
-                    merged_sl_price = noon_sl_price
-
                 rules = self.client.get_symbol_rules().get(symbol)
                 min_delta = rules.tick_size if rules else 0.0
-                if old_sl_price and abs(merged_sl_price - old_sl_price) <= max(min_delta, 1e-12):
+
+                eval_input = NoonProtectionEvaluationInput(
+                    symbol=symbol,
+                    position_amt=position_amt,
+                    position_side=position_side,
+                    close_side=close_side,
+                    use_reduce_only=use_reduce_only,
+                    cap_key=cap_key,
+                    tracked_position_id=tracked_position_id,
+                    old_sl_price=old_sl_price,
+                    noon_ref_price=noon_sl_price,
+                    tick_size=min_delta,
+                )
+                eval_res = evaluate_noon_protection_candidate(eval_input)
+                if not eval_res.should_update or eval_res.intent is None:
                     summary["skipped"] += 1
                     continue
 
+                intent = eval_res.intent
+                merged_sl_price = eval_res.merged_sl_price
                 qty = abs(position_amt)
-                if qty <= 0:
-                    raise RuntimeError("position qty is zero")
-
                 sl_stop_price = self.client.format_trigger_price(symbol, merged_sl_price, round_up=round_up)
-                try:
-                    sl_order = self._create_stop_order_with_fallback(
-                        symbol=symbol,
-                        side=close_side,
-                        stop_price=sl_stop_price,
-                        qty=qty,
-                        client_order_id=self._new_client_id("nsl", symbol),
-                        position_side=position_side if position_side in {"LONG", "SHORT"} else None,
-                        use_reduce_only=use_reduce_only,
-                    )
-                except BinanceAPIError as exc:
-                    if not self._is_immediate_trigger_error(exc):
-                        raise
-                    close_info = self._close_protection_immediate(
-                        symbol=symbol,
-                        qty=qty,
-                        side=close_side,
-                        position_id=tracked_position_id,
-                        position_side=position_side if position_side in {"LONG", "SHORT"} else None,
-                        use_reduce_only=use_reduce_only,
-                    )
+
+                exec_res = self.exit_executor.execute_stop_loss_intent(
+                    intent=intent,
+                    tracked_pos=tracked_pos,
+                    liquidation_price=self._safe_positive_float(risk.get("liquidationPrice")),
+                    client_id_prefix="nsl",
+                )
+                if exec_res.status == "CLOSED_IMMEDIATE":
                     if tracked_pos is not None:
                         self._cancel_exit_orders(tracked_pos)
                     caps.pop(cap_key, None)
@@ -2290,42 +2321,25 @@ class PositionManager:
                     details["closed_immediate"].append(
                         (
                             f"{symbol}(cap={cap_key}, stop_price={sl_stop_price}, "
-                            f"qty={qty}, close_order_id={close_info.get('close_order_id')})"
+                            f"qty={qty}, close_order_id={exec_res.close_info.get('close_order_id') if exec_res.close_info else None})"
                         )
                     )
                     continue
-
-                try:
+                elif exec_res.status == "UPDATED":
+                    caps[cap_key] = merged_sl_price
                     if tracked_position_id is not None:
-                        self.store.update_stop_loss(
-                            position_id=tracked_position_id,
-                            sl_order_id=sl_order.get("orderId"),
-                            sl_client_order_id=sl_order.get("clientOrderId"),
-                            sl_price=merged_sl_price,
-                            liq_price_latest=self._safe_positive_float(risk.get("liquidationPrice")),
+                        self.store.clear_position_error(tracked_position_id)
+                    summary["updated_sl"] += 1
+                    details["updated_sl"].append(
+                        (
+                            f"{symbol}(cap={cap_key}, old_sl={old_sl_price}, "
+                            f"window_start={start_utc.isoformat()}, noon_ref={noon_ref_price}, "
+                            f"new_sl={merged_sl_price}, side={close_side})"
                         )
-                    self.store.add_order_event(
-                        symbol=symbol,
-                        position_id=tracked_position_id,
-                        event_time_utc=self._utc_now_iso(),
-                        order_payload=sl_order,
                     )
-                except Exception:
-                    self._cancel_order_if_exists(symbol, sl_order.get("orderId"), sl_order.get("clientOrderId"))
-                    raise
-                if tracked_pos is not None:
-                    self._cancel_order_if_exists(symbol, tracked_pos.get("sl_order_id"), tracked_pos.get("sl_client_order_id"))
-                caps[cap_key] = merged_sl_price
-                if tracked_position_id is not None:
-                    self.store.clear_position_error(tracked_position_id)
-                summary["updated_sl"] += 1
-                details["updated_sl"].append(
-                    (
-                        f"{symbol}(cap={cap_key}, old_sl={old_sl_price}, "
-                        f"window_start={start_utc.isoformat()}, noon_ref={noon_ref_price}, "
-                        f"new_sl={merged_sl_price}, side={close_side})"
-                    )
-                )
+                else:
+                    if exec_res.error:
+                        raise exec_res.error
             except Exception as exc:  # noqa: BLE001
                 summary["errors"] += 1
                 LOGGER.exception("Noon protection stop failed for symbol=%s cap=%s: %s", symbol, cap_key, exc)
@@ -2452,7 +2466,7 @@ class PositionManager:
                         entry_side="SELL" if close_side == "BUY" else "BUY",
                     )
 
-                if (check_time - opened_at_utc).total_seconds() < min_hold_seconds:
+                if not is_morning_protection_hold_satisfied(check_time, opened_at_utc, min_hold_hours):
                     summary["skipped"] += 1
                     continue
 
@@ -2467,106 +2481,78 @@ class PositionManager:
                         f"no_klines_ref_between start={hour_start.isoformat()} end={check_time.isoformat()}"
                     )
 
-                old_sl_price = self._safe_positive_float(tracked_pos.get("sl_price")) if tracked_pos is not None else None
-                if old_sl_price is None:
-                    cap_price = self._safe_positive_float(caps.get(cap_key))
-                    if tracked_pos is not None:
-                        old_sl_price = cap_price
-                    elif cap_price is not None:
-                        # Ignore stale exchange cap state from a previous position lifecycle.
-                        cap_updated_at = caps_updated_at_by_key.get(cap_key)
-                        if cap_updated_at is None or opened_at_utc <= cap_updated_at:
-                            old_sl_price = cap_price
+                old_sl_price = resolve_morning_protection_old_sl(
+                    tracked_sl_price=self._safe_positive_float(tracked_pos.get("sl_price")) if tracked_pos is not None else None,
+                    cap_price=self._safe_positive_float(caps.get(cap_key)),
+                    cap_updated_at=caps_updated_at_by_key.get(cap_key),
+                    opened_at_utc=opened_at_utc,
+                    is_tracked=(tracked_pos is not None),
+                )
 
                 round_up = close_side == "BUY"
                 morning_sl_price = self.client.normalize_trigger_price(symbol, morning_ref_price, round_up=round_up)
-                if old_sl_price:
-                    merged_sl_price = min(old_sl_price, morning_sl_price) if close_side == "BUY" else max(old_sl_price, morning_sl_price)
-                else:
-                    merged_sl_price = morning_sl_price
-
                 rules = self.client.get_symbol_rules().get(symbol)
                 min_delta = rules.tick_size if rules else 0.0
-                if old_sl_price and abs(merged_sl_price - old_sl_price) <= max(min_delta, 1e-12):
+
+                eval_input = MorningProtectionEvaluationInput(
+                    symbol=symbol,
+                    position_amt=position_amt,
+                    position_side=position_side,
+                    close_side=close_side,
+                    use_reduce_only=use_reduce_only,
+                    cap_key=cap_key,
+                    check_time_utc=check_time,
+                    opened_at_utc=opened_at_utc,
+                    min_hold_hours=min_hold_hours,
+                    morning_ref_price=morning_sl_price,
+                    tracked_position_id=tracked_position_id,
+                    old_sl_price=old_sl_price,
+                    tick_size=min_delta,
+                )
+                eval_res = evaluate_morning_protection_candidate(eval_input)
+                if not eval_res.should_update or eval_res.intent is None:
                     summary["skipped"] += 1
                     continue
 
+                intent = eval_res.intent
+                merged_sl_price = eval_res.merged_sl_price
                 qty = abs(position_amt)
-                if qty <= 0:
-                    raise RuntimeError("position qty is zero")
-
                 sl_stop_price = self.client.format_trigger_price(symbol, merged_sl_price, round_up=round_up)
-                try:
-                    sl_order = self._create_stop_order_with_fallback(
-                        symbol=symbol,
-                        side=close_side,
-                        stop_price=sl_stop_price,
-                        qty=qty,
-                        client_order_id=self._new_client_id("msl", symbol),
-                        position_side=position_side if position_side in {"LONG", "SHORT"} else None,
-                        use_reduce_only=use_reduce_only,
-                    )
-                except BinanceAPIError as exc:
-                    if not self._is_immediate_trigger_error(exc):
-                        raise
-                    close_info = self._close_protection_immediate(
-                        symbol=symbol,
-                        qty=qty,
-                        side=close_side,
-                        position_id=tracked_position_id,
-                        position_side=position_side if position_side in {"LONG", "SHORT"} else None,
-                        use_reduce_only=use_reduce_only,
-                        close_status="CLOSED_MORNING_PROTECTION",
-                        close_reason="MORNING_PROTECTION_IMMEDIATE_TRIGGER",
-                        client_id_tag="msi",
-                    )
-                    if tracked_pos is not None:
-                        self._cancel_exit_orders(tracked_pos)
+
+                exec_res = self.exit_executor.execute_stop_loss_intent(
+                    intent=intent,
+                    tracked_pos=tracked_pos,
+                    liquidation_price=self._safe_positive_float(risk.get("liquidationPrice")),
+                    client_id_prefix="msl",
+                    immediate_close_status="CLOSED_MORNING_PROTECTION",
+                    immediate_close_reason="MORNING_PROTECTION_IMMEDIATE_TRIGGER",
+                    immediate_client_id_tag="msi",
+                )
+                if exec_res.status == "CLOSED_IMMEDIATE":
                     caps.pop(cap_key, None)
                     caps_updated_at_by_key.pop(cap_key, None)
                     active_cap_keys.discard(cap_key)
-                    if tracked_position_id is not None:
-                        self.store.clear_position_error(tracked_position_id)
                     summary["closed_immediate"] += 1
                     details["closed_immediate"].append(
                         (
                             f"{symbol}(cap={cap_key}, stop_price={sl_stop_price}, "
-                            f"qty={qty}, close_order_id={close_info.get('close_order_id')})"
+                            f"qty={qty}, close_order_id={exec_res.close_info.get('close_order_id') if exec_res.close_info else None})"
                         )
                     )
                     continue
-
-                try:
-                    if tracked_position_id is not None:
-                        self.store.update_stop_loss(
-                            position_id=tracked_position_id,
-                            sl_order_id=sl_order.get("orderId"),
-                            sl_client_order_id=sl_order.get("clientOrderId"),
-                            sl_price=merged_sl_price,
-                            liq_price_latest=self._safe_positive_float(risk.get("liquidationPrice")),
+                elif exec_res.status == "UPDATED":
+                    caps[cap_key] = merged_sl_price
+                    caps_updated_at_by_key[cap_key] = self._utc_now_datetime()
+                    summary["updated_sl"] += 1
+                    details["updated_sl"].append(
+                        (
+                            f"{symbol}(cap={cap_key}, old_sl={old_sl_price}, "
+                            f"morning_ref={morning_ref_price}, new_sl={merged_sl_price}, side={close_side})"
                         )
-                    self.store.add_order_event(
-                        symbol=symbol,
-                        position_id=tracked_position_id,
-                        event_time_utc=self._utc_now_iso(),
-                        order_payload=sl_order,
                     )
-                except Exception:
-                    self._cancel_order_if_exists(symbol, sl_order.get("orderId"), sl_order.get("clientOrderId"))
-                    raise
-                if tracked_pos is not None:
-                    self._cancel_order_if_exists(symbol, tracked_pos.get("sl_order_id"), tracked_pos.get("sl_client_order_id"))
-                caps[cap_key] = merged_sl_price
-                caps_updated_at_by_key[cap_key] = self._utc_now_datetime()
-                if tracked_position_id is not None:
-                    self.store.clear_position_error(tracked_position_id)
-                summary["updated_sl"] += 1
-                details["updated_sl"].append(
-                    (
-                        f"{symbol}(cap={cap_key}, old_sl={old_sl_price}, "
-                        f"morning_ref={morning_ref_price}, new_sl={merged_sl_price}, side={close_side})"
-                    )
-                )
+                else:
+                    if exec_res.error:
+                        raise exec_res.error
             except Exception as exc:  # noqa: BLE001
                 summary["errors"] += 1
                 LOGGER.exception("Morning protection stop failed for symbol=%s cap=%s: %s", symbol, cap_key, exc)
@@ -2619,27 +2605,37 @@ class PositionManager:
                 if risk is None:
                     self.store.set_position_error(position_id, "position risk not found")
                     continue
-                if self._is_protection_exempt(symbol):
-                    continue
-
-                position_amt = self._safe_float(risk.get("positionAmt"), default=0.0)
-                if position_amt >= 0:
-                    continue
-
-                unrealized_pnl = self._safe_float(risk.get("unRealizedProfit"), default=0.0)
-                if unrealized_pnl >= 0:
-                    continue
-
-                close_info = self._close_daily_loss_cut(
+                eval_cand = DailyLossCutEvaluationInput(
                     symbol=symbol,
-                    qty=abs(position_amt),
-                    side="BUY",
-                    position_id=position_id,
+                    position_amt=self._safe_float(risk.get("positionAmt"), default=0.0),
+                    unrealized_pnl=self._safe_float(risk.get("unRealizedProfit"), default=0.0),
+                    is_exempt=self._is_protection_exempt(symbol),
+                    position_side="BOTH",
+                    close_side="BUY",
+                    use_reduce_only=True,
+                    tracked_position_id=position_id,
+                    is_short_only_scope=True,
+                )
+                eval_res = evaluate_daily_loss_cut_candidate(eval_cand)
+                if not eval_res.should_close or eval_res.intent is None:
+                    continue
+
+                intent = eval_res.intent
+                close_info = self.exit_executor.close_position(
+                    symbol=intent.symbol,
+                    qty=intent.qty or 0.0,
+                    side=intent.close_side,
+                    position_id=intent.position_id,
                     cancel_pos=pos,
+                    position_side=intent.position_side,
+                    use_reduce_only=intent.use_reduce_only,
+                    close_status="CLOSED_DAILY_LOSS_CUT",
+                    close_reason=intent.reason,
+                    client_id_tag="dl",
                 )
                 summary["closed_loss_cut"] += 1
                 details["closed_loss_cut"].append(
-                    f"{symbol}(id={position_id}, upnl={unrealized_pnl:.6f}, qty={close_info['qty']}, "
+                    f"{symbol}(id={position_id}, upnl={eval_cand.unrealized_pnl:.6f}, qty={close_info['qty']}, "
                     f"close_order_id={close_info['close_order_id']})"
                 )
                 if symbol and symbol not in closed_symbols:
@@ -2701,8 +2697,6 @@ class PositionManager:
 
             summary["total"] += 1
             unrealized_pnl = self._safe_float(risk.get("unRealizedProfit"), default=0.0)
-            if unrealized_pnl >= 0:
-                continue
 
             position_side = str(risk.get("positionSide") or "BOTH").strip().upper() or "BOTH"
             close_side, use_reduce_only = self._resolve_close_side_for_exchange_position(
@@ -2715,15 +2709,34 @@ class PositionManager:
                 else None
             )
             tracked_position_id = int(tracked_pos["id"]) if tracked_pos is not None else None
+
+            eval_cand = DailyLossCutEvaluationInput(
+                symbol=symbol,
+                position_amt=position_amt,
+                unrealized_pnl=unrealized_pnl,
+                is_exempt=False,
+                position_side=position_side,
+                close_side=close_side,
+                use_reduce_only=use_reduce_only,
+                tracked_position_id=tracked_position_id,
+                is_short_only_scope=False,
+            )
+            eval_res = evaluate_daily_loss_cut_candidate(eval_cand)
+            if not eval_res.should_close or eval_res.intent is None:
+                continue
+
+            intent = eval_res.intent
             try:
-                close_info = self._close_daily_loss_cut(
-                    symbol=symbol,
-                    qty=abs(position_amt),
-                    side=close_side,
-                    position_id=tracked_position_id,
+                close_info = self.exit_executor.close_position(
+                    symbol=intent.symbol,
+                    qty=intent.qty or 0.0,
+                    side=intent.close_side,
+                    position_id=intent.position_id,
                     cancel_pos=tracked_pos,
-                    position_side=position_side if position_side in {"LONG", "SHORT"} else None,
-                    use_reduce_only=use_reduce_only,
+                    position_side=intent.position_side,
+                    use_reduce_only=intent.use_reduce_only,
+                    close_status="CLOSED_DAILY_LOSS_CUT",
+                    close_reason=intent.reason,
                 )
                 summary["closed_loss_cut"] += 1
                 details["closed_loss_cut"].append(
@@ -3243,30 +3256,17 @@ class PositionManager:
     def _close_timeout(self, pos: Dict[str, object], qty: float) -> Dict[str, object]:
         position_id = int(pos["id"])
         symbol = str(pos["symbol"])
-
-        close_order = self.client.create_order(
+        return self.exit_executor.close_position(
             symbol=symbol,
+            qty=qty,
             side="BUY",
-            type="MARKET",
-            quantity=self.client.format_order_qty(symbol, qty),
-            reduceOnly=True,
-            newClientOrderId=self._new_client_id("to", symbol),
-            newOrderRespType="RESULT",
-        )
-
-        self._market_fill_reconciler.record_market_order(
-            symbol=symbol,
             position_id=position_id,
-            order=close_order,
-        )
-        self.store.mark_position_closed(
-            position_id=position_id,
-            status="CLOSED_TIMEOUT",
+            cancel_pos=pos,
+            use_reduce_only=True,
+            close_status="CLOSED_TIMEOUT",
             close_reason="MAX_HOLD_EXCEEDED",
-            close_order_id=close_order.get("orderId"),
+            client_id_tag="to",
         )
-        self._cancel_exit_orders(pos)
-        return {"qty": qty, "close_order_id": close_order.get("orderId")}
 
     def _close_daily_loss_cut(
         self,
@@ -3281,41 +3281,18 @@ class PositionManager:
         close_reason: str = "DAILY_FLOATING_LOSS_CHECK",
         client_id_tag: str = "dl",
     ) -> Dict[str, object]:
-        create_order_params: Dict[str, object] = {
-            "symbol": symbol,
-            "side": side,
-            "type": "MARKET",
-            "quantity": self.client.format_order_qty(symbol, qty),
-            "newClientOrderId": self._new_client_id(client_id_tag, symbol),
-            "newOrderRespType": "RESULT",
-        }
-        if use_reduce_only:
-            create_order_params["reduceOnly"] = True
-        if position_side in {"LONG", "SHORT"}:
-            create_order_params["positionSide"] = position_side
-
-        close_order = self.client.create_order(
-            **create_order_params,
-        )
-
-        self._market_fill_reconciler.record_market_order(
+        return self.exit_executor.close_position(
             symbol=symbol,
+            qty=qty,
+            side=side,
             position_id=position_id,
-            order=close_order,
+            cancel_pos=cancel_pos,
+            position_side=position_side,
+            use_reduce_only=use_reduce_only,
+            close_status=close_status,
+            close_reason=close_reason,
+            client_id_tag=client_id_tag,
         )
-        if position_id is not None:
-            self.store.mark_position_closed(
-                position_id=position_id,
-                status=close_status,
-                close_reason=close_reason,
-                close_order_id=close_order.get("orderId"),
-            )
-        if cancel_pos is not None:
-            self._cancel_exit_orders(cancel_pos)
-        return {
-            "qty": qty,
-            "close_order_id": close_order.get("orderId"),
-        }
 
     def _close_protection_immediate(
         self,
@@ -3329,36 +3306,17 @@ class PositionManager:
         close_reason: str = "NOON_PROTECTION_IMMEDIATE_TRIGGER",
         client_id_tag: str = "nsi",
     ) -> Dict[str, object]:
-        create_order_params: Dict[str, object] = {
-            "symbol": symbol,
-            "side": side,
-            "type": "MARKET",
-            "quantity": self.client.format_order_qty(symbol, qty),
-            "newClientOrderId": self._new_client_id(client_id_tag, symbol),
-            "newOrderRespType": "RESULT",
-        }
-        if use_reduce_only:
-            create_order_params["reduceOnly"] = True
-        if position_side in {"LONG", "SHORT"}:
-            create_order_params["positionSide"] = position_side
-
-        close_order = self.client.create_order(**create_order_params)
-        self._market_fill_reconciler.record_market_order(
+        return self.exit_executor.close_protection_immediate(
             symbol=symbol,
+            qty=qty,
+            side=side,
             position_id=position_id,
-            order=close_order,
+            position_side=position_side,
+            use_reduce_only=use_reduce_only,
+            close_status=close_status,
+            close_reason=close_reason,
+            client_id_tag=client_id_tag,
         )
-        if position_id is not None:
-            self.store.mark_position_closed(
-                position_id=position_id,
-                status=close_status,
-                close_reason=close_reason,
-                close_order_id=close_order.get("orderId"),
-            )
-        return {
-            "qty": qty,
-            "close_order_id": close_order.get("orderId"),
-        }
 
     @staticmethod
     def _resolve_close_side_for_exchange_position(
@@ -3377,8 +3335,7 @@ class PositionManager:
 
     @staticmethod
     def _is_immediate_trigger_error(exc: BinanceAPIError) -> bool:
-        message = str(getattr(exc, "message", "") or exc).lower()
-        return getattr(exc, "code", None) == -2021 or "immediately trigger" in message
+        return is_immediate_trigger_error(exc)
 
     def _update_dynamic_stop(
         self,
@@ -3404,17 +3361,11 @@ class PositionManager:
         new_sl_price = self.client.normalize_trigger_price(symbol, new_sl_raw, round_up=True)
 
         noon_cap_price = self._get_or_backfill_noon_protection_cap(pos, risk)
-        if noon_cap_price:
-            new_sl_price = min(new_sl_price, noon_cap_price)
         morning_cap_price = self._get_morning_protection_cap(position_id)
-        if morning_cap_price:
-            new_sl_price = min(new_sl_price, morning_cap_price)
         entry_structure_protection = self._entry_structure_protection_state.get(position_id)
-        if entry_structure_protection is not None:
-            new_sl_price = min(new_sl_price, entry_structure_protection.stop_price)
-        if old_sl_price:
-            new_sl_price = min(new_sl_price, old_sl_price)
-        new_sl_stop_price = self.client.format_trigger_price(symbol, new_sl_price, round_up=True)
+        entry_structure_stop = (
+            entry_structure_protection.stop_price if entry_structure_protection is not None else None
+        )
 
         rules = self.client.get_symbol_rules().get(symbol)
         min_delta = rules.tick_size if rules else 0.0
@@ -3427,68 +3378,60 @@ class PositionManager:
             "TRIGGERING",
             "TRIGGERED",
         }
-        if old_sl_price and abs(new_sl_price - old_sl_price) <= max(min_delta, 1e-12) and sl_is_live:
+
+        position_side = str(risk.get("positionSide") or "BOTH").strip().upper() or "BOTH"
+        close_side, use_reduce_only = self._resolve_close_side_for_exchange_position(
+            position_amt=raw_position_amt,
+            position_side=position_side,
+        )
+
+        eval_cand = DynamicStopEvaluationInput(
+            symbol=symbol,
+            position_amt=raw_position_amt,
+            normalized_liq_sl_price=new_sl_price,
+            old_sl_price=old_sl_price,
+            noon_cap_price=noon_cap_price,
+            morning_cap_price=morning_cap_price,
+            entry_structure_stop_price=entry_structure_stop,
+            tick_size=min_delta,
+            sl_is_live=sl_is_live,
+            tracked_position_id=position_id,
+            position_side=position_side if position_side in {"LONG", "SHORT"} else None,
+            close_side=close_side,
+            use_reduce_only=use_reduce_only,
+        )
+        eval_res = evaluate_dynamic_stop_candidate(eval_cand)
+        if not eval_res.should_update or eval_res.intent is None:
             return None
 
-        try:
-            sl_order = self._create_stop_order_with_fallback(
-                symbol=symbol,
-                side="BUY",
-                stop_price=new_sl_stop_price,
-                qty=position_amt,
-                client_order_id=self._new_client_id("sl", symbol),
-            )
-        except BinanceAPIError as exc:
-            if not self._is_immediate_trigger_error(exc):
-                raise
-            position_side = str(risk.get("positionSide") or "BOTH").strip().upper() or "BOTH"
-            close_side, use_reduce_only = self._resolve_close_side_for_exchange_position(
-                position_amt=raw_position_amt,
-                position_side=position_side,
-            )
-            close_info = self._close_protection_immediate(
-                symbol=symbol,
-                qty=position_amt,
-                side=close_side,
-                position_id=position_id,
-                position_side=position_side if position_side in {"LONG", "SHORT"} else None,
-                use_reduce_only=use_reduce_only,
-                close_status="CLOSED_SL",
-                close_reason="PROTECTION_IMMEDIATE_TRIGGER",
-                client_id_tag="psi",
-            )
-            self._cancel_exit_orders(pos)
+        intent = eval_res.intent
+        exec_res = self.exit_executor.execute_stop_loss_intent(
+            intent=intent,
+            tracked_pos=pos,
+            liquidation_price=liq_price,
+            client_id_prefix="sl",
+            immediate_close_status="CLOSED_SL",
+            immediate_close_reason="PROTECTION_IMMEDIATE_TRIGGER",
+            immediate_client_id_tag="psi",
+        )
+        if exec_res.status == "CLOSED_IMMEDIATE":
             return {
                 "old_sl_price": old_sl_price,
-                "new_sl_price": new_sl_price,
+                "new_sl_price": eval_res.target_sl_price,
                 "liq_price": liq_price,
                 "closed_immediate": True,
-                "close_order_id": close_info.get("close_order_id"),
+                "close_order_id": exec_res.close_info.get("close_order_id") if exec_res.close_info else None,
             }
-
-        try:
-            self.store.update_stop_loss(
-                position_id=position_id,
-                sl_order_id=sl_order.get("orderId"),
-                sl_client_order_id=sl_order.get("clientOrderId"),
-                sl_price=new_sl_price,
-                liq_price_latest=liq_price,
-            )
-            self.store.add_order_event(
-                symbol=symbol,
-                position_id=position_id,
-                event_time_utc=self._utc_now_iso(),
-                order_payload=sl_order,
-            )
-        except Exception:
-            self._cancel_order_if_exists(symbol, sl_order.get("orderId"), sl_order.get("clientOrderId"))
-            raise
-        self._cancel_order_if_exists(symbol, pos.get("sl_order_id"), pos.get("sl_client_order_id"))
-        return {
-            "old_sl_price": old_sl_price,
-            "new_sl_price": new_sl_price,
-            "liq_price": liq_price,
-        }
+        elif exec_res.status == "UPDATED":
+            return {
+                "old_sl_price": old_sl_price,
+                "new_sl_price": eval_res.target_sl_price,
+                "liq_price": liq_price,
+            }
+        else:
+            if exec_res.error:
+                raise exec_res.error
+            return None
 
     def _repair_take_profit_if_needed(
         self,
@@ -3562,21 +3505,15 @@ class PositionManager:
         position_side: Optional[str] = None,
         use_reduce_only: bool = True,
     ) -> Dict[str, object]:
-        create_order_params: Dict[str, object] = {
-            "symbol": symbol,
-            "side": side,
-            "type": "STOP_MARKET",
-            "stopPrice": stop_price,
-            "quantity": self.client.format_order_qty(symbol, qty),
-            "workingType": self.trigger_price_type,
-            "priceProtect": True,
-            "newClientOrderId": client_order_id,
-        }
-        if use_reduce_only:
-            create_order_params["reduceOnly"] = True
-        if position_side in {"LONG", "SHORT"}:
-            create_order_params["positionSide"] = position_side
-        return self.client.create_order(**create_order_params)
+        return self.exit_executor.create_stop_order_with_fallback(
+            symbol=symbol,
+            side=side,
+            stop_price=stop_price,
+            qty=qty,
+            client_order_id=client_order_id,
+            position_side=position_side,
+            use_reduce_only=use_reduce_only,
+        )
 
     def _get_order(
         self,
@@ -4134,17 +4071,12 @@ class PositionManager:
         noon_time_utc: datetime,
     ) -> datetime:
         """Return the start of the two-completed-hour-plus-to-noon reference window."""
-        opened_at = opened_at_utc.astimezone(timezone.utc)
-        day_start = day_start_utc.astimezone(timezone.utc)
-        noon_time = noon_time_utc.astimezone(timezone.utc)
-        if opened_at >= noon_time:
-            return noon_time
-        if opened_at < day_start:
-            # For a position carried into today, use the two complete hours
-            # immediately before today's noon instead of the old entry day.
-            return noon_time - timedelta(hours=cls.NOON_PROTECTION_PRE_ENTRY_HOURS)
-        entry_hour_start = opened_at.replace(minute=0, second=0, microsecond=0)
-        return entry_hour_start - timedelta(hours=cls.NOON_PROTECTION_PRE_ENTRY_HOURS)
+        return calculate_noon_protection_window_start(
+            opened_at_utc=opened_at_utc,
+            day_start_utc=day_start_utc,
+            noon_time_utc=noon_time_utc,
+            pre_entry_hours=cls.NOON_PROTECTION_PRE_ENTRY_HOURS,
+        )
 
     def _fetch_noon_protection_extremes(
         self,
