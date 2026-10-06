@@ -1,5 +1,6 @@
 """Execution engine package providing first-principles order execution and tracking."""
 
+from core.execution.coordinator import AccountCoordinator
 from core.execution.engine import ExecutionEngine
 from core.execution.ledger import TradingLedger
 from core.execution.models import (
@@ -20,6 +21,7 @@ from core.execution.models import (
 )
 
 __all__ = [
+    "AccountCoordinator",
     "AccountView",
     "AttemptStatus",
     "DataQuality",
