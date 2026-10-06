@@ -1,0 +1,428 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>8点到次日8点账户资金轨迹</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      --bg: #06111a;
+      --panel: #0b1b27;
+      --panel-strong: #102635;
+      --line: #21475c;
+      --line-soft: rgba(68, 133, 160, 0.28);
+      --text: #e4f2fb;
+      --muted: #8eafbf;
+      --cyan: #53c7f3;
+      --green: #27d39a;
+      --red: #ff6b6b;
+      --amber: #f4b64a;
+      --shadow: 0 16px 36px rgba(0, 0, 0, 0.22);
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      min-width: 320px;
+      color: var(--text);
+      background: var(--bg);
+      font-family: "Avenir Next", "Noto Sans SC", "PingFang SC", "Microsoft YaHei", sans-serif;
+      font-size: 15px;
+      line-height: 1.45;
+    }
+    .page { width: min(1520px, calc(100vw - 40px)); margin: 0 auto; padding: 28px 0 56px; }
+    .header {
+      display: flex;
+      justify-content: space-between;
+      gap: 24px;
+      align-items: flex-start;
+      padding: 4px 0 20px;
+      border-bottom: 1px solid var(--line);
+    }
+    .eyebrow { margin: 0 0 8px; color: var(--cyan); font-size: 12px; font-weight: 700; letter-spacing: 0.12em; text-transform: uppercase; }
+    h1 { margin: 0; font-size: clamp(28px, 3.4vw, 48px); line-height: 1.08; letter-spacing: 0; }
+    .subtitle { max-width: 760px; margin: 12px 0 0; color: var(--muted); }
+    .header-meta { display: grid; gap: 6px; min-width: 250px; color: var(--muted); text-align: right; font-variant-numeric: tabular-nums; }
+    .header-meta strong { color: var(--text); font-weight: 600; }
+    .toolbar {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: end;
+      gap: 14px 20px;
+      margin-top: 18px;
+      padding: 14px 16px;
+      border: 1px solid var(--line);
+      background: var(--panel);
+      box-shadow: var(--shadow);
+    }
+    .field { display: grid; gap: 5px; min-width: 150px; }
+    .field label { color: var(--muted); font-size: 12px; }
+    select {
+      min-height: 36px;
+      padding: 7px 32px 7px 10px;
+      color: var(--text);
+      background: var(--panel-strong);
+      border: 1px solid var(--line);
+      border-radius: 4px;
+      font: inherit;
+    }
+    select:focus { outline: 2px solid var(--cyan); outline-offset: 2px; }
+    .toolbar-note { margin-left: auto; max-width: 620px; color: var(--muted); font-size: 13px; }
+    .section { margin-top: 22px; }
+    .section-head { display: flex; justify-content: space-between; align-items: baseline; gap: 16px; margin-bottom: 12px; }
+    h2 { margin: 0; font-size: 21px; }
+    .section-head p { margin: 0; color: var(--muted); font-size: 13px; }
+    .summary-strip { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); border: 1px solid var(--line); background: var(--panel); box-shadow: var(--shadow); }
+    .summary-item { min-height: 92px; padding: 15px 18px; border-right: 1px solid var(--line-soft); }
+    .summary-item:last-child { border-right: 0; }
+    .summary-label { color: var(--muted); font-size: 12px; }
+    .summary-value { margin-top: 7px; font-size: 24px; font-weight: 700; font-variant-numeric: tabular-nums; }
+    .summary-note { margin-top: 2px; color: var(--muted); font-size: 12px; }
+    .positive { color: var(--green); }
+    .negative { color: var(--red); }
+    .accent { color: var(--cyan); }
+    .amber { color: var(--amber); }
+    .chart-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; }
+    .chart-panel { min-width: 0; overflow: hidden; border: 1px solid var(--line); background: var(--panel); box-shadow: var(--shadow); }
+    .chart-head { display: flex; justify-content: space-between; gap: 12px; align-items: baseline; padding: 13px 15px 10px; border-bottom: 1px solid var(--line-soft); }
+    .chart-title { font-size: 18px; font-weight: 700; }
+    .chart-meta { color: var(--muted); font-size: 12px; font-variant-numeric: tabular-nums; }
+    .chart-wrap { padding: 8px 10px 4px; }
+    svg.chart { display: block; width: 100%; height: auto; }
+    .chart-legend { display: flex; flex-wrap: wrap; gap: 8px 15px; padding: 3px 15px 13px; color: var(--muted); font-size: 12px; }
+    .legend-item { display: inline-flex; align-items: center; gap: 6px; }
+    .legend-line { width: 18px; height: 3px; border-radius: 2px; background: currentColor; }
+    .down-up-callout { margin-top: 18px; padding: 15px 17px; border-left: 3px solid var(--cyan); background: #0c2230; color: var(--muted); }
+    .down-up-callout strong { color: var(--text); }
+    .threshold-panel { margin-top: 14px; border: 1px solid var(--line-soft); background: rgba(16, 38, 53, 0.55); }
+    .threshold-note { padding: 11px 14px 0; color: var(--muted); font-size: 12px; }
+    .detail-layout { display: grid; grid-template-columns: minmax(0, 1.5fr) minmax(320px, 0.8fr); gap: 14px; }
+    .detail-panel, .table-panel, .method-panel { min-width: 0; border: 1px solid var(--line); background: var(--panel); box-shadow: var(--shadow); }
+    .detail-panel { overflow: hidden; }
+    .detail-head, .table-head, .method-head { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; padding: 13px 15px 10px; border-bottom: 1px solid var(--line-soft); }
+    .detail-title, .table-title, .method-title { font-size: 18px; font-weight: 700; }
+    .detail-description { padding: 11px 15px 0; color: var(--muted); font-size: 13px; }
+    .detail-wrap { padding: 8px 10px 10px; }
+    .detail-stats { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 1px; margin: 0 15px 15px; border: 1px solid var(--line-soft); background: var(--line-soft); }
+    .detail-stat { padding: 9px 10px; background: var(--panel-strong); }
+    .detail-stat-label { color: var(--muted); font-size: 11px; }
+    .detail-stat-value { margin-top: 2px; font-size: 16px; font-weight: 700; font-variant-numeric: tabular-nums; }
+    .table-scroll { overflow-x: auto; }
+    table { width: 100%; min-width: 760px; border-collapse: collapse; font-variant-numeric: tabular-nums; }
+    th, td { padding: 11px 14px; border-bottom: 1px solid var(--line-soft); text-align: right; white-space: nowrap; }
+    th { color: var(--muted); font-size: 12px; font-weight: 600; }
+    th:first-child, td:first-child { text-align: left; }
+    td { color: var(--text); }
+    tr:last-child td { border-bottom: 0; }
+    .category-counts { color: var(--muted); font-size: 12px; }
+    .method-body { padding: 14px 16px 17px; color: var(--muted); font-size: 13px; }
+    .method-body p { margin: 0 0 10px; }
+    .method-body p:last-child { margin-bottom: 0; }
+    .empty { padding: 46px 20px; color: var(--muted); text-align: center; }
+    .sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0; }
+    @media (max-width: 980px) {
+      .header { display: block; }
+      .header-meta { margin-top: 14px; text-align: left; }
+      .toolbar-note { width: 100%; margin-left: 0; }
+      .summary-strip { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+      .summary-item:nth-child(3) { border-right: 0; }
+      .summary-item:nth-child(n + 4) { border-top: 1px solid var(--line-soft); }
+      .detail-layout { grid-template-columns: 1fr; }
+    }
+    @media (max-width: 680px) {
+      .page { width: min(100% - 24px, 1520px); padding-top: 18px; }
+      h1 { font-size: 30px; }
+      .chart-grid { grid-template-columns: 1fr; }
+      .summary-strip { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      .summary-item:nth-child(3) { border-right: 1px solid var(--line-soft); }
+      .summary-item:nth-child(2n) { border-right: 0; }
+      .summary-item:nth-child(n + 3) { border-top: 1px solid var(--line-soft); }
+      .detail-stats { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      .section-head { display: block; }
+      .section-head p { margin-top: 4px; }
+    }
+  </style>
+</head>
+<body>
+  <main class="page">
+    <header class="header">
+      <div>
+        <p class="eyebrow">Bubble Buster · Equity Path Study</p>
+        <h1>8点到次日8点的账户资金轨迹</h1>
+        <p class="subtitle">把每个完整交易日归一到当日 08:00 = 0%，先观察资金路径，再判断组合止盈和止损应该保护什么。<span class="scope-label" id="scope-label"></span></p>
+      </div>
+      <div class="header-meta">
+        <div>数据范围：<strong id="period"></strong></div>
+        <div>完整账号日：<strong id="account-days"></strong></div>
+        <div>缺失账号日：<strong id="missing-days"></strong></div>
+      </div>
+    </header>
+
+    <section class="toolbar" aria-label="筛选条件">
+      <div class="field">
+        <label for="account-filter">账号</label>
+        <select id="account-filter"></select>
+      </div>
+      <div class="field">
+        <label for="category-filter">路径类型</label>
+        <select id="category-filter"></select>
+      </div>
+      <div class="field">
+        <label for="date-filter">交易日详情</label>
+        <select id="date-filter"></select>
+      </div>
+      <div class="toolbar-note">图中每条细线是一个账号日；图形按 15 分钟网格显示，最高、最低和最大回撤统计仍使用全部 60 秒快照。</div>
+    </section>
+
+    <section class="section">
+      <div class="section-head">
+        <h2>先跌后涨：止损不能误伤的样本</h2>
+        <p id="summary-context"></p>
+      </div>
+      <div class="summary-strip">
+        <div class="summary-item"><div class="summary-label">样本数</div><div class="summary-value accent" id="down-up-count">--</div><div class="summary-note">按当前筛选范围</div></div>
+        <div class="summary-item"><div class="summary-label">最差触底</div><div class="summary-value negative" id="down-up-worst">--</div><div class="summary-note">所有先跌后涨样本的最低点</div></div>
+        <div class="summary-item"><div class="summary-label">最差 10% 参考线</div><div class="summary-value amber" id="down-up-p10">--</div><div class="summary-note">只有约 10% 样本更深</div></div>
+        <div class="summary-item"><div class="summary-label">中位触底</div><div class="summary-value" id="down-up-p50">--</div><div class="summary-note">一半样本未跌到这里</div></div>
+        <div class="summary-item"><div class="summary-label">次日 08:00 仍盈利</div><div class="summary-value positive" id="down-up-end-positive">--</div><div class="summary-note">该类路径的最终结果</div></div>
+      </div>
+      <div class="down-up-callout" id="down-up-callout"></div>
+      <div class="threshold-panel">
+        <div class="threshold-note">触底达到阈值的账号日比例（只看是否触及，不代表实际退出后的收益；账号筛选有效，路径筛选不影响此表）。</div>
+        <div class="table-scroll">
+          <table>
+            <thead><tr><th>止损阈值</th><th>一直跌</th><th>先涨后跌</th><th>先跌后涨</th><th>一直涨</th><th>全部路径</th></tr></thead>
+            <tbody id="threshold-body"></tbody>
+          </table>
+        </div>
+      </div>
+    </section>
+
+    <section class="section">
+      <div class="section-head">
+        <h2>日内路径总览</h2>
+        <p>纵轴为相对当日 08:00 的权益变化；横轴跨越 24 小时</p>
+      </div>
+      <div class="chart-grid" id="chart-grid"></div>
+    </section>
+
+    <section class="section">
+      <div class="section-head">
+        <h2>路径类型统计</h2>
+        <p>用于判断哪一类路径贡献亏损，不能单独作为策略回放结果</p>
+      </div>
+      <div class="table-panel">
+        <div class="table-scroll">
+          <table>
+            <thead><tr><th>账号</th><th>账号日</th><th>一直涨</th><th>一直跌</th><th>先跌后涨</th><th>先涨后跌</th><th>先跌后涨最差</th><th>先跌后涨最差10%</th><th>最终盈利率</th></tr></thead>
+            <tbody id="stats-body"></tbody>
+          </table>
+        </div>
+      </div>
+    </section>
+
+    <section class="section">
+      <div class="section-head">
+        <h2>交易日详情</h2>
+        <p>选中日期后，对照四个账号的路径、触底时刻和最终结果</p>
+      </div>
+      <div class="detail-layout">
+        <div class="detail-panel">
+          <div class="detail-head"><div class="detail-title" id="detail-title">--</div><div class="chart-meta" id="detail-meta"></div></div>
+          <div class="detail-description" id="detail-description"></div>
+          <div class="detail-wrap" id="detail-chart"></div>
+          <div class="detail-stats" id="detail-stats"></div>
+        </div>
+        <div class="method-panel">
+          <div class="method-head"><div class="method-title">研究边界</div></div>
+          <div class="method-body">
+            <p>路径分类是描述性标签：把四个季度的中位走势分别比较，降低单个 60 秒噪声对分类的影响。</p>
+            <p>“最差 10% 参考线”表示先跌后涨样本的触底收益分布的第 10 百分位。若止损放在这个位置，历史上大约 90% 的先跌后涨样本不会触发，但剩余尾部仍可能被截断。</p>
+            <p>这还不是可上线参数：组合止损会改变后续仓位和复利，下一步必须用逐账号、逐仓位、逐分钟的事件回放验证成交顺序、手续费和滑点。</p>
+          </div>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <script>
+    const DATA = __ACCOUNT_EQUITY_PATHS_DATA__;
+    const CATEGORY_LABELS = {up: "一直涨", down: "一直跌", down_up: "先跌后涨", up_down: "先涨后跌"};
+    const CATEGORY_COLORS = {up: "#27d39a", down: "#ff6b6b", down_up: "#53c7f3", up_down: "#f4b64a"};
+    const CATEGORY_ORDER = ["up", "down", "down_up", "up_down"];
+    const state = {account: "all", category: "all", date: ""};
+    const $ = (id) => document.getElementById(id);
+    const clamp = (value, min, max) => Math.max(min, Math.min(max, value));
+    const esc = (value) => String(value).replace(/[&<>"']/g, (char) => ({"&":"&amp;", "<":"&lt;", ">":"&gt;", "\"":"&quot;", "'":"&#39;"}[char]));
+    const pct = (bps, signed = true) => {
+      if (bps === null || bps === undefined) return "--";
+      const value = bps / 100;
+      return `${signed && value > 0 ? "+" : ""}${value.toFixed(2)}%`;
+    };
+    const count = (value) => value === null || value === undefined ? "--" : Number(value).toLocaleString("zh-CN");
+    const accounts = () => state.account === "all" ? Object.keys(DATA.accounts) : [state.account];
+    const rowsFor = (account) => {
+      const rows = DATA.accounts[account]?.days || [];
+      return state.category === "all" ? rows : rows.filter((row) => row.c === state.category);
+    };
+    const statsForSelection = () => {
+      if (state.account === "all" && state.category === "all") return DATA.overall.stats;
+      const rows = accounts().flatMap((account) => rowsFor(account));
+      const endValues = rows.map((row) => row.end);
+      const downUp = rows.filter((row) => row.c === "down_up").map((row) => row.trough).sort((a, b) => a - b);
+      const quantile = (values, p) => {
+        if (!values.length) return null;
+        const position = (values.length - 1) * p;
+        const lower = Math.floor(position), upper = Math.ceil(position);
+        if (lower === upper) return values[lower];
+        return Math.round(values[lower] + (values[upper] - values[lower]) * (position - lower));
+      };
+      const categories = Object.fromEntries(CATEGORY_ORDER.map((key) => [key, rows.filter((row) => row.c === key).length]));
+      return {
+        count: rows.length,
+        positiveEndRate: endValues.length ? endValues.filter((value) => value > 0).length / endValues.length : null,
+        categories,
+        downUp: {count: downUp.length, worst: downUp[0] ?? null, p10: quantile(downUp, .1), p50: quantile(downUp, .5), p90: quantile(downUp, .9), best: downUp[downUp.length - 1] ?? null},
+      };
+    };
+    const chartDomain = () => {
+      const rows = accounts().flatMap((account) => rowsFor(account));
+      const values = rows.flatMap((row) => row.r);
+      if (!values.length) return [DATA.domain.min, DATA.domain.max];
+      const min = Math.min(...values), max = Math.max(...values);
+      const pad = Math.max(25, (max - min) * .08);
+      return [Math.min(0, min - pad), Math.max(0, max + pad)];
+    };
+    const formatAxisPct = (bps) => `${(bps / 100).toFixed(Math.abs(bps) >= 1000 ? 0 : 1)}%`;
+    const pathD = (values, x, y) => values.map((value, index) => `${index ? "L" : "M"}${x(index).toFixed(2)},${y(value).toFixed(2)}`).join(" ");
+    function chartSvg(rows, medianValues, title, detail = false) {
+      const width = 900, height = detail ? 360 : 290;
+      const margin = {top: 14, right: 18, bottom: 35, left: 56};
+      const innerWidth = width - margin.left - margin.right;
+      const innerHeight = height - margin.top - margin.bottom;
+      const [domainMin, domainMax] = chartDomain();
+      const x = (index) => margin.left + innerWidth * index / 96;
+      const y = (value) => margin.top + (domainMax - value) * innerHeight / (domainMax - domainMin);
+      const ticks = 5;
+      let svg = `<svg class="chart" viewBox="0 0 ${width} ${height}" role="img" aria-label="${esc(title)}">`;
+      for (let i = 0; i <= ticks; i += 1) {
+        const value = domainMin + (domainMax - domainMin) * i / ticks;
+        const yy = y(value);
+        svg += `<line x1="${margin.left}" y1="${yy}" x2="${width - margin.right}" y2="${yy}" stroke="${i === ticks / 2 ? "#4c7185" : "#1d3b4c"}" stroke-width="${i === ticks / 2 ? 1.2 : 1}" />`;
+        svg += `<text x="${margin.left - 9}" y="${yy + 4}" text-anchor="end" fill="#8eafbf" font-size="12">${formatAxisPct(value)}</text>`;
+      }
+      [[0, "08:00"], [24, "14:00"], [48, "20:00"], [72, "02:00"], [96, "08:00"]].forEach(([index, label]) => {
+        const xx = x(index);
+        svg += `<line x1="${xx}" y1="${margin.top}" x2="${xx}" y2="${height - margin.bottom}" stroke="#1d3b4c" stroke-width="1" />`;
+        svg += `<text x="${xx}" y="${height - 10}" text-anchor="middle" fill="#8eafbf" font-size="12">${label}</text>`;
+      });
+      rows.forEach((row) => {
+        const color = CATEGORY_COLORS[row.c] || "#53c7f3";
+        const opacity = detail ? .9 : .22;
+        const strokeWidth = detail ? 2.8 : 1.1;
+        svg += `<path d="${pathD(row.r, x, y)}" fill="none" stroke="${color}" stroke-opacity="${opacity}" stroke-width="${strokeWidth}" stroke-linejoin="round" stroke-linecap="round"><title>${esc(`${row.d} · ${CATEGORY_LABELS[row.c]} · 收盘 ${pct(row.end)} · 触底 ${pct(row.trough)}`)}</title></path>`;
+      });
+      if (medianValues) {
+        svg += `<path d="${pathD(medianValues, x, y)}" fill="none" stroke="#eef8ff" stroke-opacity=".92" stroke-width="2.2" stroke-linejoin="round" stroke-linecap="round" stroke-dasharray="5 4"><title>筛选样本中位路径</title></path>`;
+      }
+      svg += "</svg>";
+      return svg;
+    }
+    function medianFor(account, category) {
+      const key = category === "all" ? "all" : category;
+      return DATA.accounts[account]?.medians?.[key] || null;
+    }
+    function renderSummary() {
+      const stats = statsForSelection();
+      const downUp = stats.downUp || {};
+      $("summary-context").textContent = `${state.account === "all" ? "全部账号" : state.account} · ${state.category === "all" ? "全部路径" : CATEGORY_LABELS[state.category]}`;
+      $("down-up-count").textContent = count(downUp.count);
+      $("down-up-worst").textContent = pct(downUp.worst);
+      $("down-up-p10").textContent = pct(downUp.p10);
+      $("down-up-p50").textContent = pct(downUp.p50);
+      const downUpRows = accounts().flatMap((account) => (DATA.accounts[account]?.days || []).filter((row) => row.c === "down_up"));
+      const positive = downUpRows.filter((row) => row.end > 0).length;
+      $("down-up-end-positive").textContent = downUpRows.length ? `${(positive / downUpRows.length * 100).toFixed(1)}%` : "--";
+      if (!downUpRows.length) {
+        $("down-up-callout").innerHTML = "当前筛选范围没有先跌后涨样本。切换到“全部路径”或选择具体账号后查看保护参考线。";
+      } else {
+        $("down-up-callout").innerHTML = `<strong>读法：</strong>先跌后涨样本的最低点最差为 <strong>${pct(downUp.worst)}</strong>，最差 10% 的分界约为 <strong>${pct(downUp.p10)}</strong>。止损若高于这条线，历史上会更容易误伤本来会反弹的路径；但低于这条线也不代表能识别“直跌”，还需要结合触发时间、持仓和逐仓位回放。`;
+      }
+    }
+    function renderCharts() {
+      const root = $("chart-grid");
+      const selectedAccounts = accounts();
+      root.innerHTML = selectedAccounts.map((account) => {
+        const rows = rowsFor(account);
+        const stats = DATA.accounts[account]?.stats || {};
+        const medianValues = medianFor(account, state.category);
+        const title = `${account} · ${state.category === "all" ? "全部路径" : CATEGORY_LABELS[state.category]}`;
+        const countText = `${count(rows.length)} 个账号日 · 中位路径用白色虚线`;
+        return `<article class="chart-panel"><div class="chart-head"><div class="chart-title">${esc(title)}</div><div class="chart-meta">${countText}</div></div><div class="chart-wrap">${rows.length ? chartSvg(rows, medianValues, title) : `<div class="empty">当前筛选没有完整路径</div>`}</div><div class="chart-legend"><span class="legend-item" style="color:${CATEGORY_COLORS.up}"><i class="legend-line"></i>一直涨 ${count(stats.categories?.up || 0)}</span><span class="legend-item" style="color:${CATEGORY_COLORS.down}"><i class="legend-line"></i>一直跌 ${count(stats.categories?.down || 0)}</span><span class="legend-item" style="color:${CATEGORY_COLORS.down_up}"><i class="legend-line"></i>先跌后涨 ${count(stats.categories?.down_up || 0)}</span><span class="legend-item" style="color:${CATEGORY_COLORS.up_down}"><i class="legend-line"></i>先涨后跌 ${count(stats.categories?.up_down || 0)}</span></div></article>`;
+      }).join("");
+    }
+    function renderThresholdTable() {
+      const source = state.account === "all" ? DATA.overall : DATA.accounts[state.account];
+      const thresholds = source?.stopThresholds || [];
+      $("threshold-body").innerHTML = thresholds.map((item) => {
+        const rates = item.rates || {};
+        const cell = (key) => rates[key] == null ? "--" : `${(rates[key] * 100).toFixed(1)}%`;
+        return `<tr><td class="amber">${item.threshold}%</td><td>${cell("down")}</td><td>${cell("up_down")}</td><td class="accent">${cell("down_up")}</td><td>${cell("up")}</td><td>${cell("all")}</td></tr>`;
+      }).join("");
+    }
+    function allDates() {
+      return [...new Set(Object.values(DATA.accounts).flatMap((account) => account.days.map((row) => row.d)))].sort().reverse();
+    }
+    function renderDateOptions() {
+      const dates = allDates();
+      if (!dates.includes(state.date)) state.date = dates[0] || "";
+      $("date-filter").innerHTML = dates.map((date) => `<option value="${date}">${date}</option>`).join("");
+      $("date-filter").value = state.date;
+    }
+    function renderDetail() {
+      const date = state.date;
+      const selected = accounts().flatMap((account) => (DATA.accounts[account]?.days || []).filter((row) => row.d === date).map((row) => ({account, row})));
+      $("detail-title").textContent = date ? `${date} · 08:00—次日08:00` : "没有可用交易日";
+      $("detail-meta").textContent = `${selected.length} 个账号有完整快照`;
+      $("detail-description").textContent = selected.length ? "各账号都从自己的 08:00 资金归一化，便于看出组合规则实际保留了多少盈利、承受了多少回撤。" : "该日期没有完整账户日数据。";
+      const detailRows = selected.map(({row}) => row);
+      $("detail-chart").innerHTML = selected.length ? chartSvg(detailRows, null, `交易日 ${date}`, true) : `<div class="empty">没有可显示的路径</div>`;
+      $("detail-stats").innerHTML = selected.map(({account, row}) => `<div class="detail-stat"><div class="detail-stat-label">${esc(account)} · ${CATEGORY_LABELS[row.c]}</div><div class="detail-stat-value ${row.end >= 0 ? "positive" : "negative"}">${pct(row.end)}</div><div class="detail-stat-label">最高 ${pct(row.peak)} · 触底 ${pct(row.trough)}</div></div>`).join("");
+    }
+    function renderTable() {
+      const rows = Object.entries(DATA.accounts).map(([account, payload]) => {
+        const stats = payload.stats;
+        const downUp = stats.downUp || {};
+        return `<tr><td><strong>${esc(account)}</strong></td><td>${count(stats.count)}</td><td>${count(stats.categories.up)}</td><td>${count(stats.categories.down)}</td><td>${count(stats.categories.down_up)}</td><td>${count(stats.categories.up_down)}</td><td class="negative">${pct(downUp.worst)}</td><td class="amber">${pct(downUp.p10)}</td><td class="${stats.positiveEndRate >= .5 ? "positive" : "negative"}">${stats.positiveEndRate == null ? "--" : (stats.positiveEndRate * 100).toFixed(1) + "%"}</td></tr>`;
+      });
+      const overall = DATA.overall.stats;
+      rows.push(`<tr><td><strong>合计</strong></td><td>${count(overall.count)}</td><td>${count(overall.categories.up)}</td><td>${count(overall.categories.down)}</td><td>${count(overall.categories.down_up)}</td><td>${count(overall.categories.up_down)}</td><td class="negative">${pct(overall.downUp.worst)}</td><td class="amber">${pct(overall.downUp.p10)}</td><td class="${overall.positiveEndRate >= .5 ? "positive" : "negative"}">${(overall.positiveEndRate * 100).toFixed(1)}%</td></tr>`);
+      $("stats-body").innerHTML = rows.join("");
+    }
+    function populateControls() {
+      $("account-filter").innerHTML = `<option value="all">全部账号</option>${Object.keys(DATA.accounts).map((account) => `<option value="${account}">${account}</option>`).join("")}`;
+      $("category-filter").innerHTML = `<option value="all">全部路径</option>${CATEGORY_ORDER.map((key) => `<option value="${key}">${CATEGORY_LABELS[key]}</option>`).join("")}`;
+      $("account-filter").addEventListener("change", (event) => { state.account = event.target.value; render(); });
+      $("category-filter").addEventListener("change", (event) => { state.category = event.target.value; render(); });
+      $("date-filter").addEventListener("change", (event) => { state.date = event.target.value; renderDetail(); });
+    }
+    function render() {
+      $("account-filter").value = state.account;
+      $("category-filter").value = state.category;
+      renderDateOptions();
+      renderSummary();
+      renderCharts();
+      renderThresholdTable();
+      renderDetail();
+      renderTable();
+    }
+    const totalDays = Object.values(DATA.accounts).reduce((sum, account) => sum + account.days.length, 0);
+    $("period").textContent = `${DATA.period.start} 至 ${DATA.period.end}`;
+    $("scope-label").textContent = DATA.scope?.label ? ` · ${DATA.scope.label}（上线日 ${DATA.scope.strategyLaunch}）` : "";
+    $("account-days").textContent = totalDays.toLocaleString("zh-CN");
+    $("missing-days").textContent = DATA.missing.length.toLocaleString("zh-CN");
+    populateControls();
+    render();
+  </script>
+</body>
+</html>

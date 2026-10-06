@@ -1,0 +1,434 @@
+<div id="acc04-all-equity-curves">
+  <h2>acc04 六版本独立重算权益曲线</h2>
+  <div class="acc04-all-legend viz-row" aria-label="六种策略图例">
+    <button type="button" class="acc04-all-legend-button" data-series="actual" aria-pressed="true">
+      <span class="acc04-all-swatch acc04-all-swatch-1" aria-hidden="true"></span>原版
+    </button>
+    <button type="button" class="acc04-all-legend-button" data-series="second" aria-pressed="true">
+      <span class="acc04-all-swatch acc04-all-swatch-2" aria-hidden="true"></span>第二次阴线（严格持仓）
+    </button>
+    <button type="button" class="acc04-all-legend-button" data-series="bullbear" aria-pressed="true">
+      <span class="acc04-all-swatch acc04-all-swatch-3" aria-hidden="true"></span>先阳后阴两段（严格持仓）
+    </button>
+    <button type="button" class="acc04-all-legend-button" data-series="bullbear3" aria-pressed="true">
+      <span class="acc04-all-swatch acc04-all-swatch-4" aria-hidden="true"></span>先阳后阴三段（严格持仓）
+    </button>
+    <button type="button" class="acc04-all-legend-button" data-series="bullbear_reentry" aria-pressed="true">
+      <span class="acc04-all-swatch acc04-all-swatch-5" aria-hidden="true"></span>先阳后阴两段（信号独立）
+    </button>
+    <button type="button" class="acc04-all-legend-button" data-series="bullbear3_reentry" aria-pressed="true">
+      <span class="acc04-all-swatch acc04-all-swatch-6" aria-hidden="true"></span>先阳后阴三段（信号独立）
+    </button>
+  </div>
+  <p class="text-small text-muted" id="acc04-all-note"></p>
+  <p class="text-small" id="acc04-all-summary" aria-live="polite"></p>
+  <div class="acc04-all-plot">
+    <svg role="img" aria-labelledby="acc04-all-chart-title acc04-all-chart-desc">
+      <title id="acc04-all-chart-title">acc04 六版本独立重算权益曲线</title>
+      <desc id="acc04-all-chart-desc">原版、严格持仓分仓和信号独立开仓分仓策略的账户权益走势比较。</desc>
+    </svg>
+    <div class="tooltip acc04-all-tooltip" id="acc04-all-tooltip" role="tooltip" hidden></div>
+  </div>
+</div>
+
+<style>
+#acc04-all-equity-curves {
+  position: relative;
+  width: 100%;
+  color: var(--foreground);
+}
+#acc04-all-equity-curves h2 {
+  margin: 0 0 12px;
+  font-weight: 500;
+}
+#acc04-all-equity-curves .acc04-all-legend {
+  align-items: center;
+  gap: 6px 14px;
+  margin: 4px 0;
+}
+#acc04-all-equity-curves .acc04-all-legend-button {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  min-height: 32px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--foreground);
+  font: inherit;
+  cursor: pointer;
+}
+#acc04-all-equity-curves .acc04-all-legend-button[aria-pressed="false"] {
+  color: var(--muted-foreground);
+  opacity: 0.55;
+}
+#acc04-all-equity-curves .acc04-all-swatch {
+  display: inline-block;
+  width: 22px;
+  height: 3px;
+}
+#acc04-all-equity-curves .acc04-all-swatch-1 { background: var(--viz-series-1); }
+#acc04-all-equity-curves .acc04-all-swatch-2 { background: var(--viz-series-2); }
+#acc04-all-equity-curves .acc04-all-swatch-3 { background: var(--viz-series-3); }
+#acc04-all-equity-curves .acc04-all-swatch-4 { background: var(--viz-series-4); }
+#acc04-all-equity-curves .acc04-all-swatch-5 { background: var(--viz-series-5); }
+#acc04-all-equity-curves .acc04-all-swatch-6 { background: var(--viz-series-6); }
+#acc04-all-equity-curves #acc04-all-note,
+#acc04-all-equity-curves #acc04-all-summary {
+  margin: 6px 0 4px;
+}
+#acc04-all-equity-curves .acc04-all-plot {
+  position: relative;
+  width: 100%;
+  min-height: 360px;
+}
+#acc04-all-equity-curves svg {
+  display: block;
+  width: 100%;
+  height: auto;
+}
+#acc04-all-equity-curves .acc04-all-frame {
+  fill: none;
+  stroke: var(--border);
+  stroke-width: 1;
+}
+#acc04-all-equity-curves .acc04-all-grid line {
+  stroke: var(--border);
+  stroke-opacity: 0.45;
+}
+#acc04-all-equity-curves .acc04-all-grid path {
+  display: none;
+}
+#acc04-all-equity-curves .acc04-all-axis path,
+#acc04-all-equity-curves .acc04-all-axis line {
+  stroke: var(--border);
+}
+#acc04-all-equity-curves .acc04-all-axis text,
+#acc04-all-equity-curves text.axis-title {
+  fill: var(--foreground);
+  font-size: 12px;
+}
+#acc04-all-equity-curves .acc04-all-line {
+  fill: none;
+  stroke-width: 2;
+}
+#acc04-all-equity-curves .acc04-all-line-1 { stroke: var(--viz-series-1); }
+#acc04-all-equity-curves .acc04-all-line-2 { stroke: var(--viz-series-2); }
+#acc04-all-equity-curves .acc04-all-line-3 { stroke: var(--viz-series-3); }
+#acc04-all-equity-curves .acc04-all-line-4 { stroke: var(--viz-series-4); stroke-dasharray: 6 3; }
+#acc04-all-equity-curves .acc04-all-line-5 { stroke: var(--viz-series-5); }
+#acc04-all-equity-curves .acc04-all-line-6 { stroke: var(--viz-series-6); stroke-dasharray: 6 3; }
+#acc04-all-equity-curves .acc04-all-portfolio-marker {
+  stroke: var(--background);
+  stroke-width: 2;
+}
+#acc04-all-equity-curves .acc04-all-portfolio-marker-1 { fill: var(--viz-series-1); }
+#acc04-all-equity-curves .acc04-all-portfolio-marker-2 { fill: var(--viz-series-2); }
+#acc04-all-equity-curves .acc04-all-portfolio-marker-3 { fill: var(--viz-series-3); }
+#acc04-all-equity-curves .acc04-all-portfolio-marker-4 { fill: var(--viz-series-4); }
+#acc04-all-equity-curves .acc04-all-portfolio-marker-5 { fill: var(--viz-series-5); }
+#acc04-all-equity-curves .acc04-all-portfolio-marker-6 { fill: var(--viz-series-6); }
+#acc04-all-equity-curves .acc04-all-hover-guide {
+  stroke: var(--muted-foreground);
+  stroke-width: 1;
+  pointer-events: none;
+}
+#acc04-all-equity-curves .acc04-all-hover-marker {
+  stroke: var(--background);
+  stroke-width: 2;
+  pointer-events: none;
+}
+#acc04-all-equity-curves .acc04-all-hover-marker-1 { fill: var(--viz-series-1); }
+#acc04-all-equity-curves .acc04-all-hover-marker-2 { fill: var(--viz-series-2); }
+#acc04-all-equity-curves .acc04-all-hover-marker-3 { fill: var(--viz-series-3); }
+#acc04-all-equity-curves .acc04-all-hover-marker-4 { fill: var(--viz-series-4); }
+#acc04-all-equity-curves .acc04-all-hover-marker-5 { fill: var(--viz-series-5); }
+#acc04-all-equity-curves .acc04-all-hover-marker-6 { fill: var(--viz-series-6); }
+#acc04-all-equity-curves .acc04-all-overlay {
+  fill: transparent;
+  cursor: crosshair;
+}
+#acc04-all-equity-curves .acc04-all-tooltip {
+  position: absolute;
+  z-index: 5;
+  max-width: 330px;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--popover);
+  color: var(--popover-foreground);
+  pointer-events: none;
+}
+#acc04-all-equity-curves .acc04-all-tooltip-title {
+  margin-bottom: 5px;
+  font-weight: 500;
+}
+#acc04-all-equity-curves .acc04-all-tooltip-row {
+  display: flex;
+  justify-content: space-between;
+  gap: 16px;
+  white-space: nowrap;
+}
+#acc04-all-equity-curves .acc04-all-tooltip-key {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+#acc04-all-equity-curves .acc04-all-tooltip-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+}
+#acc04-all-equity-curves .acc04-all-tooltip-dot-1 { background: var(--viz-series-1); }
+#acc04-all-equity-curves .acc04-all-tooltip-dot-2 { background: var(--viz-series-2); }
+#acc04-all-equity-curves .acc04-all-tooltip-dot-3 { background: var(--viz-series-3); }
+#acc04-all-equity-curves .acc04-all-tooltip-dot-4 { background: var(--viz-series-4); }
+#acc04-all-equity-curves .acc04-all-tooltip-dot-5 { background: var(--viz-series-5); }
+#acc04-all-equity-curves .acc04-all-tooltip-dot-6 { background: var(--viz-series-6); }
+@media (max-width: 480px) {
+  #acc04-all-equity-curves .acc04-all-legend {
+    gap: 4px 10px;
+  }
+  #acc04-all-equity-curves .acc04-all-legend-button {
+    min-height: 44px;
+  }
+  #acc04-all-equity-curves .acc04-all-plot {
+    min-height: 340px;
+  }
+}
+</style>
+
+<script src="https://cdn.jsdelivr.net/npm/d3@7.9.0/dist/d3.min.js"></script>
+<script>
+(() => {
+  const root = document.getElementById("acc04-all-equity-curves");
+  const DATA = __DATA_JSON__;
+  const series = [
+    { key: "actual", label: "原版", colorClass: "1" },
+    { key: "second", label: "第二次阴线（严格持仓）", colorClass: "2" },
+    { key: "bullbear", label: "先阳后阴两段（严格持仓）", colorClass: "3" },
+    { key: "bullbear3", label: "先阳后阴三段（严格持仓）", colorClass: "4" },
+    { key: "bullbear_reentry", label: "先阳后阴两段（信号独立）", colorClass: "5" },
+    { key: "bullbear3_reentry", label: "先阳后阴三段（信号独立）", colorClass: "6" }
+  ];
+  const visible = new Set(series.map(item => item.key));
+  const start = new Date(DATA.meta.chart_start_local);
+  const end = new Date(DATA.meta.chart_end_local);
+  const plot = root.querySelector(".acc04-all-plot");
+  const svg = d3.select(root.querySelector("svg"));
+  const tooltip = root.querySelector("#acc04-all-tooltip");
+  const summary = root.querySelector("#acc04-all-summary");
+  const note = root.querySelector("#acc04-all-note");
+  const numberFormat = d3.format(",.2f");
+  const percentFormat = d3.format("+.2f");
+  const timeFormat = new Intl.DateTimeFormat("zh-CN", {
+    timeZone: "Asia/Shanghai",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false
+  });
+  const pointsBySeries = {};
+
+  series.forEach(item => {
+    pointsBySeries[item.key] = DATA.series[item.key].points
+      .map(point => ({ x: new Date(point.t), y: Number(point.equity) }))
+      .filter(point => point.x >= start && point.x <= end);
+  });
+
+  function formatLocal(value) {
+    return timeFormat.format(value);
+  }
+
+  function formatEquity(value) {
+    return Number.isFinite(Number(value)) ? numberFormat(Number(value)) : "-";
+  }
+
+  function renderSummary() {
+    const values = series.map(item => {
+      const metric = DATA.series[item.key].metrics;
+      return item.label + " " + formatEquity(metric.final_equity)
+        + "（" + percentFormat(metric.return_pct) + "%，回撤 "
+        + percentFormat(metric.max_drawdown_pct) + "%）";
+    });
+    summary.textContent = "共同回放起点 " + formatEquity(DATA.meta.starting_equity)
+      + " USDT；期末：" + values.join(" · ");
+    note.textContent = "图表区间：北京时间 08:00–次日 08:00；每条曲线均独立重算后续退出和跨日持仓。悬停查看同一时刻的六条权益。";
+  }
+
+  function interpolate(values, x) {
+    if (!values.length) return null;
+    if (x <= values[0].x) return values[0].y;
+    if (x >= values[values.length - 1].x) return values[values.length - 1].y;
+    const center = d3.bisector(point => point.x).center;
+    const index = center(values, x);
+    const right = Math.max(1, Math.min(values.length - 1, index));
+    const left = right - 1;
+    const a = values[left];
+    const b = values[right];
+    const ratio = (x - a.x) / (b.x - a.x);
+    return a.y + (b.y - a.y) * ratio;
+  }
+
+  function updateTooltip(xValue, pointerX, pointerY, pinned) {
+    const rows = series.filter(item => visible.has(item.key)).map(item => {
+      const value = interpolate(pointsBySeries[item.key], xValue);
+      return "<div class=\"acc04-all-tooltip-row\" data-series-row=\"" + item.key + "\">"
+        + "<span class=\"acc04-all-tooltip-key\"><span class=\"acc04-all-tooltip-dot acc04-all-tooltip-dot-" + item.colorClass + "\"></span>"
+        + item.label + "</span><span class=\"tabular-nums\">" + formatEquity(value) + " USDT</span></div>";
+    }).join("");
+    tooltip.innerHTML = "<div class=\"acc04-all-tooltip-title\">" + formatLocal(xValue) + "</div>" + rows;
+    tooltip.hidden = false;
+    const plotRect = plot.getBoundingClientRect();
+    const left = Math.max(4, Math.min(plotRect.width - tooltip.offsetWidth - 4, pointerX + 12));
+    const top = Math.max(4, Math.min(plotRect.height - tooltip.offsetHeight - 4, pointerY + 12));
+    tooltip.style.left = left + "px";
+    tooltip.style.top = top + "px";
+    tooltip.dataset.pinned = pinned ? "true" : "false";
+  }
+
+  function draw() {
+    const width = Math.max(320, plot.getBoundingClientRect().width || 736);
+    const height = width < 480 ? 340 : 390;
+    const margin = { top: 18, right: 18, bottom: 48, left: 64 };
+    const innerWidth = Math.max(180, width - margin.left - margin.right);
+    const innerHeight = Math.max(180, height - margin.top - margin.bottom);
+    svg.attr("viewBox", "0 0 " + width + " " + height);
+    svg.selectAll("g.acc04-all-root").remove();
+    const chart = svg.append("g").attr("class", "acc04-all-root")
+      .attr("transform", "translate(" + margin.left + "," + margin.top + ")");
+    const allPoints = series.flatMap(item => pointsBySeries[item.key]);
+    const xExtent = d3.extent(allPoints, point => point.x);
+    const yExtent = d3.extent(allPoints, point => point.y);
+    const xStep = 15 * 60 * 1000;
+    const ySpread = Math.max(1, yExtent[1] - yExtent[0]);
+    const x = d3.scaleTime()
+      .domain([new Date(xExtent[0].getTime() - xStep), new Date(xExtent[1].getTime() + xStep)])
+      .range([0, innerWidth]);
+    const y = d3.scaleLinear()
+      .domain([yExtent[0] - ySpread * 0.08, yExtent[1] + ySpread * 0.08])
+      .nice()
+      .range([innerHeight, 0]);
+    chart.append("rect")
+      .attr("class", "acc04-all-frame")
+      .attr("data-chart-frame", "true")
+      .attr("x", 0).attr("y", 0).attr("width", innerWidth).attr("height", innerHeight);
+    const tickCount = width < 480 ? 4 : Math.max(5, Math.floor(width / 120));
+    chart.append("g")
+      .attr("class", "acc04-all-grid")
+      .call(d3.axisLeft(y).ticks(5).tickSize(-innerWidth).tickFormat(""));
+    chart.append("g")
+      .attr("class", "acc04-all-axis acc04-all-axis-x")
+      .attr("transform", "translate(0," + innerHeight + ")")
+      .call(d3.axisBottom(x).ticks(tickCount).tickFormat(d3.timeFormat("%m-%d")));
+    chart.append("g")
+      .attr("class", "acc04-all-axis acc04-all-axis-y")
+      .call(d3.axisLeft(y).ticks(5).tickFormat(d3.format(",.0f")));
+    chart.append("text")
+      .attr("class", "axis-title")
+      .attr("data-axis", "x")
+      .attr("x", innerWidth / 2)
+      .attr("y", height - margin.top - 2)
+      .attr("text-anchor", "middle")
+      .text("时间（北京时间）");
+    chart.append("text")
+      .attr("class", "axis-title")
+      .attr("data-axis", "y")
+      .attr("transform", "rotate(-90)")
+      .attr("x", -innerHeight / 2)
+      .attr("y", -48)
+      .attr("text-anchor", "middle")
+      .text("账户权益（USDT）");
+    const line = d3.line().x(point => x(point.x)).y(point => y(point.y));
+    series.forEach(item => {
+      chart.append("path")
+        .datum(pointsBySeries[item.key])
+        .attr("class", "acc04-all-line acc04-all-line-" + item.colorClass)
+        .attr("data-series", item.key)
+        .attr("d", line)
+        .style("display", visible.has(item.key) ? null : "none");
+      DATA.series[item.key].portfolio_events.forEach(event => {
+        const eventTime = new Date(event.time);
+        if (eventTime < start || eventTime > end) return;
+        chart.append("circle")
+          .attr("class", "acc04-all-portfolio-marker acc04-all-portfolio-marker-" + item.colorClass)
+          .attr("data-series", item.key)
+          .attr("data-chart-marker", "portfolio-stop")
+          .attr("cx", x(eventTime))
+          .attr("cy", y(Number(event.current_equity)))
+          .attr("r", 4)
+          .style("display", visible.has(item.key) ? null : "none");
+      });
+    });
+    const guide = chart.append("line")
+      .attr("class", "acc04-all-hover-guide")
+      .attr("data-chart-hover-guide", "true")
+      .attr("y1", 0).attr("y2", innerHeight)
+      .style("display", "none");
+    const hoverMarkers = {};
+    series.forEach(item => {
+      hoverMarkers[item.key] = chart.append("circle")
+        .attr("class", "acc04-all-hover-marker acc04-all-hover-marker-" + item.colorClass)
+        .attr("data-series", item.key)
+        .attr("data-chart-hover-marker", item.key)
+        .attr("r", 4)
+        .style("display", "none");
+    });
+    const overlay = chart.append("rect")
+      .attr("class", "acc04-all-overlay")
+      .attr("data-chart-hit", "true")
+      .attr("data-chart-hover-overlay", "cross-series")
+      .attr("width", innerWidth).attr("height", innerHeight);
+    let pinned = false;
+    function handlePointer(event) {
+      const [px, py] = d3.pointer(event, overlay.node());
+      const xValue = x.invert(Math.max(0, Math.min(innerWidth, px)));
+      guide.attr("x1", x(xValue)).attr("x2", x(xValue)).style("display", null);
+      series.forEach(item => {
+        const value = visible.has(item.key) ? interpolate(pointsBySeries[item.key], xValue) : null;
+        hoverMarkers[item.key]
+          .style("display", value === null ? "none" : null)
+          .attr("cx", x(xValue)).attr("cy", value === null ? 0 : y(value));
+      });
+      updateTooltip(xValue, px + margin.left, py + margin.top, pinned);
+    }
+    overlay
+      .on("pointerenter", handlePointer)
+      .on("pointermove", handlePointer)
+      .on("pointerleave", () => {
+        if (!pinned) {
+          tooltip.hidden = true;
+          guide.style("display", "none");
+          Object.values(hoverMarkers).forEach(marker => marker.style("display", "none"));
+        }
+      })
+      .on("pointerdown", event => {
+        pinned = !pinned;
+        handlePointer(event);
+      });
+  }
+
+  root.querySelectorAll(".acc04-all-legend-button").forEach(button => {
+    button.addEventListener("click", () => {
+      const key = button.dataset.series;
+      if (visible.has(key) && visible.size === 1) return;
+      if (visible.has(key)) visible.delete(key); else visible.add(key);
+      button.setAttribute("aria-pressed", visible.has(key) ? "true" : "false");
+      svg.selectAll("[data-series=\"" + key + "\"]").style("display", visible.has(key) ? null : "none");
+      if (!visible.size) {
+        visible.add(key);
+        button.setAttribute("aria-pressed", "true");
+      }
+    });
+  });
+
+  renderSummary();
+  draw();
+  if (typeof ResizeObserver !== "undefined") {
+    new ResizeObserver(draw).observe(plot);
+  } else {
+    window.addEventListener("resize", draw);
+  }
+})();
+</script>

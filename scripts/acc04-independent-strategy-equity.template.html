@@ -1,0 +1,575 @@
+<div id="acc04-independent-strategy-replay">
+  <h2>acc04 三套策略独立重算权益曲线</h2>
+  <div class="viz-controls acc04-controls">
+    <label class="form-label" for="acc04-independent-day">
+      查看交易日
+      <select class="form-select" id="acc04-independent-day" aria-label="查看交易日"></select>
+    </label>
+  </div>
+  <div class="acc04-independent-legend viz-row" aria-label="独立重算策略图例">
+    <button type="button" class="acc04-independent-legend-button" data-series="actual" aria-pressed="true">
+      <span class="acc04-independent-swatch acc04-independent-swatch-actual" aria-hidden="true"></span>实际（独立重算）
+    </button>
+    <button type="button" class="acc04-independent-legend-button" data-series="second" aria-pressed="true">
+      <span class="acc04-independent-swatch acc04-independent-swatch-second" aria-hidden="true"></span>第二次阴线（独立重算）
+    </button>
+    <button type="button" class="acc04-independent-legend-button" data-series="bullbear" aria-pressed="true">
+      <span class="acc04-independent-swatch acc04-independent-swatch-bullbear" aria-hidden="true"></span>先阳后阴（独立重算）
+    </button>
+  </div>
+  <p class="text-small text-muted" id="acc04-independent-note"></p>
+  <p class="text-small" id="acc04-independent-summary" aria-live="polite"></p>
+  <div class="acc04-independent-plot">
+    <svg role="img" aria-labelledby="acc04-independent-chart-title acc04-independent-chart-desc">
+      <title id="acc04-independent-chart-title">acc04 三套策略独立重算权益曲线</title>
+      <desc id="acc04-independent-chart-desc">每套策略独立重算入场、组合止损、后续退出和跨日仓位的账户权益走势。</desc>
+    </svg>
+    <div class="tooltip acc04-independent-tooltip" id="acc04-independent-tooltip" role="tooltip" hidden></div>
+  </div>
+  <div class="acc04-independent-detail">
+    <p class="text-small" id="acc04-independent-detail-title" aria-live="polite"></p>
+    <div class="table-responsive">
+      <table class="table table-sm">
+        <caption class="sr-only">所选交易日的独立回放细节</caption>
+        <thead>
+          <tr>
+            <th scope="col">策略</th>
+            <th scope="col" class="text-end">08:00基准</th>
+            <th scope="col" class="text-end">继承仓位</th>
+            <th scope="col" class="text-end">当日新开</th>
+            <th scope="col">组合止损</th>
+            <th scope="col">止盈时刻</th>
+            <th scope="col">个体止损/保护</th>
+            <th scope="col" class="text-end">次日08:00</th>
+            <th scope="col" class="text-end">日末权益</th>
+          </tr>
+        </thead>
+        <tbody id="acc04-independent-detail-body"></tbody>
+      </table>
+    </div>
+  </div>
+  <p class="text-small text-muted acc04-independent-footnote">
+    回放使用 Binance Vision 15 分钟 OHLC（无 15 分钟档案的 symbol 使用 1 小时档案）；组合止损按每 15 分钟收盘权益重算，07:55 早盘保护和 11:55 浮亏止损按相邻可用时点近似。
+  </p>
+</div>
+
+<style>
+#acc04-independent-strategy-replay {
+  position: relative;
+  width: 100%;
+  color: var(--foreground);
+}
+#acc04-independent-strategy-replay h2 {
+  margin: 0 0 12px;
+  font-weight: 500;
+}
+#acc04-independent-strategy-replay .acc04-controls {
+  margin-bottom: 6px;
+}
+#acc04-independent-strategy-replay .form-label {
+  max-width: 280px;
+}
+#acc04-independent-strategy-replay .acc04-independent-legend {
+  align-items: center;
+  gap: 14px;
+  margin: 4px 0;
+}
+#acc04-independent-strategy-replay .acc04-independent-legend-button {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  min-height: 32px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--foreground);
+  font: inherit;
+  cursor: pointer;
+}
+#acc04-independent-strategy-replay .acc04-independent-legend-button[aria-pressed="false"] {
+  color: var(--muted-foreground);
+  opacity: 0.55;
+}
+#acc04-independent-strategy-replay .acc04-independent-swatch {
+  display: inline-block;
+  width: 22px;
+  height: 3px;
+}
+#acc04-independent-strategy-replay .acc04-independent-swatch-actual {
+  background: var(--viz-series-1);
+}
+#acc04-independent-strategy-replay .acc04-independent-swatch-second {
+  background: var(--viz-series-2);
+}
+#acc04-independent-strategy-replay .acc04-independent-swatch-bullbear {
+  background: var(--viz-series-3);
+}
+#acc04-independent-strategy-replay #acc04-independent-note,
+#acc04-independent-strategy-replay #acc04-independent-summary,
+#acc04-independent-strategy-replay #acc04-independent-detail-title {
+  margin: 6px 0 4px;
+}
+#acc04-independent-strategy-replay .acc04-independent-plot {
+  position: relative;
+  width: 100%;
+  min-height: 360px;
+}
+#acc04-independent-strategy-replay svg {
+  display: block;
+  width: 100%;
+  height: auto;
+}
+#acc04-independent-strategy-replay .acc04-independent-frame {
+  fill: none;
+  stroke: var(--border);
+  stroke-width: 1;
+}
+#acc04-independent-strategy-replay .acc04-independent-grid line {
+  stroke: var(--border);
+  stroke-opacity: 0.45;
+}
+#acc04-independent-strategy-replay .acc04-independent-grid path {
+  display: none;
+}
+#acc04-independent-strategy-replay .acc04-independent-axis path,
+#acc04-independent-strategy-replay .acc04-independent-axis line {
+  stroke: var(--border);
+}
+#acc04-independent-strategy-replay .acc04-independent-axis text,
+#acc04-independent-strategy-replay .acc04-independent-axis-title {
+  fill: var(--foreground);
+  font-size: 12px;
+}
+#acc04-independent-strategy-replay .acc04-independent-line {
+  fill: none;
+  stroke-width: 2;
+}
+#acc04-independent-strategy-replay .acc04-independent-line-actual {
+  stroke: var(--viz-series-1);
+}
+#acc04-independent-strategy-replay .acc04-independent-line-second {
+  stroke: var(--viz-series-2);
+}
+#acc04-independent-strategy-replay .acc04-independent-line-bullbear {
+  stroke: var(--viz-series-3);
+}
+#acc04-independent-strategy-replay .acc04-independent-portfolio-marker {
+  stroke: var(--background);
+  stroke-width: 2;
+}
+#acc04-independent-strategy-replay .acc04-independent-portfolio-marker-actual {
+  fill: var(--viz-series-1);
+}
+#acc04-independent-strategy-replay .acc04-independent-portfolio-marker-second {
+  fill: var(--viz-series-2);
+}
+#acc04-independent-strategy-replay .acc04-independent-portfolio-marker-bullbear {
+  fill: var(--viz-series-3);
+}
+#acc04-independent-strategy-replay .acc04-independent-hover-guide {
+  stroke: var(--muted-foreground);
+  stroke-width: 1;
+  pointer-events: none;
+}
+#acc04-independent-strategy-replay .acc04-independent-hover-marker {
+  stroke: var(--background);
+  stroke-width: 2;
+  pointer-events: none;
+}
+#acc04-independent-strategy-replay .acc04-independent-hover-marker-actual {
+  fill: var(--viz-series-1);
+}
+#acc04-independent-strategy-replay .acc04-independent-hover-marker-second {
+  fill: var(--viz-series-2);
+}
+#acc04-independent-strategy-replay .acc04-independent-hover-marker-bullbear {
+  fill: var(--viz-series-3);
+}
+#acc04-independent-strategy-replay .acc04-independent-overlay {
+  fill: transparent;
+  cursor: crosshair;
+}
+#acc04-independent-strategy-replay .acc04-independent-tooltip {
+  position: absolute;
+  z-index: 5;
+  max-width: 280px;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--popover);
+  color: var(--popover-foreground);
+  pointer-events: none;
+}
+#acc04-independent-strategy-replay .acc04-independent-tooltip-title {
+  margin-bottom: 5px;
+  font-weight: 500;
+}
+#acc04-independent-strategy-replay .acc04-independent-tooltip-row {
+  display: flex;
+  justify-content: space-between;
+  gap: 16px;
+  white-space: nowrap;
+}
+#acc04-independent-strategy-replay .acc04-independent-tooltip-key {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+#acc04-independent-strategy-replay .acc04-independent-tooltip-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+}
+#acc04-independent-strategy-replay .acc04-independent-tooltip-dot-actual {
+  background: var(--viz-series-1);
+}
+#acc04-independent-strategy-replay .acc04-independent-tooltip-dot-second {
+  background: var(--viz-series-2);
+}
+#acc04-independent-strategy-replay .acc04-independent-tooltip-dot-bullbear {
+  background: var(--viz-series-3);
+}
+#acc04-independent-strategy-replay .acc04-independent-detail {
+  margin-top: 8px;
+}
+#acc04-independent-strategy-replay .acc04-independent-footnote {
+  margin: 8px 0 0;
+}
+@media (max-width: 480px) {
+  #acc04-independent-strategy-replay .acc04-independent-legend {
+    gap: 8px 12px;
+  }
+  #acc04-independent-strategy-replay .acc04-independent-legend-button {
+    min-height: 44px;
+  }
+  #acc04-independent-strategy-replay .acc04-independent-plot {
+    min-height: 340px;
+  }
+}
+</style>
+
+<script src="https://cdn.jsdelivr.net/npm/d3@7.9.0/dist/d3.min.js"></script>
+<script>
+(() => {
+  const root = document.getElementById("acc04-independent-strategy-replay");
+  const DATA = __DATA_JSON__;
+  const series = [
+    { key: "actual", label: "实际（独立重算）", colorClass: "actual" },
+    { key: "second", label: "第二次阴线（独立重算）", colorClass: "second" },
+    { key: "bullbear", label: "先阳后阴（独立重算）", colorClass: "bullbear" }
+  ];
+  const visible = new Set(series.map(item => item.key));
+  const start = new Date(DATA.meta.chart_start_local);
+  const end = new Date(DATA.meta.chart_end_local);
+  const plot = root.querySelector(".acc04-independent-plot");
+  const svg = d3.select(root.querySelector("svg"));
+  const tooltip = root.querySelector("#acc04-independent-tooltip");
+  const daySelect = root.querySelector("#acc04-independent-day");
+  const summary = root.querySelector("#acc04-independent-summary");
+  const note = root.querySelector("#acc04-independent-note");
+  const detailTitle = root.querySelector("#acc04-independent-detail-title");
+  const detailBody = root.querySelector("#acc04-independent-detail-body");
+  const parseTime = value => new Date(value);
+  const timeFormat = new Intl.DateTimeFormat("zh-CN", {
+    timeZone: "Asia/Shanghai",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false
+  });
+  const dayFormat = new Intl.DateTimeFormat("zh-CN", {
+    timeZone: "Asia/Shanghai",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit"
+  });
+  const numberFormat = d3.format(",.2f");
+  const percentFormat = d3.format("+.2f");
+  const pointsBySeries = {};
+
+  series.forEach(item => {
+    pointsBySeries[item.key] = DATA.series[item.key].points
+      .map(point => ({ x: parseTime(point.t), y: Number(point.equity) }))
+      .filter(point => point.x >= start && point.x <= end);
+  });
+
+  DATA.days.forEach(day => {
+    const option = document.createElement("option");
+    option.value = day;
+    option.textContent = day;
+    daySelect.appendChild(option);
+  });
+  daySelect.value = DATA.days[0] || "";
+
+  function sessionDay(timestamp) {
+    const value = parseTime(timestamp);
+    const localMs = value.getTime() + 8 * 60 * 60 * 1000;
+    const local = new Date(localMs);
+    if (local.getUTCHours() < 8) {
+      local.setUTCDate(local.getUTCDate() - 1);
+    }
+    return local.toISOString().slice(0, 10);
+  }
+
+  function formatLocal(timestamp) {
+    return timeFormat.format(parseTime(timestamp));
+  }
+
+  function formatEquity(value) {
+    return Number.isFinite(Number(value)) ? numberFormat(Number(value)) : "-";
+  }
+
+  function formatCount(value) {
+    return Number.isFinite(Number(value)) ? String(Number(value)) : "0";
+  }
+
+  function formatTimes(events, reason) {
+    return events
+      .filter(event => event.type === "exit" && event.reason === reason)
+      .map(event => formatLocal(event.time).replace(/^\d{2}月\d{2}日\s*/, ""))
+      .join("、") || "-";
+  }
+
+  function selectedDailyRow(key, day) {
+    return DATA.series[key].daily.find(row => row.date === day) || null;
+  }
+
+  function selectedEvents(key, day) {
+    return DATA.series[key].events.filter(event => sessionDay(event.time) === day);
+  }
+
+  function renderSummary() {
+    const values = series.map(item => {
+      const metric = DATA.series[item.key].chart_metrics;
+      return item.label + " " + formatEquity(metric.initial_equity)
+        + " → " + formatEquity(metric.final_equity)
+        + "（" + percentFormat(metric.return_pct) + "%，最大回撤 "
+        + percentFormat(metric.max_drawdown_pct) + "%）";
+    });
+    summary.textContent = "图表区间（北京时间 08:00–08:00）：" + values.join(" · ");
+    note.textContent = "三套策略分别独立重算入场、组合止损、止盈/止损和跨日持仓；不沿用实际退出时刻。";
+  }
+
+  function renderDetail() {
+    const day = daySelect.value;
+    detailTitle.textContent = day + "（北京时间 08:00–次日 08:00）回放细节";
+    detailBody.innerHTML = "";
+    series.forEach(item => {
+      const row = selectedDailyRow(item.key, day) || {};
+      const events = selectedEvents(item.key, day);
+      const portfolioEvents = DATA.series[item.key].portfolio_events
+        .filter(event => sessionDay(event.time) === day);
+      const newOpen = item.key === "actual"
+        ? formatCount(row.new_full)
+        : formatCount(row.new_first) + " + " + formatCount(row.new_second);
+      const protection = [
+        ["个体止损", row.individual_stop],
+        ["结构", row.structure_stop],
+        ["浮亏", row.daily_loss_cut],
+        ["12:00", row.noon_protection],
+        ["07:55", row.morning_protection],
+        ["持仓超时", row.max_hold]
+      ].filter(pair => Number(pair[1]) > 0)
+        .map(pair => pair[0] + " " + pair[1])
+        .join(" · ") || "-";
+      const portfolioText = portfolioEvents.length
+        ? portfolioEvents.map(event => formatLocal(event.time).replace(/^\d{2}月\d{2}日\s*/, "")
+          + "（" + formatEquity(event.current_equity) + "）").join("、")
+        : "未触发";
+      const tr = document.createElement("tr");
+      tr.innerHTML = [
+        item.label,
+        formatEquity(row.baseline_equity),
+        formatCount(row.carried_count),
+        newOpen,
+        portfolioText,
+        formatTimes(events, "HOURLY_EXCHANGE_TAKE_PROFIT"),
+        protection,
+        formatCount(row.next_day_active_count),
+        formatEquity(row.end_equity)
+      ].map((value, index) => index === 0
+        ? "<th scope=\"row\">" + value + "</th>"
+        : "<td" + ([1, 2, 3, 7, 8].includes(index) ? " class=\"text-end tabular-nums\"" : "") + ">" + value + "</td>").join("");
+      detailBody.appendChild(tr);
+    });
+  }
+
+  function interpolate(values, x) {
+    if (!values.length) return null;
+    if (x <= values[0].x) return values[0].y;
+    if (x >= values[values.length - 1].x) return values[values.length - 1].y;
+    const center = d3.bisector(point => point.x).center;
+    const index = center(values, x);
+    const right = Math.max(1, Math.min(values.length - 1, index));
+    const left = right - 1;
+    const a = values[left];
+    const b = values[right];
+    const ratio = (x - a.x) / (b.x - a.x);
+    return a.y + (b.y - a.y) * ratio;
+  }
+
+  function updateTooltip(x, pointerX, pointerY, pinned) {
+    const rows = series.filter(item => visible.has(item.key)).map(item => {
+      const value = interpolate(pointsBySeries[item.key], x);
+      return "<div class=\"acc04-independent-tooltip-row\" data-series-row=\"" + item.key + "\">"
+        + "<span class=\"acc04-independent-tooltip-key\"><span class=\"acc04-independent-tooltip-dot acc04-independent-tooltip-dot-" + item.colorClass + "\"></span>"
+        + item.label + "</span><span class=\"tabular-nums\">" + formatEquity(value) + " USDT</span></div>";
+    }).join("");
+    tooltip.innerHTML = "<div class=\"acc04-independent-tooltip-title\">" + formatLocal(x.toISOString()) + "</div>" + rows;
+    tooltip.hidden = false;
+    const plotRect = plot.getBoundingClientRect();
+    const left = Math.max(4, Math.min(plotRect.width - tooltip.offsetWidth - 4, pointerX + 12));
+    const top = Math.max(4, Math.min(plotRect.height - tooltip.offsetHeight - 4, pointerY + 12));
+    tooltip.style.left = left + "px";
+    tooltip.style.top = top + "px";
+    tooltip.dataset.pinned = pinned ? "true" : "false";
+  }
+
+  function draw() {
+    const width = Math.max(320, plot.getBoundingClientRect().width || 736);
+    const height = width < 480 ? 340 : 390;
+    const margin = { top: 18, right: 18, bottom: 48, left: 64 };
+    const innerWidth = Math.max(180, width - margin.left - margin.right);
+    const innerHeight = Math.max(180, height - margin.top - margin.bottom);
+    svg.attr("viewBox", "0 0 " + width + " " + height);
+    svg.selectAll("g.acc04-independent-root").remove();
+    const chart = svg.append("g").attr("class", "acc04-independent-root")
+      .attr("transform", "translate(" + margin.left + "," + margin.top + ")");
+    const allPoints = series.flatMap(item => pointsBySeries[item.key]);
+    const xExtent = d3.extent(allPoints, point => point.x);
+    const yExtent = d3.extent(allPoints, point => point.y);
+    const xStep = 15 * 60 * 1000;
+    const ySpread = Math.max(1, yExtent[1] - yExtent[0]);
+    const x = d3.scaleTime()
+      .domain([new Date(xExtent[0].getTime() - xStep), new Date(xExtent[1].getTime() + xStep)])
+      .range([0, innerWidth]);
+    const y = d3.scaleLinear()
+      .domain([yExtent[0] - ySpread * 0.08, yExtent[1] + ySpread * 0.08])
+      .nice()
+      .range([innerHeight, 0]);
+    const frame = chart.append("rect")
+      .attr("class", "acc04-independent-frame")
+      .attr("data-chart-frame", "true")
+      .attr("x", 0).attr("y", 0).attr("width", innerWidth).attr("height", innerHeight);
+    const tickCount = width < 480 ? 4 : Math.max(5, Math.floor(width / 120));
+    chart.append("g")
+      .attr("class", "acc04-independent-grid")
+      .call(d3.axisLeft(y).ticks(5).tickSize(-innerWidth).tickFormat(""));
+    chart.append("g")
+      .attr("class", "acc04-independent-axis acc04-independent-axis-x")
+      .attr("transform", "translate(0," + innerHeight + ")")
+      .call(d3.axisBottom(x).ticks(tickCount).tickFormat(d3.timeFormat("%m-%d")));
+    chart.append("g")
+      .attr("class", "acc04-independent-axis acc04-independent-axis-y")
+      .call(d3.axisLeft(y).ticks(5).tickFormat(d3.format(",.0f")));
+    chart.append("text")
+      .attr("class", "acc04-independent-axis-title")
+      .attr("data-axis", "x")
+      .attr("x", innerWidth / 2)
+      .attr("y", height - margin.top - 2)
+      .attr("text-anchor", "middle")
+      .text("时间（北京时间）");
+    chart.append("text")
+      .attr("class", "acc04-independent-axis-title")
+      .attr("data-axis", "y")
+      .attr("transform", "rotate(-90)")
+      .attr("x", -innerHeight / 2)
+      .attr("y", -48)
+      .attr("text-anchor", "middle")
+      .text("账户权益（USDT）");
+    const line = d3.line().x(point => x(point.x)).y(point => y(point.y));
+    series.forEach(item => {
+      chart.append("path")
+        .datum(pointsBySeries[item.key])
+        .attr("class", "acc04-independent-line acc04-independent-line-" + item.colorClass)
+        .attr("data-series", item.key)
+        .attr("d", line)
+        .style("display", visible.has(item.key) ? null : "none");
+      DATA.series[item.key].portfolio_events.forEach(event => {
+        const eventTime = parseTime(event.time);
+        if (eventTime < start || eventTime > end) return;
+        chart.append("circle")
+          .attr("class", "acc04-independent-portfolio-marker acc04-independent-portfolio-marker-" + item.colorClass)
+          .attr("data-series", item.key)
+          .attr("data-chart-marker", "portfolio-stop")
+          .attr("cx", x(eventTime))
+          .attr("cy", y(Number(event.current_equity)))
+          .attr("r", 4)
+          .style("display", visible.has(item.key) ? null : "none");
+      });
+    });
+    const guide = chart.append("line")
+      .attr("class", "acc04-independent-hover-guide")
+      .attr("data-chart-hover-guide", "true")
+      .attr("y1", 0).attr("y2", innerHeight)
+      .style("display", "none");
+    const hoverMarkers = {};
+    series.forEach(item => {
+      hoverMarkers[item.key] = chart.append("circle")
+        .attr("class", "acc04-independent-hover-marker acc04-independent-hover-marker-" + item.colorClass)
+        .attr("data-series", item.key)
+        .attr("data-chart-hover-marker", item.key)
+        .attr("r", 4)
+        .style("display", "none");
+    });
+    const overlay = chart.append("rect")
+      .attr("class", "acc04-independent-overlay")
+      .attr("data-chart-hit", "true")
+      .attr("data-chart-hover-overlay", "cross-series")
+      .attr("width", innerWidth).attr("height", innerHeight);
+    let pinned = false;
+    function handlePointer(event) {
+      const [px, py] = d3.pointer(event, overlay.node());
+      const xValue = x.invert(Math.max(0, Math.min(innerWidth, px)));
+      guide.attr("x1", x(xValue)).attr("x2", x(xValue)).style("display", null);
+      series.forEach(item => {
+        const value = visible.has(item.key) ? interpolate(pointsBySeries[item.key], xValue) : null;
+        hoverMarkers[item.key]
+          .style("display", value === null ? "none" : null)
+          .attr("cx", x(xValue)).attr("cy", value === null ? 0 : y(value));
+      });
+      updateTooltip(xValue, px + margin.left, py + margin.top, pinned);
+    }
+    overlay
+      .on("pointerenter", handlePointer)
+      .on("pointermove", handlePointer)
+      .on("pointerleave", () => {
+        if (!pinned) {
+          tooltip.hidden = true;
+          guide.style("display", "none");
+          Object.values(hoverMarkers).forEach(marker => marker.style("display", "none"));
+        }
+      })
+      .on("pointerdown", event => {
+        pinned = !pinned;
+        handlePointer(event);
+      });
+    root.querySelectorAll(".acc04-independent-legend-button").forEach(button => {
+      if (button.dataset.bound === "true") return;
+      button.dataset.bound = "true";
+      button.addEventListener("click", () => {
+        const key = button.dataset.series;
+        if (visible.has(key) && visible.size === 1) return;
+        if (visible.has(key)) visible.delete(key); else visible.add(key);
+        button.setAttribute("aria-pressed", visible.has(key) ? "true" : "false");
+        svg.selectAll("[data-series=\"" + key + "\"]").style("display", visible.has(key) ? null : "none");
+        if (!visible.size) {
+          visible.add(key);
+          button.setAttribute("aria-pressed", "true");
+        }
+      });
+    });
+  }
+
+  renderSummary();
+  renderDetail();
+  daySelect.addEventListener("change", renderDetail);
+  draw();
+  if (typeof ResizeObserver !== "undefined") {
+    new ResizeObserver(draw).observe(plot);
+  } else {
+    window.addEventListener("resize", draw);
+  }
+})();
+</script>
