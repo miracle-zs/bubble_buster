@@ -10,8 +10,8 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 
-from core.state_store import StateStore
 from infra.binance_futures_client import BinanceFuturesClient
+from infra.protocols import TradeStatsStoreProtocol
 
 LOGGER = logging.getLogger(__name__)
 
@@ -47,7 +47,7 @@ class TradeStatsFetcher:
         self,
         client: BinanceFuturesClient,
         cache_ttl_sec: int = 300,
-        store: Optional[StateStore] = None,
+        store: Optional[TradeStatsStoreProtocol] = None,
         overlap_minutes: int = 20,
     ):
         self.client = client
@@ -504,7 +504,7 @@ class TradeStatsFetcher:
         now_ms = int(now.timestamp() * 1000)
         lookback_ms = max(1, int(lookback_days)) * 24 * 60 * 60 * 1000
         overlap_ms = self.overlap_minutes * 60 * 1000
-        state = self.store.get_lock_state("readonly_trade_stats_cursor_v2") or {}
+        state = self.store.get_cursor_state("readonly_trade_stats_cursor_v2") or {}
         bootstrapped = bool(state.get("bootstrapped"))
         try:
             cursor_ms = int(state.get("income_cursor_ms") or 0)
@@ -597,7 +597,7 @@ class TradeStatsFetcher:
 
         complete_interval = (not all_rows) or len(all_rows) < 1000 or not bootstrapped
         next_cursor_ms = request_end_ms if complete_interval else cursor_ms
-        self.store.set_lock_state(
+        self.store.save_cursor_state(
             "readonly_trade_stats_cursor_v2",
             {
                 "bootstrapped": True,

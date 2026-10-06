@@ -60,24 +60,16 @@ class EntryStructureProtectionState:
         self.store = store
 
     def get(self, position_id: int) -> Optional[EntryStructureProtection]:
-        positions = self._load_positions()
-        return EntryStructureProtection.from_payload(positions.get(str(int(position_id))))
+        data = self.store.get_entry_structure_protection(position_id)
+        if isinstance(data, dict):
+            return EntryStructureProtection.from_payload(data)
+        return None
 
     def put(self, position_id: int, protection: EntryStructureProtection) -> None:
-        state = self.store.get_lock_state(ENTRY_STRUCTURE_PROTECTION_LOCK_NAME)
-        payload = dict(state) if isinstance(state, dict) else {}
-        positions = self._positions_from_state(payload)
-        positions[str(int(position_id))] = protection.to_payload()
-        payload.update({"version": 1, "positions": positions})
-        self.store.set_lock_state(ENTRY_STRUCTURE_PROTECTION_LOCK_NAME, payload)
-
-    def _load_positions(self) -> Dict[str, Any]:
-        state = self.store.get_lock_state(ENTRY_STRUCTURE_PROTECTION_LOCK_NAME)
-        return self._positions_from_state(state)
-
-    @staticmethod
-    def _positions_from_state(state: object) -> Dict[str, Any]:
-        if not isinstance(state, dict):
-            return {}
-        positions = state.get("positions")
-        return dict(positions) if isinstance(positions, dict) else {}
+        self.store.set_entry_structure_protection(
+            position_id=position_id,
+            stop_price=protection.stop_price,
+            bearish_close_time_utc=protection._iso_utc(protection.bearish_close_time_utc),
+            window_start_utc=protection._iso_utc(protection.window_start_utc),
+            window_end_utc=protection._iso_utc(protection.window_end_utc),
+        )

@@ -18,6 +18,7 @@ from core.entry_structure_protection import (
 )
 from core.market_fill_reconciler import MarketFillReconciler
 from core.account_snapshot import AccountSnapshotProvider
+from core.risk import CentralExitExecutor
 from core.state_store import StateStore
 from infra.binance_futures_client import (
     BinanceAPIError,
@@ -140,8 +141,10 @@ class Top10ShortStrategy:
         mutation_lock: Optional[Any] = None,
         order_state: Optional[Any] = None,
         snapshot_provider: Optional[AccountSnapshotProvider] = None,
+        non_blocking_entry_wait: bool = False,
     ):
         self.client = client
+        self.non_blocking_entry_wait = bool(non_blocking_entry_wait)
         self.store = store
         self.notifier = notifier
         self.leverage = leverage
@@ -207,6 +210,14 @@ class Top10ShortStrategy:
         self._entry_prewarmed_leverage_symbols: Set[str] = set()
         self._entry_structure_protection_state = EntryStructureProtectionState(store)
         self._market_fill_reconciler = MarketFillReconciler(client, store)
+        self.exit_executor = CentralExitExecutor(
+            client=client,
+            store=store,
+            market_fill_reconciler=self._market_fill_reconciler,
+            trigger_price_type=self.trigger_price_type,
+            new_client_id_fn=self._new_client_id,
+            now_iso_fn=self._utc_now_iso,
+        )
         self._mutation_lock = mutation_lock or threading.RLock()
         self.order_state = order_state
         self.snapshot_provider = snapshot_provider
@@ -426,7 +437,7 @@ class Top10ShortStrategy:
                 top_gainers = shared_top_gainers
                 fetch_top_n = max(fetch_top_n, len(top_gainers))
 
-            ranked = self._build_ranked_entries(top_gainers)
+            ranked = MarketRankScanner.build_ranked_entries(top_gainers)
             ranked = MarketRankScanner.filter_and_sort_ranked_entries(ranked, self.volume_threshold)
 
             if not ranked:
@@ -449,7 +460,7 @@ class Top10ShortStrategy:
                     "exit_setup_failed": 0,
                 }
 
-            candidates, skipped_symbols = self._select_entry_candidates(
+            candidates, skipped_symbols = MarketRankScanner.select_entry_candidates(
                 ranked=ranked,
                 open_symbols=open_symbols,
                 target_count=self.top_n,
@@ -682,6 +693,11 @@ class Top10ShortStrategy:
                         continue
 
                     intent_opened_at = self._utc_now_datetime()
+                    open_ep = self.store.get_open_position_episode(plan.symbol, "SHORT")
+                    if isinstance(open_ep, dict) and open_ep.get("episode_id"):
+                        episode_id = str(open_ep["episode_id"])
+                    else:
+                        episode_id = f"ep_{plan.symbol.lower()}_{uuid4().hex[:12]}"
                     position_id = self.store.insert_position(
                         run_id=run_id,
                         symbol=plan.symbol,
@@ -698,6 +714,7 @@ class Top10ShortStrategy:
                         opened_at_utc=intent_opened_at.isoformat(),
                         expire_at_utc=(intent_opened_at + timedelta(hours=self.max_hold_hours)).isoformat(),
                         status="PENDING_ENTRY",
+                        episode_id=episode_id,
                     )
 
                     open_order, retry_count_used = self._place_market_short_with_shrink_retry(
@@ -705,6 +722,7 @@ class Top10ShortStrategy:
                         target_notional=plan.target_notional_usdt,
                         reference_price=reference_price,
                         client_id_tag="ent",
+                        episode_id=episode_id,
                     )
                     if retry_count_used > 0:
                         shrink_retry_details.append(f"{plan.symbol}: 缩量重试{retry_count_used}次后成功")
@@ -1272,12 +1290,22 @@ class Top10ShortStrategy:
             if now < final_available_at and not self._entry_wait_stop_event.is_set():
                 wait_sec = max(0.0, (final_available_at - now).total_seconds())
                 LOGGER.info(
-                    "Waiting for final candle audit: account=%s symbol=%s wait_sec=%.3f",
+                    "Deferring final candle audit to scheduled wakeup: account=%s symbol=%s next_wakeup=%s wait_sec=%.3f",
                     self.account_id,
                     symbol,
+                    final_available_at.isoformat(),
                     wait_sec,
                 )
-                self._entry_wait_stop_event.wait(timeout=wait_sec)
+                self.store.save_entry_plan(
+                    plan_id=f"entry_audit_{symbol}_{order_event_id}",
+                    symbol=symbol,
+                    status="WAITING_KLINE",
+                    hour_open_utc=hour_open.isoformat(),
+                    next_wakeup_utc=final_available_at.isoformat(),
+                    plan_payload={"order_event_id": order_event_id, "audit": audit},
+                )
+                summary["skipped"] += 1
+                continue
 
             if self._entry_wait_stop_event.is_set():
                 entry_audit["final_candle_available"] = False
@@ -1593,11 +1621,20 @@ class Top10ShortStrategy:
             if next_check_times:
                 wait_until = min(next_check_times)
                 sleep_sec = min(sleep_sec, max(0.0, (wait_until - now).total_seconds()))
+                self._persist_entry_wait_pending(
+                    pending=pending,
+                    run_id=run_id,
+                    trade_day_utc=trade_day_utc,
+                    signal_base_time_utc=signal_base_time_utc,
+                    next_wakeup_utc=wait_until,
+                )
             if sleep_sec <= 0:
                 continue
-            if self._entry_wait_stop_event.wait(timeout=sleep_sec):
-                self._entry_wait_interrupted = True
-                return
+            LOGGER.info(
+                "Entry bullish-then-bearish wait pending next candle at %s; yielding to coordinator",
+                min(next_check_times).isoformat() if next_check_times else "now",
+            )
+            return
 
     def _iter_ready_entries_after_bearish_hour(
         self,
@@ -1822,26 +1859,45 @@ class Top10ShortStrategy:
                     sleep_sec,
                     max(0.0, (wait_until - now).total_seconds()),
                 )
+                self._persist_entry_wait_pending(
+                    pending=pending,
+                    run_id=run_id,
+                    trade_day_utc=trade_day_utc,
+                    signal_base_time_utc=signal_base_time_utc,
+                    next_wakeup_utc=wait_until,
+                )
             if sleep_sec <= 0:
                 continue
             LOGGER.info(
-                "Entry bearish-hour wait sleep: account=%s pending=%s wait_sec=%.3f",
-                self.account_id,
-                len(pending),
-                sleep_sec,
+                "Entry bearish-hour wait pending next candle at %s; yielding to coordinator",
+                min(next_check_times).isoformat() if next_check_times else "now",
             )
-            if self._entry_wait_stop_event.wait(timeout=sleep_sec):
-                self._entry_wait_interrupted = True
-                return
+            return
 
         return
 
     def _load_entry_wait_state(self) -> Dict[str, Any]:
-        state = self.store.get_lock_state(self.ENTRY_WAIT_LOCK_NAME) or {}
-        return state if isinstance(state, dict) else {}
+        rec = self.store.get_entry_plan(self.ENTRY_WAIT_LOCK_NAME)
+        if rec and isinstance(rec.get("plan_payload"), dict):
+            return rec["plan_payload"]
+        return {}
 
     def _clear_entry_wait_state(self) -> None:
-        self.store.set_lock_state(self.ENTRY_WAIT_LOCK_NAME, {})
+        self.store.save_entry_plan(
+            plan_id=self.ENTRY_WAIT_LOCK_NAME,
+            symbol="ALL",
+            status="COMPLETED",
+            hour_open_utc="",
+            next_wakeup_utc="",
+            plan_payload={},
+        )
+
+    def _load_equity_recovery_state(self) -> Dict[str, Any]:
+        state = self.store.get_protection_policy_state(self.EQUITY_RECOVERY_LOCK_NAME)
+        return state if isinstance(state, dict) else {}
+
+    def _save_equity_recovery_state(self, payload: Dict[str, Any]) -> None:
+        self.store.save_protection_policy_state(self.EQUITY_RECOVERY_LOCK_NAME, "EQUITY_RECOVERY", payload)
 
     def _ranking_payload_from_wait_state(self, state: Dict[str, Any]) -> List[Dict[str, Any]]:
         pending = state.get("pending")
@@ -1964,6 +2020,7 @@ class Top10ShortStrategy:
         run_id: Optional[str],
         trade_day_utc: Optional[str],
         signal_base_time_utc: datetime,
+        next_wakeup_utc: Optional[datetime] = None,
     ) -> None:
         if not pending:
             self._clear_entry_wait_state()
@@ -1997,17 +2054,23 @@ class Top10ShortStrategy:
                 "phase": str(state.get("phase") or self.ENTRY_PHASE_INITIAL).strip().upper(),
                 "bullish_seen": bool(state.get("bullish_seen", False)),
             }
-        self.store.set_lock_state(
-            self.ENTRY_WAIT_LOCK_NAME,
-            {
-                "run_id": run_id,
-                "trade_day_utc": trade_day_utc,
-                "entry_scale_in_mode": self.entry_scale_in_mode,
-                "signal_base_time_utc": signal_base_time_utc.astimezone(timezone.utc).isoformat(),
-                "deadline_utc": deadline.astimezone(timezone.utc).isoformat(),
-                "pending": serialized,
-                "updated_at_utc": self._utc_now_iso(),
-            },
+        payload = {
+            "run_id": run_id,
+            "trade_day_utc": trade_day_utc,
+            "entry_scale_in_mode": self.entry_scale_in_mode,
+            "signal_base_time_utc": signal_base_time_utc.astimezone(timezone.utc).isoformat(),
+            "deadline_utc": deadline.astimezone(timezone.utc).isoformat(),
+            "pending": serialized,
+            "updated_at_utc": self._utc_now_iso(),
+        }
+        wakeup_time = next_wakeup_utc or deadline
+        self.store.save_entry_plan(
+            plan_id=self.ENTRY_WAIT_LOCK_NAME,
+            symbol="ALL",
+            status="WAITING_KLINE",
+            hour_open_utc=signal_base_time_utc.astimezone(timezone.utc).isoformat(),
+            next_wakeup_utc=wakeup_time.astimezone(timezone.utc).isoformat(),
+            plan_payload=payload,
         )
 
     def _fetch_hour_candle_with_retry(
@@ -2525,7 +2588,7 @@ class Top10ShortStrategy:
         if self._is_equity_recovery_time_blocked(current_time_utc):
             return {"status": "SKIPPED", "reason": "TIME_WINDOW_BLOCKED"}
 
-        state = self.store.get_lock_state(self.EQUITY_RECOVERY_LOCK_NAME) or {}
+        state = self._load_equity_recovery_state()
         current_dt = self._parse_iso_utc(current_time_utc)
         rolling_start_dt = current_dt - timedelta(hours=self.equity_recovery_lookback_hours)
         anchored_start_utc = str(state.get("window_start_utc") or "").strip()
@@ -2563,15 +2626,14 @@ class Top10ShortStrategy:
         # Avoid floating-point edge misses (e.g. 900 * 1.1 -> 990.0000000000001).
         threshold_eps = max(1e-9, abs(threshold_equity) * 1e-12)
         if current_equity + threshold_eps < threshold_equity:
-            self.store.set_lock_state(
-                self.EQUITY_RECOVERY_LOCK_NAME,
+            self._save_equity_recovery_state(
                 {
                     "cycle_key": cycle_key,
                     "cycle_min_equity": cycle_min_equity,
                     "triggered": False,
                     "window_start_utc": start_time_utc,
                     "updated_at_utc": self._utc_now_iso(),
-                },
+                }
             )
             return {
                 "status": "SKIPPED",
@@ -2584,15 +2646,14 @@ class Top10ShortStrategy:
         open_positions = self.store.list_open_positions()
         if not open_positions:
             # Threshold reached with no positions: start a new anchored window from now.
-            self.store.set_lock_state(
-                self.EQUITY_RECOVERY_LOCK_NAME,
+            self._save_equity_recovery_state(
                 {
                     "cycle_key": current_time_utc,
                     "cycle_min_equity": cycle_min_equity,
                     "triggered": False,
                     "window_start_utc": current_time_utc,
                     "updated_at_utc": self._utc_now_iso(),
-                },
+                }
             )
             return {"status": "SKIPPED", "reason": "NO_OPEN_POSITIONS", "cycle_key": current_time_utc}
 
@@ -2666,19 +2727,14 @@ class Top10ShortStrategy:
                     )
                     continue
 
-                order = self.client.create_order(
+                order = self.exit_executor.close_market_order(
                     symbol=symbol,
+                    qty=reduce_qty,
                     side="BUY",
-                    type="MARKET",
                     quantity=reduce_qty_text,
-                    reduceOnly=True,
-                    newClientOrderId=self._new_client_id("ptp", symbol),
-                    newOrderRespType="RESULT",
-                )
-                self._market_fill_reconciler.record_market_order(
-                    symbol=symbol,
+                    client_id_tag="ptp",
                     position_id=position_id,
-                    order=order,
+                    use_reduce_only=True,
                 )
                 reduced_notional += reduce_qty * mark_price
                 adjusted += 1
@@ -2731,8 +2787,7 @@ class Top10ShortStrategy:
         )
         lock_triggered = errors == 0
         next_window_start = current_time_utc if lock_triggered else start_time_utc
-        self.store.set_lock_state(
-            self.EQUITY_RECOVERY_LOCK_NAME,
+        self._save_equity_recovery_state(
             {
                 "cycle_key": next_window_start,
                 "cycle_min_equity": cycle_min_equity,
@@ -2741,7 +2796,7 @@ class Top10ShortStrategy:
                 "triggered_at_utc": self._utc_now_iso(),
                 "event_id": event_id,
                 "updated_at_utc": self._utc_now_iso(),
-            },
+            }
         )
         return {
             "status": "TRIGGERED" if lock_triggered else "PARTIAL",
@@ -3152,25 +3207,15 @@ class Top10ShortStrategy:
                 "cancel_errors": cancel_errors,
             }
 
-        close_order = self.client.create_order(
+        close_order = self.exit_executor.close_market_order(
             symbol=symbol,
+            qty=qty,
             side="BUY",
-            type="MARKET",
-            quantity=self.client.format_order_qty(symbol, qty),
-            reduceOnly=True,
-            newClientOrderId=self._new_client_id("rf", symbol),
-            newOrderRespType="RESULT",
-        )
-        self._market_fill_reconciler.record_market_order(
-            symbol=symbol,
+            client_id_tag="rf",
             position_id=position_id,
-            order=close_order,
-        )
-        self.store.mark_position_closed(
-            position_id=position_id,
-            status="CLOSED_RISK_OFF",
+            use_reduce_only=True,
+            close_status="CLOSED_RISK_OFF",
             close_reason=reason,
-            close_order_id=close_order.get("orderId"),
         )
         cancel_errors = self._cancel_risk_off_exit_orders(persisted, symbol, position_id)
         return {
@@ -3367,29 +3412,29 @@ class Top10ShortStrategy:
                     "newOrderRespType": "RESULT",
                 }
                 if plan.side == "BUY":
-                    order_params["newClientOrderId"] = self._new_client_id(f"rb{reason_tag}", plan.symbol)
-                    order_params["reduceOnly"] = True
-                if plan.side == "SELL":
-                    order = self._create_order_with_cooling_off_retry(
-                        submit_order=lambda order_params=order_params.copy(): self.client.create_order(
-                            **{
-                                **order_params,
-                                "newClientOrderId": self._new_client_id(f"rb{reason_tag}", plan.symbol),
-                            }
+                    order = self.exit_executor.close_market_order(
+                        symbol=plan.symbol,
+                        qty=plan.qty,
+                        side="BUY",
+                        client_order_id=self._new_client_id(f"rb{reason_tag}", plan.symbol),
+                        position_id=plan.position_id,
+                        use_reduce_only=True,
+                    )
+                else:
+                    order = self.exit_executor.create_order_with_cooling_off_retry(
+                        submit_order=lambda: self.exit_executor.create_market_order(
+                            symbol=plan.symbol,
+                            side=plan.side,
+                            qty=plan.qty,
+                            client_order_id=self._new_client_id(f"rb{reason_tag}", plan.symbol),
                         ),
                         symbol=plan.symbol,
                         side=plan.side,
                         context=f"rebalance_{reason_tag}",
+                        max_retries=self.cooling_off_retry_count,
+                        delay_sec=self.cooling_off_retry_delay_sec,
+                        account_id=self.account_id,
                     )
-                else:
-                    order = self.client.create_order(**order_params)
-                if plan.side == "BUY":
-                    self._market_fill_reconciler.record_market_order(
-                        symbol=plan.symbol,
-                        position_id=plan.position_id,
-                        order=order,
-                    )
-                else:
                     self.store.add_order_event(
                         symbol=plan.symbol,
                         position_id=plan.position_id,
@@ -3597,12 +3642,10 @@ class Top10ShortStrategy:
         if not order_id and not client_order_id:
             return
         try:
-            parsed_order_id = int(order_id) if order_id else None
-            parsed_client_order_id = str(client_order_id) if client_order_id else None
-            self.client.cancel_order(
+            self.exit_executor.cancel_order(
                 symbol=symbol,
-                order_id=parsed_order_id,
-                orig_client_order_id=parsed_client_order_id,
+                order_id=order_id,
+                client_order_id=client_order_id,
             )
         except BinanceAPIError as exc:
             raise RuntimeError(
@@ -4135,6 +4178,11 @@ class Top10ShortStrategy:
 
         entry_structure_window = self._prepare_entry_structure_window(ready_entry)
         intent_opened_at = self._utc_now_datetime()
+        open_ep = self.store.get_open_position_episode(symbol, "SHORT")
+        if isinstance(open_ep, dict) and open_ep.get("episode_id"):
+            episode_id = str(open_ep["episode_id"])
+        else:
+            episode_id = f"ep_{symbol.lower()}_{uuid4().hex[:12]}"
         position_id = self.store.insert_position(
             run_id=run_id,
             symbol=symbol,
@@ -4151,6 +4199,7 @@ class Top10ShortStrategy:
             opened_at_utc=intent_opened_at.isoformat(),
             expire_at_utc=(intent_opened_at + timedelta(hours=self.max_hold_hours)).isoformat(),
             status="PENDING_ENTRY",
+            episode_id=episode_id,
         )
 
         try:
@@ -4159,6 +4208,7 @@ class Top10ShortStrategy:
                 target_notional=target_notional,
                 reference_price=reference_price,
                 client_id_tag="add",
+                episode_id=episode_id,
             )
             observed_fill_time = self._utc_now_datetime()
             opened_at = self._resolve_entry_fill_time(add_order, observed_fill_time)
@@ -4293,6 +4343,7 @@ class Top10ShortStrategy:
         target_notional: float,
         reference_price: float,
         client_id_tag: str,
+        episode_id: Optional[str] = None,
     ) -> tuple[Dict[str, object], int]:
         notional = max(0.0, float(target_notional))
         retries_used = 0
@@ -4305,13 +4356,12 @@ class Top10ShortStrategy:
 
             try:
                 order = self._create_order_with_cooling_off_retry(
-                    submit_order=lambda qty_str=self.client.format_order_qty(symbol, qty): self.client.create_order(
+                    submit_order=lambda qty=qty: self.exit_executor.create_market_order(
                         symbol=symbol,
                         side="SELL",
-                        type="MARKET",
-                        quantity=qty_str,
-                        newClientOrderId=self._new_client_id(client_id_tag, symbol),
-                        newOrderRespType="RESULT",
+                        qty=qty,
+                        client_order_id=self._new_client_id(client_id_tag, symbol),
+                        episode_id=episode_id,
                     ),
                     symbol=symbol,
                     side="SELL",
@@ -4435,30 +4485,15 @@ class Top10ShortStrategy:
         side: str,
         context: str,
     ) -> Dict[str, object]:
-        max_retries = self.cooling_off_retry_count
-        delay_sec = self.cooling_off_retry_delay_sec
-
-        for attempt in range(max_retries + 1):
-            try:
-                return submit_order()
-            except BinanceAPIError as exc:
-                if not self._is_cooling_off_error(exc):
-                    raise
-                if max_retries <= 0 or delay_sec <= 0 or attempt >= max_retries:
-                    raise
-                LOGGER.warning(
-                    "Cooling-off retry scheduled: account=%s symbol=%s side=%s context=%s wait_sec=%s retry=%s/%s",
-                    self.account_id,
-                    symbol,
-                    str(side or "").upper() or "-",
-                    context,
-                    delay_sec,
-                    attempt + 1,
-                    max_retries,
-                )
-                time.sleep(delay_sec)
-
-        raise RuntimeError(f"Cooling-off retry exhausted unexpectedly for {symbol}")
+        return self.exit_executor.create_order_with_cooling_off_retry(
+            submit_order=submit_order,
+            symbol=symbol,
+            side=side,
+            context=context,
+            max_retries=self.cooling_off_retry_count,
+            delay_sec=self.cooling_off_retry_delay_sec,
+            account_id=self.account_id,
+        )
 
     def _log_margin_shortfall_context(
         self,
@@ -4601,42 +4636,14 @@ class Top10ShortStrategy:
         qty: float,
         client_order_id: str,
     ) -> Dict[str, object]:
-        try:
-            return self.client.create_order(
-                symbol=symbol,
-                side="BUY",
-                type=order_type,
-                stopPrice=stop_price,
-                closePosition=True,
-                workingType=self.trigger_price_type,
-                priceProtect=True,
-                newClientOrderId=client_order_id,
-            )
-        except BinanceAPIError as exc:
-            try:
-                code = int(exc.code)
-            except (TypeError, ValueError):
-                code = None
-            if code not in {-4120, -4130}:
-                raise
-
-            LOGGER.warning(
-                "Fallback to reduceOnly conditional order for %s/%s due to Binance error code=%s",
-                symbol,
-                order_type,
-                code,
-            )
-            return self.client.create_order(
-                symbol=symbol,
-                side="BUY",
-                type=order_type,
-                stopPrice=stop_price,
-                quantity=self.client.format_order_qty(symbol, qty),
-                reduceOnly=True,
-                workingType=self.trigger_price_type,
-                priceProtect=True,
-                newClientOrderId=client_order_id,
-            )
+        return self.exit_executor.create_conditional_order_with_fallback(
+            symbol=symbol,
+            order_type=order_type,
+            side="BUY",
+            stop_price=stop_price,
+            qty=qty,
+            client_order_id=client_order_id,
+        )
 
     @staticmethod
     def _safe_positive_float(value: object) -> Optional[float]:

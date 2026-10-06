@@ -262,6 +262,19 @@ class StateStoreTest(unittest.TestCase):
         self.assertEqual(loaded["cycle_key"], "2026-02-23T01:00:00+00:00")
         self.assertTrue(loaded["triggered"])
 
+    def test_ingestion_cursor_state_roundtrip(self) -> None:
+        self.assertIsNone(self.store.get_cursor_state("test_cursor"))
+        self.store.save_cursor_state(
+            "test_cursor",
+            {"cursor_ms": 123456789, "page": 2, "draining": True},
+        )
+        loaded = self.store.get_cursor_state("test_cursor")
+        self.assertIsNotNone(loaded)
+        assert loaded is not None
+        self.assertEqual(loaded["cursor_ms"], 123456789)
+        self.assertEqual(loaded["page"], 2)
+        self.assertTrue(loaded["draining"])
+
     def test_rebalance_cycle_and_action_roundtrip(self) -> None:
         run_id, _ = self.store.create_run("2026-02-13")
         cycle_id = self.store.create_rebalance_cycle(

@@ -35,8 +35,13 @@ class EntryStructureProtectionStateTest(unittest.TestCase):
 
         self.assertEqual(state.get(position_id=5618), protection)
         self.assertIsNone(state.get(position_id=9999))
-        raw = self.store.get_lock_state(ENTRY_STRUCTURE_PROTECTION_LOCK_NAME)
-        self.assertEqual(raw["positions"]["5618"]["stop_price"], 0.02590)
+
+        # Verify dedicated table row
+        direct = self.store.get_entry_structure_protection(5618)
+        self.assertIsNotNone(direct)
+        self.assertEqual(direct["stop_price"], 0.02590)
+        # Ensure no legacy lock state is written
+        self.assertIsNone(self.store.get_lock_state(ENTRY_STRUCTURE_PROTECTION_LOCK_NAME))
 
 
 if __name__ == "__main__":

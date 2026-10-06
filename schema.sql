@@ -31,6 +31,7 @@ CREATE TABLE IF NOT EXISTS positions (
     status TEXT NOT NULL,
     close_reason TEXT,
     last_error TEXT,
+    episode_id TEXT,
     created_at_utc TEXT NOT NULL,
     updated_at_utc TEXT NOT NULL,
     FOREIGN KEY(run_id) REFERENCES runs(run_id)
@@ -39,6 +40,7 @@ CREATE TABLE IF NOT EXISTS positions (
 CREATE INDEX IF NOT EXISTS idx_positions_status ON positions(status);
 CREATE INDEX IF NOT EXISTS idx_positions_symbol_status ON positions(symbol, status);
 CREATE INDEX IF NOT EXISTS idx_positions_status_opened ON positions(status, opened_at_utc);
+CREATE INDEX IF NOT EXISTS idx_positions_episode_id ON positions(episode_id);
 
 CREATE TABLE IF NOT EXISTS order_events (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -323,6 +325,18 @@ CREATE TABLE IF NOT EXISTS locks (
     updated_at_utc TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS entry_structure_protections (
+    position_id INTEGER PRIMARY KEY,
+    account_id TEXT NOT NULL DEFAULT 'default',
+    stop_price REAL NOT NULL,
+    bearish_close_time_utc TEXT NOT NULL,
+    window_start_utc TEXT NOT NULL,
+    window_end_utc TEXT NOT NULL,
+    updated_at_utc TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_entry_structure_protections_account ON entry_structure_protections(account_id);
+
 CREATE TABLE IF NOT EXISTS equity_recovery_events (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     account_id TEXT NOT NULL DEFAULT 'default',
@@ -369,3 +383,161 @@ CREATE INDEX IF NOT EXISTS idx_task_executions_account_cycle
     ON task_executions(account_id, task_name, task_cycle);
 CREATE INDEX IF NOT EXISTS idx_task_executions_created
     ON task_executions(created_at_utc DESC);
+
+-- Execution Engine domain tables
+CREATE TABLE IF NOT EXISTS order_intents (
+    intent_id TEXT PRIMARY KEY,
+    account_id TEXT NOT NULL DEFAULT 'default',
+    client_intent_key TEXT NOT NULL UNIQUE,
+    symbol TEXT NOT NULL,
+    side TEXT NOT NULL,
+    order_type TEXT NOT NULL,
+    target_qty REAL,
+    target_price REAL,
+    intent_scope TEXT NOT NULL,
+    position_id INTEGER,
+    episode_id TEXT,
+    status TEXT NOT NULL,
+    reason TEXT,
+    created_at_utc TEXT NOT NULL,
+    updated_at_utc TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_order_intents_account_status ON order_intents(account_id, status);
+CREATE INDEX IF NOT EXISTS idx_order_intents_symbol ON order_intents(symbol);
+
+CREATE TABLE IF NOT EXISTS order_attempts (
+    attempt_id TEXT PRIMARY KEY,
+    intent_id TEXT NOT NULL,
+    account_id TEXT NOT NULL DEFAULT 'default',
+    symbol TEXT NOT NULL,
+    client_order_id TEXT NOT NULL UNIQUE,
+    exchange_order_id TEXT,
+    attempt_number INTEGER NOT NULL DEFAULT 1,
+    status TEXT NOT NULL,
+    submitted_qty REAL,
+    executed_qty REAL NOT NULL DEFAULT 0,
+    cumulative_quote_qty REAL,
+    avg_price REAL,
+    error_message TEXT,
+    parent_attempt_id TEXT,
+    created_at_utc TEXT NOT NULL,
+    updated_at_utc TEXT NOT NULL,
+    FOREIGN KEY(intent_id) REFERENCES order_intents(intent_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_order_attempts_intent ON order_attempts(intent_id);
+CREATE INDEX IF NOT EXISTS idx_order_attempts_client_order_id ON order_attempts(client_order_id);
+CREATE INDEX IF NOT EXISTS idx_order_attempts_exchange_order_id ON order_attempts(account_id, symbol, exchange_order_id);
+CREATE INDEX IF NOT EXISTS idx_order_attempts_status ON order_attempts(status);
+CREATE INDEX IF NOT EXISTS idx_order_attempts_parent ON order_attempts(parent_attempt_id);
+
+CREATE TABLE IF NOT EXISTS position_episodes (
+    episode_id TEXT PRIMARY KEY,
+    account_id TEXT NOT NULL DEFAULT 'default',
+    symbol TEXT NOT NULL,
+    position_side TEXT NOT NULL DEFAULT 'SHORT',
+    status TEXT NOT NULL,
+    opened_at_utc TEXT NOT NULL,
+    closed_at_utc TEXT,
+    target_qty REAL,
+    current_qty REAL NOT NULL DEFAULT 0,
+    realized_pnl REAL NOT NULL DEFAULT 0,
+    created_at_utc TEXT NOT NULL,
+    updated_at_utc TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_position_episodes_account_symbol ON position_episodes(account_id, symbol, status);
+
+CREATE TABLE IF NOT EXISTS risk_cycle_target_sets (
+    target_set_id TEXT PRIMARY KEY,
+    account_id TEXT NOT NULL DEFAULT 'default',
+    cycle_type TEXT NOT NULL,
+    cycle_key TEXT NOT NULL,
+    status TEXT NOT NULL,
+    targets_json TEXT NOT NULL,
+    summary_json TEXT,
+    created_at_utc TEXT NOT NULL,
+    updated_at_utc TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_risk_cycle_target_sets_account_cycle ON risk_cycle_target_sets(account_id, cycle_type, cycle_key);
+
+CREATE TABLE IF NOT EXISTS protection_policy_states (
+    policy_key TEXT PRIMARY KEY,
+    account_id TEXT NOT NULL DEFAULT 'default',
+    policy_type TEXT NOT NULL,
+    payload_json TEXT NOT NULL,
+    updated_at_utc TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_protection_policy_states_account ON protection_policy_states(account_id, policy_type);
+
+CREATE TABLE IF NOT EXISTS entry_plans (
+    plan_id TEXT PRIMARY KEY,
+    account_id TEXT NOT NULL DEFAULT 'default',
+    symbol TEXT NOT NULL,
+    status TEXT NOT NULL,
+    hour_open_utc TEXT NOT NULL,
+    next_wakeup_utc TEXT NOT NULL,
+    plan_payload_json TEXT NOT NULL,
+    created_at_utc TEXT NOT NULL,
+    updated_at_utc TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_entry_plans_account_status ON entry_plans(account_id, status);
+
+CREATE TABLE IF NOT EXISTS execution_fills (
+    fill_id TEXT PRIMARY KEY,
+    attempt_id TEXT NOT NULL,
+    intent_id TEXT NOT NULL,
+    account_id TEXT NOT NULL DEFAULT 'default',
+    symbol TEXT NOT NULL,
+    exchange_trade_id TEXT NOT NULL UNIQUE,
+    exchange_order_id TEXT,
+    side TEXT NOT NULL,
+    price REAL NOT NULL,
+    qty REAL NOT NULL,
+    commission REAL NOT NULL DEFAULT 0,
+    commission_asset TEXT NOT NULL DEFAULT 'USDT',
+    trade_time_utc TEXT NOT NULL,
+    created_at_utc TEXT NOT NULL,
+    FOREIGN KEY(attempt_id) REFERENCES order_attempts(attempt_id),
+    FOREIGN KEY(intent_id) REFERENCES order_intents(intent_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_execution_fills_attempt ON execution_fills(attempt_id);
+CREATE INDEX IF NOT EXISTS idx_execution_fills_intent ON execution_fills(intent_id);
+CREATE INDEX IF NOT EXISTS idx_execution_fills_trade_id ON execution_fills(exchange_trade_id);
+
+CREATE TABLE IF NOT EXISTS ingestion_cursor_states (
+    cursor_key TEXT NOT NULL,
+    account_id TEXT NOT NULL,
+    payload TEXT NOT NULL,
+    updated_at_utc TEXT NOT NULL,
+    PRIMARY KEY (cursor_key, account_id)
+);
+
+CREATE TABLE IF NOT EXISTS task_occurrences (
+    task_occurrence_id TEXT PRIMARY KEY,
+    account_id TEXT NOT NULL,
+    task_type TEXT NOT NULL,
+    cycle_key TEXT NOT NULL,
+    status TEXT NOT NULL,
+    due_at_utc TEXT NOT NULL,
+    executed_at_utc TEXT,
+    completed_at_utc TEXT,
+    payload TEXT,
+    error_message TEXT,
+    created_at_utc TEXT NOT NULL,
+    updated_at_utc TEXT NOT NULL,
+    UNIQUE (account_id, task_type, cycle_key)
+);
+
+CREATE INDEX IF NOT EXISTS idx_task_occurrences_due ON task_occurrences(account_id, status, due_at_utc);
+
+CREATE TABLE IF NOT EXISTS schema_migrations (
+    version TEXT PRIMARY KEY,
+    applied_at_utc TEXT NOT NULL,
+    description TEXT
+);

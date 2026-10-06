@@ -387,3 +387,34 @@ class UnitOfWorkTransactionTest(unittest.TestCase):
         fills = self.store.list_fills_for_position(pos_id)
         self.assertEqual(len(fills), 1)
         self.assertEqual(fills[0].id, fill.id)
+
+    def test_nested_uow_after_commit_deferred_to_outer(self) -> None:
+        outer_commits = []
+        inner_commits = []
+
+        with self.store.unit_of_work() as outer:
+            outer.add_after_commit(lambda: outer_commits.append("outer"))
+            with self.store.unit_of_work() as inner:
+                inner.add_after_commit(lambda: inner_commits.append("inner"))
+                # When inner exits, inner_commits should NOT have been called yet
+                self.assertEqual(inner_commits, [])
+            self.assertEqual(inner_commits, [])
+
+        # Both should execute only after outer commits
+        self.assertEqual(outer_commits, ["outer"])
+        self.assertEqual(inner_commits, ["inner"])
+
+    def test_nested_uow_after_commit_not_called_on_outer_rollback(self) -> None:
+        inner_commits = []
+
+        try:
+            with self.store.unit_of_work():
+                with self.store.unit_of_work() as inner:
+                    inner.add_after_commit(lambda: inner_commits.append("inner"))
+                # Outer fails after inner released savepoint
+                raise RuntimeError("Outer failure")
+        except RuntimeError:
+            pass
+
+        # Inner callback must NOT be executed because outer transaction rolled back
+        self.assertEqual(inner_commits, [])

@@ -114,7 +114,7 @@ class BalanceSamplerTest(unittest.TestCase):
         self.assertEqual(inserted, 1)
         self.assertEqual(len(client.calls), 1)
         self.assertIsNone(client.calls[0]["income_type"])
-        cursor = self.store.get_lock_state("cashflow_income_cursor_v2")
+        cursor = self.store.get_cursor_state("cashflow_income_cursor_v2")
         self.assertIsNotNone(cursor)
         self.assertEqual(cursor["last_row_count"], 2)
 
@@ -171,7 +171,7 @@ class BalanceSamplerTest(unittest.TestCase):
         self.assertEqual(client.calls[1]["page"], 2)
         self.assertEqual(client.calls[1]["start_time"], client.calls[0]["start_time"])
         self.assertEqual(client.calls[1]["end_time"], client.calls[0]["end_time"])
-        cursor = self.store.get_lock_state("cashflow_income_cursor_v2")
+        cursor = self.store.get_cursor_state("cashflow_income_cursor_v2")
         self.assertFalse(cursor["draining_full_page"])
         self.assertEqual(cursor["cursor_ms"], 5000)
 

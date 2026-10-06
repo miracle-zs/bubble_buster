@@ -28,6 +28,11 @@ class MarketFillReconciler:
         normalized_symbol = str(symbol or "").strip().upper()
         order_id = self._safe_optional_int(order.get("actualOrderId")) or self._safe_optional_int(order.get("orderId"))
         client_order_id = str(order.get("clientOrderId") or order.get("clientAlgoId") or "").strip() or None
+
+        # Execute network trade lookup OUTSIDE any database transaction
+        payload = self._build_fill_payload(normalized_symbol, order)
+        event_payload = payload if payload is not None else order
+
         order_event_id: Optional[int] = None
         try:
             found_order_event_id = self.store.find_order_event_id(
@@ -41,52 +46,27 @@ class MarketFillReconciler:
                 order_event_id = self.store.add_order_event(
                     symbol=normalized_symbol,
                     position_id=position_id,
-                    event_time_utc=self._event_time_utc(order),
-                    order_payload=order,
+                    event_time_utc=self._event_time_utc(event_payload),
+                    order_payload=event_payload,
                 )
             else:
                 self.store.update_order_event(
                     order_event_id=order_event_id,
                     symbol=normalized_symbol,
                     position_id=position_id,
-                    event_time_utc=self._event_time_utc(order),
-                    order_payload=order,
+                    event_time_utc=self._event_time_utc(event_payload),
+                    order_payload=event_payload,
                 )
+            if payload is not None:
+                return True
         except Exception as exc:  # noqa: BLE001
             LOGGER.warning(
-                "Initial market order persistence failed account=%s symbol=%s order_id=%s: %s",
+                "Market order persistence failed account=%s symbol=%s order_id=%s: %s",
                 self.store.account_id,
                 normalized_symbol,
                 order_id,
                 exc,
             )
-        payload = self._build_fill_payload(normalized_symbol, order)
-        if payload is not None:
-            try:
-                if order_event_id is None:
-                    order_event_id = self.store.add_order_event(
-                        symbol=normalized_symbol,
-                        position_id=position_id,
-                        event_time_utc=self._event_time_utc(payload),
-                        order_payload=payload,
-                    )
-                else:
-                    self.store.update_order_event(
-                        order_event_id=order_event_id,
-                        symbol=normalized_symbol,
-                        position_id=position_id,
-                        event_time_utc=self._event_time_utc(payload),
-                        order_payload=payload,
-                    )
-                return True
-            except Exception as exc:  # noqa: BLE001
-                LOGGER.warning(
-                    "Market fill enrichment persistence failed account=%s symbol=%s order_id=%s: %s",
-                    self.store.account_id,
-                    normalized_symbol,
-                    order.get("orderId"),
-                    exc,
-                )
 
         try:
             self._queue_pending(
@@ -339,17 +319,15 @@ class MarketFillReconciler:
         self._save_state(items)
 
     def _load_state(self) -> Dict[str, Any]:
-        state = self.store.get_lock_state(self.LOCK_NAME) or {}
+        state = self.store.get_protection_policy_state(self.LOCK_NAME)
         return state if isinstance(state, dict) else {}
 
     def _save_state(self, items: Dict[str, Any]) -> None:
-        self.store.set_lock_state(
-            self.LOCK_NAME,
-            {
-                "items": items,
-                "updated_at_utc": datetime.now(timezone.utc).replace(microsecond=0).isoformat(),
-            },
-        )
+        payload = {
+            "items": items,
+            "updated_at_utc": datetime.now(timezone.utc).replace(microsecond=0).isoformat(),
+        }
+        self.store.save_protection_policy_state(self.LOCK_NAME, "RECONCILER", payload)
 
     @classmethod
     def _retry_delay_sec(cls, attempts: int) -> int:

@@ -581,8 +581,9 @@ class PositionManagerTest(unittest.TestCase):
 
     def test_cleanup_orphan_exit_orders_once_per_day_skips_after_daily_run(self) -> None:
         today_key = datetime.now().astimezone().date().isoformat()
-        self.store.set_lock_state(
+        self.store.save_protection_policy_state(
             "orphan_exit_order_cleanup_v1",
+            "ORPHAN_CLEANUP",
             {
                 "day_key": today_key,
                 "canceled": 0,
@@ -1061,7 +1062,7 @@ class PositionManagerTest(unittest.TestCase):
 
         row = self._get_position(position_id)
         self.assertAlmostEqual(float(row["sl_price"]), 0.0017, places=10)
-        lock_state = self.store.get_lock_state(PositionManager.NOON_PROTECTION_LOCK_NAME)
+        lock_state = self.store.get_protection_policy_state(PositionManager.NOON_PROTECTION_LOCK_NAME)
         self.assertIsNotNone(lock_state)
         assert lock_state is not None
         self.assertAlmostEqual(float(lock_state["caps"][str(position_id)]), 0.0017, places=10)
@@ -1078,8 +1079,9 @@ class PositionManagerTest(unittest.TestCase):
         )
         day_start = datetime(2026, 7, 1, 0, 0, tzinfo=timezone.utc)
         noon = datetime(2026, 7, 1, 4, 0, tzinfo=timezone.utc)
-        self.store.set_lock_state(
+        self.store.save_protection_policy_state(
             PositionManager.NOON_PROTECTION_LOCK_NAME,
+            "NOON_CAPS",
             {
                 "caps": {str(position_id): 59000.0},
                 "day_start_utc": day_start.isoformat(),
@@ -1138,8 +1140,9 @@ class PositionManagerTest(unittest.TestCase):
             expire_at_utc=(opened_at + timedelta(days=7)).isoformat(),
             status="OPEN",
         )
-        self.store.set_lock_state(
+        self.store.save_protection_policy_state(
             PositionManager.NOON_PROTECTION_LOCK_NAME,
+            "NOON_CAPS",
             {
                 "caps": {},
                 "day_start_utc": day_start.isoformat(),
@@ -1189,7 +1192,7 @@ class PositionManagerTest(unittest.TestCase):
         row = self._get_position(position_id)
         self.assertAlmostEqual(float(row["sl_price"]), 1.10)
         self.assertEqual(row["sl_order_id"], 22)
-        lock_state = self.store.get_lock_state(PositionManager.NOON_PROTECTION_LOCK_NAME)
+        lock_state = self.store.get_protection_policy_state(PositionManager.NOON_PROTECTION_LOCK_NAME)
         self.assertNotIn(str(position_id), lock_state["caps"])
 
     def test_run_once_backfills_noon_cap_for_position_opened_before_noon(self) -> None:
@@ -1213,8 +1216,9 @@ class PositionManagerTest(unittest.TestCase):
             expire_at_utc=(opened_at + timedelta(days=7)).isoformat(),
             status="OPEN",
         )
-        self.store.set_lock_state(
+        self.store.save_protection_policy_state(
             PositionManager.NOON_PROTECTION_LOCK_NAME,
+            "NOON_CAPS",
             {
                 "caps": {},
                 "day_start_utc": day_start.isoformat(),
@@ -1256,7 +1260,7 @@ class PositionManagerTest(unittest.TestCase):
         self.assertEqual(klines_kwargs["end_time"], int(noon.timestamp() * 1000))
         row = self._get_position(position_id)
         self.assertAlmostEqual(float(row["sl_price"]), 0.90)
-        lock_state = self.store.get_lock_state(PositionManager.NOON_PROTECTION_LOCK_NAME)
+        lock_state = self.store.get_protection_policy_state(PositionManager.NOON_PROTECTION_LOCK_NAME)
         self.assertAlmostEqual(float(lock_state["caps"][str(position_id)]), 0.90)
 
     def test_run_once_ignores_stale_noon_window_from_previous_local_day(self) -> None:
@@ -1280,8 +1284,9 @@ class PositionManagerTest(unittest.TestCase):
             expire_at_utc=(opened_at + timedelta(days=7)).isoformat(),
             status="OPEN",
         )
-        self.store.set_lock_state(
+        self.store.save_protection_policy_state(
             PositionManager.NOON_PROTECTION_LOCK_NAME,
+            "NOON_CAPS",
             {
                 "caps": {},
                 "day_start_utc": stale_day_start.isoformat(),
@@ -1327,7 +1332,7 @@ class PositionManagerTest(unittest.TestCase):
         client.get_klines.assert_not_called()
         row = self._get_position(position_id)
         self.assertAlmostEqual(float(row["sl_price"]), 3.6036)
-        lock_state = self.store.get_lock_state(PositionManager.NOON_PROTECTION_LOCK_NAME)
+        lock_state = self.store.get_protection_policy_state(PositionManager.NOON_PROTECTION_LOCK_NAME)
         self.assertNotIn(str(position_id), lock_state["caps"])
 
     def test_run_once_keeps_existing_noon_cap_across_local_midnight(self) -> None:
@@ -1351,8 +1356,9 @@ class PositionManagerTest(unittest.TestCase):
             expire_at_utc=(opened_at + timedelta(days=7)).isoformat(),
             status="OPEN",
         )
-        self.store.set_lock_state(
+        self.store.save_protection_policy_state(
             PositionManager.NOON_PROTECTION_LOCK_NAME,
+            "NOON_CAPS",
             {
                 "caps": {str(position_id): 0.003789},
                 "day_start_utc": stale_day_start.isoformat(),
@@ -1422,8 +1428,9 @@ class PositionManagerTest(unittest.TestCase):
             expire_at_utc=(opened_at + timedelta(days=7)).isoformat(),
             status="OPEN",
         )
-        self.store.set_lock_state(
+        self.store.save_protection_policy_state(
             PositionManager.NOON_PROTECTION_LOCK_NAME,
+            "NOON_CAPS",
             {
                 "caps": {},
                 "day_start_utc": day_start.isoformat(),
@@ -1603,7 +1610,7 @@ class PositionManagerTest(unittest.TestCase):
         self.assertEqual(order_kwargs["quantity"], "1500.0")
         self.assertTrue(order_kwargs["reduceOnly"])
         self.assertNotIn("closePosition", order_kwargs)
-        lock_state = self.store.get_lock_state(PositionManager.NOON_PROTECTION_LOCK_NAME)
+        lock_state = self.store.get_protection_policy_state(PositionManager.NOON_PROTECTION_LOCK_NAME)
         self.assertIsNotNone(lock_state)
         assert lock_state is not None
         self.assertIn("EX:XRPUSDT:BOTH_SHORT", lock_state["caps"])
@@ -1690,8 +1697,9 @@ class PositionManagerTest(unittest.TestCase):
             "status": "NEW",
         }
 
-        self.store.set_lock_state(
+        self.store.save_protection_policy_state(
             PositionManager.NOON_PROTECTION_LOCK_NAME,
+            "NOON_CAPS",
             {"caps": {"EX:SKYAIUSDT:SHORT": 0.0548}},
         )
 
@@ -1738,8 +1746,9 @@ class PositionManagerTest(unittest.TestCase):
         client.format_order_qty.side_effect = lambda _symbol, qty: str(qty)
         client.create_order.side_effect = RuntimeError("create noon stop failed")
 
-        self.store.set_lock_state(
+        self.store.save_protection_policy_state(
             PositionManager.NOON_PROTECTION_LOCK_NAME,
+            "NOON_CAPS",
             {"caps": {"EX:SKYAIUSDT:SHORT": 0.0548}},
         )
 
@@ -1761,7 +1770,7 @@ class PositionManagerTest(unittest.TestCase):
         self.assertEqual(summary["skipped"], 0)
         self.assertEqual(summary["errors"], 1)
 
-        lock_state = self.store.get_lock_state(PositionManager.NOON_PROTECTION_LOCK_NAME)
+        lock_state = self.store.get_protection_policy_state(PositionManager.NOON_PROTECTION_LOCK_NAME)
         self.assertIsNotNone(lock_state)
         assert lock_state is not None
         self.assertAlmostEqual(float(lock_state["caps"]["EX:SKYAIUSDT:SHORT"]), 0.0548, places=10)
@@ -1905,8 +1914,9 @@ class PositionManagerTest(unittest.TestCase):
             "status": "NEW",
         }
 
-        self.store.set_lock_state(
+        self.store.save_protection_policy_state(
             PositionManager.NOON_PROTECTION_LOCK_NAME,
+            "NOON_CAPS",
             {
                 "caps": {
                     str(position_id): 0.0020,
@@ -1934,7 +1944,7 @@ class PositionManagerTest(unittest.TestCase):
         self.assertEqual(client.get_klines.call_count, 1)
         self.assertEqual(client.create_order.call_count, 1)
 
-        lock_state = self.store.get_lock_state(PositionManager.NOON_PROTECTION_LOCK_NAME)
+        lock_state = self.store.get_protection_policy_state(PositionManager.NOON_PROTECTION_LOCK_NAME)
         self.assertIsNotNone(lock_state)
         assert lock_state is not None
         self.assertIn("EX:OTHERUSDT:SHORT", lock_state["caps"])
@@ -2128,8 +2138,9 @@ class PositionManagerTest(unittest.TestCase):
 
     def test_morning_protection_ignores_stale_exchange_cap_from_previous_position(self) -> None:
         check_time = datetime(2026, 3, 17, 7, 55, tzinfo=timezone.utc)
-        self.store.set_lock_state(
+        self.store.save_protection_policy_state(
             PositionManager.MORNING_PROTECTION_LOCK_NAME,
+            "MORNING_CAPS",
             {
                 "caps": {"EX:BTCUSDT:BOTH_SHORT": 70800.0},
                 "cap_updated_at_utc_by_key": {
@@ -2208,8 +2219,9 @@ class PositionManagerTest(unittest.TestCase):
 
     def test_morning_protection_does_not_reuse_btc_cap_when_other_symbol_updates_lock_later(self) -> None:
         check_time = datetime(2026, 3, 17, 7, 55, tzinfo=timezone.utc)
-        self.store.set_lock_state(
+        self.store.save_protection_policy_state(
             PositionManager.MORNING_PROTECTION_LOCK_NAME,
+            "MORNING_CAPS",
             {
                 "caps": {
                     "EX:BTCUSDT:BOTH_SHORT": 70800.0,
@@ -2292,8 +2304,9 @@ class PositionManagerTest(unittest.TestCase):
 
     def test_morning_protection_does_not_persist_new_cap_when_order_creation_fails(self) -> None:
         check_time = datetime(2026, 3, 17, 7, 55, tzinfo=timezone.utc)
-        self.store.set_lock_state(
+        self.store.save_protection_policy_state(
             PositionManager.MORNING_PROTECTION_LOCK_NAME,
+            "MORNING_CAPS",
             {
                 "caps": {"EX:BTCUSDT:BOTH_SHORT": 70800.0},
                 "cap_updated_at_utc_by_key": {
@@ -2360,7 +2373,7 @@ class PositionManagerTest(unittest.TestCase):
         self.assertEqual(summary["skipped"], 0)
         self.assertEqual(summary["errors"], 1)
 
-        state = self.store.get_lock_state(PositionManager.MORNING_PROTECTION_LOCK_NAME) or {}
+        state = self.store.get_protection_policy_state(PositionManager.MORNING_PROTECTION_LOCK_NAME) or {}
         holder_caps = state.get("caps") if isinstance(state, dict) else None
         self.assertIsInstance(holder_caps, dict)
         self.assertEqual(float(holder_caps["EX:BTCUSDT:BOTH_SHORT"]), 70800.0)
@@ -2526,8 +2539,9 @@ class PositionManagerTest(unittest.TestCase):
             sl_price=59000.0,
             expire_in_hours=24,
         )
-        self.store.set_lock_state(
+        self.store.save_protection_policy_state(
             PositionManager.MORNING_PROTECTION_LOCK_NAME,
+            "MORNING_CAPS",
             {"caps": {str(position_id): 59000.0}},
         )
 
@@ -2688,8 +2702,9 @@ class PositionManagerTest(unittest.TestCase):
         self.assertEqual(row["status"], "OPEN")
 
     def test_hourly_exchange_take_profit_skips_exempt_symbol(self) -> None:
-        self.store.set_lock_state(
+        self.store.save_protection_policy_state(
             PositionManager.HOURLY_EXCHANGE_TP_LOCK_NAME,
+            "HOURLY_TP",
             {
                 "symbols": {
                     "XAUUSDT": {
@@ -2796,7 +2811,7 @@ class PositionManagerTest(unittest.TestCase):
         self.assertEqual(summary["initialized"], 1)
         self.assertEqual(summary["errors"], 0)
         client.get_user_trades.assert_not_called()
-        state = self.store.get_lock_state(PositionManager.HOURLY_EXCHANGE_TP_LOCK_NAME) or {}
+        state = self.store.get_protection_policy_state(PositionManager.HOURLY_EXCHANGE_TP_LOCK_NAME) or {}
         self.assertEqual(state["symbols"]["SPELLUSDT"]["opened_at_utc"], opened_at_utc.isoformat())
 
     def test_hourly_exchange_take_profit_initializes_state_from_true_open_time(self) -> None:
@@ -2841,7 +2856,7 @@ class PositionManagerTest(unittest.TestCase):
         self.assertEqual(summary["updated"], 0)
         self.assertEqual(summary["pruned"], 0)
 
-        lock_state = self.store.get_lock_state(PositionManager.HOURLY_EXCHANGE_TP_LOCK_NAME)
+        lock_state = self.store.get_protection_policy_state(PositionManager.HOURLY_EXCHANGE_TP_LOCK_NAME)
         self.assertIsNotNone(lock_state)
         assert lock_state is not None
         monitor = lock_state["symbols"]["BTCUSDT"]
@@ -2914,7 +2929,7 @@ class PositionManagerTest(unittest.TestCase):
         self.assertEqual(summary["errors"], 1)
         self.assertEqual(summary["error_symbols"], ["NFPUSDT"])
 
-        lock_state = self.store.get_lock_state(PositionManager.HOURLY_EXCHANGE_TP_LOCK_NAME)
+        lock_state = self.store.get_protection_policy_state(PositionManager.HOURLY_EXCHANGE_TP_LOCK_NAME)
         self.assertIsNotNone(lock_state)
         assert lock_state is not None
         self.assertNotIn("NFPUSDT", lock_state["symbols"])
@@ -3013,7 +3028,7 @@ class PositionManagerTest(unittest.TestCase):
 
         self.assertEqual(summary["initialized"], 0)
         self.assertEqual(summary["updated"], 1)
-        lock_state = self.store.get_lock_state(PositionManager.HOURLY_EXCHANGE_TP_LOCK_NAME)
+        lock_state = self.store.get_protection_policy_state(PositionManager.HOURLY_EXCHANGE_TP_LOCK_NAME)
         self.assertIsNotNone(lock_state)
         assert lock_state is not None
         monitor = lock_state["symbols"]["BTCUSDT"]
@@ -3025,8 +3040,9 @@ class PositionManagerTest(unittest.TestCase):
         new_opened_at_utc = datetime(2026, 3, 16, 11, 10, tzinfo=timezone.utc)
         now_local = datetime(2026, 3, 16, 12, 59, tzinfo=timezone.utc)
 
-        self.store.set_lock_state(
+        self.store.save_protection_policy_state(
             PositionManager.HOURLY_EXCHANGE_TP_LOCK_NAME,
+            "HOURLY_TP",
             {
                 "symbols": {
                     "BTCUSDT": {
@@ -3088,7 +3104,7 @@ class PositionManagerTest(unittest.TestCase):
 
         self.assertEqual(summary["initialized"], 0)
         self.assertEqual(summary["updated"], 1)
-        lock_state = self.store.get_lock_state(PositionManager.HOURLY_EXCHANGE_TP_LOCK_NAME)
+        lock_state = self.store.get_protection_policy_state(PositionManager.HOURLY_EXCHANGE_TP_LOCK_NAME)
         self.assertIsNotNone(lock_state)
         assert lock_state is not None
         monitor = lock_state["symbols"]["BTCUSDT"]
@@ -3115,8 +3131,9 @@ class PositionManagerTest(unittest.TestCase):
             expire_at_utc=(datetime(2026, 3, 16, 1, 0, tzinfo=timezone.utc) + timedelta(days=7)).isoformat(),
             status="OPEN",
         )
-        self.store.set_lock_state(
+        self.store.save_protection_policy_state(
             PositionManager.HOURLY_EXCHANGE_TP_LOCK_NAME,
+            "HOURLY_TP",
             {
                 "symbols": {
                     "BTCUSDT": {
@@ -3211,8 +3228,9 @@ class PositionManagerTest(unittest.TestCase):
         self.assertEqual(buy_fill["client_order_id"], "tp-hourly")
 
     def test_hourly_exchange_take_profit_skips_when_previous_closed_hour_is_bearish_even_if_current_hour_is_green(self) -> None:
-        self.store.set_lock_state(
+        self.store.save_protection_policy_state(
             PositionManager.HOURLY_EXCHANGE_TP_LOCK_NAME,
+            "HOURLY_TP",
             {
                 "symbols": {
                     "BTCUSDT": {
@@ -3278,8 +3296,9 @@ class PositionManagerTest(unittest.TestCase):
         client.create_order.assert_not_called()
 
     def test_hourly_exchange_take_profit_closes_hedge_mode_short_with_position_side(self) -> None:
-        self.store.set_lock_state(
+        self.store.save_protection_policy_state(
             PositionManager.HOURLY_EXCHANGE_TP_LOCK_NAME,
+            "HOURLY_TP",
             {
                 "symbols": {
                     "MYXUSDT": {
@@ -3358,8 +3377,9 @@ class PositionManagerTest(unittest.TestCase):
         self.assertNotIn("reduceOnly", order_kwargs)
 
     def test_hourly_exchange_take_profit_skips_ineligible_or_bearish_positions(self) -> None:
-        self.store.set_lock_state(
+        self.store.save_protection_policy_state(
             PositionManager.HOURLY_EXCHANGE_TP_LOCK_NAME,
+            "HOURLY_TP",
             {
                 "symbols": {
                     "BTCUSDT": {
@@ -3457,8 +3477,9 @@ class PositionManagerTest(unittest.TestCase):
         client.create_order.assert_not_called()
 
     def test_hourly_exchange_take_profit_logs_symbol_when_close_fails(self) -> None:
-        self.store.set_lock_state(
+        self.store.save_protection_policy_state(
             PositionManager.HOURLY_EXCHANGE_TP_LOCK_NAME,
+            "HOURLY_TP",
             {
                 "symbols": {
                     "COSUSDT": {

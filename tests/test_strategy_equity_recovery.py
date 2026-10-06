@@ -143,7 +143,7 @@ class StrategyEquityRecoveryTest(unittest.TestCase):
             "captured_at_utc": "2026-02-23T01:00:00+00:00",
             "balance_usdt": 900.0,
         }
-        store.get_lock_state.side_effect = [
+        store.get_protection_policy_state.side_effect = [
             None,
             {
                 "cycle_key": "2026-02-23T07:40:00+00:00",
@@ -205,7 +205,7 @@ class StrategyEquityRecoveryTest(unittest.TestCase):
             {"captured_at_utc": "2026-02-23T01:00:00+00:00", "balance_usdt": 900.0},
             {"captured_at_utc": "2026-02-23T07:40:00+00:00", "balance_usdt": 990.0},
         ]
-        store.get_lock_state.side_effect = [
+        store.get_protection_policy_state.side_effect = [
             None,
             {
                 "cycle_key": "2026-02-23T07:40:00+00:00",
@@ -250,7 +250,7 @@ class StrategyEquityRecoveryTest(unittest.TestCase):
             "captured_at_utc": "2026-02-23T01:00:00+00:00",
             "balance_usdt": 900.0,
         }
-        store.get_lock_state.return_value = None
+        store.get_protection_policy_state.return_value = None
         store.list_open_positions.return_value = [
             {"id": 1, "symbol": "AUSDT", "entry_price": 10.0},
             {"id": 2, "symbol": "BUSDT", "entry_price": 10.0},
@@ -269,7 +269,7 @@ class StrategyEquityRecoveryTest(unittest.TestCase):
         result = strategy.run_equity_recovery_take_profit()
 
         self.assertEqual(result["status"], "PARTIAL")
-        last_lock = store.set_lock_state.call_args_list[-1].args[1]
+        last_lock = store.save_protection_policy_state.call_args_list[-1].args[2]
         self.assertFalse(last_lock["triggered"])
         self.assertEqual(last_lock["window_start_utc"], "2026-02-22T07:40:00+00:00")
 
@@ -287,7 +287,7 @@ class StrategyEquityRecoveryTest(unittest.TestCase):
             "captured_at_utc": "2026-02-23T01:00:00+00:00",
             "balance_usdt": 900.0,
         }
-        store.get_lock_state.return_value = None
+        store.get_protection_policy_state.return_value = None
         store.list_open_positions.return_value = [
             {"id": 1, "symbol": "XAUUSDT", "entry_price": 10.0},
             {"id": 2, "symbol": "BTCUSDT", "entry_price": 20.0},
@@ -342,7 +342,7 @@ class StrategyEquityRecoveryTest(unittest.TestCase):
             "captured_at_utc": "2026-02-23T01:00:00+00:00",
             "balance_usdt": 900.0,
         }
-        store.get_lock_state.return_value = None
+        store.get_protection_policy_state.return_value = None
         store.list_open_positions.return_value = []
 
         strategy = self._build_strategy(client, store)
@@ -350,7 +350,7 @@ class StrategyEquityRecoveryTest(unittest.TestCase):
 
         self.assertEqual(result["status"], "SKIPPED")
         self.assertEqual(result["reason"], "NO_OPEN_POSITIONS")
-        lock_payload = store.set_lock_state.call_args.args[1]
+        lock_payload = store.save_protection_policy_state.call_args.args[2]
         self.assertEqual(lock_payload["window_start_utc"], "2026-02-23T07:40:00+00:00")
 
     def test_equity_recovery_skips_inside_blocked_local_time_window(self) -> None:
@@ -367,9 +367,9 @@ class StrategyEquityRecoveryTest(unittest.TestCase):
 
         self.assertEqual(result["status"], "SKIPPED")
         self.assertEqual(result["reason"], "TIME_WINDOW_BLOCKED")
-        store.get_lock_state.assert_not_called()
+        store.get_protection_policy_state.assert_not_called()
         store.get_wallet_snapshot_min_since.assert_not_called()
-        store.set_lock_state.assert_not_called()
+        store.save_protection_policy_state.assert_not_called()
         client.create_order.assert_not_called()
 
     def test_equity_recovery_skips_at_blocked_local_time_end_boundary(self) -> None:
@@ -386,7 +386,7 @@ class StrategyEquityRecoveryTest(unittest.TestCase):
 
         self.assertEqual(result["status"], "SKIPPED")
         self.assertEqual(result["reason"], "TIME_WINDOW_BLOCKED")
-        store.get_lock_state.assert_not_called()
+        store.get_protection_policy_state.assert_not_called()
         client.create_order.assert_not_called()
 
     def test_equity_recovery_runs_outside_blocked_local_time_window(self) -> None:
@@ -404,7 +404,7 @@ class StrategyEquityRecoveryTest(unittest.TestCase):
             "captured_at_utc": "2026-02-23T01:00:00+00:00",
             "balance_usdt": 900.0,
         }
-        store.get_lock_state.return_value = None
+        store.get_protection_policy_state.return_value = None
         store.list_open_positions.return_value = [{"id": 1, "symbol": "AUSDT", "entry_price": 10.0}]
 
         strategy = self._build_strategy(client, store, runtime_timezone="Asia/Shanghai")
@@ -434,7 +434,7 @@ class StrategyEquityRecoveryTest(unittest.TestCase):
             "captured_at_utc": "2026-02-23T01:00:00+00:00",
             "balance_usdt": 900.0,
         }
-        store.get_lock_state.return_value = None
+        store.get_protection_policy_state.return_value = None
         store.list_open_positions.return_value = [{"id": 1, "symbol": "AUSDT", "entry_price": 10.0}]
 
         strategy = self._build_strategy(client, store)
@@ -465,7 +465,7 @@ class StrategyEquityRecoveryTest(unittest.TestCase):
             "captured_at_utc": "2026-02-23T01:00:00+00:00",
             "balance_usdt": 900.0,
         }
-        store.get_lock_state.return_value = None
+        store.get_protection_policy_state.return_value = None
         store.list_open_positions.return_value = [
             {"id": 1, "symbol": "AUSDT", "entry_price": 10.0},
             {"id": 2, "symbol": "BUSDT", "entry_price": 20.0},
@@ -505,7 +505,7 @@ class StrategyEquityRecoveryTest(unittest.TestCase):
             "captured_at_utc": "2026-02-23T01:00:00+00:00",
             "balance_usdt": 900.0,
         }
-        store.get_lock_state.return_value = None
+        store.get_protection_policy_state.return_value = None
         store.list_open_positions.return_value = [{"id": 1, "symbol": "AUSDT", "entry_price": 10.0}]
 
         strategy = self._build_strategy(client, store)
@@ -547,7 +547,7 @@ class StrategyEquityRecoveryTest(unittest.TestCase):
             "captured_at_utc": "2026-02-23T01:00:00+00:00",
             "balance_usdt": 900.0,
         }
-        store.get_lock_state.return_value = None
+        store.get_protection_policy_state.return_value = None
         store.list_open_positions.return_value = [{"id": 1, "symbol": "AUSDT", "entry_price": 10.0}]
 
         strategy = self._build_strategy(client, store)

@@ -30,6 +30,7 @@ class UnitOfWork:
     def __init__(self, store: Any) -> None:
         self.store = store
         self.conn: Optional[sqlite3.Connection] = None
+        self.parent: Optional[UnitOfWork] = None
         self.is_nested: bool = False
         self.savepoint_name: Optional[str] = None
         self._token: Optional[Token[Optional[UnitOfWork]]] = None
@@ -53,6 +54,7 @@ class UnitOfWork:
 
     def __enter__(self) -> "UnitOfWork":
         parent = get_current_uow()
+        self.parent = parent
         # If there is already an active UoW on the same database, join via SQLite SAVEPOINT
         if (
             parent is not None
@@ -117,6 +119,11 @@ class UnitOfWork:
             return
         if self.is_nested and self.savepoint_name:
             self.conn.execute(f"RELEASE SAVEPOINT {self.savepoint_name}")
+            if self.parent is not None:
+                for cb in self._after_commit_callbacks:
+                    self.parent.add_after_commit(cb)
+                self._after_commit_callbacks.clear()
+            return
         else:
             if not self._committed and not self._rolled_back:
                 try:

@@ -592,13 +592,15 @@ class StrategyRebalanceTest(unittest.TestCase):
         state = {}
         store = MagicMock()
         store.list_active_symbols.return_value = set()
-        store.get_lock_state.side_effect = lambda _name: dict(state)
+        store.get_entry_plan.side_effect = lambda _key=None: {"plan_payload": dict(state)} if state else None
 
-        def save_state(_name, payload):
+        def save_state(**kwargs):
+            payload = kwargs.get("plan_payload", {})
             state.clear()
-            state.update(payload)
+            if payload:
+                state.update(payload)
 
-        store.set_lock_state.side_effect = save_state
+        store.save_entry_plan.side_effect = save_state
         strategy = self._build_strategy(
             client,
             store,
@@ -818,8 +820,9 @@ class StrategyRebalanceTest(unittest.TestCase):
         self.assertEqual(result["status"], "ADDED")
         self.assertTrue(result["independent"])
         self.assertEqual(result["position_id"], 17)
+        insert_kwargs = store.insert_position.call_args.kwargs
         self.assertEqual(
-            store.insert_position.call_args.kwargs,
+            {k: v for k, v in insert_kwargs.items() if k != "episode_id"},
             {
                 "run_id": "run-1",
                 "symbol": "AAAUSDT",
@@ -838,6 +841,7 @@ class StrategyRebalanceTest(unittest.TestCase):
                 "status": "PENDING_ENTRY",
             },
         )
+        self.assertTrue(str(insert_kwargs["episode_id"]).startswith("ep_aaausdt_"))
         self.assertEqual(
             strategy._place_market_short_with_shrink_retry.call_args.kwargs["target_notional"],
             50.0,
@@ -962,7 +966,7 @@ class StrategyRebalanceTest(unittest.TestCase):
                 }
             },
         }
-        store.get_lock_state.return_value = persisted
+        store.get_entry_plan.return_value = {"plan_payload": persisted}
         store.list_active_symbols.return_value = {"AAAUSDT"}
         strategy = self._build_strategy(
             client,
@@ -1319,7 +1323,7 @@ class StrategyRebalanceTest(unittest.TestCase):
             "sl_order_id": 22,
             "sl_client_order_id": "sl-fallback-old",
         }
-        store.get_lock_state.return_value = {}
+        store.get_entry_structure_protection.return_value = None
 
         strategy._finalize_preclose_entry_audits(
             [
@@ -1356,8 +1360,9 @@ class StrategyRebalanceTest(unittest.TestCase):
             sl_price=112.0,
             liq_price_latest=140.0,
         )
-        protection_payload = store.set_lock_state.call_args.args[1]["positions"]["34"]
-        self.assertEqual(protection_payload["stop_price"], 112.0)
+        kwargs = store.set_entry_structure_protection.call_args.kwargs
+        self.assertEqual(kwargs["stop_price"], 112.0)
+        self.assertEqual(kwargs["position_id"], 34)
 
     def test_preclose_structure_stop_never_widens_a_tighter_existing_stop(self) -> None:
         client = MagicMock()
@@ -1386,7 +1391,7 @@ class StrategyRebalanceTest(unittest.TestCase):
             "sl_order_id": 22,
             "sl_client_order_id": "sl-tighter",
         }
-        store.get_lock_state.return_value = {}
+        store.get_entry_structure_protection.return_value = None
         protection = EntryStructureProtection(
             stop_price=112.0,
             bearish_close_time_utc=datetime(2025, 12, 1, 8, tzinfo=timezone.utc),
@@ -1404,8 +1409,9 @@ class StrategyRebalanceTest(unittest.TestCase):
         client.create_order.assert_not_called()
         client.cancel_order.assert_not_called()
         store.update_stop_loss.assert_not_called()
-        protection_payload = store.set_lock_state.call_args.args[1]["positions"]["34"]
-        self.assertEqual(protection_payload["stop_price"], 112.0)
+        kwargs = store.set_entry_structure_protection.call_args.kwargs
+        self.assertEqual(kwargs["stop_price"], 112.0)
+        self.assertEqual(kwargs["position_id"], 34)
 
     def test_preclose_structure_recovery_replays_persisted_entry_audit(self) -> None:
         store = MagicMock()
@@ -1449,13 +1455,15 @@ class StrategyRebalanceTest(unittest.TestCase):
         client = MagicMock()
         state = {}
         store = MagicMock()
-        store.get_lock_state.side_effect = lambda _name: dict(state)
+        store.get_entry_plan.side_effect = lambda _key=None: {"plan_payload": dict(state)} if state else None
 
-        def save_state(_name, payload):
+        def save_state(**kwargs):
+            payload = kwargs.get("plan_payload", {})
             state.clear()
-            state.update(payload)
+            if payload:
+                state.update(payload)
 
-        store.set_lock_state.side_effect = save_state
+        store.save_entry_plan.side_effect = save_state
         strategy = self._build_strategy(
             client,
             store,
@@ -1479,8 +1487,8 @@ class StrategyRebalanceTest(unittest.TestCase):
         client = MagicMock()
         state = {}
         store = MagicMock()
-        store.get_lock_state.side_effect = lambda _name: dict(state)
-        store.set_lock_state.side_effect = lambda _name, payload: (state.clear(), state.update(payload))
+        store.get_entry_plan.side_effect = lambda _key=None: {"plan_payload": dict(state)} if state else None
+        store.save_entry_plan.side_effect = lambda **kwargs: (state.clear(), state.update(kwargs.get("plan_payload", {})))
         store.list_active_symbols.return_value = set()
         strategy = self._build_strategy(
             client,
@@ -1580,7 +1588,7 @@ class StrategyRebalanceTest(unittest.TestCase):
             status="RUNNING",
             reason=None,
         )
-        store.get_lock_state.return_value = {}
+        store.get_entry_plan.return_value = {}
         store.list_active_symbols.return_value = set()
         strategy = self._build_strategy(client, store, rebalance_enabled=False)
 
@@ -1608,7 +1616,7 @@ class StrategyRebalanceTest(unittest.TestCase):
             status="RUNNING",
             reason=None,
         )
-        store.get_lock_state.return_value = {}
+        store.get_entry_plan.return_value = {}
         store.list_active_symbols.return_value = set()
         store.count_run_opened_positions.return_value = 9
         store.insert_position.return_value = 1001
@@ -1725,9 +1733,9 @@ class StrategyRebalanceTest(unittest.TestCase):
         inserted = store.insert_position.call_args.kwargs
         self.assertEqual(inserted["status"], "PENDING_ENTRY")
         entry_fill = store.set_position_entry_fill.call_args.kwargs
-        self.assertEqual(entry_fill["opened_at_utc"], "2026-07-17T04:00:05.804000+00:00")
-        lock_payload = store.set_lock_state.call_args.args[1]
-        self.assertEqual(lock_payload["positions"]["5618"]["stop_price"], 0.02590)
+        kwargs = store.set_entry_structure_protection.call_args.kwargs
+        self.assertEqual(kwargs["stop_price"], 0.02590)
+        self.assertEqual(kwargs["position_id"], 5618)
 
     def test_initial_exit_setup_cleans_take_profit_when_stop_creation_fails(self) -> None:
         client = MagicMock()

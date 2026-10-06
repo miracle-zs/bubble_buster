@@ -129,7 +129,7 @@ class PositionManager:
         drop_pct: float,
     ) -> Dict[str, object]:
         now_utc = now_local.astimezone(timezone.utc).replace(microsecond=0)
-        state = self.store.get_lock_state(self.HOURLY_EXCHANGE_TP_LOCK_NAME) or {}
+        state = self._load_hourly_exchange_tp_state()
         raw_symbols = state.get("symbols")
         symbols_state = dict(raw_symbols) if isinstance(raw_symbols, dict) else {}
 
@@ -195,12 +195,11 @@ class PositionManager:
         if error_symbols:
             summary["error_symbols"] = error_symbols
 
-        self.store.set_lock_state(
-            self.HOURLY_EXCHANGE_TP_LOCK_NAME,
+        self._save_hourly_exchange_tp_state(
             {
                 "symbols": symbols_state,
                 "updated_at_utc": self._utc_now_iso(),
-            },
+            }
         )
         return summary
 
@@ -211,7 +210,7 @@ class PositionManager:
         drop_pct: float,
     ) -> Dict[str, object]:
         self.refresh_hourly_exchange_take_profit_state(now_local=now_local, drop_pct=drop_pct)
-        state = self.store.get_lock_state(self.HOURLY_EXCHANGE_TP_LOCK_NAME) or {}
+        state = self._load_hourly_exchange_tp_state()
         raw_symbols = state.get("symbols")
         symbols_state = raw_symbols if isinstance(raw_symbols, dict) else {}
         summary = {
@@ -296,12 +295,11 @@ class PositionManager:
                     exc,
                 )
 
-        self.store.set_lock_state(
-            self.HOURLY_EXCHANGE_TP_LOCK_NAME,
+        self._save_hourly_exchange_tp_state(
             {
                 "symbols": symbols_state,
                 "updated_at_utc": self._utc_now_iso(),
-            },
+            }
         )
         return summary
 
@@ -570,6 +568,70 @@ class PositionManager:
             reset_minute=reset_minute,
         )
 
+    def _load_portfolio_loss_cut_state(self, cycle_key: Optional[str] = None) -> Dict[str, Any]:
+        key = cycle_key or self._local_day_key()
+        rec = self.store.get_risk_cycle_target_set("LOSS_CUT", key)
+        if not rec:
+            rec = self.store.get_latest_risk_cycle_target_set("LOSS_CUT")
+        if rec and isinstance(rec.get("targets"), dict):
+            return rec["targets"]
+        return {}
+
+    def _save_portfolio_loss_cut_state(self, state: Dict[str, Any], cycle_key: Optional[str] = None) -> None:
+        key = cycle_key or str(state.get("cycle_date") or self._local_day_key())
+        self.store.save_risk_cycle_target_set(
+            cycle_type="LOSS_CUT",
+            cycle_key=key,
+            targets=state,
+            status="TRIGGERED" if state.get("triggered") else "MONITORING",
+        )
+
+    def _load_portfolio_take_profit_state(self, cycle_key: Optional[str] = None) -> Dict[str, Any]:
+        key = cycle_key or self._local_day_key()
+        rec = self.store.get_risk_cycle_target_set("TAKE_PROFIT", key)
+        if not rec:
+            rec = self.store.get_latest_risk_cycle_target_set("TAKE_PROFIT")
+        if rec and isinstance(rec.get("targets"), dict):
+            return rec["targets"]
+        return {}
+
+    def _save_portfolio_take_profit_state(self, state: Dict[str, Any], cycle_key: Optional[str] = None) -> None:
+        key = cycle_key or str(state.get("cycle_date") or self._local_day_key())
+        self.store.save_risk_cycle_target_set(
+            cycle_type="TAKE_PROFIT",
+            cycle_key=key,
+            targets=state,
+            status="TRIGGERED" if state.get("triggered") else "MONITORING",
+        )
+
+    def _load_noon_protection_state(self) -> Dict[str, Any]:
+        state = self.store.get_protection_policy_state(self.NOON_PROTECTION_LOCK_NAME)
+        return state if isinstance(state, dict) else {}
+
+    def _save_noon_protection_state(self, payload: Dict[str, Any]) -> None:
+        self.store.save_protection_policy_state(self.NOON_PROTECTION_LOCK_NAME, "NOON_CAPS", payload)
+
+    def _load_morning_protection_state(self) -> Dict[str, Any]:
+        state = self.store.get_protection_policy_state(self.MORNING_PROTECTION_LOCK_NAME)
+        return state if isinstance(state, dict) else {}
+
+    def _save_morning_protection_state(self, payload: Dict[str, Any]) -> None:
+        self.store.save_protection_policy_state(self.MORNING_PROTECTION_LOCK_NAME, "MORNING_CAPS", payload)
+
+    def _load_hourly_exchange_tp_state(self) -> Dict[str, Any]:
+        state = self.store.get_protection_policy_state(self.HOURLY_EXCHANGE_TP_LOCK_NAME)
+        return state if isinstance(state, dict) else {}
+
+    def _save_hourly_exchange_tp_state(self, payload: Dict[str, Any]) -> None:
+        self.store.save_protection_policy_state(self.HOURLY_EXCHANGE_TP_LOCK_NAME, "HOURLY_TP", payload)
+
+    def _load_orphan_cleanup_state(self) -> Dict[str, Any]:
+        state = self.store.get_protection_policy_state(self.ORPHAN_EXIT_ORDER_CLEANUP_LOCK_NAME)
+        return state if isinstance(state, dict) else {}
+
+    def _save_orphan_cleanup_state(self, payload: Dict[str, Any]) -> None:
+        self.store.save_protection_policy_state(self.ORPHAN_EXIT_ORDER_CLEANUP_LOCK_NAME, "ORPHAN_CLEANUP", payload)
+
     @_serialized_account_mutation
     def run_portfolio_loss_cut(
         self,
@@ -605,7 +667,7 @@ class PositionManager:
             return {"status": "SKIPPED", "reason": "INVALID_EQUITY", "cycle_date": cycle_key}
 
         normalized_loss_pct = min(100.0, max(0.001, float(loss_pct)))
-        state = self.store.get_lock_state(self.PORTFOLIO_LOSS_CUT_LOCK_NAME) or {}
+        state = self._load_portfolio_loss_cut_state(cycle_key)
         if str(state.get("cycle_date") or "") != cycle_key:
             cycle_start_utc = cycle_start_local.astimezone(timezone.utc).replace(microsecond=0).isoformat()
             snapshot = self.store.get_wallet_snapshot_first_since(
@@ -632,7 +694,7 @@ class PositionManager:
                 "notification_sent": False,
                 "updated_at_utc": self._utc_now_iso(),
             }
-            self.store.set_lock_state(self.PORTFOLIO_LOSS_CUT_LOCK_NAME, state)
+            self._save_portfolio_loss_cut_state(state, cycle_key=cycle_key)
 
         baseline_equity = self._safe_float(state.get("baseline_equity_usdt"), default=0.0)
         already_triggered = bool(state.get("triggered"))
@@ -650,7 +712,7 @@ class PositionManager:
         state["updated_at_utc"] = self._utc_now_iso()
 
         if eval_res.status == "MONITORING":
-            self.store.set_lock_state(self.PORTFOLIO_LOSS_CUT_LOCK_NAME, state)
+            self._save_portfolio_loss_cut_state(state, cycle_key=cycle_key)
             return {
                 "status": "MONITORING",
                 "cycle_date": cycle_key,
@@ -663,10 +725,10 @@ class PositionManager:
             state["triggered"] = True
             state["close_complete"] = False
             state["triggered_at_utc"] = self._utc_now_iso()
-            self.store.set_lock_state(self.PORTFOLIO_LOSS_CUT_LOCK_NAME, state)
+            self._save_portfolio_loss_cut_state(state, cycle_key=cycle_key)
 
         if eval_res.status == "ALREADY_TRIGGERED":
-            self.store.set_lock_state(self.PORTFOLIO_LOSS_CUT_LOCK_NAME, state)
+            self._save_portfolio_loss_cut_state(state, cycle_key=cycle_key)
             return {
                 "status": "ALREADY_TRIGGERED",
                 "triggered": True,
@@ -696,7 +758,7 @@ class PositionManager:
                 state["notification_sent"] = True
             except Exception as exc:  # noqa: BLE001
                 LOGGER.warning("Portfolio loss-cut notification failed account=%s: %s", self.account_id, exc)
-        self.store.set_lock_state(self.PORTFOLIO_LOSS_CUT_LOCK_NAME, state)
+        self._save_portfolio_loss_cut_state(state, cycle_key=cycle_key)
 
         return {
             "status": "TRIGGERED" if not already_triggered else "TRIGGERED_RETRY",
@@ -742,7 +804,7 @@ class PositionManager:
         normalized_profit_pct = min(100.0, max(0.001, float(profit_pct)))
         normalized_reduce_ratio = min(1.0, max(0.05, float(reduce_ratio)))
         normalized_giveback_pct = min(100.0, max(0.0, float(giveback_pct)))
-        state = self.store.get_lock_state(self.PORTFOLIO_TAKE_PROFIT_LOCK_NAME) or {}
+        state = self._load_portfolio_take_profit_state(cycle_key)
         if str(state.get("cycle_date") or "") != cycle_key:
             previous_state = state
             previous_plan = previous_state.get("portfolio_limit_plan")
@@ -829,7 +891,7 @@ class PositionManager:
                 "notification_sent": bool(previous_state.get("notification_sent")) if carried_limit_plan else False,
                 "updated_at_utc": self._utc_now_iso(),
             }
-            self.store.set_lock_state(self.PORTFOLIO_TAKE_PROFIT_LOCK_NAME, state)
+            self._save_portfolio_take_profit_state(state, cycle_key)
 
         baseline_equity = self._safe_float(state.get("baseline_equity_usdt"), default=0.0)
         if baseline_equity <= 0:
@@ -915,7 +977,7 @@ class PositionManager:
         state["threshold_equity_usdt"] = threshold_equity
 
         if not already_triggered and not eval_res.should_trigger:
-            self.store.set_lock_state(self.PORTFOLIO_TAKE_PROFIT_LOCK_NAME, state)
+            self._save_portfolio_take_profit_state(state, cycle_key)
             return {
                 "status": eval_res.status,
                 "cycle_date": cycle_key,
@@ -939,10 +1001,10 @@ class PositionManager:
             state["trigger_equity_usdt"] = current_equity
             state["trigger_profit_pct"] = actual_profit_pct
             state["trigger_threshold_equity_usdt"] = threshold_equity
-            self.store.set_lock_state(self.PORTFOLIO_TAKE_PROFIT_LOCK_NAME, state)
+            self._save_portfolio_take_profit_state(state, cycle_key)
 
         if bool(state.get("close_complete")):
-            self.store.set_lock_state(self.PORTFOLIO_TAKE_PROFIT_LOCK_NAME, state)
+            self._save_portfolio_take_profit_state(state, cycle_key)
             return {
                 "status": "ALREADY_TRIGGERED",
                 "triggered": True,
@@ -978,7 +1040,7 @@ class PositionManager:
             if not isinstance(raw_limit_plan, list):
                 raw_limit_plan = self._build_portfolio_take_profit_limit_plan(active_reduce_ratio)
                 state["portfolio_limit_plan"] = raw_limit_plan
-                self.store.set_lock_state(self.PORTFOLIO_TAKE_PROFIT_LOCK_NAME, state)
+                self._save_portfolio_take_profit_state(state, cycle_key)
             limit_plan = [dict(item) for item in raw_limit_plan if isinstance(item, dict)]
             close_summary = self._execute_portfolio_take_profit_limit_plan(limit_plan)
             state["portfolio_limit_plan"] = limit_plan
@@ -1011,7 +1073,7 @@ class PositionManager:
                 state["notification_sent"] = True
             except Exception as exc:  # noqa: BLE001
                 LOGGER.warning("Portfolio take-profit notification failed account=%s: %s", self.account_id, exc)
-        self.store.set_lock_state(self.PORTFOLIO_TAKE_PROFIT_LOCK_NAME, state)
+        self._save_portfolio_take_profit_state(state, cycle_key)
 
         return {
             "status": "TRIGGERED" if not already_triggered else "TRIGGERED_RETRY",
@@ -1600,25 +1662,19 @@ class PositionManager:
         if not client_id:
             client_id = self._new_client_id("pftlim", symbol)
             item["portfolio_client_order_id"] = client_id
-        order_params: Dict[str, object] = {
-            "symbol": symbol,
-            "side": str(item.get("close_side") or "BUY").strip().upper(),
-            "type": "LIMIT",
-            "timeInForce": "GTC",
-            "price": limit_price,
-            "quantity": formatted_qty,
-            "newClientOrderId": client_id,
-            "newOrderRespType": "RESULT",
-        }
-        if bool(item.get("use_reduce_only", True)):
-            order_params["reduceOnly"] = True
-        if position_side in {"LONG", "SHORT"}:
-            order_params["positionSide"] = position_side
-
         item["portfolio_requested_qty"] = order_qty
         item["portfolio_order_status"] = "SUBMITTING"
         try:
-            created_order = self.client.create_order(**order_params)
+            created_order = self.exit_executor.create_limit_order(
+                symbol=symbol,
+                side=str(item.get("close_side") or "BUY").strip().upper(),
+                price=limit_price,
+                qty=order_qty,
+                client_order_id=client_id,
+                time_in_force="GTC",
+                position_side=position_side if position_side in {"LONG", "SHORT"} else None,
+                use_reduce_only=bool(item.get("use_reduce_only", True)),
+            )
         except OrderStateUnknownError as exc:
             item["portfolio_order_status"] = "UNKNOWN"
             item["last_error"] = str(exc)
@@ -1918,27 +1974,18 @@ class PositionManager:
                             item["action_complete"] = True
                             item["skipped_reason"] = "FORMATTED_QTY_ZERO"
                         else:
-                            order_params: Dict[str, object] = {
-                                "symbol": symbol,
-                                "side": close_side,
-                                "type": "MARKET",
-                                "quantity": formatted_qty,
-                                "newClientOrderId": self._new_client_id("pft", symbol),
-                                "newOrderRespType": "RESULT",
-                            }
-                            if use_reduce_only:
-                                order_params["reduceOnly"] = True
-                            if position_side in {"LONG", "SHORT"}:
-                                order_params["positionSide"] = position_side
-                            close_order = self.client.create_order(**order_params)
-                            self._market_fill_reconciler.record_market_order(
+                            close_order = self.exit_executor.close_market_order(
                                 symbol=symbol,
+                                qty=order_qty,
+                                side=close_side,
+                                client_id_tag="pft",
                                 position_id=(
                                     int(item["tracked_position_id"])
                                     if item.get("tracked_position_id") is not None
                                     else None
                                 ),
-                                order=close_order,
+                                position_side=position_side,
+                                use_reduce_only=use_reduce_only,
                             )
                             executed_qty = self._safe_float(
                                 close_order.get("executedQty"),
@@ -2044,21 +2091,16 @@ class PositionManager:
             )
             tp_price = self._safe_positive_float(pos.get("tp_price"))
             if tp_price is not None:
-                tp_params: Dict[str, object] = {
-                    "symbol": symbol,
-                    "side": "BUY",
-                    "type": "TAKE_PROFIT_MARKET",
-                    "stopPrice": self.client.format_trigger_price(symbol, tp_price, round_up=False),
-                    "quantity": self.client.format_order_qty(symbol, remaining_qty),
-                    "workingType": self.trigger_price_type,
-                    "priceProtect": True,
-                    "newClientOrderId": self._new_client_id("tpfix", symbol),
-                }
-                if use_reduce_only:
-                    tp_params["reduceOnly"] = True
-                if position_side in {"LONG", "SHORT"}:
-                    tp_params["positionSide"] = position_side
-                tp_order = self.client.create_order(**tp_params)
+                tp_stop_price = self.client.format_trigger_price(symbol, tp_price, round_up=False)
+                tp_order = self.exit_executor.create_take_profit_order_with_fallback(
+                    symbol=symbol,
+                    side="BUY",
+                    stop_price=tp_stop_price,
+                    qty=remaining_qty,
+                    client_order_id=self._new_client_id("tpfix", symbol),
+                    position_side=position_side,
+                    use_reduce_only=use_reduce_only,
+                )
 
             self.store.update_position_orders(
                 position_id=position_id,
@@ -2864,7 +2906,7 @@ class PositionManager:
         return summary
 
     def _reconcile_portfolio_take_profit_limit_plan(self) -> Optional[Dict[str, object]]:
-        state = self.store.get_lock_state(self.PORTFOLIO_TAKE_PROFIT_LOCK_NAME) or {}
+        state = self._load_portfolio_take_profit_state()
         raw_plan = state.get("portfolio_limit_plan")
         if not bool(state.get("triggered")) or not isinstance(raw_plan, list):
             return None
@@ -2880,7 +2922,7 @@ class PositionManager:
         )
         state["last_close_summary"] = summary
         state["updated_at_utc"] = self._utc_now_iso()
-        self.store.set_lock_state(self.PORTFOLIO_TAKE_PROFIT_LOCK_NAME, state)
+        self._save_portfolio_take_profit_state(state)
         return summary
 
     @_serialized_account_mutation
@@ -2895,7 +2937,7 @@ class PositionManager:
                 exc,
             )
 
-        state = self.store.get_lock_state(self.PORTFOLIO_TAKE_PROFIT_LOCK_NAME) or {}
+        state = self._load_portfolio_take_profit_state()
         raw_plan = state.get("portfolio_limit_plan")
         if not isinstance(raw_plan, list):
             return {"canceled": 0, "failed": 0, "details": []}
@@ -2938,25 +2980,24 @@ class PositionManager:
 
         state["portfolio_limit_plan"] = plan
         state["updated_at_utc"] = self._utc_now_iso()
-        self.store.set_lock_state(self.PORTFOLIO_TAKE_PROFIT_LOCK_NAME, state)
+        self._save_portfolio_take_profit_state(state)
         return {"canceled": canceled, "failed": failed, "details": details}
 
     @_serialized_account_mutation
     def cleanup_orphan_exit_orders_once_per_day(self) -> Dict[str, object]:
         day_key = self._local_day_key()
-        state = self.store.get_lock_state(self.ORPHAN_EXIT_ORDER_CLEANUP_LOCK_NAME) or {}
+        state = self._load_orphan_cleanup_state()
         if str(state.get("day_key") or "") == day_key:
             return {"canceled": 0, "details": [], "skipped": True, "day_key": day_key}
 
         result = self._cleanup_orphan_exit_orders()
         if int(result.get("failed", 0)) == 0:
-            self.store.set_lock_state(
-                self.ORPHAN_EXIT_ORDER_CLEANUP_LOCK_NAME,
+            self._save_orphan_cleanup_state(
                 {
                     "day_key": day_key,
                     "canceled": int(result["canceled"]),
                     "updated_at_utc": self._utc_now_iso(),
-                },
+                }
             )
         result["day_key"] = day_key
         result["skipped"] = False
@@ -3461,21 +3502,16 @@ class PositionManager:
             position_amt=position_amt,
             position_side=position_side,
         )
-        order_params: Dict[str, object] = {
-            "symbol": symbol,
-            "side": close_side,
-            "type": "TAKE_PROFIT_MARKET",
-            "stopPrice": self.client.format_trigger_price(symbol, tp_price, round_up=False),
-            "quantity": self.client.format_order_qty(symbol, abs(position_amt)),
-            "workingType": self.trigger_price_type,
-            "priceProtect": True,
-            "newClientOrderId": self._new_client_id("tpfix", symbol),
-        }
-        if use_reduce_only:
-            order_params["reduceOnly"] = True
-        if position_side in {"LONG", "SHORT"}:
-            order_params["positionSide"] = position_side
-        order = self.client.create_order(**order_params)
+        tp_stop_price = self.client.format_trigger_price(symbol, tp_price, round_up=False)
+        order = self.exit_executor.create_take_profit_order_with_fallback(
+            symbol=symbol,
+            side=close_side,
+            stop_price=tp_stop_price,
+            qty=abs(position_amt),
+            client_order_id=self._new_client_id("tpfix", symbol),
+            position_side=position_side,
+            use_reduce_only=use_reduce_only,
+        )
         try:
             self.store.update_take_profit(
                 position_id=int(pos["id"]),
@@ -3694,22 +3730,7 @@ class PositionManager:
         self._cancel_order_if_exists(symbol, pos.get("sl_order_id"), pos.get("sl_client_order_id"))
 
     def _cancel_order_if_exists(self, symbol: str, order_id: object, client_order_id: object) -> bool:
-        if not order_id and not client_order_id:
-            return True
-        try:
-            parsed_order_id = int(order_id) if order_id else None
-            parsed_client_order_id = str(client_order_id) if client_order_id else None
-            canceled = self.client.cancel_order(
-                symbol=symbol,
-                order_id=parsed_order_id,
-                orig_client_order_id=parsed_client_order_id,
-            )
-            if isinstance(canceled, dict):
-                self.store.upsert_exchange_order_state(canceled, source="LOCAL_CANCEL")
-            return True
-        except BinanceAPIError as exc:
-            LOGGER.warning("cancel_order failed for %s/%s/%s: %s", symbol, order_id, client_order_id, exc)
-            return False
+        return self.exit_executor.cancel_order_if_exists(symbol, order_id, client_order_id)
 
     @staticmethod
     def _build_manage_notification(summary: Dict[str, int], details: Dict[str, List[str]]) -> str:
@@ -3952,7 +3973,7 @@ class PositionManager:
         return (max(highs) if highs else None, min(lows) if lows else None)
 
     def _load_noon_protection_caps(self) -> Dict[str, float]:
-        state = self.store.get_lock_state(self.NOON_PROTECTION_LOCK_NAME) or {}
+        state = self._load_noon_protection_state()
         raw_caps = state.get("caps")
         if not isinstance(raw_caps, dict):
             return {}
@@ -3974,7 +3995,7 @@ class PositionManager:
         day_start_utc: Optional[datetime] = None,
         noon_time_utc: Optional[datetime] = None,
     ) -> None:
-        existing = self.store.get_lock_state(self.NOON_PROTECTION_LOCK_NAME) or {}
+        existing = self._load_noon_protection_state()
         payload = {
             "caps": {str(cap_key): float(price) for cap_key, price in caps.items() if price > 0},
             "updated_at_utc": self._utc_now_iso(),
@@ -3987,7 +4008,7 @@ class PositionManager:
             payload["noon_time_utc"] = noon_time_utc.astimezone(timezone.utc).isoformat()
         elif existing.get("noon_time_utc"):
             payload["noon_time_utc"] = existing.get("noon_time_utc")
-        self.store.set_lock_state(self.NOON_PROTECTION_LOCK_NAME, payload)
+        self._save_noon_protection_state(payload)
 
     def _get_noon_protection_cap(self, position_id: int) -> Optional[float]:
         if self._noon_protection_caps_cache is None:
@@ -3998,7 +4019,7 @@ class PositionManager:
         return float(value)
 
     def _get_noon_protection_window(self) -> Optional[tuple[datetime, datetime]]:
-        state = self.store.get_lock_state(self.NOON_PROTECTION_LOCK_NAME) or {}
+        state = self._load_noon_protection_state()
         day_start_raw = str(state.get("day_start_utc") or "").strip()
         noon_raw = str(state.get("noon_time_utc") or "").strip()
         if not day_start_raw or not noon_raw:
@@ -4123,7 +4144,7 @@ class PositionManager:
         return (max(highs) if highs else None, min(lows) if lows else None)
 
     def _load_morning_protection_caps(self) -> Dict[str, float]:
-        state = self.store.get_lock_state(self.MORNING_PROTECTION_LOCK_NAME) or {}
+        state = self._load_morning_protection_state()
         raw_caps = state.get("caps")
         if not isinstance(raw_caps, dict):
             return {}
@@ -4140,7 +4161,7 @@ class PositionManager:
         return parsed
 
     def _load_morning_protection_updated_at_by_key(self) -> Dict[str, datetime]:
-        state = self.store.get_lock_state(self.MORNING_PROTECTION_LOCK_NAME) or {}
+        state = self._load_morning_protection_state()
         raw_by_key = state.get("cap_updated_at_utc_by_key")
         parsed: Dict[str, datetime] = {}
         if isinstance(raw_by_key, dict):
@@ -4186,7 +4207,7 @@ class PositionManager:
             "cap_updated_at_utc_by_key": serialized_updated_at_by_key,
             "updated_at_utc": now_iso,
         }
-        self.store.set_lock_state(self.MORNING_PROTECTION_LOCK_NAME, payload)
+        self._save_morning_protection_state(payload)
 
     def _get_morning_protection_cap(self, position_id: int) -> Optional[float]:
         if self._morning_protection_caps_cache is None:

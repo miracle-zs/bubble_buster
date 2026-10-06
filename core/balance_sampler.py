@@ -120,7 +120,7 @@ class WalletSnapshotSampler:
 
         now = (now_utc or datetime.now(timezone.utc)).astimezone(timezone.utc)
         request_now_ms = int(now.timestamp() * 1000)
-        cursor_state = self.store.get_lock_state("cashflow_income_cursor_v2") or {}
+        cursor_state = self.store.get_cursor_state("cashflow_income_cursor_v2") or {}
         draining_full_page = bool(cursor_state.get("draining_full_page"))
         if draining_full_page:
             try:
@@ -184,7 +184,7 @@ class WalletSnapshotSampler:
         full_page = len(rows_sorted) >= 1000
         previous_cursor_ms = int(cursor_state.get("cursor_ms") or 0)
         cursor_ms = end_ms if not full_page else previous_cursor_ms
-        self.store.set_lock_state(
+        self.store.save_cursor_state(
             "cashflow_income_cursor_v2",
             {
                 "cursor_ms": int(cursor_ms),
@@ -206,7 +206,7 @@ class WalletSnapshotSampler:
         return self.sync_cashflows_once()
 
     def _resolve_cashflow_start_ms(self, income_type: Optional[str] = None) -> int:
-        cursor_state = self.store.get_lock_state("cashflow_income_cursor_v2") or {}
+        cursor_state = self.store.get_cursor_state("cashflow_income_cursor_v2") or {}
         try:
             cursor_ms = int(cursor_state.get("cursor_ms") or 0)
         except (TypeError, ValueError):

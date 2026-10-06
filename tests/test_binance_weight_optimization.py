@@ -332,7 +332,7 @@ class BinanceWeightOptimizationTest(unittest.TestCase):
                 self.trade_calls.append(params)
                 return []
 
-        self.store.set_lock_state(
+        self.store.save_cursor_state(
             "readonly_trade_stats_cursor_v2",
             {
                 "bootstrapped": True,
@@ -343,9 +343,9 @@ class BinanceWeightOptimizationTest(unittest.TestCase):
         fetcher = TradeStatsFetcher(client=client, store=self.store)
 
         first = fetcher._sync_incremental(lookback_days=30)
-        first_state = self.store.get_lock_state("readonly_trade_stats_cursor_v2")
+        first_state = self.store.get_cursor_state("readonly_trade_stats_cursor_v2")
         second = fetcher._sync_incremental(lookback_days=30)
-        second_state = self.store.get_lock_state("readonly_trade_stats_cursor_v2")
+        second_state = self.store.get_cursor_state("readonly_trade_stats_cursor_v2")
 
         self.assertEqual(first["income_requests"], 1)
         self.assertEqual(second["income_requests"], 1)

@@ -92,7 +92,7 @@ class MarketFillReconcilerTest(unittest.TestCase):
         assert fill is not None
         self.assertAlmostEqual(float(fill["avg_price"]), 48900.0)
         self.assertAlmostEqual(float(fill["realized_pnl"]), 22.0)
-        state = self.store.get_lock_state(MarketFillReconciler.LOCK_NAME) or {}
+        state = self.store.get_protection_policy_state(MarketFillReconciler.LOCK_NAME) or {}
         self.assertFalse(state.get("items"))
 
     def test_persists_missing_fill_and_retries_later(self) -> None:
@@ -128,7 +128,7 @@ class MarketFillReconcilerTest(unittest.TestCase):
         recorded = reconciler.record_market_order("BTCUSDT", self.position_id, order)
 
         self.assertFalse(recorded)
-        state = self.store.get_lock_state(MarketFillReconciler.LOCK_NAME) or {}
+        state = self.store.get_protection_policy_state(MarketFillReconciler.LOCK_NAME) or {}
         items = state.get("items")
         self.assertIsInstance(items, dict)
         assert isinstance(items, dict)
@@ -175,7 +175,7 @@ class MarketFillReconcilerTest(unittest.TestCase):
 
         self.assertFalse(recorded)
         self.assertIsNone(self._get_priced_fill())
-        state = self.store.get_lock_state(MarketFillReconciler.LOCK_NAME) or {}
+        state = self.store.get_protection_policy_state(MarketFillReconciler.LOCK_NAME) or {}
         self.assertEqual(len(state.get("items") or {}), 1)
 
     def test_discovers_and_backfills_existing_unpriced_market_close(self) -> None:
@@ -232,8 +232,8 @@ class MarketFillReconcilerTest(unittest.TestCase):
         store = MagicMock()
         store.account_id = "acc01"
         store.add_order_event.return_value = 88
-        store.get_lock_state.return_value = {}
-        store.set_lock_state.side_effect = RuntimeError("database busy")
+        store.get_protection_policy_state.return_value = {}
+        store.save_protection_policy_state.side_effect = RuntimeError("database busy")
         reconciler = MarketFillReconciler(client, store)
 
         recorded = reconciler.record_market_order(

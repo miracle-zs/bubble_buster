@@ -119,6 +119,8 @@ class StateStore:
         with self._connect_ctx() as conn:
             conn.execute("PRAGMA foreign_keys = OFF")
             conn.execute("PRAGMA journal_mode = WAL")
+            self._ensure_column(conn, "positions", "episode_id", "TEXT")
+            self._ensure_column(conn, "order_attempts", "parent_attempt_id", "TEXT")
             if schema_sql:
                 # The migration above normally adds these columns. Keep this guard
                 # for databases created concurrently between the two connections.
@@ -129,6 +131,7 @@ class StateStore:
                 raise ValueError("schema_path is required for StateStore.init_schema")
             self._backfill_order_event_account_ids(conn)
             self._repair_legacy_run_foreign_keys(conn)
+            self._apply_schema_migrations(conn)
 
     def create_run(self, trade_day_utc: str, account_id: str = "default") -> Tuple[str, bool]:
         """Creates a run for a UTC trade day.
@@ -278,6 +281,98 @@ class StateStore:
             f"ALTER TABLE {table_name} ADD COLUMN account_id TEXT NOT NULL DEFAULT '{escaped}'"
         )
 
+    def _ensure_column(
+        self,
+        conn: sqlite3.Connection,
+        table_name: str,
+        column_name: str,
+        column_type: str,
+    ) -> None:
+        row = conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name=?",
+            (table_name,),
+        ).fetchone()
+        if row is None:
+            return
+        cols = conn.execute(f"PRAGMA table_info({table_name})").fetchall()
+        if any(str(col["name"]) == column_name for col in cols):
+            return
+        conn.execute(f"ALTER TABLE {table_name} ADD COLUMN {column_name} {column_type}")
+
+    def _apply_schema_migrations(self, conn: sqlite3.Connection) -> None:
+        now_iso = utc_now_iso()
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS schema_migrations (
+                version TEXT PRIMARY KEY,
+                applied_at_utc TEXT NOT NULL,
+                description TEXT
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS ingestion_cursor_states (
+                cursor_key TEXT NOT NULL,
+                account_id TEXT NOT NULL,
+                payload TEXT NOT NULL,
+                updated_at_utc TEXT NOT NULL,
+                PRIMARY KEY (cursor_key, account_id)
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS task_occurrences (
+                task_occurrence_id TEXT PRIMARY KEY,
+                account_id TEXT NOT NULL,
+                task_type TEXT NOT NULL,
+                cycle_key TEXT NOT NULL,
+                status TEXT NOT NULL,
+                due_at_utc TEXT NOT NULL,
+                executed_at_utc TEXT,
+                completed_at_utc TEXT,
+                payload TEXT,
+                error_message TEXT,
+                created_at_utc TEXT NOT NULL,
+                updated_at_utc TEXT NOT NULL,
+                UNIQUE (account_id, task_type, cycle_key)
+            )
+            """
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_task_occurrences_due ON task_occurrences(account_id, status, due_at_utc)"
+        )
+        migrations = [
+            ("20260926_01_execution_engine", "Add order_intents, order_attempts, position_episodes, risk_cycle_target_sets, protection_policy_states, entry_plans"),
+            ("20261005_02_execution_fills_and_episodes", "Add execution_fills table, episode_id on positions, parent_attempt_id on order_attempts"),
+            ("20261005_03_ingestion_cursor_states", "Add ingestion_cursor_states table migrating from legacy locks"),
+            ("20261005_04_task_occurrences", "Add task_occurrences table for persistent task scheduling"),
+            ("20261005_05_historical_episodes_backfill", "Backfill historical position episodes and execution fills"),
+        ]
+        for ver, desc in migrations:
+            conn.execute(
+                """
+                INSERT OR IGNORE INTO schema_migrations (version, applied_at_utc, description)
+                VALUES (?, ?, ?)
+                """,
+                (ver, now_iso, desc),
+            )
+
+    def get_applied_migrations(self) -> List[str]:
+        with self._connect_ctx() as conn:
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS schema_migrations (
+                    version TEXT PRIMARY KEY,
+                    applied_at_utc TEXT NOT NULL,
+                    description TEXT
+                )
+                """
+            )
+            rows = conn.execute("SELECT version FROM schema_migrations ORDER BY applied_at_utc ASC").fetchall()
+            return [str(r["version"]) for r in rows]
+
     @staticmethod
     def _backfill_order_event_account_ids(conn: sqlite3.Connection) -> None:
         columns = conn.execute("PRAGMA table_info(order_events)").fetchall()
@@ -385,6 +480,7 @@ class StateStore:
         expire_at_utc: str,
         status: str = "OPEN",
         last_error: Optional[str] = None,
+        episode_id: Optional[str] = None,
         conn: Optional[sqlite3.Connection] = None,
     ) -> int:
         now_iso = utc_now_iso()
@@ -416,10 +512,10 @@ class StateStore:
                     tp_order_id, sl_order_id,
                     tp_client_order_id, sl_client_order_id,
                     opened_at_utc, expire_at_utc,
-                    status, last_error,
+                    status, last_error, episode_id,
                     created_at_utc, updated_at_utc
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     run_id,
@@ -439,11 +535,19 @@ class StateStore:
                     expire_at_utc,
                     status,
                     last_error,
+                    episode_id,
                     now_iso,
                     now_iso,
                 ),
             )
             return int(cursor.lastrowid)
+
+    def update_position_episode_id(self, position_id: int, episode_id: str) -> None:
+        with self._connect_ctx() as conn:
+            conn.execute(
+                "UPDATE positions SET episode_id = ?, updated_at_utc = ? WHERE id = ?",
+                (episode_id, utc_now_iso(), position_id),
+            )
 
     def list_open_positions(self, conn: Optional[sqlite3.Connection] = None) -> List[PositionRecord]:
         with self._connect_ctx(conn) as conn:
@@ -1494,6 +1598,67 @@ class StateStore:
                     updated_at_utc = excluded.updated_at_utc
                 """,
                 (name, payload, utc_now_iso()),
+            )
+
+    def get_entry_structure_protection(self, position_id: int) -> Optional[Dict[str, Any]]:
+        pos_id = int(position_id)
+        with self._connect_ctx() as conn:
+            try:
+                row = conn.execute(
+                    """
+                    SELECT stop_price, bearish_close_time_utc, window_start_utc, window_end_utc
+                    FROM entry_structure_protections
+                    WHERE position_id = ? AND account_id = ?
+                    LIMIT 1
+                    """,
+                    (pos_id, self.account_id),
+                ).fetchone()
+                if row is not None:
+                    return {
+                        "stop_price": float(row["stop_price"]),
+                        "bearish_close_time_utc": str(row["bearish_close_time_utc"]),
+                        "window_start_utc": str(row["window_start_utc"]),
+                        "window_end_utc": str(row["window_end_utc"]),
+                    }
+            except sqlite3.OperationalError:
+                pass
+        return None
+
+    def set_entry_structure_protection(
+        self,
+        position_id: int,
+        stop_price: float,
+        bearish_close_time_utc: str,
+        window_start_utc: str,
+        window_end_utc: str,
+    ) -> None:
+        pos_id = int(position_id)
+        now_iso = utc_now_iso()
+        with self._connect_ctx() as conn:
+            conn.execute(
+                """
+                INSERT INTO entry_structure_protections (
+                    position_id, account_id, stop_price, bearish_close_time_utc,
+                    window_start_utc, window_end_utc, updated_at_utc
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(position_id) DO UPDATE SET
+                    account_id = excluded.account_id,
+                    stop_price = excluded.stop_price,
+                    bearish_close_time_utc = excluded.bearish_close_time_utc,
+                    window_start_utc = excluded.window_start_utc,
+                    window_end_utc = excluded.window_end_utc,
+                    updated_at_utc = excluded.updated_at_utc
+                """,
+                (
+                    pos_id,
+                    self.account_id,
+                    float(stop_price),
+                    str(bearish_close_time_utc),
+                    str(window_start_utc),
+                    str(window_end_utc),
+                    now_iso,
+                ),
             )
 
     def add_equity_recovery_event(
@@ -2755,6 +2920,825 @@ class StateStore:
                     "payload": payload,
                 })
             return items
+
+    # -------------------------------------------------------------------------
+    # Execution Engine: Order Intents & Order Attempts
+    # -------------------------------------------------------------------------
+    def save_order_intent(
+        self,
+        intent_id: str,
+        client_intent_key: str,
+        symbol: str,
+        side: str,
+        order_type: str,
+        target_qty: Optional[float] = None,
+        target_price: Optional[float] = None,
+        intent_scope: str = "EXIT",
+        position_id: Optional[int] = None,
+        episode_id: Optional[str] = None,
+        status: str = "PENDING",
+        reason: Optional[str] = None,
+    ) -> None:
+        now_iso = utc_now_iso()
+        with self._connect_ctx() as conn:
+            conn.execute(
+                """
+                INSERT INTO order_intents (
+                    intent_id, account_id, client_intent_key, symbol, side, order_type,
+                    target_qty, target_price, intent_scope, position_id, episode_id,
+                    status, reason, created_at_utc, updated_at_utc
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(client_intent_key) DO UPDATE SET
+                    status = excluded.status,
+                    reason = COALESCE(excluded.reason, order_intents.reason),
+                    target_qty = COALESCE(excluded.target_qty, order_intents.target_qty),
+                    target_price = COALESCE(excluded.target_price, order_intents.target_price),
+                    updated_at_utc = excluded.updated_at_utc
+                """,
+                (
+                    intent_id,
+                    self.account_id,
+                    client_intent_key,
+                    symbol,
+                    side,
+                    order_type,
+                    target_qty,
+                    target_price,
+                    intent_scope,
+                    position_id,
+                    episode_id,
+                    status,
+                    reason,
+                    now_iso,
+                    now_iso,
+                ),
+            )
+
+    def get_order_intent(self, intent_id: str) -> Optional[Dict[str, Any]]:
+        with self._connect_ctx() as conn:
+            row = conn.execute(
+                "SELECT * FROM order_intents WHERE intent_id = ? AND account_id = ?",
+                (intent_id, self.account_id),
+            ).fetchone()
+            return dict(row) if row else None
+
+    def get_order_intent_by_key(self, client_intent_key: str) -> Optional[Dict[str, Any]]:
+        with self._connect_ctx() as conn:
+            row = conn.execute(
+                "SELECT * FROM order_intents WHERE client_intent_key = ? AND account_id = ?",
+                (client_intent_key, self.account_id),
+            ).fetchone()
+            return dict(row) if row else None
+
+    def update_order_intent_status(
+        self, intent_id: str, status: str, reason: Optional[str] = None
+    ) -> None:
+        now_iso = utc_now_iso()
+        with self._connect_ctx() as conn:
+            conn.execute(
+                """
+                UPDATE order_intents
+                SET status = ?, reason = COALESCE(?, reason), updated_at_utc = ?
+                WHERE intent_id = ? AND account_id = ?
+                """,
+                (status, reason, now_iso, intent_id, self.account_id),
+            )
+
+    def update_order_intent_episode_id(self, intent_id: str, episode_id: str) -> None:
+        now_iso = utc_now_iso()
+        with self._connect_ctx() as conn:
+            conn.execute(
+                """
+                UPDATE order_intents
+                SET episode_id = ?, updated_at_utc = ?
+                WHERE intent_id = ? AND account_id = ?
+                """,
+                (episode_id, now_iso, intent_id, self.account_id),
+            )
+
+    def list_active_order_intents(self, symbol: Optional[str] = None) -> List[Dict[str, Any]]:
+        with self._connect_ctx() as conn:
+            if symbol:
+                rows = conn.execute(
+                    """
+                    SELECT * FROM order_intents
+                    WHERE account_id = ? AND symbol = ? AND status IN ('PENDING', 'SUBMITTED', 'PARTIALLY_FILLED')
+                    ORDER BY created_at_utc ASC
+                    """,
+                    (self.account_id, symbol),
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    """
+                    SELECT * FROM order_intents
+                    WHERE account_id = ? AND status IN ('PENDING', 'SUBMITTED', 'PARTIALLY_FILLED')
+                    ORDER BY created_at_utc ASC
+                    """,
+                    (self.account_id,),
+                ).fetchall()
+            return [dict(r) for r in rows]
+
+
+    def save_order_attempt(
+        self,
+        attempt_id: str,
+        intent_id: str,
+        symbol: str,
+        client_order_id: str,
+        exchange_order_id: Optional[str] = None,
+        attempt_number: int = 1,
+        status: str = "PREPARED",
+        submitted_qty: Optional[float] = None,
+        executed_qty: float = 0.0,
+        cumulative_quote_qty: Optional[float] = None,
+        avg_price: Optional[float] = None,
+        error_message: Optional[str] = None,
+        parent_attempt_id: Optional[str] = None,
+    ) -> None:
+        now_iso = utc_now_iso()
+        with self._connect_ctx() as conn:
+            conn.execute(
+                """
+                INSERT INTO order_attempts (
+                    attempt_id, intent_id, account_id, symbol, client_order_id,
+                    exchange_order_id, attempt_number, status, submitted_qty,
+                    executed_qty, cumulative_quote_qty, avg_price, error_message,
+                    parent_attempt_id, created_at_utc, updated_at_utc
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(attempt_id) DO UPDATE SET
+                    status = excluded.status,
+                    exchange_order_id = COALESCE(excluded.exchange_order_id, order_attempts.exchange_order_id),
+                    executed_qty = excluded.executed_qty,
+                    cumulative_quote_qty = COALESCE(excluded.cumulative_quote_qty, order_attempts.cumulative_quote_qty),
+                    avg_price = COALESCE(excluded.avg_price, order_attempts.avg_price),
+                    error_message = COALESCE(excluded.error_message, order_attempts.error_message),
+                    parent_attempt_id = COALESCE(excluded.parent_attempt_id, order_attempts.parent_attempt_id),
+                    updated_at_utc = excluded.updated_at_utc
+                """,
+                (
+                    attempt_id,
+                    intent_id,
+                    self.account_id,
+                    symbol,
+                    client_order_id,
+                    exchange_order_id,
+                    attempt_number,
+                    status,
+                    submitted_qty,
+                    executed_qty,
+                    cumulative_quote_qty,
+                    avg_price,
+                    error_message,
+                    parent_attempt_id,
+                    now_iso,
+                    now_iso,
+                ),
+            )
+
+    def get_order_attempt(self, attempt_id: str) -> Optional[Dict[str, Any]]:
+        with self._connect_ctx() as conn:
+            row = conn.execute(
+                "SELECT * FROM order_attempts WHERE attempt_id = ? AND account_id = ?",
+                (attempt_id, self.account_id),
+            ).fetchone()
+            return dict(row) if row else None
+
+    def get_order_attempt_by_client_id(self, client_order_id: str) -> Optional[Dict[str, Any]]:
+        with self._connect_ctx() as conn:
+            row = conn.execute(
+                "SELECT * FROM order_attempts WHERE client_order_id = ? AND account_id = ?",
+                (client_order_id, self.account_id),
+            ).fetchone()
+            return dict(row) if row else None
+
+    def list_order_attempts_for_intent(self, intent_id: str) -> List[Dict[str, Any]]:
+        with self._connect_ctx() as conn:
+            rows = conn.execute(
+                """
+                SELECT * FROM order_attempts
+                WHERE intent_id = ? AND account_id = ?
+                ORDER BY attempt_number ASC, created_at_utc ASC
+                """,
+                (intent_id, self.account_id),
+            ).fetchall()
+            return [dict(r) for r in rows]
+
+    def get_latest_order_attempt_for_intent(self, intent_id: str) -> Optional[Dict[str, Any]]:
+        with self._connect_ctx() as conn:
+            row = conn.execute(
+                """
+                SELECT * FROM order_attempts
+                WHERE intent_id = ? AND account_id = ?
+                ORDER BY attempt_number DESC, created_at_utc DESC
+                LIMIT 1
+                """,
+                (intent_id, self.account_id),
+            ).fetchone()
+            return dict(row) if row else None
+
+    # -------------------------------------------------------------------------
+    # Execution Engine: Execution Fills
+    # -------------------------------------------------------------------------
+    def save_execution_fill(
+        self,
+        fill_id: str,
+        attempt_id: str,
+        intent_id: str,
+        symbol: str,
+        exchange_trade_id: str,
+        side: str,
+        price: float,
+        qty: float,
+        commission: float = 0.0,
+        commission_asset: str = "USDT",
+        trade_time_utc: Optional[str] = None,
+        exchange_order_id: Optional[str] = None,
+    ) -> None:
+        now_iso = utc_now_iso()
+        t_time = trade_time_utc or now_iso
+        with self._connect_ctx() as conn:
+            conn.execute(
+                """
+                INSERT INTO execution_fills (
+                    fill_id, attempt_id, intent_id, account_id, symbol,
+                    exchange_trade_id, exchange_order_id, side, price, qty,
+                    commission, commission_asset, trade_time_utc, created_at_utc
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(exchange_trade_id) DO UPDATE SET
+                    exchange_order_id = COALESCE(excluded.exchange_order_id, execution_fills.exchange_order_id),
+                    commission = excluded.commission,
+                    commission_asset = excluded.commission_asset
+                """,
+                (
+                    fill_id,
+                    attempt_id,
+                    intent_id,
+                    self.account_id,
+                    symbol,
+                    str(exchange_trade_id),
+                    str(exchange_order_id) if exchange_order_id else None,
+                    side,
+                    float(price),
+                    float(qty),
+                    float(commission),
+                    commission_asset,
+                    t_time,
+                    now_iso,
+                ),
+            )
+
+    def list_execution_fills_for_attempt(self, attempt_id: str) -> List[Dict[str, Any]]:
+        with self._connect_ctx() as conn:
+            rows = conn.execute(
+                """
+                SELECT * FROM execution_fills
+                WHERE attempt_id = ? AND account_id = ?
+                ORDER BY trade_time_utc ASC
+                """,
+                (attempt_id, self.account_id),
+            ).fetchall()
+            return [dict(r) for r in rows]
+
+    def list_execution_fills_for_intent(self, intent_id: str) -> List[Dict[str, Any]]:
+        with self._connect_ctx() as conn:
+            rows = conn.execute(
+                """
+                SELECT * FROM execution_fills
+                WHERE intent_id = ? AND account_id = ?
+                ORDER BY trade_time_utc ASC
+                """,
+                (intent_id, self.account_id),
+            ).fetchall()
+            return [dict(r) for r in rows]
+
+    def update_order_attempt_status(
+        self,
+        attempt_id: str,
+        status: str,
+        executed_qty: Optional[float] = None,
+        avg_price: Optional[float] = None,
+        cumulative_quote_qty: Optional[float] = None,
+        exchange_order_id: Optional[str] = None,
+        error_message: Optional[str] = None,
+    ) -> None:
+        now_iso = utc_now_iso()
+        with self._connect_ctx() as conn:
+            conn.execute(
+                """
+                UPDATE order_attempts
+                SET status = ?,
+                    executed_qty = COALESCE(?, executed_qty),
+                    avg_price = COALESCE(?, avg_price),
+                    cumulative_quote_qty = COALESCE(?, cumulative_quote_qty),
+                    exchange_order_id = COALESCE(?, exchange_order_id),
+                    error_message = COALESCE(?, error_message),
+                    updated_at_utc = ?
+                WHERE attempt_id = ? AND account_id = ?
+                """,
+                (
+                    status,
+                    executed_qty,
+                    avg_price,
+                    cumulative_quote_qty,
+                    exchange_order_id,
+                    error_message,
+                    now_iso,
+                    attempt_id,
+                    self.account_id,
+                ),
+            )
+
+    def list_unknown_order_attempts(self) -> List[Dict[str, Any]]:
+        with self._connect_ctx() as conn:
+            rows = conn.execute(
+                "SELECT * FROM order_attempts WHERE account_id = ? AND status = 'UNKNOWN' ORDER BY created_at_utc ASC",
+                (self.account_id,),
+            ).fetchall()
+            return [dict(r) for r in rows]
+
+    # -------------------------------------------------------------------------
+    # Position Episodes
+    # -------------------------------------------------------------------------
+    def save_position_episode(
+        self,
+        episode_id: str,
+        symbol: str,
+        position_side: str = "SHORT",
+        status: str = "OPEN",
+        target_qty: Optional[float] = None,
+        current_qty: float = 0.0,
+        realized_pnl: float = 0.0,
+        closed_at_utc: Optional[str] = None,
+    ) -> None:
+        now_iso = utc_now_iso()
+        with self._connect_ctx() as conn:
+            conn.execute(
+                """
+                INSERT INTO position_episodes (
+                    episode_id, account_id, symbol, position_side, status,
+                    opened_at_utc, closed_at_utc, target_qty, current_qty,
+                    realized_pnl, created_at_utc, updated_at_utc
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(episode_id) DO UPDATE SET
+                    status = excluded.status,
+                    closed_at_utc = COALESCE(excluded.closed_at_utc, position_episodes.closed_at_utc),
+                    target_qty = COALESCE(excluded.target_qty, position_episodes.target_qty),
+                    current_qty = excluded.current_qty,
+                    realized_pnl = excluded.realized_pnl,
+                    updated_at_utc = excluded.updated_at_utc
+                """,
+                (
+                    episode_id,
+                    self.account_id,
+                    symbol,
+                    position_side,
+                    status,
+                    now_iso,
+                    closed_at_utc,
+                    target_qty,
+                    current_qty,
+                    realized_pnl,
+                    now_iso,
+                    now_iso,
+                ),
+            )
+
+    def get_position_episode(self, episode_id: str) -> Optional[Dict[str, Any]]:
+        with self._connect_ctx() as conn:
+            row = conn.execute(
+                "SELECT * FROM position_episodes WHERE episode_id = ? AND account_id = ?",
+                (episode_id, self.account_id),
+            ).fetchone()
+            return dict(row) if row else None
+
+    def get_active_position_episode(self, symbol: str) -> Optional[Dict[str, Any]]:
+        with self._connect_ctx() as conn:
+            row = conn.execute(
+                """
+                SELECT * FROM position_episodes
+                WHERE symbol = ? AND account_id = ? AND status IN ('OPEN', 'CLOSING')
+                ORDER BY opened_at_utc DESC LIMIT 1
+                """,
+                (symbol, self.account_id),
+            ).fetchone()
+            return dict(row) if row else None
+
+    def get_open_position_episode(self, symbol: str, position_side: str = "SHORT") -> Optional[Dict[str, Any]]:
+        with self._connect_ctx() as conn:
+            row = conn.execute(
+                """
+                SELECT * FROM position_episodes
+                WHERE symbol = ? AND account_id = ? AND position_side = ? AND status = 'OPEN'
+                ORDER BY opened_at_utc DESC LIMIT 1
+                """,
+                (symbol, self.account_id, position_side),
+            ).fetchone()
+            return dict(row) if row else None
+
+    def list_open_position_episodes(self, symbol: Optional[str] = None) -> List[Dict[str, Any]]:
+        with self._connect_ctx() as conn:
+            if symbol:
+                rows = conn.execute(
+                    """
+                    SELECT * FROM position_episodes
+                    WHERE account_id = ? AND symbol = ? AND status IN ('OPEN', 'CLOSING')
+                    ORDER BY opened_at_utc ASC
+                    """,
+                    (self.account_id, symbol),
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    """
+                    SELECT * FROM position_episodes
+                    WHERE account_id = ? AND status IN ('OPEN', 'CLOSING')
+                    ORDER BY opened_at_utc ASC
+                    """,
+                    (self.account_id,),
+                ).fetchall()
+            return [dict(r) for r in rows]
+
+
+    # -------------------------------------------------------------------------
+    # Risk Cycle Target Sets (migrated from locks)
+    # -------------------------------------------------------------------------
+    def save_risk_cycle_target_set(
+        self,
+        cycle_type: str,
+        cycle_key: str,
+        targets: Dict[str, Any],
+        summary: Optional[Dict[str, Any]] = None,
+        status: str = "IN_PROGRESS",
+        target_set_id: Optional[str] = None,
+    ) -> str:
+        tid = target_set_id or f"{self.account_id}:{cycle_type}:{cycle_key}"
+        now_iso = utc_now_iso()
+        targets_json = json.dumps(targets, separators=(",", ":"))
+        summary_json = json.dumps(summary, separators=(",", ":")) if summary is not None else None
+        with self._connect_ctx() as conn:
+            conn.execute(
+                """
+                INSERT INTO risk_cycle_target_sets (
+                    target_set_id, account_id, cycle_type, cycle_key, status,
+                    targets_json, summary_json, created_at_utc, updated_at_utc
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(target_set_id) DO UPDATE SET
+                    status = excluded.status,
+                    targets_json = excluded.targets_json,
+                    summary_json = excluded.summary_json,
+                    updated_at_utc = excluded.updated_at_utc
+                """,
+                (
+                    tid,
+                    self.account_id,
+                    cycle_type,
+                    cycle_key,
+                    status,
+                    targets_json,
+                    summary_json,
+                    now_iso,
+                    now_iso,
+                ),
+            )
+        return tid
+
+    def get_risk_cycle_target_set(
+        self, cycle_type: str, cycle_key: str
+    ) -> Optional[Dict[str, Any]]:
+        with self._connect_ctx() as conn:
+            row = conn.execute(
+                """
+                SELECT * FROM risk_cycle_target_sets
+                WHERE account_id = ? AND cycle_type = ? AND cycle_key = ?
+                ORDER BY updated_at_utc DESC, rowid DESC LIMIT 1
+                """,
+                (self.account_id, cycle_type, cycle_key),
+            ).fetchone()
+            if not row:
+                return None
+            res = dict(row)
+            try:
+                res["targets"] = json.loads(res.get("targets_json") or "{}")
+            except Exception:
+                res["targets"] = {}
+            try:
+                res["summary"] = json.loads(res.get("summary_json") or "{}") if res.get("summary_json") else None
+            except Exception:
+                res["summary"] = None
+            return res
+
+    def get_latest_risk_cycle_target_set(
+        self, cycle_type: str
+    ) -> Optional[Dict[str, Any]]:
+        with self._connect_ctx() as conn:
+            row = conn.execute(
+                """
+                SELECT * FROM risk_cycle_target_sets
+                WHERE account_id = ? AND cycle_type = ?
+                ORDER BY updated_at_utc DESC, rowid DESC LIMIT 1
+                """,
+                (self.account_id, cycle_type),
+            ).fetchone()
+            if not row:
+                return None
+            res = dict(row)
+            try:
+                res["targets"] = json.loads(res.get("targets_json") or "{}")
+            except Exception:
+                res["targets"] = {}
+            try:
+                res["summary"] = json.loads(res.get("summary_json") or "{}") if res.get("summary_json") else None
+            except Exception:
+                res["summary"] = None
+            return res
+
+    # -------------------------------------------------------------------------
+    # Protection Policy States (migrated from locks)
+    # -------------------------------------------------------------------------
+    def save_protection_policy_state(
+        self, policy_key: str, policy_type: str, payload: Dict[str, Any]
+    ) -> None:
+        now_iso = utc_now_iso()
+        payload_json = json.dumps(payload, separators=(",", ":"))
+        with self._connect_ctx() as conn:
+            conn.execute(
+                """
+                INSERT INTO protection_policy_states (
+                    policy_key, account_id, policy_type, payload_json, updated_at_utc
+                )
+                VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT(policy_key) DO UPDATE SET
+                    payload_json = excluded.payload_json,
+                    updated_at_utc = excluded.updated_at_utc
+                """,
+                (policy_key, self.account_id, policy_type, payload_json, now_iso),
+            )
+
+    def get_protection_policy_state(self, policy_key: str) -> Optional[Dict[str, Any]]:
+        with self._connect_ctx() as conn:
+            row = conn.execute(
+                "SELECT * FROM protection_policy_states WHERE policy_key = ? AND account_id = ?",
+                (policy_key, self.account_id),
+            ).fetchone()
+            if not row:
+                return None
+            try:
+                return json.loads(row["payload_json"])
+            except Exception:
+                return None
+
+    # -------------------------------------------------------------------------
+    # Entry Plans (migrated from locks and blocking wait)
+    # -------------------------------------------------------------------------
+    def save_entry_plan(
+        self,
+        plan_id: str,
+        symbol: str,
+        status: str,
+        hour_open_utc: Optional[str] = None,
+        next_wakeup_utc: Optional[str] = None,
+        plan_payload: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        now_iso = utc_now_iso()
+        existing = self.get_entry_plan(plan_id)
+        final_hour_open = hour_open_utc or (existing.get("hour_open_utc") if existing else now_iso)
+        final_next_wakeup = next_wakeup_utc or (existing.get("next_wakeup_utc") if existing else now_iso)
+        payload = plan_payload if plan_payload is not None else (existing.get("plan_payload") if existing else {})
+        payload_json = json.dumps(payload, separators=(",", ":"))
+        with self._connect_ctx() as conn:
+            conn.execute(
+                """
+                INSERT INTO entry_plans (
+                    plan_id, account_id, symbol, status, hour_open_utc,
+                    next_wakeup_utc, plan_payload_json, created_at_utc, updated_at_utc
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(plan_id) DO UPDATE SET
+                    status = excluded.status,
+                    next_wakeup_utc = excluded.next_wakeup_utc,
+                    plan_payload_json = excluded.plan_payload_json,
+                    updated_at_utc = excluded.updated_at_utc
+                """,
+                (
+                    plan_id,
+                    self.account_id,
+                    symbol,
+                    status,
+                    final_hour_open,
+                    final_next_wakeup,
+                    payload_json,
+                    now_iso,
+                    now_iso,
+                ),
+            )
+
+    def get_entry_plan(self, plan_id: str) -> Optional[Dict[str, Any]]:
+        with self._connect_ctx() as conn:
+            row = conn.execute(
+                "SELECT * FROM entry_plans WHERE plan_id = ? AND account_id = ?",
+                (plan_id, self.account_id),
+            ).fetchone()
+            if not row:
+                return None
+            res = dict(row)
+            try:
+                res["plan_payload"] = json.loads(res.get("plan_payload_json") or "{}")
+            except Exception:
+                res["plan_payload"] = {}
+            return res
+
+    def get_active_entry_plan(self, symbol: Optional[str] = None) -> Optional[Dict[str, Any]]:
+        with self._connect_ctx() as conn:
+            if symbol:
+                row = conn.execute(
+                    """
+                    SELECT * FROM entry_plans
+                    WHERE symbol = ? AND account_id = ? AND status = 'WAITING_KLINE'
+                    ORDER BY next_wakeup_utc ASC LIMIT 1
+                    """,
+                    (symbol, self.account_id),
+                ).fetchone()
+            else:
+                row = conn.execute(
+                    """
+                    SELECT * FROM entry_plans
+                    WHERE account_id = ? AND status = 'WAITING_KLINE'
+                    ORDER BY next_wakeup_utc ASC LIMIT 1
+                    """,
+                    (self.account_id,),
+                ).fetchone()
+            if not row:
+                return None
+            res = dict(row)
+            try:
+                res["plan_payload"] = json.loads(res.get("plan_payload_json") or "{}")
+            except Exception:
+                res["plan_payload"] = {}
+            return res
+
+    # -------------------------------------------------------------------------
+    # Ingestion Cursor States (migrated from legacy locks)
+    # -------------------------------------------------------------------------
+    def save_cursor_state(self, cursor_key: str, state_payload: Dict[str, Any]) -> None:
+        now_iso = utc_now_iso()
+        with self._connect_ctx() as conn:
+            conn.execute(
+                """
+                INSERT INTO ingestion_cursor_states (cursor_key, account_id, payload, updated_at_utc)
+                VALUES (?, ?, ?, ?)
+                ON CONFLICT(cursor_key, account_id) DO UPDATE SET
+                    payload = excluded.payload,
+                    updated_at_utc = excluded.updated_at_utc
+                """,
+                (cursor_key, self.account_id, json.dumps(state_payload), now_iso),
+            )
+
+    def get_cursor_state(self, cursor_key: str) -> Optional[Dict[str, Any]]:
+        with self._connect_ctx() as conn:
+            row = conn.execute(
+                "SELECT payload FROM ingestion_cursor_states WHERE cursor_key = ? AND account_id = ?",
+                (cursor_key, self.account_id),
+            ).fetchone()
+            if not row or not row["payload"]:
+                return None
+            try:
+                return json.loads(row["payload"])
+            except Exception:
+                return None
+
+    # -------------------------------------------------------------------------
+    # Task Occurrences (Persistent Task Scheduling)
+    # -------------------------------------------------------------------------
+    def save_task_occurrence(
+        self,
+        task_occurrence_id: str,
+        task_type: str,
+        cycle_key: str,
+        due_at_utc: str,
+        status: str = "PENDING",
+        payload: Optional[Dict[str, Any]] = None,
+        error_message: Optional[str] = None,
+    ) -> None:
+        now_iso = utc_now_iso()
+        payload_json = json.dumps(payload or {})
+        with self._connect_ctx() as conn:
+            conn.execute(
+                """
+                INSERT INTO task_occurrences (
+                    task_occurrence_id, account_id, task_type, cycle_key,
+                    status, due_at_utc, payload, error_message,
+                    created_at_utc, updated_at_utc
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(account_id, task_type, cycle_key) DO UPDATE SET
+                    status = excluded.status,
+                    due_at_utc = excluded.due_at_utc,
+                    payload = excluded.payload,
+                    error_message = excluded.error_message,
+                    updated_at_utc = excluded.updated_at_utc
+                """,
+                (
+                    task_occurrence_id,
+                    self.account_id,
+                    task_type,
+                    cycle_key,
+                    status,
+                    due_at_utc,
+                    payload_json,
+                    error_message,
+                    now_iso,
+                    now_iso,
+                ),
+            )
+
+    def get_task_occurrence(self, task_occurrence_id: str) -> Optional[Dict[str, Any]]:
+        with self._connect_ctx() as conn:
+            row = conn.execute(
+                "SELECT * FROM task_occurrences WHERE task_occurrence_id = ? AND account_id = ?",
+                (task_occurrence_id, self.account_id),
+            ).fetchone()
+            if not row:
+                return None
+            res = dict(row)
+            try:
+                res["payload"] = json.loads(res.get("payload") or "{}")
+            except Exception:
+                res["payload"] = {}
+            return res
+
+    def get_task_occurrence_by_cycle(self, task_type: str, cycle_key: str) -> Optional[Dict[str, Any]]:
+        with self._connect_ctx() as conn:
+            row = conn.execute(
+                """
+                SELECT * FROM task_occurrences
+                WHERE task_type = ? AND cycle_key = ? AND account_id = ?
+                """,
+                (task_type, cycle_key, self.account_id),
+            ).fetchone()
+            if not row:
+                return None
+            res = dict(row)
+            try:
+                res["payload"] = json.loads(res.get("payload") or "{}")
+            except Exception:
+                res["payload"] = {}
+            return res
+
+    def list_due_task_occurrences(self, now_iso: Optional[str] = None) -> List[Dict[str, Any]]:
+        limit_time = now_iso or utc_now_iso()
+        with self._connect_ctx() as conn:
+            rows = conn.execute(
+                """
+                SELECT * FROM task_occurrences
+                WHERE account_id = ? AND status = 'PENDING' AND due_at_utc <= ?
+                ORDER BY due_at_utc ASC
+                """,
+                (self.account_id, limit_time),
+            ).fetchall()
+            results = []
+            for r in rows:
+                item = dict(r)
+                try:
+                    item["payload"] = json.loads(item.get("payload") or "{}")
+                except Exception:
+                    item["payload"] = {}
+                results.append(item)
+            return results
+
+    def update_task_occurrence_status(
+        self,
+        task_occurrence_id: str,
+        status: str,
+        error_message: Optional[str] = None,
+        executed_at_utc: Optional[str] = None,
+        completed_at_utc: Optional[str] = None,
+    ) -> None:
+        now_iso = utc_now_iso()
+        with self._connect_ctx() as conn:
+            conn.execute(
+                """
+                UPDATE task_occurrences
+                SET status = ?,
+                    error_message = COALESCE(?, error_message),
+                    executed_at_utc = COALESCE(?, executed_at_utc),
+                    completed_at_utc = COALESCE(?, completed_at_utc),
+                    updated_at_utc = ?
+                WHERE task_occurrence_id = ? AND account_id = ?
+                """,
+                (
+                    status,
+                    error_message,
+                    executed_at_utc,
+                    completed_at_utc,
+                    now_iso,
+                    task_occurrence_id,
+                    self.account_id,
+                ),
+            )
 
 
 def _safe_float(value: Any) -> Optional[float]:

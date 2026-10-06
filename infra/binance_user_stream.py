@@ -10,13 +10,12 @@ from datetime import datetime, timezone
 from typing import Any, Dict, Optional
 from urllib.parse import urlparse
 
-from core.account_snapshot import AccountSnapshotProvider
-from core.state_store import StateStore
 from infra.binance_futures_client import (
     BinanceAPIError,
     BinanceFuturesClient,
     BinanceRateLimitError,
 )
+from infra.protocols import UserStreamSnapshotProtocol, UserStreamStoreProtocol
 
 
 LOGGER = logging.getLogger(__name__)
@@ -34,15 +33,15 @@ def _event_time_iso(payload: Dict[str, Any]) -> str:
 class BinanceUserStreamState:
     """Own stream certainty, REST verification and the persisted local ledger."""
 
-    LOCK_NAME = "user_stream_state_v1"
+    CURSOR_NAME = "user_stream_state_v1"
     VERIFY_RETRY_DELAYS_SEC = (5.0, 10.0, 30.0, 60.0)
 
     def __init__(
         self,
         *,
         client: BinanceFuturesClient,
-        store: StateStore,
-        snapshot_provider: AccountSnapshotProvider,
+        store: UserStreamStoreProtocol,
+        snapshot_provider: UserStreamSnapshotProtocol,
         account_id: str,
         websocket_base_url: Optional[str] = None,
         rest_verify_interval_sec: float = 300.0,
@@ -573,6 +572,6 @@ class BinanceUserStreamState:
                 "updated_at_utc": datetime.now(timezone.utc).replace(microsecond=0).isoformat(),
             }
         try:
-            self.store.set_lock_state(self.LOCK_NAME, state)
+            self.store.save_cursor_state(self.CURSOR_NAME, state)
         except Exception as exc:  # noqa: BLE001
             LOGGER.debug("Failed to persist user stream state account=%s: %s", self.account_id, exc)
