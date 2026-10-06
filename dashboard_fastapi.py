@@ -245,7 +245,7 @@ def create_dashboard_context(config_path: str) -> DashboardRuntimeContext:
     )
     curve_points = max(100, int(runtime_cfg.get("dashboard_curve_points", 600)))
     balance_refresh_sec = max(5, int(runtime_cfg.get("manager_interval_sec", 60)))
-    run_with_dashboard = runtime_cfg.get("run_service_with_dashboard", "true").strip().lower() in {
+    run_with_dashboard = runtime_cfg.get("run_service_with_dashboard", "false").strip().lower() in {
         "1",
         "true",
         "yes",
@@ -521,7 +521,7 @@ def _ensure_strategy_log_handler(log_file: str) -> None:
 def _startup_background_service(app: FastAPI, config_path: str) -> None:
     cfg = _load_config(config_path)
     runtime_cfg = cfg["runtime"] if cfg.has_section("runtime") else {}
-    run_with_dashboard = runtime_cfg.get("run_service_with_dashboard", "true").strip().lower() in {
+    run_with_dashboard = runtime_cfg.get("run_service_with_dashboard", "false").strip().lower() in {
         "1",
         "true",
         "yes",

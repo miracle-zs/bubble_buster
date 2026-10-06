@@ -9,7 +9,7 @@ import time
 from contextlib import contextmanager
 from datetime import datetime
 from logging.handlers import TimedRotatingFileHandler
-from typing import Dict, Iterator, Optional
+from typing import Any, Dict, Iterator, Optional
 from zoneinfo import ZoneInfo
 
 from core.runtime_components import create_components, resolve_path
@@ -181,27 +181,42 @@ def main() -> int:
 
             if args.command == "entry":
                 warn_if_outside_entry_window(runtime_cfg)
-                result = strategy.run_entry(trade_day_utc=args.trade_day_utc)
-                LOGGER.info("entry result: %s", result)
-                return 0 if result.get("status") != "FAILED" else 1
+                entry_results = {}
+                for aid, actx in account_runtimes.items():
+                    coord = actx["coordinator"]
+                    entry_results[aid] = coord.step(action="entry", trade_day_utc=args.trade_day_utc)
+                LOGGER.info("entry result: %s", entry_results)
+                failed = any(isinstance(r, dict) and r.get("status") == "FAILED" for r in entry_results.values())
+                return 1 if failed else 0
 
             if args.command == "manage":
                 interval = runtime_cfg.getint("manager_interval_sec", fallback=60)
+
+                def _run_manage_once() -> Dict[str, Any]:
+                    summaries: Dict[str, Any] = {}
+                    for aid, actx in account_runtimes.items():
+                        coord = actx["coordinator"]
+                        summaries[aid] = coord.step(action="manage", config=actx)
+                    LOGGER.info("manage summary: %s", summaries)
+                    return summaries
+
                 if args.loop:
                     LOGGER.info("manage loop started, interval=%ss", interval)
                     while True:
-                        summary = manager.run_once()
-                        LOGGER.info("manage summary: %s", summary)
+                        _run_manage_once()
                         time.sleep(max(1, interval))
                 else:
-                    summary = manager.run_once()
-                    LOGGER.info("manage summary: %s", summary)
+                    _run_manage_once()
                 return 0
 
             if args.command == "loss-cut":
-                summary = manager.run_daily_loss_cut()
-                LOGGER.info("daily loss-cut summary: %s", summary)
-                return 0 if summary.get("errors", 0) == 0 else 1
+                loss_cut_results = {}
+                for aid, actx in account_runtimes.items():
+                    coord = actx["coordinator"]
+                    loss_cut_results[aid] = coord.step(action="loss_cut", config=actx)
+                LOGGER.info("daily loss-cut summary: %s", loss_cut_results)
+                errors = any(isinstance(r, dict) and r.get("errors", 0) > 0 for r in loss_cut_results.values())
+                return 1 if errors else 0
 
             if args.command == "service":
                 LOGGER.info(

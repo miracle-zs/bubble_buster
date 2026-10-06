@@ -2,7 +2,7 @@ import time
 from pathlib import Path
 import pytest
 
-from core.template_loader import load_template, clear_template_cache
+from web.template_loader import clear_template_cache, load_template
 
 
 class TestTemplateLoader:
@@ -19,6 +19,7 @@ class TestTemplateLoader:
         assert "<!doctype html>" in overview
         assert "Bubble Buster Overview" in overview
         assert "__REFRESH_SEC__" in overview
+
 
     def test_load_non_existent_template_raises(self) -> None:
         with pytest.raises(FileNotFoundError):

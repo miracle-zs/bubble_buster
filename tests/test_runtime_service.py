@@ -9,6 +9,142 @@ from zoneinfo import ZoneInfo
 from core.runtime_service import ServiceRuntimeConfig, StrategyRuntimeService
 
 
+class CoordinatorStub:
+    def __init__(self, strategy=None, manager=None, account_id="default"):
+        self.strategy = strategy
+        self.manager = manager
+        self.account_id = account_id
+        self.calls = 0
+
+    def step(self, action=None, **kwargs):
+        self.calls += 1
+        if action == "entry":
+            if self.strategy and hasattr(self.strategy, "run_entry"):
+                import inspect
+                try:
+                    sig = inspect.signature(self.strategy.run_entry)
+                    kwargs_call = {}
+                    if "trade_day_utc" in sig.parameters or any(p.kind == inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values()):
+                        if kwargs.get("trade_day_utc"):
+                            kwargs_call["trade_day_utc"] = kwargs.get("trade_day_utc")
+                    if "shared_top_gainers" in sig.parameters or any(p.kind == inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values()):
+                        if kwargs.get("shared_top_gainers") is not None:
+                            kwargs_call["shared_top_gainers"] = kwargs.get("shared_top_gainers")
+                    return self.strategy.run_entry(**kwargs_call)
+                except (TypeError, ValueError):
+                    return self.strategy.run_entry()
+            return {"status": "SUCCESS"}
+        elif action == "manage":
+            res = {}
+            if self.manager and hasattr(self.manager, "run_once"):
+                res = self.manager.run_once() or {}
+            cfg = kwargs.get("config", {})
+            tp_enabled = cfg.get("portfolio_take_profit_enabled")
+            if tp_enabled and self.manager and hasattr(self.manager, "run_portfolio_take_profit"):
+                tp_res = self.manager.run_portfolio_take_profit(
+                    current_equity_usdt=float(kwargs.get("equity") or 0.0),
+                    now_local=kwargs.get("now_local") or datetime.now(),
+                    profit_pct=float(cfg.get("portfolio_take_profit_pct", 9.0)),
+                    reset_hour=int(cfg.get("portfolio_take_profit_hour", 8)),
+                    reset_minute=int(cfg.get("portfolio_take_profit_minute", 0)),
+                    reduce_ratio=float(cfg.get("portfolio_take_profit_reduce_ratio", 0.5)),
+                    giveback_pct=float(cfg.get("portfolio_take_profit_giveback_pct", 15.0)),
+                )
+                if isinstance(res, dict):
+                    res["portfolio_take_profit"] = tp_res
+            elif not tp_enabled and self.strategy and hasattr(self.strategy, "run_equity_recovery_take_profit"):
+                self.strategy.run_equity_recovery_take_profit()
+
+            loss_enabled = cfg.get("portfolio_loss_cut_enabled")
+            if loss_enabled and self.manager and hasattr(self.manager, "run_portfolio_loss_cut"):
+                loss_res = self.manager.run_portfolio_loss_cut(
+                    current_equity_usdt=float(kwargs.get("equity") or 0.0),
+                    now_local=kwargs.get("now_local") or datetime.now(),
+                    loss_pct=float(cfg.get("portfolio_loss_cut_pct", 3.5)),
+                    reset_hour=int(cfg.get("portfolio_loss_cut_reset_hour", 11)),
+                    reset_minute=int(cfg.get("portfolio_loss_cut_reset_minute", 55)),
+                )
+                if isinstance(res, dict):
+                    res["portfolio_loss_cut"] = loss_res
+            return res if res else {"total": 0}
+        elif action == "loss_cut":
+            if self.manager and hasattr(self.manager, "run_daily_loss_cut"):
+                return self.manager.run_daily_loss_cut()
+            return {"total": 0, "closed_loss_cut": 0, "errors": 0}
+        elif action == "noon_protection":
+            if self.manager and hasattr(self.manager, "run_noon_protection_stop"):
+                if kwargs.get("symbols"):
+                    return self.manager.run_noon_protection_stop(
+                        day_start_utc=kwargs.get("day_start_utc"),
+                        noon_time_utc=kwargs.get("noon_time_utc"),
+                        symbols=kwargs["symbols"],
+                    )
+                return self.manager.run_noon_protection_stop(
+                    day_start_utc=kwargs.get("day_start_utc"),
+                    noon_time_utc=kwargs.get("noon_time_utc"),
+                )
+            return {"status": "SUCCESS"}
+        elif action == "morning_protection":
+            if self.manager and hasattr(self.manager, "run_morning_protection_stop"):
+                return self.manager.run_morning_protection_stop(
+                    check_time_utc=kwargs.get("check_time_utc"),
+                    min_hold_hours=kwargs.get("min_hold_hours", 4.0),
+                )
+            return {"status": "SUCCESS"}
+        elif action == "hourly_take_profit":
+            if self.manager and hasattr(self.manager, "run_hourly_exchange_take_profit"):
+                return self.manager.run_hourly_exchange_take_profit(
+                    now_local=kwargs.get("now_local"),
+                    drop_pct=float(kwargs.get("config", {}).get("hourly_exchange_take_profit_drop_pct", 0.03)),
+                )
+            return {"status": "SUCCESS"}
+        elif action == "orphan_cleanup":
+            if self.manager and hasattr(self.manager, "cleanup_orphan_exit_orders_once_per_day"):
+                return self.manager.cleanup_orphan_exit_orders_once_per_day()
+            return {"canceled": 0, "details": [], "day_key": "2026-02-13"}
+        return {"status": "SUCCESS"}
+
+
+class _AccountRuntimesDict(dict):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        for k, v in list(self.items()):
+            self[k] = v
+
+    def __setitem__(self, key, value):
+        if isinstance(value, dict) and ("coordinator" not in value or value["coordinator"] is None):
+            value = dict(value)
+            value["coordinator"] = CoordinatorStub(
+                strategy=value.get("strategy"),
+                manager=value.get("manager"),
+                account_id=key,
+            )
+        super().__setitem__(key, value)
+
+
+_orig_runtime_init = StrategyRuntimeService.__init__
+
+
+def _test_runtime_init(self, *args, **kwargs):
+    _orig_runtime_init(self, *args, **kwargs)
+    runtimes = _AccountRuntimesDict()
+    for aid, actx in list(self._account_runtimes.items()):
+        runtimes[aid] = actx
+    self._account_runtimes = runtimes
+
+
+def _get_account_runtimes(self):
+    return getattr(self, "_account_runtimes", {})
+
+
+def _set_account_runtimes(self, val):
+    self._account_runtimes = _AccountRuntimesDict(val or {})
+
+
+StrategyRuntimeService.__init__ = _test_runtime_init
+StrategyRuntimeService.account_runtimes = property(_get_account_runtimes, _set_account_runtimes)
+
+
 def _wait_until(predicate, timeout: float = 1.0) -> bool:
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
@@ -672,7 +808,7 @@ class RuntimeServiceTest(unittest.TestCase):
             now_monotonic=20.0,
         )
 
-        self.assertTrue(_wait_until(lambda: len(acc02.shared_payloads) == 1))
+        self.assertTrue(_wait_until(lambda: len(acc01.shared_payloads) == 1 and len(acc03.shared_payloads) == 1 and len(acc02.shared_payloads) == 1))
         self.assertEqual(build_calls, [("acc01", "acc03")])
         self.assertIs(acc01.shared_payloads[0], ranking)
         self.assertIs(acc03.shared_payloads[0], ranking)

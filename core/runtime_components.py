@@ -13,6 +13,10 @@ from core.position_manager import PositionManager
 from core.runtime_service import ServiceRuntimeConfig
 from core.state_store import StateStore
 from core.strategy_top10_short import Top10ShortStrategy
+from core.decision.kernel import DecisionKernel
+from core.execution.coordinator import AccountCoordinator
+from core.execution.engine import ExecutionEngine
+from core.execution.ledger import TradingLedger
 from infra.binance_futures_client import BinanceFuturesClient
 from infra.binance_rate_limit import get_shared_rate_limit_coordinator
 from infra.binance_top10_monitor import DailyOpenPriceStream
@@ -272,10 +276,38 @@ def _build_single_account_components(
         cashflow_inline=False,
     )
 
+    ledger = TradingLedger(store=scoped_store)
+    engine = ExecutionEngine(
+        client=client,
+        store=scoped_store,
+        account_id=account_id,
+        ledger=ledger,
+    )
+    kernel = DecisionKernel()
+    coordinator = AccountCoordinator(
+        account_id=account_id,
+        store=scoped_store,
+        engine=engine,
+        ledger=ledger,
+        client=client,
+        kernel=kernel,
+        strategy=strategy,
+        manager=manager,
+    )
+    # Ensure all executors route through canonical execution engine
+    if hasattr(manager, "exit_executor") and manager.exit_executor is not None:
+        manager.exit_executor._execution_engine = engine
+    if hasattr(strategy, "exit_executor") and strategy.exit_executor is not None:
+        strategy.exit_executor._execution_engine = engine
+
     return {
         "account_id": account_id,
         "mode": mode,
         "client": client,
+        "ledger": ledger,
+        "engine": engine,
+        "kernel": kernel,
+        "coordinator": coordinator,
         "entry_hour": runtime_cfg.getint("entry_hour", fallback=7),
         "entry_minute": runtime_cfg.getint("entry_minute", fallback=40),
         "entry_initial_delay_sec": max(0, runtime_cfg.getint("entry_initial_delay_sec", fallback=0)),

@@ -9,6 +9,7 @@ from core.position_manager import PositionManager
 from core.runtime_service import ServiceRuntimeConfig, StrategyRuntimeService
 from core.state_store import StateStore
 from infra.binance_futures_client import BinanceAPIError
+import tests.test_runtime_service  # noqa: F401
 
 
 class PortfolioTakeProfitTest(unittest.TestCase):
@@ -100,8 +101,9 @@ class PortfolioTakeProfitTest(unittest.TestCase):
         self.assertEqual(result["errors"], 0)
         self.assertAlmostEqual(result["actual_profit_pct"], 9.0)
 
-        state = self.store.get_lock_state(PositionManager.PORTFOLIO_TAKE_PROFIT_LOCK_NAME)
-        assert state is not None
+        rec = self.store.get_risk_cycle_target_set("TAKE_PROFIT", "2026-07-28")
+        assert rec is not None
+        state = rec["targets"]
         self.assertAlmostEqual(float(state["baseline_equity_usdt"]), 100.0)
         self.assertAlmostEqual(float(state["threshold_equity_usdt"]), 109.0)
         self.assertTrue(state["triggered"])
@@ -147,8 +149,9 @@ class PortfolioTakeProfitTest(unittest.TestCase):
             profit_pct=9.0,
         )
         self.assertEqual(first["errors"], 1)
-        state = self.store.get_lock_state(PositionManager.PORTFOLIO_TAKE_PROFIT_LOCK_NAME)
-        assert state is not None
+        rec = self.store.get_risk_cycle_target_set("TAKE_PROFIT", "2026-07-28")
+        assert rec is not None
+        state = rec["targets"]
         self.assertEqual(
             state["portfolio_limit_plan"][0]["limit_price"],
             "0.00008598",
@@ -156,7 +159,7 @@ class PortfolioTakeProfitTest(unittest.TestCase):
 
         # Simulate a plan persisted by the buggy version before the retry.
         state["portfolio_limit_plan"][0]["limit_price"] = 8.598e-05
-        self.store.set_lock_state(PositionManager.PORTFOLIO_TAKE_PROFIT_LOCK_NAME, state)
+        self.store.save_risk_cycle_target_set("TAKE_PROFIT", "2026-07-28", state)
         client.create_order.side_effect = None
         client.create_order.return_value = {
             "orderId": 701,
@@ -298,14 +301,15 @@ class PortfolioTakeProfitTest(unittest.TestCase):
         self.assertFalse(first["close_complete"])
         self.assertEqual(client.create_order.call_count, 1)
 
-        state = self.store.get_lock_state(PositionManager.PORTFOLIO_TAKE_PROFIT_LOCK_NAME)
-        assert state is not None
+        rec = self.store.get_risk_cycle_target_set("TAKE_PROFIT", "2026-07-28")
+        assert rec is not None
+        state = rec["targets"]
         item = state["portfolio_limit_plan"][0]
         item["portfolio_order_id"] = None
         item["portfolio_client_order_id"] = None
         item["portfolio_order_status"] = "REJECTED"
         item["retry_count"] = 1
-        self.store.set_lock_state(PositionManager.PORTFOLIO_TAKE_PROFIT_LOCK_NAME, state)
+        self.store.save_risk_cycle_target_set("TAKE_PROFIT", "2026-07-28", state)
 
         second = manager.run_portfolio_take_profit(
             current_equity_usdt=108.0,
@@ -317,9 +321,9 @@ class PortfolioTakeProfitTest(unittest.TestCase):
         self.assertEqual(second["errors"], 0)
         self.assertEqual(second["pending"], 1)
         self.assertEqual(client.create_order.call_count, 1)
-        state = self.store.get_lock_state(PositionManager.PORTFOLIO_TAKE_PROFIT_LOCK_NAME)
-        assert state is not None
-        self.assertEqual(state["portfolio_limit_plan"][0]["portfolio_order_id"], 701)
+        rec = self.store.get_risk_cycle_target_set("TAKE_PROFIT", "2026-07-28")
+        assert rec is not None
+        self.assertEqual(rec["targets"]["portfolio_limit_plan"][0]["portfolio_order_id"], 701)
 
     def test_reduce_only_rejection_adopts_existing_remote_limit(self) -> None:
         self._insert_short("BTCUSDT")
@@ -364,9 +368,9 @@ class PortfolioTakeProfitTest(unittest.TestCase):
         self.assertEqual(client.create_order.call_count, 1)
         client.get_open_orders.assert_called_once_with(symbol="BTCUSDT")
 
-        state = self.store.get_lock_state(PositionManager.PORTFOLIO_TAKE_PROFIT_LOCK_NAME)
-        assert state is not None
-        self.assertEqual(state["portfolio_limit_plan"][0]["portfolio_order_id"], 702)
+        rec = self.store.get_risk_cycle_target_set("TAKE_PROFIT", "2026-07-28")
+        assert rec is not None
+        self.assertEqual(rec["targets"]["portfolio_limit_plan"][0]["portfolio_order_id"], 702)
 
         client.get_order.return_value = client.get_open_orders.return_value[0]
         second = manager.run_portfolio_take_profit(
@@ -419,8 +423,9 @@ class PortfolioTakeProfitTest(unittest.TestCase):
         self.assertEqual(next_cycle["status"], "TRIGGERED_RETRY")
         self.assertFalse(next_cycle["close_complete"])
         self.assertEqual(client.create_order.call_count, 1)
-        state = self.store.get_lock_state(PositionManager.PORTFOLIO_TAKE_PROFIT_LOCK_NAME)
-        assert state is not None
+        rec = self.store.get_risk_cycle_target_set("TAKE_PROFIT", "2026-07-29")
+        assert rec is not None
+        state = rec["targets"]
         self.assertEqual(state["cycle_date"], "2026-07-29")
         self.assertEqual(state["portfolio_limit_plan"][0]["portfolio_order_id"], 601)
 

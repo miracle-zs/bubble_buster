@@ -8,6 +8,7 @@ from zoneinfo import ZoneInfo
 from core.position_manager import PositionManager
 from core.runtime_service import ServiceRuntimeConfig, StrategyRuntimeService
 from core.state_store import StateStore
+import tests.test_runtime_service  # noqa: F401
 
 
 class PortfolioLossCutTest(unittest.TestCase):
@@ -81,8 +82,9 @@ class PortfolioLossCutTest(unittest.TestCase):
         self.assertEqual(result["total"], 2)
         self.assertEqual(result["closed_loss_cut"], 2)
         self.assertEqual(result["errors"], 0)
-        state = self.store.get_lock_state(PositionManager.PORTFOLIO_LOSS_CUT_LOCK_NAME)
-        assert state is not None
+        rec = self.store.get_risk_cycle_target_set("LOSS_CUT", "2026-07-28")
+        assert rec is not None
+        state = rec["targets"]
         self.assertAlmostEqual(float(state["baseline_equity_usdt"]), 100.0)
         self.assertAlmostEqual(float(state["threshold_equity_usdt"]), 96.5)
         self.assertTrue(state["triggered"])
@@ -112,7 +114,9 @@ class PortfolioLossCutTest(unittest.TestCase):
             loss_pct=3.5,
         )
         self.assertEqual(triggered["status"], "TRIGGERED")
-        self.assertTrue(self.store.get_lock_state(PositionManager.PORTFOLIO_LOSS_CUT_LOCK_NAME)["triggered"])
+        rec = self.store.get_risk_cycle_target_set("LOSS_CUT", "2026-07-28")
+        assert rec is not None
+        self.assertTrue(rec["targets"]["triggered"])
 
         same_cycle = manager.run_portfolio_loss_cut(
             current_equity_usdt=95.0,

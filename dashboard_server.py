@@ -18,7 +18,7 @@ from zoneinfo import ZoneInfo
 
 from core.state_store import SQLITE_BUSY_TIMEOUT_MS
 from core.task_status import format_task_status, task_status_template
-from core.template_loader import load_template
+from web.template_loader import load_template
 
 LOGGER = logging.getLogger(__name__)
 

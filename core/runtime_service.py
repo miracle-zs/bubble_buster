@@ -83,10 +83,12 @@ class StrategyRuntimeService:
         now_monotonic: Optional[float] = None,
         account_runtimes: Optional[Dict[str, Dict[str, object]]] = None,
         max_account_workers: Optional[int] = None,
+        coordinator: Optional[Any] = None,
     ):
         self.strategy = strategy
         self.manager = manager
         self.balance_sampler = balance_sampler
+        self.coordinator = coordinator
         self.cfg = cfg
         self.max_account_workers = max(
             1,
@@ -99,6 +101,7 @@ class StrategyRuntimeService:
                 "strategy": strategy,
                 "manager": manager,
                 "balance_sampler": balance_sampler,
+                "coordinator": coordinator,
             }
         }
         self.account_states: Dict[str, AccountRuntimeState] = {
@@ -437,10 +440,15 @@ class StrategyRuntimeService:
             if self._entry_retry_blocked(aid, now_local.date(), now_monotonic=now_monotonic):
                 continue
             strategy = self.account_runtimes[aid].get("strategy")
+            coord = self.account_runtimes[aid].get("coordinator")
             has_pending_wait = bool(
                 strategy is not None
                 and hasattr(strategy, "has_pending_entry_wait")
                 and strategy.has_pending_entry_wait()  # type: ignore[attr-defined]
+            ) or bool(
+                coord is not None
+                and hasattr(coord, "check_entry_plan_wakeups")
+                and coord.check_entry_plan_wakeups() is not None
             )
             pending_wait_by_account[aid] = has_pending_wait
             if has_pending_wait or self._should_run_entry(aid, now_local):
@@ -477,6 +485,12 @@ class StrategyRuntimeService:
         submitted: List[str] = []
         for aid in due_account_ids:
             strategy = self.account_runtimes[aid].get("strategy")
+            coord = self.account_runtimes[aid].get("coordinator")
+            if coord is not None and hasattr(coord, "recover_unknown_attempts"):
+                try:
+                    coord.recover_unknown_attempts()
+                except Exception as exc:
+                    LOGGER.warning("service pre-entry unknown recovery failed account=%s: %s", aid, exc)
             if strategy is None:
                 LOGGER.warning("service entry skipped account=%s: strategy_missing", aid)
                 continue
@@ -490,6 +504,7 @@ class StrategyRuntimeService:
                 strategy,
                 shared_top_gainers,
                 trade_day,
+                coord,
             )
             self._entry_futures[future] = aid
             self._entry_future_trade_day_by_future[future] = trade_day
@@ -528,25 +543,16 @@ class StrategyRuntimeService:
         strategy: object,
         shared_top_gainers: Optional[List[Dict[str, Any]]],
         trade_day: date,
+        coordinator: Optional[Any] = None,
     ) -> Dict[str, object]:
-        run_entry = getattr(strategy, "run_entry", None)
-        if run_entry is None:
-            raise RuntimeError("strategy_missing")
-        kwargs: Dict[str, object] = {}
-        try:
-            parameters = inspect.signature(run_entry).parameters
-            accepts_kwargs = any(parameter.kind == inspect.Parameter.VAR_KEYWORD for parameter in parameters.values())
-            if "trade_day_utc" in parameters or accepts_kwargs:
-                kwargs["trade_day_utc"] = trade_day.isoformat()
-            if shared_top_gainers is not None:
-                kwargs["shared_top_gainers"] = shared_top_gainers
-        except (TypeError, ValueError):
-            # Builtin/mock callables may not expose a signature; actual strategies
-            # accept both keywords, so keep the complete call as the fallback.
-            kwargs = {"trade_day_utc": trade_day.isoformat()}
-            if shared_top_gainers is not None:
-                kwargs["shared_top_gainers"] = shared_top_gainers
-        return run_entry(**kwargs)  # type: ignore[misc]
+        if coordinator is None or not hasattr(coordinator, "step"):
+            raise RuntimeError("AccountCoordinator is required for entry execution")
+        return coordinator.step(
+            action="entry",
+            trade_day_utc=trade_day.isoformat(),
+            shared_top_gainers=shared_top_gainers,
+            strategy=strategy,
+        )
 
     def _build_shared_top_gainers(self, account_ids: List[str]) -> Optional[List[Dict[str, Any]]]:
         if len(account_ids) <= 1:
@@ -813,11 +819,11 @@ class StrategyRuntimeService:
         results: Dict[str, object] = {}
         calls: Dict[str, Callable[[], object]] = {}
         for aid in account_ids:
-            manager = self.account_runtimes[aid].get("manager")
-            if manager is None or not hasattr(manager, "run_daily_loss_cut"):
-                results[aid] = {"error": "manager_missing"}
-            else:
-                calls[aid] = manager.run_daily_loss_cut  # type: ignore[attr-defined]
+            actx = self.account_runtimes[aid]
+            coord = actx.get("coordinator")
+            if coord is None or not hasattr(coord, "step"):
+                raise RuntimeError(f"AccountCoordinator is required for account={aid} daily loss-cut")
+            calls[aid] = lambda c=coord, ctx=actx: c.step(action="loss_cut", config=ctx)
         results.update(self._run_account_task_calls(calls, "daily-loss-cut", task_day=today))
         for aid, res in results.items():
             self._record_task_execution(
@@ -900,26 +906,30 @@ class StrategyRuntimeService:
         results: Dict[str, object] = {}
         calls: Dict[str, Callable[[], object]] = {}
         for aid in account_ids:
-            manager = self.account_runtimes[aid].get("manager")
-            if manager is None or not hasattr(manager, "run_noon_protection_stop"):
-                results[aid] = {"error": "manager_missing"}
-            else:
-                retry_symbols = (
-                    self._noon_protection_pending_symbols_by_account.get(aid)
-                    if is_retry
-                    else None
+            actx = self.account_runtimes[aid]
+            coord = actx.get("coordinator")
+            retry_symbols = (
+                self._noon_protection_pending_symbols_by_account.get(aid)
+                if is_retry
+                else None
+            )
+            if coord is None or not hasattr(coord, "step"):
+                raise RuntimeError(f"AccountCoordinator is required for account={aid} noon protection")
+            if is_retry and retry_symbols:
+                calls[aid] = lambda c=coord, actx=actx, retry_symbols=frozenset(retry_symbols): c.step(
+                    action="noon_protection",
+                    day_start_utc=day_start_utc,
+                    noon_time_utc=noon_time_utc,
+                    symbols=set(retry_symbols),
+                    config=actx,
                 )
-                if is_retry and retry_symbols:
-                    calls[aid] = lambda manager=manager, retry_symbols=frozenset(retry_symbols): manager.run_noon_protection_stop(  # type: ignore[attr-defined]
-                        day_start_utc=day_start_utc,
-                        noon_time_utc=noon_time_utc,
-                        symbols=set(retry_symbols),
-                    )
-                else:
-                    calls[aid] = lambda manager=manager: manager.run_noon_protection_stop(  # type: ignore[attr-defined]
-                        day_start_utc=day_start_utc,
-                        noon_time_utc=noon_time_utc,
-                    )
+            else:
+                calls[aid] = lambda c=coord, actx=actx: c.step(
+                    action="noon_protection",
+                    day_start_utc=day_start_utc,
+                    noon_time_utc=noon_time_utc,
+                    config=actx,
+                )
         results.update(self._run_account_task_calls(calls, "noon-protection", task_day=today))
         for aid, res in results.items():
             self._record_task_execution(
@@ -1018,23 +1028,23 @@ class StrategyRuntimeService:
                 self._last_morning_protection_local_date_by_account[aid] = today
                 continue
 
-            manager = ctx.get("manager")
-            if manager is None or not hasattr(manager, "run_morning_protection_stop"):
-                results[aid] = {"error": "manager_missing"}
-                continue
-
+            coord = ctx.get("coordinator")
             min_hold_hours = float(
                 ctx.get(
                     "morning_protection_min_hold_hours",
                     self.cfg.morning_protection_min_hold_hours,
                 )
             )
+            if coord is None or not hasattr(coord, "step"):
+                raise RuntimeError(f"AccountCoordinator is required for account={aid} morning protection")
             try:
-                results[aid] = manager.run_morning_protection_stop(  # type: ignore[attr-defined]
+                results[aid] = coord.step(
+                    action="morning_protection",
                     check_time_utc=target.astimezone(timezone.utc),
                     min_hold_hours=min_hold_hours,
+                    config=ctx,
                 )
-            except Exception as exc:  # noqa: BLE001
+            except Exception as exc:
                 results[aid] = {"error": str(exc)}
             if self._account_task_succeeded(results[aid]):
                 self._last_morning_protection_local_date_by_account[aid] = today
@@ -1080,23 +1090,22 @@ class StrategyRuntimeService:
             if self._last_hourly_exchange_take_profit_hour_by_account.get(aid) == hour_key:
                 continue
 
-            manager = ctx.get("manager")
-            if manager is None or not hasattr(manager, "run_hourly_exchange_take_profit"):
-                results[aid] = {"error": "manager_missing"}
-                continue
-
+            coord = ctx.get("coordinator")
             drop_pct = float(
                 ctx.get(
                     "hourly_exchange_take_profit_drop_pct",
                     self.cfg.hourly_exchange_take_profit_drop_pct,
                 )
             )
+            if coord is None or not hasattr(coord, "step"):
+                raise RuntimeError(f"AccountCoordinator is required for account={aid} hourly take profit")
             try:
-                results[aid] = manager.run_hourly_exchange_take_profit(  # type: ignore[attr-defined]
+                results[aid] = coord.step(
+                    action="hourly_take_profit",
                     now_local=now_local,
-                    drop_pct=drop_pct,
+                    config=ctx,
                 )
-            except Exception as exc:  # noqa: BLE001
+            except Exception as exc:
                 results[aid] = {"error": str(exc)}
             if self._account_task_succeeded(results[aid]):
                 self._last_hourly_exchange_take_profit_hour_by_account[aid] = hour_key
@@ -1185,8 +1194,6 @@ class StrategyRuntimeService:
             if isinstance(pending_recovery, dict) and int(pending_recovery.get("total", 0)) > 0:
                 LOGGER.warning("service pending exit setup recovery account=%s: %s", account_id, pending_recovery)
 
-        run_manager = manager.run_once  # type: ignore[attr-defined]
-        summary = self._call_with_optional_account_snapshot(run_manager, account_snapshot)
         if balance_sampler is not None:
             try:
                 sampled = self._call_with_optional_account_snapshot(
@@ -1207,102 +1214,34 @@ class StrategyRuntimeService:
             reduce_ratio,
             giveback_pct,
         ) = self._portfolio_take_profit_settings(account_id)
-        if take_profit_enabled and hasattr(manager, "run_portfolio_take_profit"):
-            equity = wallet_summary.get("equity") if wallet_summary is not None else None
-            if equity is None:
-                portfolio_take_profit_result = {
-                    "status": "SKIPPED",
-                    "reason": "NO_CURRENT_EQUITY_SNAPSHOT",
-                }
-            else:
-                try:
-                    result = manager.run_portfolio_take_profit(  # type: ignore[attr-defined]
-                        current_equity_usdt=float(equity),
-                        now_local=local_dt,
-                        profit_pct=profit_pct,
-                        reset_hour=take_profit_hour,
-                        reset_minute=take_profit_minute,
-                        reduce_ratio=reduce_ratio,
-                        giveback_pct=giveback_pct,
-                    )
-                    if isinstance(result, dict):
-                        portfolio_take_profit_result = result
-                        if str(result.get("status") or "").upper() in {"TRIGGERED", "TRIGGERED_RETRY"}:
-                            LOGGER.warning(
-                                "service portfolio take-profit account=%s result=%s",
-                                account_id,
-                                result,
-                            )
-                            self._record_task_execution(
-                                account_id=account_id,
-                                task_name="equity_recovery_take_profit",
-                                payload=result,
-                                task_cycle=local_dt.date().isoformat(),
-                            )
-                except Exception as exc:  # noqa: BLE001
-                    portfolio_take_profit_result = {"status": "ERROR", "error": str(exc)}
-                    LOGGER.exception("service portfolio take-profit failed account=%s: %s", account_id, exc)
-                    self._record_task_execution(
-                        account_id=account_id,
-                        task_name="equity_recovery_take_profit",
-                        payload=portfolio_take_profit_result,
-                        error=str(exc),
-                        task_cycle=local_dt.date().isoformat(),
-                    )
-
         enabled, loss_pct, reset_hour, reset_minute = self._portfolio_loss_cut_settings(account_id)
-        if enabled and hasattr(manager, "run_portfolio_loss_cut"):
-            equity = wallet_summary.get("equity") if wallet_summary is not None else None
-            if equity is None:
-                portfolio_result = {"status": "SKIPPED", "reason": "NO_CURRENT_EQUITY_SNAPSHOT"}
-            else:
-                try:
-                    result = manager.run_portfolio_loss_cut(  # type: ignore[attr-defined]
-                        current_equity_usdt=float(equity),
-                        now_local=local_dt,
-                        loss_pct=loss_pct,
-                        reset_hour=reset_hour,
-                        reset_minute=reset_minute,
-                    )
-                    if isinstance(result, dict):
-                        portfolio_result = result
-                        if bool(result.get("triggered")):
-                            LOGGER.warning(
-                                "service portfolio loss-cut account=%s result=%s",
-                                account_id,
-                                result,
-                            )
-                except Exception as exc:  # noqa: BLE001
-                    portfolio_result = {"status": "ERROR", "error": str(exc)}
-                    LOGGER.exception("service portfolio loss-cut failed account=%s: %s", account_id, exc)
 
-        # The fixed daily-baseline rule replaces the legacy rolling-low
-        # recovery rule for an account; never let both exit engines act on the
-        # same positions in one manage cycle.
-        if (
-            not take_profit_enabled
-            and strategy is not None
-            and hasattr(strategy, "run_equity_recovery_take_profit")
-        ):
-            try:
-                result = strategy.run_equity_recovery_take_profit()  # type: ignore[attr-defined]
-                if isinstance(result, dict) and result.get("status") in {"TRIGGERED", "PARTIAL"}:
-                    LOGGER.info("service equity recovery take-profit account=%s result: %s", account_id, result)
-                    self._record_task_execution(
-                        account_id=account_id,
-                        task_name="equity_recovery_take_profit",
-                        payload=result,
-                        task_cycle=local_dt.date().isoformat(),
-                    )
-            except Exception as exc:  # noqa: BLE001
-                LOGGER.warning("service equity recovery take-profit failed account=%s: %s", account_id, exc)
-                self._record_task_execution(
-                    account_id=account_id,
-                    task_name="equity_recovery_take_profit",
-                    payload={"status": "FAILED", "error": str(exc)},
-                    error=str(exc),
-                    task_cycle=local_dt.date().isoformat(),
-                )
+        coord = ctx.get("coordinator")
+        if coord is None or not hasattr(coord, "step"):
+            raise RuntimeError(f"AccountCoordinator is required for account={account_id} position management")
+        bal = wallet_summary.get("wallet_balance") if wallet_summary else None
+        eq = wallet_summary.get("equity") if wallet_summary else None
+        coord_cfg = dict(ctx)
+        coord_cfg.update({
+            "portfolio_take_profit_enabled": take_profit_enabled,
+            "portfolio_take_profit_pct": profit_pct,
+            "portfolio_take_profit_reduce_ratio": reduce_ratio,
+            "portfolio_take_profit_giveback_pct": giveback_pct,
+            "portfolio_loss_cut_enabled": enabled,
+            "portfolio_loss_cut_pct": loss_pct,
+        })
+        summary = coord.step(
+            action="manage",
+            now_local=local_dt,
+            wallet_balance=float(bal) if bal is not None else None,
+            equity=float(eq) if eq is not None else None,
+            config=coord_cfg,
+        )
+        if isinstance(summary, dict):
+            if "portfolio_take_profit" in summary:
+                portfolio_take_profit_result = summary["portfolio_take_profit"]
+            if "portfolio_loss_cut" in summary:
+                portfolio_result = summary["portfolio_loss_cut"]
 
         return {
             "account_id": account_id,
@@ -1454,12 +1393,11 @@ class StrategyRuntimeService:
         for aid, ctx in self.account_runtimes.items():
             if str(ctx.get("mode", "full")).strip().lower() != "full":
                 continue
-            manager = ctx.get("manager")
-            if manager is None or not hasattr(manager, "cleanup_orphan_exit_orders_once_per_day"):
-                results[aid] = {"account_id": aid, "error": "MANAGER_UNAVAILABLE"}
-                continue
+            coord = ctx.get("coordinator")
+            if coord is None or not hasattr(coord, "step"):
+                raise RuntimeError(f"AccountCoordinator is required for account={aid} orphan cleanup")
             try:
-                results[aid] = manager.cleanup_orphan_exit_orders_once_per_day()  # type: ignore[attr-defined]
+                results[aid] = coord.step(action="orphan_cleanup", config=ctx)
             except Exception as exc:  # noqa: BLE001
                 LOGGER.exception("service orphan exit order cleanup failed account=%s: %s", aid, exc)
                 results[aid] = {"account_id": aid, "error": str(exc)}
