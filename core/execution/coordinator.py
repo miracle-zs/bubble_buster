@@ -11,6 +11,7 @@ Implements Phase D requirements:
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
 import logging
 import time
 import uuid
@@ -162,8 +163,64 @@ class AccountCoordinator:
         positions_map: Dict[str, Dict[str, Any]] = {}
         total_unrealized_pnl = 0.0
 
+        exchange_positions: Dict[str, float] = {}
+        if self.client is not None and hasattr(self.client, "get_position_risk") and open_positions_raw:
+            try:
+                risk_rows = self.client.get_position_risk()
+                for r in (risk_rows or []):
+                    s = str(r.get("symbol") or "").upper()
+                    amt = float(r.get("positionAmt", "0") or 0.0)
+                    if s:
+                        exchange_positions[s] = exchange_positions.get(s, 0.0) + amt
+            except Exception as exc:
+                LOGGER.warning("AccountCoordinator: failed to fetch position risk for reconciliation: %s", exc)
+                exchange_positions = {}
+
         for pos in open_positions_raw:
             sym = str(pos["symbol"])
+            pos_id = pos.get("id")
+
+            # If exchange_positions was successfully fetched, verify symbol has open position on exchange
+            if exchange_positions and sym in exchange_positions:
+                ex_amt = exchange_positions[sym]
+                opened_at = pos.get("opened_at_utc")
+                is_recent = False
+                if opened_at:
+                    try:
+                        opened_dt = datetime.fromisoformat(str(opened_at).replace("Z", "+00:00"))
+                        now_dt = datetime.now(timezone.utc)
+                        if (now_dt - opened_dt).total_seconds() < 60:
+                            is_recent = True
+                    except Exception:
+                        pass
+                if abs(ex_amt) < 1e-8 and not is_recent:
+                    LOGGER.info(
+                        "AccountCoordinator: position %s (%s) is already flat on exchange (amt=%.4f). Marking closed locally.",
+                        pos_id,
+                        sym,
+                        ex_amt,
+                    )
+                    if pos_id is not None:
+                        self.store.mark_position_closed(
+                            position_id=int(pos_id),
+                            status="CLOSED_EXTERNAL",
+                            close_reason="EXCHANGE_POSITION_FLAT",
+                        )
+                    for old_oid, old_cid in [
+                        (pos.get("sl_order_id"), pos.get("sl_client_order_id")),
+                        (pos.get("tp_order_id"), pos.get("tp_client_order_id")),
+                    ]:
+                        if old_oid or old_cid:
+                            try:
+                                self.engine.cancel_order(
+                                    symbol=sym,
+                                    order_id=old_oid,
+                                    client_order_id=old_cid,
+                                    reason="EXCHANGE_POSITION_FLAT_CLEANUP",
+                                )
+                            except Exception:
+                                pass
+                    continue
             positions_map[sym] = {
                 "id": pos.get("id"),
                 "symbol": sym,
@@ -506,7 +563,10 @@ class AccountCoordinator:
                         account_view=account_view,
                     )
                 else:
-                    attempt = self.engine.submit_intent(intent)
+                    attempt = self.engine.submit_intent(
+                        intent,
+                        reduce_only=(intent.intent_scope in {"EXIT", "PROTECTION"}),
+                    )
                     submitted_attempts.append(attempt)
             except Exception as exc:
                 LOGGER.error(
@@ -703,6 +763,9 @@ class AccountCoordinator:
                         except Exception as exc:
                             LOGGER.warning("AccountCoordinator: failed to fetch noon klines for %s: %s", sym, exc)
 
+            for sym, p in noon_prices.items():
+                noon_cfg[f"noon_ref_price_{sym}"] = p
+
             market_view = self.build_market_view(
                 prices=noon_prices,
                 top_gainers=top_gainers,
@@ -744,8 +807,24 @@ class AccountCoordinator:
                 wallet_balance=wallet_balance,
                 equity=equity,
             )
+
+            morning_prices = dict(prices or {})
+            if self.client is not None and hasattr(self.client, "get_klines"):
+                for sym in account_view.positions:
+                    if sym not in morning_prices:
+                        try:
+                            klines = self.client.get_klines(sym, "1h", limit=12)
+                            if klines:
+                                highs = [float(k.get("high") if isinstance(k, dict) else k[2]) for k in klines]
+                                morning_prices[sym] = max(highs)
+                        except Exception as exc:
+                            LOGGER.warning("AccountCoordinator: failed to fetch morning klines for %s: %s", sym, exc)
+
+            for sym, p in morning_prices.items():
+                morning_cfg[f"morning_ref_price_{sym}"] = p
+
             market_view = self.build_market_view(
-                prices=prices,
+                prices=morning_prices,
                 top_gainers=top_gainers,
                 open_symbols=set(account_view.positions.keys()),
             )

@@ -480,4 +480,79 @@ class ExecutionEngineTest(unittest.TestCase):
         self.assertNotIn("龙虾", call_kwargs["newClientOrderId"])
         self.assertNotIn("price", call_kwargs)
 
+    def test_submit_intent_enforces_reduce_only_on_exit(self) -> None:
+        self.client.create_order.return_value = {
+            "orderId": 7001,
+            "status": "FILLED",
+            "executedQty": "100.0",
+            "avgPrice": "1.5",
+        }
+
+        intent = OrderIntent(
+            intent_id="intent-exit-reduce",
+            account_id="acc_exec",
+            client_intent_key="exit-pos-reduce",
+            symbol="RESOLVUSDT",
+            side="BUY",
+            order_type="MARKET",
+            target_qty=100.0,
+            intent_scope="EXIT",
+            position_id=123,
+        )
+
+        # Call submit_intent without passing reduce_only=True
+        attempt = self.engine.submit_intent(intent)
+        self.assertEqual(attempt.status, AttemptStatus.FILLED.value)
+
+        # Assert reduceOnly was forced to True in create_order call
+        self.client.create_order.assert_called_once()
+        call_kwargs = self.client.create_order.call_args.kwargs
+        self.assertTrue(call_kwargs.get("reduceOnly"))
+
+    def test_submit_intent_handles_binance_2022_as_already_flat(self) -> None:
+        self.client.create_order.side_effect = BinanceAPIError(-2022, "ReduceOnly Order is rejected.")
+
+        # Seed a position in database
+        with self.store._connect_ctx() as conn:
+            conn.execute(
+                """
+                INSERT INTO runs (run_id, account_id, trade_day_utc, started_at_utc, status)
+                VALUES ('run-1', 'acc_exec', '2026-10-01', '2026-10-01T00:00:00Z', 'COMPLETED')
+                """
+            )
+            conn.execute(
+                """
+                INSERT INTO positions (id, run_id, symbol, side, status, qty, entry_price, opened_at_utc, expire_at_utc, created_at_utc, updated_at_utc)
+                VALUES (8040, 'run-1', 'RESOLVUSDT', 'SHORT', 'OPEN', 1222.0, 0.0218, '2026-10-01T00:00:00Z', '2026-10-02T00:00:00Z', '2026-10-01T00:00:00Z', '2026-10-01T00:00:00Z')
+                """
+            )
+
+        intent = OrderIntent(
+            intent_id="intent-exit-2022",
+            account_id="acc_exec",
+            client_intent_key="exit-pos-2022",
+            symbol="RESOLVUSDT",
+            side="BUY",
+            order_type="MARKET",
+            target_qty=1222.0,
+            intent_scope="EXIT",
+            position_id=8040,
+            reason="STOP_LOSS",
+        )
+
+        # submit_intent should catch -2022 and reconcile locally as flat
+        attempt = self.engine.submit_intent(intent, raise_on_error=True)
+
+        self.assertEqual(attempt.status, AttemptStatus.FILLED.value)
+        self.assertEqual(attempt.executed_qty, 0.0)
+
+        # Intent should be COMPLETED
+        saved_intent = self.store.get_order_intent("intent-exit-2022")
+        self.assertEqual(saved_intent["status"], IntentStatus.COMPLETED.value)
+
+        # Position should be closed locally
+        pos = self.store.get_position(8040)
+        self.assertEqual(pos["status"], "CLOSED_EXTERNAL")
+        self.assertEqual(pos["close_reason"], "EXCHANGE_ALREADY_FLAT")
+
 

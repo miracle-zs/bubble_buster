@@ -554,6 +554,46 @@ class TestAccountCoordinator(unittest.TestCase):
         state = self.store.get_protection_policy_state("ORPHAN_CLEANUP")
         self.assertIsNotNone(state)
 
+    def test_build_account_view_reconciles_flat_exchange_position(self):
+        """When exchange position risk shows amt == 0 for an open position, it is marked CLOSED_EXTERNAL."""
+        run_id, _ = self.store.create_run("2026-10-05_flat", account_id=self.store.account_id)
+        pos_id = self.store.insert_position(
+            run_id=run_id,
+            symbol="RESOLVUSDT",
+            side="SHORT",
+            qty=1222.0,
+            entry_price=0.0218,
+            liq_price_open=None,
+            tp_price=None,
+            sl_price=0.0215,
+            tp_order_id=None,
+            sl_order_id=99901,
+            tp_client_order_id=None,
+            sl_client_order_id="sl_cid_1",
+            opened_at_utc="2026-10-01T00:00:00Z",
+            expire_at_utc="2026-10-02T00:00:00Z",
+            status="OPEN",
+        )
+
+        # Exchange says positionAmt is 0.0
+        self.client.get_position_risk.return_value = [
+            {"symbol": "RESOLVUSDT", "positionAmt": "0.0"}
+        ]
+        self.client.cancel_order.return_value = {"orderId": 99901, "status": "CANCELED"}
+
+        acct_view = self.coordinator.build_account_view()
+
+        # Position should not be in active account view
+        self.assertNotIn("RESOLVUSDT", acct_view.positions)
+
+        # Position in DB should be marked CLOSED_EXTERNAL
+        pos = self.store.get_position(pos_id)
+        self.assertEqual(pos["status"], "CLOSED_EXTERNAL")
+        self.assertEqual(pos["close_reason"], "EXCHANGE_POSITION_FLAT")
+
+        # Orphan order was canceled
+        self.client.cancel_order.assert_called_once()
+
 
 if __name__ == "__main__":
     unittest.main()

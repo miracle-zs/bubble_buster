@@ -222,6 +222,9 @@ class ExecutionEngine:
         order_resp: Optional[Any] = None
         submission_error: Optional[Exception] = None
 
+        if intent.intent_scope in {"EXIT", "PROTECTION"}:
+            reduce_only = True
+
         try:
             order_params: Dict[str, Any] = {
                 "symbol": intent.symbol,
@@ -286,17 +289,31 @@ class ExecutionEngine:
             attempt.error_message = str(exc)
 
         except BinanceAPIError as exc:
-            LOGGER.warning(
-                "Order rejected account=%s symbol=%s cid=%s code=%s: %s",
-                self.store.account_id,
-                intent.symbol,
-                attempt.client_order_id,
-                getattr(exc, "code", None),
-                exc,
-            )
-            submission_error = exc
-            attempt.status = AttemptStatus.REJECTED.value
-            attempt.error_message = str(exc)
+            err_code = getattr(exc, "code", None)
+            err_msg = str(getattr(exc, "message", "") or exc)
+            if (err_code == -2022 or "ReduceOnly Order is rejected" in err_msg) and intent.intent_scope in {"EXIT", "PROTECTION"}:
+                LOGGER.info(
+                    "Order rejected with -2022 (ReduceOnly) account=%s symbol=%s cid=%s: position already flat on exchange",
+                    self.store.account_id,
+                    intent.symbol,
+                    attempt.client_order_id,
+                )
+                attempt.status = AttemptStatus.FILLED.value
+                attempt.error_message = None
+                attempt.executed_qty = 0.0
+                submission_error = None
+            else:
+                LOGGER.warning(
+                    "Order rejected account=%s symbol=%s cid=%s code=%s: %s",
+                    self.store.account_id,
+                    intent.symbol,
+                    attempt.client_order_id,
+                    err_code,
+                    exc,
+                )
+                submission_error = exc
+                attempt.status = AttemptStatus.REJECTED.value
+                attempt.error_message = str(exc)
 
         except Exception as exc:
             LOGGER.error(
@@ -379,7 +396,9 @@ class ExecutionEngine:
                 self._record_execution_fills(attempt=attempt, intent=intent, order_resp=order_resp)
 
             # Synchronize PositionEpisode
-            if attempt.executed_qty > 0:
+            if attempt.executed_qty > 0 or (
+                attempt.status == AttemptStatus.FILLED.value and intent.intent_scope in {"EXIT", "PROTECTION"}
+            ):
                 self._sync_position_episode(intent=intent, attempt=attempt)
 
         if submission_error is not None and attempt.status == AttemptStatus.UNKNOWN.value:
@@ -447,66 +466,82 @@ class ExecutionEngine:
             ep = self.store.get_active_position_episode(intent.symbol)
             if ep:
                 episode_id = ep.get("episode_id")
-        if not episode_id:
-            if intent.intent_scope == "ENTRY":
-                episode_id = str(uuid.uuid4())
-                intent.episode_id = episode_id
-                self.store.update_order_intent_episode_id(intent.intent_id, episode_id)
-            else:
-                return
+        if not episode_id and intent.position_id:
+            try:
+                pos = self.store.get_position(int(intent.position_id))
+                if pos and pos.get("episode_id"):
+                    episode_id = pos.get("episode_id")
+            except Exception:
+                pass
 
-        episode = self.store.get_position_episode(episode_id)
-        if intent.intent_scope == "ENTRY":
-            if isinstance(episode, dict):
-                prev_qty = float(episode.get("current_qty") or 0.0)
-                new_qty = prev_qty + attempt.executed_qty
-                target_qty = (episode.get("target_qty") or 0.0) + (intent.target_qty or attempt.executed_qty)
-                self.store.save_position_episode(
-                    episode_id=episode_id,
-                    symbol=intent.symbol,
-                    position_side=episode.get("position_side", "SHORT"),
-                    status=EpisodeStatus.OPEN.value,
-                    target_qty=target_qty,
-                    current_qty=new_qty,
-                )
+        if not episode_id and intent.intent_scope == "ENTRY":
+            episode_id = str(uuid.uuid4())
+            intent.episode_id = episode_id
+            self.store.update_order_intent_episode_id(intent.intent_id, episode_id)
+
+        if episode_id:
+            episode = self.store.get_position_episode(episode_id)
+            if intent.intent_scope == "ENTRY":
+                if isinstance(episode, dict):
+                    prev_qty = float(episode.get("current_qty") or 0.0)
+                    new_qty = prev_qty + attempt.executed_qty
+                    target_qty = (episode.get("target_qty") or 0.0) + (intent.target_qty or attempt.executed_qty)
+                    self.store.save_position_episode(
+                        episode_id=episode_id,
+                        symbol=intent.symbol,
+                        position_side=episode.get("position_side", "SHORT"),
+                        status=EpisodeStatus.OPEN.value,
+                        target_qty=target_qty,
+                        current_qty=new_qty,
+                    )
+                else:
+                    self.store.save_position_episode(
+                        episode_id=episode_id,
+                        symbol=intent.symbol,
+                        position_side="SHORT" if intent.side == "SELL" else "LONG",
+                        status=EpisodeStatus.OPEN.value,
+                        target_qty=intent.target_qty or attempt.executed_qty,
+                        current_qty=attempt.executed_qty,
+                    )
             else:
-                self.store.save_position_episode(
-                    episode_id=episode_id,
-                    symbol=intent.symbol,
-                    position_side="SHORT" if intent.side == "SELL" else "LONG",
-                    status=EpisodeStatus.OPEN.value,
-                    target_qty=intent.target_qty or attempt.executed_qty,
-                    current_qty=attempt.executed_qty,
-                )
-        else:
-            # EXIT, REBALANCE, PROTECTION
-            if isinstance(episode, dict):
-                prev_qty = float(episode.get("current_qty") or 0.0)
-                new_qty = max(0.0, prev_qty - attempt.executed_qty)
-                ep_status = EpisodeStatus.CLOSED.value if new_qty <= 0 else EpisodeStatus.CLOSING.value
-                self.store.save_position_episode(
-                    episode_id=episode_id,
-                    symbol=intent.symbol,
-                    position_side=episode.get("position_side", "SHORT"),
-                    status=ep_status,
-                    current_qty=new_qty,
-                    closed_at_utc=self.now_iso_fn() if ep_status == EpisodeStatus.CLOSED.value else None,
-                )
-            if intent.intent_scope == "EXIT" and intent.position_id and attempt.status == AttemptStatus.FILLED.value:
-                close_status = "CLOSED_MARKET"
-                if intent.reason == "HOLD_EXPIRY":
-                    close_status = "CLOSED_HOLD_EXPIRY"
-                elif intent.reason == "PORTFOLIO_LOSS_CUT":
-                    close_status = "CLOSED_LOSS_CUT"
-                elif "TP" in (intent.reason or ""):
-                    close_status = "CLOSED_TP"
-                parsed_order_id = int(attempt.exchange_order_id) if attempt.exchange_order_id and str(attempt.exchange_order_id).isdigit() else None
-                self.store.mark_position_closed(
-                    position_id=int(intent.position_id),
-                    status=close_status,
-                    close_reason=intent.reason or "EXIT",
-                    close_order_id=parsed_order_id,
-                )
+                # EXIT, REBALANCE, PROTECTION
+                if isinstance(episode, dict):
+                    prev_qty = float(episode.get("current_qty") or 0.0)
+                    if attempt.executed_qty <= 0 and attempt.status == AttemptStatus.FILLED.value:
+                        new_qty = 0.0
+                    else:
+                        new_qty = max(0.0, prev_qty - attempt.executed_qty)
+                    ep_status = EpisodeStatus.CLOSED.value if new_qty <= 0 else EpisodeStatus.CLOSING.value
+                    self.store.save_position_episode(
+                        episode_id=episode_id,
+                        symbol=intent.symbol,
+                        position_side=episode.get("position_side", "SHORT"),
+                        status=ep_status,
+                        current_qty=new_qty,
+                        closed_at_utc=self.now_iso_fn() if ep_status == EpisodeStatus.CLOSED.value else None,
+                    )
+
+        if intent.intent_scope in {"EXIT", "PROTECTION"} and intent.position_id and attempt.status == AttemptStatus.FILLED.value:
+            close_status = "CLOSED_MARKET"
+            close_reason = intent.reason or "EXIT"
+            if attempt.executed_qty <= 0:
+                close_status = "CLOSED_EXTERNAL"
+                close_reason = "EXCHANGE_ALREADY_FLAT"
+            elif intent.reason == "HOLD_EXPIRY":
+                close_status = "CLOSED_HOLD_EXPIRY"
+            elif intent.reason == "PORTFOLIO_LOSS_CUT":
+                close_status = "CLOSED_LOSS_CUT"
+            elif "TP" in (intent.reason or ""):
+                close_status = "CLOSED_TP"
+            elif "PROTECTION" in (intent.reason or ""):
+                close_status = "CLOSED_NOON_PROTECTION" if "NOON" in (intent.reason or "") else "CLOSED_MORNING_PROTECTION"
+            parsed_order_id = int(attempt.exchange_order_id) if attempt.exchange_order_id and str(attempt.exchange_order_id).isdigit() else None
+            self.store.mark_position_closed(
+                position_id=int(intent.position_id),
+                status=close_status,
+                close_reason=close_reason,
+                close_order_id=parsed_order_id,
+            )
 
     def recover_unknown_attempt(self, attempt: Any) -> OrderAttempt:
         """Query Binance by client_order_id to resolve an UNKNOWN order attempt."""

@@ -326,7 +326,9 @@ class DecisionKernel:
 
             # A. Noon protection
             if noon_enabled:
-                noon_ref = config.get(f"noon_ref_price_{symbol}") or market_view.prices.get(symbol)
+                noon_ref = config.get(f"noon_ref_price_{symbol}")
+                if noon_ref is None and isinstance(config.get("noon_ref_prices"), dict):
+                    noon_ref = config["noon_ref_prices"].get(symbol)
                 if noon_ref is not None and float(noon_ref) > 0:
                     noon_ref_price = float(noon_ref)
                     merged_sl_price, should_update = calculate_merged_stop_loss(
@@ -356,7 +358,9 @@ class DecisionKernel:
 
             # B. Morning protection
             if morning_enabled:
-                morning_ref = config.get(f"morning_ref_price_{symbol}") or market_view.prices.get(symbol)
+                morning_ref = config.get(f"morning_ref_price_{symbol}")
+                if morning_ref is None and isinstance(config.get("morning_ref_prices"), dict):
+                    morning_ref = config["morning_ref_prices"].get(symbol)
                 if morning_ref is not None and float(morning_ref) > 0:
                     morning_ref_price = float(morning_ref)
                     merged_sl_price, should_update = calculate_merged_stop_loss(
