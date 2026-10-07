@@ -6,7 +6,7 @@ from pathlib import Path
 from unittest.mock import MagicMock
 
 from infra.binance_futures_client import BinanceAPIError, OrderStateUnknownError
-from core.execution.engine import ExecutionEngine
+from core.execution.engine import ExecutionEngine, sanitize_client_order_id
 from core.execution.models import AttemptStatus, EpisodeStatus, IntentStatus, OrderIntent
 from core.state_store import StateStore
 
@@ -402,4 +402,82 @@ class ExecutionEngineTest(unittest.TestCase):
         intent = self.store.get_order_intent_by_key("cancel_BTCUSDT_cid-cancel-me")
         self.assertIsNotNone(intent)
         self.assertEqual(intent["status"], IntentStatus.COMPLETED.value)
+
+    def test_sanitize_client_order_id(self) -> None:
+        import re
+        legal_regex = re.compile(r"^[.A-Z:/a-z0-9_-]{1,36}$")
+
+        # Chinese characters sanitized
+        res = sanitize_client_order_id("nsl_龙虾USDT_1791354391176_4")
+        self.assertTrue(legal_regex.match(res), f"Regex mismatch: {res}")
+        self.assertNotIn("龙虾", res)
+        self.assertLessEqual(len(res), 36)
+
+        # Normal ASCII string preserved
+        res2 = sanitize_client_order_id("nsl_BTCUSDT_1791354391176")
+        self.assertTrue(legal_regex.match(res2))
+        self.assertEqual(res2, "nsl_BTCUSDT_1791354391176")
+
+        # Very long string truncated with hash
+        long_cid = "a" * 50
+        res3 = sanitize_client_order_id(long_cid)
+        self.assertTrue(legal_regex.match(res3))
+        self.assertLessEqual(len(res3), 36)
+
+    def test_submit_intent_stop_market_omits_price_and_sets_stopprice(self) -> None:
+        self.client.create_order.return_value = {
+            "orderId": 6001,
+            "status": "NEW",
+            "clientOrderId": "cid-stop-1",
+        }
+
+        intent = OrderIntent(
+            intent_id="intent-stop-1",
+            account_id="acc_exec",
+            client_intent_key="stop-loss-pos-1",
+            symbol="NIGHTUSDT",
+            side="BUY",
+            order_type="STOP_MARKET",
+            target_price=0.08,
+            intent_scope="PROTECTION",
+            position_id=8023,
+        )
+
+        attempt = self.engine.submit_intent(intent, close_position=True, stop_price="0.08")
+        self.assertEqual(attempt.status, AttemptStatus.ACKNOWLEDGED.value)
+
+        # Verify create_order was called WITHOUT 'price' and WITH 'stopPrice' and 'closePosition'
+        self.client.create_order.assert_called_once()
+        call_kwargs = self.client.create_order.call_args.kwargs
+        self.assertNotIn("price", call_kwargs)
+        self.assertIn("stopPrice", call_kwargs)
+        self.assertEqual(call_kwargs["stopPrice"], "0.08")
+        self.assertTrue(call_kwargs.get("closePosition"))
+        self.assertNotIn("quantity", call_kwargs)
+        self.assertNotIn("reduceOnly", call_kwargs)
+
+    def test_submit_intent_sanitizes_chinese_symbol_cid(self) -> None:
+        self.client.create_order.return_value = {
+            "orderId": 6002,
+            "status": "NEW",
+        }
+
+        intent = OrderIntent(
+            intent_id="intent-cn-1",
+            account_id="acc_exec",
+            client_intent_key="stop-loss-pos-cn",
+            symbol="龙虾USDT",
+            side="BUY",
+            order_type="STOP_MARKET",
+            target_price=0.05,
+            intent_scope="PROTECTION",
+        )
+
+        attempt = self.engine.submit_intent(intent, client_order_id="nsl_龙虾USDT_1234567890", close_position=True)
+        self.assertNotIn("龙虾", attempt.client_order_id)
+        self.assertLessEqual(len(attempt.client_order_id), 36)
+        call_kwargs = self.client.create_order.call_args.kwargs
+        self.assertNotIn("龙虾", call_kwargs["newClientOrderId"])
+        self.assertNotIn("price", call_kwargs)
+
 

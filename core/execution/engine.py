@@ -10,7 +10,9 @@ Implements the canonical lifecycle:
 
 from __future__ import annotations
 
+import hashlib
 import logging
+import re
 import uuid
 from datetime import datetime, timezone
 from typing import Any, Callable, Dict, List, Optional
@@ -35,6 +37,25 @@ from core.market_fill_reconciler import MarketFillReconciler
 from core.state_store import StateStore
 
 LOGGER = logging.getLogger(__name__)
+
+
+def sanitize_client_order_id(cid: str, max_len: int = 36) -> str:
+    """Sanitize client_order_id to strictly match Binance Futures requirement: ^[.A-Z:/a-z0-9_-]{1,36}$."""
+    raw = str(cid or "").strip()
+    allowed = set("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_.-:/")
+    cleaned = "".join(ch for ch in raw if ch in allowed)
+
+    if not cleaned or len(cleaned) != len(raw):
+        digest = hashlib.sha1(raw.encode("utf-8")).hexdigest()[:6]
+        prefix_limit = max(1, max_len - 7)
+        cleaned = f"{cleaned[:prefix_limit]}-{digest}" if cleaned else f"bb-{digest}"
+
+    if len(cleaned) > max_len:
+        digest = hashlib.sha1(raw.encode("utf-8")).hexdigest()[:6]
+        prefix_limit = max(1, max_len - 7)
+        cleaned = f"{cleaned[:prefix_limit]}-{digest}"
+
+    return cleaned
 
 
 class ExecutionEngine:
@@ -167,6 +188,7 @@ class ExecutionEngine:
             cid = f"{client_order_id}_{attempt_number}" if attempt_number > 1 else client_order_id
         else:
             cid = f"bb_{intent.symbol.lower()}_{uuid.uuid4().hex[:10]}_{attempt_number}"
+        cid = sanitize_client_order_id(cid)
 
         acct_id = getattr(self.store, "account_id", None) or intent.account_id or "default"
         attempt = OrderAttempt(
@@ -212,13 +234,20 @@ class ExecutionEngine:
                 order_params["quantity"] = str(quantity)
             elif intent.target_qty is not None and not close_position:
                 order_params["quantity"] = self.client.format_order_qty(intent.symbol, intent.target_qty)
-            if price is not None:
-                order_params["price"] = str(price)
-            elif intent.target_price is not None:
-                order_params["price"] = str(intent.target_price)
+
+            # Price parameter is only valid for limit order types.
+            # In Binance Futures: MARKET, STOP_MARKET, TAKE_PROFIT_MARKET forbid 'price'.
+            market_types = {"MARKET", "STOP_MARKET", "TAKE_PROFIT_MARKET", "TRAILING_STOP_MARKET"}
+            if intent.order_type not in market_types:
+                if price is not None:
+                    order_params["price"] = str(price)
+                elif intent.target_price is not None:
+                    order_params["price"] = str(intent.target_price)
+
+            stop_types = {"STOP", "STOP_MARKET", "STOP_LOSS", "TAKE_PROFIT", "TAKE_PROFIT_MARKET", "TRAILING_STOP_MARKET"}
             if stop_price is not None:
                 order_params["stopPrice"] = str(stop_price)
-            elif intent.target_price is not None and intent.order_type in {"STOP_MARKET", "STOP", "STOP_LOSS"}:
+            elif intent.target_price is not None and intent.order_type in stop_types:
                 formatted = None
                 if hasattr(self.client, "format_trigger_price"):
                     try:
@@ -228,11 +257,12 @@ class ExecutionEngine:
                     except Exception:
                         pass
                 order_params["stopPrice"] = formatted if formatted is not None else str(intent.target_price)
+
             if working_type is not None:
                 order_params["workingType"] = working_type
             if price_protect is not None:
                 order_params["priceProtect"] = price_protect
-            if reduce_only:
+            if reduce_only and not close_position:
                 order_params["reduceOnly"] = True
             if close_position:
                 order_params["closePosition"] = True

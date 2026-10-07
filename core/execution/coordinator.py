@@ -17,7 +17,7 @@ import uuid
 from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Set, Tuple
 
 from infra.binance_futures_client import BinanceFuturesClient
-from core.execution.engine import ExecutionEngine
+from core.execution.engine import ExecutionEngine, sanitize_client_order_id
 from core.execution.ledger import TradingLedger
 from core.execution.models import (
     AccountView,
@@ -325,7 +325,7 @@ class AccountCoordinator:
             except Exception:
                 pass
 
-        client_order_id = f"{prefix}_{intent.symbol}_{int(time.time() * 1000)}"
+        client_order_id = sanitize_client_order_id(f"{prefix}_{intent.symbol}_{int(time.time() * 1000)}")
         attempt = None
 
         # 2. Submit new stop order via execution engine
@@ -378,7 +378,7 @@ class AccountCoordinator:
                 )
                 self.engine.submit_intent(
                     intent=close_intent,
-                    client_order_id=f"{prefix}i_{intent.symbol}_{int(time.time() * 1000)}",
+                    client_order_id=sanitize_client_order_id(f"{prefix}i_{intent.symbol}_{int(time.time() * 1000)}"),
                     reduce_only=True,
                     raise_on_error=False,
                 )
