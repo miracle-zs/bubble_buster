@@ -433,12 +433,24 @@ class AccountCoordinator:
                     episode_id=intent.episode_id,
                     reason=f"{intent.reason}_IMMEDIATE_TRIGGER",
                 )
-                self.engine.submit_intent(
+                close_attempt = self.engine.submit_intent(
                     intent=close_intent,
                     client_order_id=sanitize_client_order_id(f"{prefix}i_{intent.symbol}_{int(time.time() * 1000)}"),
                     reduce_only=True,
                     raise_on_error=False,
                 )
+                closed_pos = self.store.get_position(int(pos_id)) if pos_id is not None else None
+                close_complete = (
+                    str(closed_pos.get("status") or "").startswith("CLOSED")
+                    if closed_pos else
+                    close_attempt.status == AttemptStatus.FILLED.value and close_attempt.executed_qty >= qty
+                )
+                if not close_complete:
+                    LOGGER.warning(
+                        "Protection market close incomplete for %s; preserving existing exit orders (status=%s)",
+                        intent.symbol, close_attempt.status,
+                    )
+                    return False
                 # Cancel old exit orders
                 if pos:
                     for old_id, old_cid in [

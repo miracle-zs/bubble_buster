@@ -540,11 +540,15 @@ class ExecutionEngineTest(unittest.TestCase):
             reason="STOP_LOSS",
         )
 
-        # submit_intent should catch -2022 and reconcile locally as flat
+        self.client.get_position_risk.return_value = [
+            {"symbol": "RESOLVUSDT", "positionSide": "BOTH", "positionAmt": "0"}
+        ]
+        # A rejected order is not a fill, even when REST confirms the goal is met.
         attempt = self.engine.submit_intent(intent, raise_on_error=True)
 
-        self.assertEqual(attempt.status, AttemptStatus.FILLED.value)
+        self.assertEqual(attempt.status, AttemptStatus.REJECTED.value)
         self.assertEqual(attempt.executed_qty, 0.0)
+        self.client.get_position_risk.assert_called_once()
 
         # Intent should be COMPLETED
         saved_intent = self.store.get_order_intent("intent-exit-2022")
@@ -555,4 +559,127 @@ class ExecutionEngineTest(unittest.TestCase):
         self.assertEqual(pos["status"], "CLOSED_EXTERNAL")
         self.assertEqual(pos["close_reason"], "EXCHANGE_ALREADY_FLAT")
 
+    def _seed_exit_position(self, qty=1222.0, episode=True):
+        run_id, _ = self.store.create_run("2026-10-01", account_id="acc_exec")
+        episode_id = "ep-reduce" if episode else None
+        if episode:
+            self.store.save_position_episode(
+                episode_id=episode_id, symbol="RESOLVUSDT", current_qty=qty,
+                target_qty=qty, status="OPEN",
+            )
+        return self.store.insert_position(
+            run_id=run_id, symbol="RESOLVUSDT", side="SHORT", qty=qty,
+            entry_price=0.0218, liq_price_open=None, tp_price=None, sl_price=0.03,
+            tp_order_id=None, sl_order_id=777, tp_client_order_id=None,
+            sl_client_order_id="existing-stop", opened_at_utc="2026-10-01T00:00:00Z",
+            expire_at_utc="2026-10-02T00:00:00Z", status="OPEN", episode_id=episode_id,
+        )
+
+    def _exit_intent(self, pos_id, qty=100.0, key="reduce", reason="PARTIAL_REDUCE"):
+        return OrderIntent(
+            intent_id=key, account_id="acc_exec", client_intent_key=key,
+            symbol="RESOLVUSDT", side="BUY", order_type="MARKET", target_qty=qty,
+            intent_scope="EXIT", position_id=pos_id, reason=reason,
+        )
+
+    def test_reduce_only_rejection_with_open_position_keeps_protection(self):
+        pos_id = self._seed_exit_position()
+        self.client.create_order.side_effect = BinanceAPIError(-2022, "ReduceOnly Order is rejected.")
+        self.client.get_position_risk.return_value = [
+            {"symbol": "RESOLVUSDT", "positionSide": "BOTH", "positionAmt": "-1222"}
+        ]
+        with self.assertRaises(BinanceAPIError):
+            self.engine.submit_intent(self._exit_intent(pos_id), raise_on_error=True)
+        self.assertEqual(self.store.get_position(pos_id)["status"], "OPEN")
+        self.assertEqual(self.store.get_position(pos_id)["sl_order_id"], 777)
+        self.assertEqual(self.store.get_position_episode("ep-reduce")["current_qty"], 1222)
+        self.assertEqual(self.store.get_order_intent("reduce")["status"], "FAILED")
+        self.client.cancel_order.assert_not_called()
+
+    def test_reduce_only_rejection_requires_explicit_flat_evidence(self):
+        pos_id = self._seed_exit_position()
+        self.client.create_order.side_effect = BinanceAPIError(-2022, "ReduceOnly Order is rejected.")
+        for idx, rows in enumerate([
+            [], [{"symbol": "OTHERUSDT", "positionAmt": "0"}],
+            [{"symbol": "RESOLVUSDT", "positionAmt": "nan"}],
+            [{"symbol": "RESOLVUSDT", "positionAmt": "1222"}],
+            [{"symbol": "RESOLVUSDT", "positionSide": "LONG", "positionAmt": "0"}],
+        ]):
+            with self.subTest(rows=rows):
+                self.client.get_position_risk.return_value = rows
+                attempt = self.engine.submit_intent(self._exit_intent(pos_id, key=f"reject-{idx}"))
+                self.assertEqual(attempt.status, "REJECTED")
+                self.assertEqual(self.store.get_position(pos_id)["status"], "OPEN")
+
+    def test_reduce_only_rejection_when_verification_fails_keeps_position(self):
+        pos_id = self._seed_exit_position()
+        self.client.create_order.side_effect = BinanceAPIError(-2022, "ReduceOnly Order is rejected.")
+        self.client.get_position_risk.side_effect = BinanceAPIError("NETWORK", "timeout")
+        attempt = self.engine.submit_intent(self._exit_intent(pos_id))
+        self.assertEqual(attempt.status, "REJECTED")
+        self.assertEqual(self.store.get_position(pos_id)["status"], "OPEN")
+
+    def test_hedge_position_verification_does_not_net_opposite_positions(self):
+        pos_id = self._seed_exit_position()
+        self.client.create_order.side_effect = BinanceAPIError(-2022, "ReduceOnly Order is rejected.")
+        self.client.get_position_risk.return_value = [
+            {"symbol": "RESOLVUSDT", "positionSide": "LONG", "positionAmt": "1222"},
+            {"symbol": "RESOLVUSDT", "positionSide": "SHORT", "positionAmt": "-1222"},
+        ]
+        self.engine.submit_intent(self._exit_intent(pos_id), position_side="SHORT")
+        self.assertEqual(self.store.get_position(pos_id)["status"], "OPEN")
+
+    def test_completed_partial_reduce_preserves_remaining_position_and_episode(self):
+        pos_id = self._seed_exit_position()
+        self.client.create_order.return_value = {
+            "orderId": 8002, "status": "FILLED", "executedQty": "100", "avgPrice": "0.02",
+        }
+        intent = self._exit_intent(pos_id)
+        attempt = self.engine.submit_intent(intent)
+        pos = self.store.get_position(pos_id)
+        self.assertEqual(pos["status"], "OPEN")
+        self.assertEqual(pos["qty"], 1122)
+        self.assertIsNone(pos["closed_at_utc"])
+        self.assertEqual(pos["sl_order_id"], 777)
+        ep = self.store.get_position_episode("ep-reduce")
+        self.assertEqual(ep["current_qty"], 1122)
+        self.assertEqual(ep["status"], "OPEN")
+        self.assertEqual(self.store.get_order_intent(intent.intent_id)["status"], "COMPLETED")
+        self.engine.submit_intent(intent)
+        self.assertEqual(self.store.get_position(pos_id)["qty"], 1122)
+        self.client.create_order.assert_called_once()
+        self.assertEqual(attempt.status, "FILLED")
+
+    def test_completed_partial_reduce_without_episode_keeps_position(self):
+        pos_id = self._seed_exit_position(episode=False)
+        self.client.create_order.return_value = {
+            "orderId": 8003, "status": "FILLED", "executedQty": "100", "avgPrice": "0.02",
+        }
+        self.engine.submit_intent(self._exit_intent(pos_id))
+        self.assertEqual(self.store.get_position(pos_id)["status"], "OPEN")
+        self.assertEqual(self.store.get_position(pos_id)["qty"], 1122)
+
+    def test_recovered_partial_fills_apply_only_new_quantity(self):
+        pos_id = self._seed_exit_position()
+        self.client.create_order.return_value = {
+            "orderId": 8004, "status": "PARTIALLY_FILLED", "executedQty": "40", "avgPrice": "0.02",
+        }
+        attempt = self.engine.submit_intent(self._exit_intent(pos_id))
+        self.client.get_order.return_value = {
+            "orderId": 8004, "status": "FILLED", "executedQty": "100", "avgPrice": "0.02",
+        }
+        self.engine.recover_unknown_attempt(attempt.attempt_id)
+        self.engine.recover_unknown_attempt(attempt.attempt_id)
+        self.assertEqual(self.store.get_position(pos_id)["qty"], 1122)
+        self.assertEqual(self.store.get_position(pos_id)["status"], "OPEN")
+        self.assertEqual(self.store.get_position_episode("ep-reduce")["current_qty"], 1122)
+
+    def test_full_exit_closes_only_after_all_remaining_quantity_fills(self):
+        pos_id = self._seed_exit_position()
+        self.client.create_order.return_value = {
+            "orderId": 8005, "status": "FILLED", "executedQty": "1222", "avgPrice": "0.02",
+        }
+        self.engine.submit_intent(self._exit_intent(pos_id, qty=1222, reason="STOP_LOSS"))
+        self.assertEqual(self.store.get_position(pos_id)["status"], "CLOSED_MARKET")
+        self.assertEqual(self.store.get_position_episode("ep-reduce")["current_qty"], 0)
 

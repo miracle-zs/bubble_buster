@@ -426,6 +426,39 @@ class TestAccountCoordinator(unittest.TestCase):
         # Verify old order was NOT canceled
         self.client.cancel_order.assert_not_called()
 
+    def test_immediate_protection_close_rejected_keeps_existing_stop(self):
+        from infra.binance_futures_client import BinanceAPIError
+
+        run_id, _ = self.store.create_run("2026-10-05-rejected-close", account_id=self.store.account_id)
+        pos_id = self.store.insert_position(
+            run_id=run_id, symbol="DOGEUSDT", side="SHORT", qty=1000.0,
+            entry_price=0.20, liq_price_open=None, tp_price=None, sl_price=0.25,
+            tp_order_id=None, sl_order_id=111, tp_client_order_id=None,
+            sl_client_order_id="original-sl", opened_at_utc="2026-10-05T00:00:00Z",
+            expire_at_utc="2026-10-06T00:00:00Z", status="OPEN",
+        )
+        self.client.get_position_risk.return_value = [
+            {"symbol": "DOGEUSDT", "positionSide": "BOTH", "positionAmt": "-1000"}
+        ]
+        self.client.create_order.side_effect = [
+            BinanceAPIError(-2021, "Order would immediately trigger."),
+            BinanceAPIError(-2022, "ReduceOnly Order is rejected."),
+        ]
+        view = self.coordinator.build_account_view()
+        intent = OrderIntent(
+            intent_id="protect-rejected", account_id=self.store.account_id,
+            client_intent_key="protect-rejected", symbol="DOGEUSDT", side="BUY",
+            order_type="STOP_MARKET", target_qty=1000, target_price=0.22,
+            intent_scope="PROTECTION", position_id=pos_id, reason="NOON_PROTECTION_UPDATE",
+        )
+        updated = self.coordinator._execute_protection_update(
+            intent, "NOON_PROTECTION", "NOON_CAPS", "nsl", view,
+        )
+        self.assertFalse(updated)
+        self.client.cancel_order.assert_not_called()
+        self.assertEqual(self.store.get_position(pos_id)["status"], "OPEN")
+        self.assertEqual(self.store.get_position(pos_id)["sl_order_id"], 111)
+
     def test_step_manage_hold_expiry_closes_position(self):
         """Positions past expire_at_utc generate HOLD_EXPIRY exit and mark position closed."""
         run_id, _ = self.store.create_run("2026-10-05_exp", account_id=self.store.account_id)

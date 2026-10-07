@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import math
 import re
 import uuid
 from datetime import datetime, timezone
@@ -221,6 +222,7 @@ class ExecutionEngine:
         # 2. Network execution OUTSIDE database transaction
         order_resp: Optional[Any] = None
         submission_error: Optional[Exception] = None
+        confirmed_flat = False
 
         if intent.intent_scope in {"EXIT", "PROTECTION"}:
             reduce_only = True
@@ -291,16 +293,20 @@ class ExecutionEngine:
         except BinanceAPIError as exc:
             err_code = getattr(exc, "code", None)
             err_msg = str(getattr(exc, "message", "") or exc)
-            if (err_code == -2022 or "ReduceOnly Order is rejected" in err_msg) and intent.intent_scope in {"EXIT", "PROTECTION"}:
+            submission_error = exc
+            attempt.status = AttemptStatus.REJECTED.value
+            attempt.error_message = str(exc)
+            if (str(err_code) == "-2022" or "ReduceOnly Order is rejected" in err_msg) and intent.intent_scope in {"EXIT", "PROTECTION"}:
+                # Rejection can mean conflicting exit orders, not a flat position.
+                # REST verification is outside the persistence transaction.
+                confirmed_flat = self._confirm_exchange_flat(intent, position_side)
+            if confirmed_flat:
                 LOGGER.info(
-                    "Order rejected with -2022 (ReduceOnly) account=%s symbol=%s cid=%s: position already flat on exchange",
+                    "Reduce-only order rejected account=%s symbol=%s cid=%s; REST confirmed position flat",
                     self.store.account_id,
                     intent.symbol,
                     attempt.client_order_id,
                 )
-                attempt.status = AttemptStatus.FILLED.value
-                attempt.error_message = None
-                attempt.executed_qty = 0.0
                 submission_error = None
             else:
                 LOGGER.warning(
@@ -311,9 +317,6 @@ class ExecutionEngine:
                     err_code,
                     exc,
                 )
-                submission_error = exc
-                attempt.status = AttemptStatus.REJECTED.value
-                attempt.error_message = str(exc)
 
         except Exception as exc:
             LOGGER.error(
@@ -378,7 +381,7 @@ class ExecutionEngine:
             )
 
             intent_final_status = IntentStatus.PENDING.value
-            if attempt.status == AttemptStatus.FILLED.value:
+            if attempt.status == AttemptStatus.FILLED.value or confirmed_flat:
                 intent_final_status = IntentStatus.COMPLETED.value
             elif attempt.status == AttemptStatus.REJECTED.value:
                 intent_final_status = IntentStatus.FAILED.value
@@ -396,10 +399,8 @@ class ExecutionEngine:
                 self._record_execution_fills(attempt=attempt, intent=intent, order_resp=order_resp)
 
             # Synchronize PositionEpisode
-            if attempt.executed_qty > 0 or (
-                attempt.status == AttemptStatus.FILLED.value and intent.intent_scope in {"EXIT", "PROTECTION"}
-            ):
-                self._sync_position_episode(intent=intent, attempt=attempt)
+            if attempt.executed_qty > 0 or confirmed_flat:
+                self._sync_position_episode(intent=intent, attempt=attempt, confirmed_flat=confirmed_flat)
 
         if submission_error is not None and attempt.status == AttemptStatus.UNKNOWN.value:
             # Attempt active recovery
@@ -409,6 +410,28 @@ class ExecutionEngine:
             raise submission_error
 
         return attempt
+
+    def _confirm_exchange_flat(self, intent: OrderIntent, position_side: Optional[str]) -> bool:
+        """Require an explicit zero row for the target side; missing data is uncertain."""
+        target_side = position_side or ("SHORT" if intent.side == "BUY" else "LONG")
+        try:
+            rows = self.client.get_position_risk()
+            if not isinstance(rows, list):
+                return False
+            amounts = []
+            for row in rows:
+                if not isinstance(row, dict) or row.get("symbol") != intent.symbol:
+                    continue
+                if str(row.get("positionSide") or "BOTH").upper() not in {"BOTH", target_side}:
+                    continue
+                amount = float(row["positionAmt"])
+                if not math.isfinite(amount):
+                    return False
+                amounts.append(amount)
+            return bool(amounts) and all(amount == 0.0 for amount in amounts)
+        except Exception as exc:
+            LOGGER.warning("Flat-position verification failed account=%s symbol=%s: %s", self.account_id, intent.symbol, exc)
+            return False
 
     def _record_execution_fills(
         self,
@@ -459,20 +482,20 @@ class ExecutionEngine:
                 exchange_order_id=attempt.exchange_order_id,
             )
 
-    def _sync_position_episode(self, intent: OrderIntent, attempt: OrderAttempt) -> None:
+    def _sync_position_episode(
+        self, intent: OrderIntent, attempt: OrderAttempt,
+        executed_delta: Optional[float] = None, confirmed_flat: bool = False,
+    ) -> None:
         """Update or create PositionEpisode when an attempt executes quantity."""
+        delta = attempt.executed_qty if executed_delta is None else executed_delta
+        pos = self.store.get_position(int(intent.position_id)) if intent.position_id else None
         episode_id = intent.episode_id
-        if not episode_id:
+        if not episode_id and pos:
+            episode_id = pos.get("episode_id")
+        if not episode_id and not pos:
             ep = self.store.get_active_position_episode(intent.symbol)
             if ep:
                 episode_id = ep.get("episode_id")
-        if not episode_id and intent.position_id:
-            try:
-                pos = self.store.get_position(int(intent.position_id))
-                if pos and pos.get("episode_id"):
-                    episode_id = pos.get("episode_id")
-            except Exception:
-                pass
 
         if not episode_id and intent.intent_scope == "ENTRY":
             episode_id = str(uuid.uuid4())
@@ -484,8 +507,8 @@ class ExecutionEngine:
             if intent.intent_scope == "ENTRY":
                 if isinstance(episode, dict):
                     prev_qty = float(episode.get("current_qty") or 0.0)
-                    new_qty = prev_qty + attempt.executed_qty
-                    target_qty = (episode.get("target_qty") or 0.0) + (intent.target_qty or attempt.executed_qty)
+                    new_qty = prev_qty + delta
+                    target_qty = (episode.get("target_qty") or 0.0) + delta
                     self.store.save_position_episode(
                         episode_id=episode_id,
                         symbol=intent.symbol,
@@ -501,30 +524,47 @@ class ExecutionEngine:
                         position_side="SHORT" if intent.side == "SELL" else "LONG",
                         status=EpisodeStatus.OPEN.value,
                         target_qty=intent.target_qty or attempt.executed_qty,
-                        current_qty=attempt.executed_qty,
+                        current_qty=delta,
                     )
             else:
                 # EXIT, REBALANCE, PROTECTION
                 if isinstance(episode, dict):
                     prev_qty = float(episode.get("current_qty") or 0.0)
-                    if attempt.executed_qty <= 0 and attempt.status == AttemptStatus.FILLED.value:
+                    if confirmed_flat:
                         new_qty = 0.0
                     else:
-                        new_qty = max(0.0, prev_qty - attempt.executed_qty)
-                    ep_status = EpisodeStatus.CLOSED.value if new_qty <= 0 else EpisodeStatus.CLOSING.value
+                        new_qty = max(0.0, prev_qty - delta)
+                    ep_status = (
+                        EpisodeStatus.CLOSED.value if new_qty <= 0 else
+                        EpisodeStatus.OPEN.value if attempt.status == AttemptStatus.FILLED.value else
+                        EpisodeStatus.CLOSING.value
+                    )
                     self.store.save_position_episode(
                         episode_id=episode_id,
                         symbol=intent.symbol,
                         position_side=episode.get("position_side", "SHORT"),
                         status=ep_status,
                         current_qty=new_qty,
+                        realized_pnl=float(episode.get("realized_pnl") or 0.0),
                         closed_at_utc=self.now_iso_fn() if ep_status == EpisodeStatus.CLOSED.value else None,
                     )
 
-        if intent.intent_scope in {"EXIT", "PROTECTION"} and intent.position_id and attempt.status == AttemptStatus.FILLED.value:
+        if intent.intent_scope in {"EXIT", "PROTECTION"} and pos:
+            if str(pos.get("status") or "").startswith("CLOSED"):
+                return
+            remaining_qty = 0.0 if confirmed_flat else max(0.0, float(pos["qty"]) - delta)
+            if remaining_qty > 0:
+                if delta > 0:
+                    self.store.set_position_qty(
+                        position_id=int(intent.position_id), qty=remaining_qty,
+                        entry_price=float(pos["entry_price"]),
+                    )
+                return
+            if not confirmed_flat and delta <= 0:
+                return
             close_status = "CLOSED_MARKET"
             close_reason = intent.reason or "EXIT"
-            if attempt.executed_qty <= 0:
+            if confirmed_flat:
                 close_status = "CLOSED_EXTERNAL"
                 close_reason = "EXCHANGE_ALREADY_FLAT"
             elif intent.reason == "HOLD_EXPIRY":
@@ -586,6 +626,10 @@ class ExecutionEngine:
                 attempt.status = AttemptStatus.UNKNOWN.value
 
             with self.store.unit_of_work():
+                persisted_attempt = self.store.get_order_attempt(attempt.attempt_id)
+                previous_qty = float(persisted_attempt.get("executed_qty") or 0.0) if persisted_attempt else 0.0
+                # Exchange responses contain cumulative fills, not increments.
+                executed_delta = max(0.0, attempt.executed_qty - previous_qty)
                 self.store.update_order_attempt_status(
                     attempt_id=attempt.attempt_id,
                     status=attempt.status,
@@ -610,12 +654,14 @@ class ExecutionEngine:
                             side=intent_row["side"],
                             order_type=intent_row["order_type"],
                             intent_scope=intent_row.get("intent_scope", "EXIT"),
+                            position_id=intent_row.get("position_id"),
+                            reason=intent_row.get("reason"),
                             episode_id=intent_row.get("episode_id"),
                             target_qty=intent_row.get("target_qty"),
                             target_price=intent_row.get("target_price"),
                         )
                         self._record_execution_fills(attempt=attempt, intent=intent_obj, order_resp=order_info)
-                        self._sync_position_episode(intent=intent_obj, attempt=attempt)
+                        self._sync_position_episode(intent=intent_obj, attempt=attempt, executed_delta=executed_delta)
 
             LOGGER.info(
                 "Successfully recovered unknown order account=%s symbol=%s cid=%s status=%s",
@@ -763,4 +809,3 @@ class ExecutionEngine:
                     self.store.upsert_exchange_order_state(canceled_resp, source=reason)
 
         return canceled_resp
-
