@@ -472,15 +472,16 @@ class BinanceFuturesClient:
         self,
         symbol: str,
         interval: str,
-        start_time: int,
+        start_time: Optional[int] = None,
         end_time: Optional[int] = None,
         limit: Optional[int] = None,
     ) -> List[List[Any]]:
         params: Dict[str, Any] = {
             "symbol": symbol,
             "interval": interval,
-            "startTime": start_time,
         }
+        if start_time is not None:
+            params["startTime"] = start_time
         if end_time is not None:
             params["endTime"] = end_time
         if limit is not None:
