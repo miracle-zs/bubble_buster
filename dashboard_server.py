@@ -1308,6 +1308,16 @@ class DashboardDataProvider:
             wait_state = wait_states.get(account_id) or {}
             if str(wait_state.get("run_id") or "") != run_id:
                 wait_state = {}
+            persisted_next_check = None
+            try:
+                wakeup_raw = str(wait_state.get("next_wakeup_utc") or "").strip()
+                if wakeup_raw:
+                    persisted_next_check = datetime.fromisoformat(wakeup_raw)
+                    if persisted_next_check.tzinfo is None:
+                        persisted_next_check = persisted_next_check.replace(tzinfo=timezone.utc)
+                    persisted_next_check = persisted_next_check.astimezone(timezone.utc)
+            except ValueError:
+                pass
             raw_pending = wait_state.get("pending")
             pending_items = raw_pending.values() if isinstance(raw_pending, dict) else []
             waiting_symbols: List[Dict[str, Any]] = []
@@ -1328,6 +1338,11 @@ class DashboardDataProvider:
                         next_check = parsed_hour_open.astimezone(timezone.utc) + timedelta(hours=1)
                     except ValueError:
                         next_check = None
+                if persisted_next_check is not None and (
+                    next_check is None or
+                    next_check - timedelta(hours=1) <= persisted_next_check <= next_check
+                ):
+                    next_check = persisted_next_check
                 if next_check is not None:
                     next_checks.append(next_check)
                 entry_phase = str(item.get("phase") or "INITIAL").strip().upper()
@@ -1372,7 +1387,10 @@ class DashboardDataProvider:
                 or wait_state.get("entry_scale_in_mode")
                 or "none"
             ).strip().lower()
-            action_data_available = bool(entry_actions)
+            # A persisted staged plan describes actions even before its first fill.
+            action_data_available = bool(entry_actions) or (
+                waiting_count > 0 and scale_in_mode not in {"", "none", "off", "disabled"}
+            )
             if action_data_available:
                 pending_initial_count = sum(
                     1
@@ -1387,6 +1405,11 @@ class DashboardDataProvider:
                     + skipped_count,
                     len(initial_actions),
                 )
+                if not entry_actions:
+                    # Older fills may have positions but no action audit. Count
+                    # unique planned symbols, not an open first tranche twice.
+                    planned_symbols = {item["symbol"] for item in opened_symbols + waiting_symbols}
+                    planned_initial_count = max(len(planned_symbols), legacy_opened_count) + entry_failed_count + skipped_count
                 has_scale_in_stage = bool(
                     scale_in_actions
                     or scale_in_failed_count
@@ -1462,7 +1485,9 @@ class DashboardDataProvider:
                 "entry_action_scale_in_count": len(scale_in_actions),
                 "entry_action_scale_in_mode": scale_in_mode,
                 "waiting_symbols": waiting_symbols,
-                "next_check_local": self._format_utc_as_local(min(next_checks).isoformat()) if next_checks else None,
+                "next_check_local": self._format_utc_as_local(
+                    (persisted_next_check or min(next_checks)).isoformat()
+                ) if next_checks or persisted_next_check else None,
                 "deadline_local": self._format_utc_as_local(deadline_raw),
                 "started_at_local": started_at_local,
                 "updated_at_local": self._format_utc_as_local(event_time),
@@ -1497,6 +1522,31 @@ class DashboardDataProvider:
                 continue
             if isinstance(parsed, dict):
                 states[account_id] = parsed
+        # Strategy state migrated from locks to entry_plans. A canonical row
+        # (including a completed/cleared one) supersedes any historical lock.
+        if conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='entry_plans'").fetchone():
+            account_placeholders = ",".join("?" for _ in account_ids)
+            plans = conn.execute(
+                f"""SELECT account_id, plan_id, status, plan_payload_json, next_wakeup_utc, updated_at_utc
+                    FROM entry_plans WHERE account_id IN ({account_placeholders})
+                    ORDER BY updated_at_utc ASC""",
+                tuple(account_ids),
+            ).fetchall()
+            for plan in plans:
+                aid = str(plan["account_id"] or "")
+                if str(plan["plan_id"] or "") not in {"bearish_hour_entry_wait_v1", f"{aid}:bearish_hour_entry_wait_v1"}:
+                    continue
+                states[aid] = {}  # Never revive stale locks on cleared/invalid new state.
+                if str(plan["status"] or "").upper() != "WAITING_KLINE":
+                    continue
+                try:
+                    payload = json.loads(str(plan["plan_payload_json"] or "{}"))
+                except (TypeError, ValueError):
+                    continue
+                if isinstance(payload, dict):
+                    states[aid] = dict(payload)
+                    states[aid]["next_wakeup_utc"] = plan["next_wakeup_utc"]
+                    states[aid].setdefault("updated_at_utc", plan["updated_at_utc"])
         return states
 
     def _entry_actions_from_db(
@@ -3997,4 +4047,3 @@ def run_dashboard_server(cfg: DashboardServerConfig) -> None:
         server.serve_forever()
     finally:
         server.server_close()
-

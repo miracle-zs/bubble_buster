@@ -1045,6 +1045,43 @@ class DashboardServerTest(unittest.TestCase):
         self.assertIn("skipped=2", row["tasks"]["entry"]["summary"])
         self.assertIsNotNone(row["tasks"]["entry"]["time_local"])
 
+    def test_entry_progress_reads_new_plan_instead_of_stale_legacy_lock(self) -> None:
+        run_id, _ = self.store.create_run("2026-10-09", account_id="acc04")
+        scoped = self.store.scoped("acc04")
+        scoped.set_lock_state("bearish_hour_entry_wait_v1", {
+            "run_id": "yesterday", "pending": {"0": {"symbol": "OLDUSDT"}},
+        })
+        scoped.save_entry_plan(
+            plan_id="bearish_hour_entry_wait_v1", symbol="ALL", status="WAITING_KLINE",
+            next_wakeup_utc="2026-10-08T23:59:50+00:00",
+            plan_payload={
+                "run_id": run_id, "entry_scale_in_mode": "after_bullish_bearish_independent",
+                "deadline_utc": "2026-10-09T15:40:00+00:00",
+                "pending": {str(i): {"symbol": f"COIN{i}USDT", "phase": "INITIAL",
+                                      "hour_open_utc": "2026-10-08T23:00:00+00:00"} for i in range(10)},
+            },
+        )
+        provider = DashboardDataProvider(db_path=self.db_path, log_file=self.log_file,
+                                         timezone_name="Asia/Shanghai", entry_hour=7, entry_minute=40)
+        row = next(a for a in provider.accounts_summary()["accounts"] if a["account_id"] == "acc04")
+        progress = row["entry_progress"]
+        self.assertEqual(progress["status"], "WAITING")
+        self.assertEqual(progress["waiting_count"], 10)
+        self.assertEqual(progress["entry_action_target_count"], 20)
+        self.assertEqual(progress["entry_action_scale_in_mode"], "after_bullish_bearish_independent")
+        self.assertEqual(progress["next_check_local"], "2026-10-09 07:59:50")
+        self.assertIn("waiting=10", row["tasks"]["entry"]["summary"])
+
+    def test_completed_new_plan_does_not_resurrect_legacy_wait(self) -> None:
+        scoped = self.store.scoped("acc04")
+        scoped.set_lock_state("bearish_hour_entry_wait_v1", {"pending": {"0": {"symbol": "OLDUSDT"}}})
+        scoped.save_entry_plan(plan_id="bearish_hour_entry_wait_v1", symbol="ALL", status="COMPLETED", plan_payload={})
+        provider = DashboardDataProvider(db_path=self.db_path, log_file=self.log_file,
+                                         timezone_name="UTC", entry_hour=7, entry_minute=40)
+        with provider._connect_ctx() as conn:
+            states = provider._entry_wait_states_from_db(conn, ["acc04"])
+        self.assertFalse(states.get("acc04", {}).get("pending"))
+
     def test_accounts_summary_reports_persisted_bearish_entry_wait_as_running(self) -> None:
         run_id, _ = self.store.create_run("2026-07-18", account_id="acc01")
         now = datetime.now(timezone.utc).replace(microsecond=0)
