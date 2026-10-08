@@ -38,34 +38,6 @@ class CoordinatorStub:
             res = {}
             if self.manager and hasattr(self.manager, "run_once"):
                 res = self.manager.run_once() or {}
-            cfg = kwargs.get("config", {})
-            tp_enabled = cfg.get("portfolio_take_profit_enabled")
-            if tp_enabled and self.manager and hasattr(self.manager, "run_portfolio_take_profit"):
-                tp_res = self.manager.run_portfolio_take_profit(
-                    current_equity_usdt=float(kwargs.get("equity") or 0.0),
-                    now_local=kwargs.get("now_local") or datetime.now(),
-                    profit_pct=float(cfg.get("portfolio_take_profit_pct", 9.0)),
-                    reset_hour=int(cfg.get("portfolio_take_profit_hour", 8)),
-                    reset_minute=int(cfg.get("portfolio_take_profit_minute", 0)),
-                    reduce_ratio=float(cfg.get("portfolio_take_profit_reduce_ratio", 0.5)),
-                    giveback_pct=float(cfg.get("portfolio_take_profit_giveback_pct", 15.0)),
-                )
-                if isinstance(res, dict):
-                    res["portfolio_take_profit"] = tp_res
-            elif not tp_enabled and self.strategy and hasattr(self.strategy, "run_equity_recovery_take_profit"):
-                self.strategy.run_equity_recovery_take_profit()
-
-            loss_enabled = cfg.get("portfolio_loss_cut_enabled")
-            if loss_enabled and self.manager and hasattr(self.manager, "run_portfolio_loss_cut"):
-                loss_res = self.manager.run_portfolio_loss_cut(
-                    current_equity_usdt=float(kwargs.get("equity") or 0.0),
-                    now_local=kwargs.get("now_local") or datetime.now(),
-                    loss_pct=float(cfg.get("portfolio_loss_cut_pct", 3.5)),
-                    reset_hour=int(cfg.get("portfolio_loss_cut_reset_hour", 11)),
-                    reset_minute=int(cfg.get("portfolio_loss_cut_reset_minute", 55)),
-                )
-                if isinstance(res, dict):
-                    res["portfolio_loss_cut"] = loss_res
             return res if res else {"total": 0}
         elif action == "loss_cut":
             if self.manager and hasattr(self.manager, "run_daily_loss_cut"):
@@ -362,6 +334,106 @@ class RuntimeServiceTest(unittest.TestCase):
                 {"status": "SKIPPED", "reason": "USER_STREAM_STATE_UNCERTAIN"}
             )
         )
+
+    def test_native_entry_completed_is_terminal_and_not_resubmitted(self):
+        service, _, _, _ = self._create_service(entry_hour=7, entry_minute=40)
+        coordinator = MagicMock()
+        coordinator.step.return_value = {"status": "COMPLETED", "opened": 0, "errors": 0}
+        service.account_runtimes["default"]["coordinator"] = coordinator
+        service._get_entry_ranking = MagicMock(return_value=[])
+        due = datetime(2026, 2, 13, 7, 40, tzinfo=ZoneInfo("UTC"))
+        service.run_cycle(now_local=due, now_monotonic=100.0)
+        self.assertTrue(_wait_until(lambda: (service._collect_entry_futures(due) or not service._entry_futures)))
+        self.assertEqual(service._last_entry_local_date_by_account.get("default"), due.date())
+        service.run_cycle(now_local=due, now_monotonic=101.0)
+        entries = [c for c in coordinator.step.call_args_list if c.kwargs.get("action") == "entry"]
+        self.assertEqual(len(entries), 1)
+
+    def test_single_account_real_coordinator_entry_completes_once(self):
+        from tests.test_account_coordinator import TestAccountCoordinator
+
+        fixture = TestAccountCoordinator()
+        fixture.setUp()
+        self.addCleanup(fixture.tearDown)
+        service, _, _, _ = self._create_service(entry_hour=7, entry_minute=40)
+        service.account_runtimes["default"]["coordinator"] = fixture.coordinator
+        fixture.client.create_order.return_value = {
+            "orderId": 101, "status": "FILLED", "executedQty": "2.0", "avgPrice": "50.0",
+        }
+        due = datetime(2026, 2, 13, 7, 40, tzinfo=ZoneInfo("UTC"))
+        with patch("infra.binance_top10_monitor.build_top_gainers", return_value=[
+            {"symbol": "SOLUSDT", "current_price": 50.0},
+        ]) as ranker:
+            service.run_cycle(now_local=due, now_monotonic=100.0)
+            self.assertTrue(_wait_until(lambda: (service._collect_entry_futures(due) or not service._entry_futures)))
+            self.assertEqual(service._last_entry_local_date_by_account.get("default"), due.date())
+            service.run_cycle(now_local=due, now_monotonic=101.0)
+        ranker.assert_called_once()
+        fixture.client.create_order.assert_called_once()
+        self.assertIsNotNone(fixture.store.get_active_position_episode("SOLUSDT"))
+
+    def test_entry_worker_exception_gets_backoff(self):
+        service, _, _, _ = self._create_service(entry_hour=7, entry_minute=40)
+        coordinator = MagicMock()
+        coordinator.step.side_effect = RuntimeError("worker failed")
+        service.account_runtimes["default"]["coordinator"] = coordinator
+        service._get_entry_ranking = MagicMock(return_value=[])
+        due = datetime(2026, 2, 13, 7, 40, tzinfo=ZoneInfo("UTC"))
+        service.run_cycle(now_local=due)
+        self.assertTrue(_wait_until(lambda: (service._collect_entry_futures(due) or not service._entry_futures)))
+        self.assertTrue(service._entry_retry_blocked("default", due.date()))
+
+    def test_real_coordinator_manage_restores_portfolio_policy_parameters(self):
+        from tests.test_account_coordinator import TestAccountCoordinator
+        fixture = TestAccountCoordinator()
+        fixture.setUp()
+        self.addCleanup(fixture.tearDown)
+        service, strategy, _, _ = self._create_service()
+        manager = MagicMock()
+        manager.run_once.return_value = {"total": 2, "errors": 0}
+        manager.run_portfolio_take_profit.return_value = {"status": "MONITORING"}
+        manager.run_portfolio_loss_cut.return_value = {"status": "MONITORING"}
+        fixture.coordinator.manager = manager
+        sampler = MagicMock()
+        sampler.run_once.return_value = {"wallet_balance": 290, "equity": 300}
+        service.account_runtimes["default"].update({
+            "coordinator": fixture.coordinator, "manager": manager, "balance_sampler": sampler,
+            "portfolio_take_profit_enabled": True, "portfolio_take_profit_pct": 9,
+            "portfolio_take_profit_hour": 8, "portfolio_take_profit_minute": 30,
+            "portfolio_take_profit_reduce_ratio": 0.5, "portfolio_take_profit_giveback_pct": 15,
+            "portfolio_loss_cut_enabled": True, "portfolio_loss_cut_pct": 3.5,
+            "portfolio_loss_cut_hour": 11, "portfolio_loss_cut_minute": 55,
+        })
+        now = datetime(2026, 10, 8, 12, tzinfo=ZoneInfo("UTC"))
+        service._run_manage_for_account("default", now)
+        manager.run_once.assert_called_once_with()
+        manager.run_portfolio_take_profit.assert_called_once_with(
+            current_equity_usdt=300.0, now_local=now, profit_pct=9.0,
+            reset_hour=8, reset_minute=30, reduce_ratio=0.5, giveback_pct=15.0,
+        )
+        manager.run_portfolio_loss_cut.assert_called_once_with(
+            current_equity_usdt=300.0, now_local=now, loss_pct=3.5, reset_hour=11, reset_minute=55,
+        )
+        self.assertEqual(strategy.equity_recovery_calls, 0)
+        fixture.client.create_order.assert_not_called()
+
+    def test_ranking_failure_and_other_incomplete_results_have_backoff(self):
+        service, _, _, _ = self._create_service()
+        today = datetime(2026, 2, 13).date()
+        for result in ({"status": "RETRY", "reason": "RANKING_UNAVAILABLE", "retry_after_sec": 30},
+                       {"status": "FAILED", "errors": 1}):
+            with self.subTest(result=result), patch("core.runtime_service.time.monotonic", return_value=100):
+                service._schedule_entry_retry("default", today, result)
+                self.assertTrue(service._entry_retry_blocked("default", today, now_monotonic=101))
+                self.assertFalse(service._entry_retry_blocked("default", today, now_monotonic=161))
+
+    def test_candle_wait_keeps_original_polling_cadence(self):
+        service, _, _, _ = self._create_service()
+        today = datetime(2026, 2, 13).date()
+        result = {"status": "WAITING", "opened": 1}
+        self.assertFalse(service._is_entry_result_complete(result))
+        service._schedule_entry_retry("default", today, result)
+        self.assertFalse(service._entry_retry_blocked("default", today))
 
     def test_manage_interval_and_catch_up_limit(self):
         service, _, manager, _ = self._create_service(
@@ -880,9 +952,14 @@ class RuntimeServiceTest(unittest.TestCase):
             now_monotonic=10.0,
         )
         self.assertTrue(_wait_until(lambda: acc03.entry_calls == 1))
+        due = datetime(2026, 2, 13, 7, 40, tzinfo=ZoneInfo("UTC"))
+        self.assertTrue(_wait_until(lambda: (service._collect_entry_futures(due) or not service._entry_futures)))
+        retry_at = service._entry_retry_not_before_by_account["acc03"]
+        service.run_cycle(now_local=due, now_monotonic=retry_at - 1.0)
+        self.assertEqual(acc03.entry_calls, 1)
         service.run_cycle(
             now_local=datetime(2026, 2, 13, 7, 41, tzinfo=ZoneInfo("UTC")),
-            now_monotonic=70.0,
+            now_monotonic=retry_at + 1.0,
         )
         self.assertTrue(_wait_until(lambda: acc03.entry_calls == 2))
 
@@ -2180,4 +2257,3 @@ def test_runtime_service_records_task_executions(tmp_path) -> None:
     assert "noon_protection" in latest
     assert latest["noon_protection"]["status"] == "SUCCESS"
     assert "updated=1" in latest["noon_protection"]["summary"]
-

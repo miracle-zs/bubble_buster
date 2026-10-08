@@ -6,13 +6,17 @@ Implements Phase D requirements:
 3. Resolves due TaskOccurrences and EntryPlan wakeups.
 4. Assembles immutable AccountView and MarketView.
 5. Invokes pure DecisionKernel for conflict arbitration.
-6. Submits arbitrated intents via ExecutionEngine.
+6. Production actions use the existing strategy and manager workflows so
+   configuration, candle timing, sizing, protection, and risk semantics survive.
+   The kernel-only path remains available for isolated kernel evaluation.
 """
 
 from __future__ import annotations
 
 from datetime import datetime, timezone
+from functools import wraps
 import logging
+import threading
 import time
 import uuid
 from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Set, Tuple
@@ -39,6 +43,14 @@ if TYPE_CHECKING:
 
 
 LOGGER = logging.getLogger(__name__)
+
+
+def _serialized_step(method):
+    @wraps(method)
+    def wrapped(self, *args, **kwargs):
+        with self._step_lock:
+            return method(self, *args, **kwargs)
+    return wrapped
 
 
 class AccountCoordinator:
@@ -70,7 +82,9 @@ class AccountCoordinator:
         else:
             self.kernel = kernel
         self._revision: int = 0
+        self._step_lock = threading.RLock()
 
+    @_serialized_step
     def recover_unknown_attempts(self) -> Tuple[List[OrderAttempt], Set[str]]:
         """Query and actively recover in-flight UNKNOWN attempts.
 
@@ -589,6 +603,7 @@ class AccountCoordinator:
 
         return submitted_attempts, timed_out
 
+    @_serialized_step
     def step(
         self,
         max_duration_sec: float = 30.0,
@@ -608,17 +623,18 @@ class AccountCoordinator:
         config: Optional[Dict[str, Any]] = None,
         wallet_balance: Optional[float] = None,
         equity: Optional[float] = None,
+        account_snapshot: Optional[Any] = None,
     ) -> Dict[str, Any]:
-        """Execute a single bounded, serialized coordination step natively.
+        """Serialize a strategy workflow, or run an isolated bounded kernel step.
 
         Lifecycle:
         1. Measure bounded execution budget.
         2. Actively recover in-flight UNKNOWN order attempts.
-        3. Dispatch specific action workflow (entry, loss_cut, protection, cleanup) or general step.
-        4. Detect EntryPlan wakeups and due tasks.
-        5. Build AccountView and MarketView.
-        6. Pure DecisionKernel arbitration (respects uncertainty freeze).
-        7. Execute arbitrated intents within budget.
+        3. Dispatch attached strategy/manager workflows when available. Runtime
+           entry waiting yields using the strategy's non-blocking wait state.
+        4. For isolated kernel steps only, dispatch specific or general actions.
+        5. Detect EntryPlan wakeups and due tasks; build account/market views.
+        6. Pure DecisionKernel arbitration and bounded intent execution.
         """
         start_mono = time.monotonic()
         cfg = dict(config or {})
@@ -626,22 +642,74 @@ class AccountCoordinator:
         # 1. Recover UNKNOWN attempts first on any step
         recovered_attempts, uncertain_symbols = self.recover_unknown_attempts()
 
+        # Production accounts retain the complete strategy/policy workflows.
+        # The kernel-only path below is not a substitute for candle timing,
+        # balance sizing, exit setup, or persisted portfolio policy state.
+        if action == "entry" and self.strategy is not None:
+            if uncertain_symbols:
+                return {
+                    "status": "RETRY", "reason": "ORDER_STATE_UNCERTAIN",
+                    "retry_after_sec": 10.0, "opened": 0, "failed": 0,
+                    "uncertain_symbols": sorted(uncertain_symbols),
+                }
+            return self.strategy.run_entry(
+                trade_day_utc=trade_day_utc,
+                shared_top_gainers=shared_top_gainers,
+            )
+        if self.manager is not None:
+            if action == "manage":
+                if account_snapshot is not None:
+                    return self.manager.run_once(account_snapshot=account_snapshot)
+                return self.manager.run_once()
+            if action == "loss_cut":
+                return self.manager.run_daily_loss_cut()
+            if action == "noon_protection":
+                kwargs = {"day_start_utc": day_start_utc, "noon_time_utc": noon_time_utc}
+                if symbols is not None:
+                    kwargs["symbols"] = symbols
+                return self.manager.run_noon_protection_stop(**kwargs)
+            if action == "morning_protection":
+                return self.manager.run_morning_protection_stop(
+                    check_time_utc=check_time_utc, min_hold_hours=min_hold_hours,
+                )
+            if action == "hourly_take_profit":
+                return self.manager.run_hourly_exchange_take_profit(
+                    now_local=now_local,
+                    drop_pct=float(cfg.get("hourly_exchange_take_profit_drop_pct", 18.0)),
+                )
+            if action == "orphan_cleanup":
+                return self.manager.cleanup_orphan_exit_orders_once_per_day()
+
         if action == "entry":
-            gainers = list(shared_top_gainers or top_gainers or [])
-            if not gainers:
-                if self.client is not None and hasattr(self.client, "session"):
-                    try:
-                        from core.ranking_top_gainers import build_top_gainers
-                        fetch_top_n = int(cfg.get("top_n", 10)) * 2
-                        gainers = build_top_gainers(
-                            top_n=fetch_top_n,
-                            volume_threshold=float(cfg.get("volume_threshold", 5000000.0)),
-                            session=self.client.session,
-                            base_url=getattr(self.client, "base_url", None),
-                        )
-                    except Exception as exc:
-                        LOGGER.warning("AccountCoordinator: failed to build top gainers: %s", exc)
-                        gainers = []
+            # An explicitly supplied empty ranking is valid, not a fetch failure.
+            ranking = shared_top_gainers if shared_top_gainers is not None else top_gainers
+            gainers = list(ranking) if ranking is not None else []
+            if ranking is None:
+                try:
+                    if self.client is None or not hasattr(self.client, "session"):
+                        raise RuntimeError("Ranking client unavailable")
+                    from infra.binance_top10_monitor import build_top_gainers
+
+                    fetch_top_n = int(cfg.get("top_n", 10)) * 2
+                    gainers = build_top_gainers(
+                        top_n=fetch_top_n,
+                        volume_threshold=float(cfg.get("volume_threshold", 5000000.0)),
+                        session=self.client.session,
+                        base_url=getattr(self.client, "base_url", None),
+                        rate_limit_coordinator=getattr(self.client, "rate_limit_coordinator", None),
+                        state_store=self.store,
+                    )
+                except Exception as exc:
+                    LOGGER.warning("AccountCoordinator: failed to build top gainers: %s", exc)
+                    # No entry intents have been created: safe to retry ranking later.
+                    return {
+                        "status": "RETRY",
+                        "reason": "RANKING_UNAVAILABLE",
+                        "retry_after_sec": 30.0,
+                        "opened": 0,
+                        "failed": 0,
+                        "errors": 1,
+                    }
 
             advanced_plans = self.advance_entry_plans()
             for p in advanced_plans:

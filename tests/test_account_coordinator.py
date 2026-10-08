@@ -4,7 +4,7 @@ import os
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 from core.decision.kernel import DecisionKernel
 from core.execution.coordinator import AccountCoordinator
@@ -54,6 +54,185 @@ class TestAccountCoordinator(unittest.TestCase):
 
     def tearDown(self):
         self.temp_dir.cleanup()
+
+    def test_attached_strategy_preserves_complete_entry_workflow(self):
+        strategy = MagicMock()
+        expected = {"status": "WAITING", "opened": 1, "scale_in_added": 0}
+        strategy.run_entry.return_value = expected
+        self.coordinator.strategy = strategy
+        ranking = [{"symbol": "SOLUSDT", "current_price": 50.0}]
+        result = self.coordinator.step(action="entry", trade_day_utc="2026-10-08", shared_top_gainers=ranking)
+        self.assertEqual(result, expected)
+        strategy.run_entry.assert_called_once_with(trade_day_utc="2026-10-08", shared_top_gainers=ranking)
+        self.client.create_order.assert_not_called()
+
+    def test_attached_manager_preserves_scheduled_policy_inputs(self):
+        manager = MagicMock()
+        self.coordinator.manager = manager
+        from datetime import datetime, timezone
+        now = datetime(2026, 10, 8, 4, tzinfo=timezone.utc)
+        cases = [
+            ("manage", {"account_snapshot": {"equity": 300}}, "run_once", {"account_snapshot": {"equity": 300}}),
+            ("loss_cut", {}, "run_daily_loss_cut", {}),
+            ("noon_protection", {"day_start_utc": "start", "noon_time_utc": "noon", "symbols": {"SOLUSDT"}},
+             "run_noon_protection_stop", {"day_start_utc": "start", "noon_time_utc": "noon", "symbols": {"SOLUSDT"}}),
+            ("morning_protection", {"check_time_utc": now, "min_hold_hours": 6},
+             "run_morning_protection_stop", {"check_time_utc": now, "min_hold_hours": 6}),
+            ("hourly_take_profit", {"now_local": now, "config": {"hourly_exchange_take_profit_drop_pct": 18}},
+             "run_hourly_exchange_take_profit", {"now_local": now, "drop_pct": 18}),
+            ("orphan_cleanup", {}, "cleanup_orphan_exit_orders_once_per_day", {}),
+        ]
+        for action, inputs, method_name, expected_kwargs in cases:
+            with self.subTest(action=action):
+                method = getattr(manager, method_name)
+                method.return_value = {"total": 2, "errors": 0}
+                result = self.coordinator.step(action=action, **inputs)
+                self.assertEqual(result, method.return_value)
+                method.assert_called_once_with(**expected_kwargs)
+        self.client.create_order.assert_not_called()
+
+    def test_attached_strategy_is_frozen_until_unknown_orders_resolve(self):
+        strategy = MagicMock()
+        self.coordinator.strategy = strategy
+        with patch.object(self.coordinator, "recover_unknown_attempts", return_value=([], {"SOLUSDT"})):
+            result = self.coordinator.step(action="entry")
+        self.assertEqual(result["status"], "RETRY")
+        strategy.run_entry.assert_not_called()
+
+    def test_real_strategy_entry_restores_balance_sizing_positions_and_exits(self):
+        from tests.test_strategy_rebalance import StrategyRebalanceTest
+        from datetime import datetime
+
+        strategy = StrategyRebalanceTest()._build_strategy(self.client, self.store, rebalance_enabled=False)
+        strategy.account_id = self.store.account_id
+        strategy.top_n = 2
+        old_run, _ = self.store.create_run("2026-10-07", account_id=self.store.account_id)
+        for symbol in ("OLD1USDT", "OLD2USDT", "OLD3USDT"):
+            self.store.insert_position(
+                run_id=old_run, symbol=symbol, side="SHORT", qty=1, entry_price=10,
+                liq_price_open=15, tp_price=8, sl_price=14.85,
+                tp_order_id=None, sl_order_id=None, tp_client_order_id=None, sl_client_order_id=None,
+                opened_at_utc="2026-10-07T00:00:00+00:00", expire_at_utc="2026-10-10T00:00:00+00:00", status="OPEN",
+            )
+        self.client.get_available_balance.return_value = 500.0
+        self.client.diagnose_order_qty.side_effect = lambda symbol, notional, price: {"normalized_qty": notional / price}
+        self.client.normalize_order_qty.side_effect = lambda symbol, notional, price: notional / price
+        self.client.format_trigger_price.side_effect = lambda symbol, price, **kwargs: str(price)
+        self.client.normalize_trigger_price.side_effect = lambda symbol, price, **kwargs: price
+        self.client.create_order.side_effect = lambda **kwargs: {
+            "orderId": self.client.create_order.call_count, "symbol": kwargs["symbol"],
+            "side": kwargs["side"], "type": kwargs["type"],
+            "status": "FILLED" if kwargs["type"] == "MARKET" else "NEW",
+            "executedQty": kwargs.get("quantity", "0") if kwargs["type"] == "MARKET" else "0",
+            "avgPrice": "10", "clientOrderId": kwargs["newClientOrderId"],
+        }
+        risk = {"entryPrice": "10", "liquidationPrice": "15", "positionAmt": "-9.9"}
+        strategy._load_short_position = MagicMock(return_value=risk)
+        strategy._load_exit_position_with_liquidation_price = MagicMock(return_value=risk)
+        strategy._prewarm_entry_candidates = MagicMock()
+        self.coordinator.strategy = strategy
+        result = self.coordinator.step(action="entry", trade_day_utc="2026-10-08", shared_top_gainers=[
+            {"symbol": symbol, "change": 10, "current_price": 10, "volume": 1e7}
+            for symbol in ("AAAUSDT", "BBBUSDT")
+        ], config={"max_positions": 2, "target_notional_per_pos": 999})
+        self.assertEqual(result["status"], "SUCCESS")
+        self.assertEqual(result["opened"], 2)
+        rows = self.store.list_open_positions()
+        self.assertEqual(len(rows), 5)  # top_n is new entries, not a total-position cap.
+        for row in [p for p in rows if not p["symbol"].startswith("OLD")]:
+            self.assertAlmostEqual(row["qty"], 9.9)
+            self.assertAlmostEqual(row["tp_price"], 8.0)
+            self.assertAlmostEqual(row["sl_price"], 14.85)
+            hold = datetime.fromisoformat(row["expire_at_utc"]) - datetime.fromisoformat(row["opened_at_utc"])
+            self.assertEqual(hold.total_seconds(), 47.5 * 3600)
+        self.assertEqual(self.client.ensure_isolated_and_leverage.call_count, 2)
+        types = [c.kwargs["type"] for c in self.client.create_order.call_args_list]
+        self.assertEqual(types.count("MARKET"), 2)
+        self.assertEqual(types.count("STOP_MARKET"), 2)
+        self.assertEqual(types.count("TAKE_PROFIT_MARKET"), 2)
+
+    def test_real_strategy_candle_wait_remains_resumable_until_signal(self):
+        from tests.test_strategy_rebalance import StrategyRebalanceTest
+        from datetime import datetime, timezone
+        strategy = StrategyRebalanceTest()._build_strategy(
+            self.client, self.store, rebalance_enabled=False, entry_wait_bearish_hour_enabled=True,
+        )
+        strategy.account_id = self.store.account_id
+        strategy.top_n = 1
+        self.coordinator.strategy = strategy
+        self.client.get_available_balance.return_value = 500
+        strategy._prewarm_entry_candidates = MagicMock()
+        strategy._prepare_entry_structure_window = MagicMock(return_value=None)
+        strategy._complete_entry_structure_protection = MagicMock(return_value=None)
+        strategy._load_short_position = MagicMock(return_value={
+            "entryPrice": "10", "liquidationPrice": "15", "positionAmt": "-9.9",
+        })
+        strategy._place_exit_orders = MagicMock()
+        strategy._place_market_short_with_shrink_retry = MagicMock(return_value=({
+            "orderId": 1, "status": "FILLED", "executedQty": "9.9", "avgPrice": "10",
+        }, 0))
+        self.client.diagnose_order_qty.return_value = {"normalized_qty": 9.9}
+        ranking = [{"symbol": "AAAUSDT", "change": 10, "current_price": 10, "volume": 1e7}]
+        before = datetime(2026, 10, 8, 0, 40, tzinfo=timezone.utc)
+        with patch.object(strategy, "_utc_now_datetime", return_value=before):
+            first = self.coordinator.step(action="entry", trade_day_utc="2026-10-08", shared_top_gainers=ranking)
+        self.assertEqual(first["status"], "WAITING")
+        self.assertEqual(self.store.get_run(first["run_id"]).status, "RUNNING")
+        strategy._place_market_short_with_shrink_retry.assert_not_called()
+        after = datetime(2026, 10, 8, 1, 0, 2, tzinfo=timezone.utc)
+        closed = datetime(2026, 10, 8, 1, tzinfo=timezone.utc)
+        with patch.object(strategy, "_utc_now_datetime", return_value=after), patch.object(
+            strategy, "_fetch_hour_candles_parallel", return_value={0: (10.0, 9.0, closed)},
+        ):
+            second = self.coordinator.step(action="entry", trade_day_utc="2026-10-08", shared_top_gainers=ranking)
+        self.assertEqual(second["status"], "SUCCESS")
+        self.assertEqual(second["opened"], 1)
+        strategy._place_market_short_with_shrink_retry.assert_called_once()
+        strategy._place_exit_orders.assert_called_once()
+
+    def test_real_strategy_second_tranche_requires_later_bullish_then_bearish(self):
+        from tests.test_strategy_rebalance import StrategyRebalanceTest
+        from datetime import datetime, timezone
+        strategy = StrategyRebalanceTest()._build_strategy(
+            self.client, self.store, rebalance_enabled=False, entry_scale_in_mode="after_bullish_bearish",
+        )
+        strategy.account_id = self.store.account_id
+        strategy.top_n = 1
+        self.coordinator.strategy = strategy
+        self.client.get_available_balance.return_value = 500
+        strategy._prewarm_entry_candidates = MagicMock()
+        strategy._prepare_entry_structure_window = MagicMock(return_value=None)
+        strategy._complete_entry_structure_protection = MagicMock(return_value=None)
+        strategy._place_exit_orders = MagicMock()
+        strategy._place_market_short_with_shrink_retry = MagicMock(return_value=({
+            "orderId": 1, "status": "FILLED", "executedQty": "4.95", "avgPrice": "10",
+        }, 0))
+        strategy._load_short_position = MagicMock(side_effect=lambda symbol: {
+            "entryPrice": "10", "liquidationPrice": "15",
+            "positionAmt": "-4.95" if strategy._place_market_short_with_shrink_retry.call_count == 1 else "-9.9",
+        })
+        self.client.diagnose_order_qty.return_value = {"normalized_qty": 4.95}
+        ranking = [{"symbol": "AAAUSDT", "change": 10, "current_price": 10, "volume": 1e7}]
+        def advance(hour, open_price, close_price):
+            now = datetime(2026, 10, 8, hour, 0, 2, tzinfo=timezone.utc)
+            close = datetime(2026, 10, 8, hour, tzinfo=timezone.utc)
+            with patch.object(strategy, "_utc_now_datetime", return_value=now), patch.object(
+                strategy, "_fetch_hour_candles_parallel", return_value={0: (open_price, close_price, close)},
+            ):
+                return self.coordinator.step(action="entry", trade_day_utc="2026-10-08", shared_top_gainers=ranking)
+        with patch.object(strategy, "_utc_now_datetime", return_value=datetime(2026, 10, 8, 0, 40, tzinfo=timezone.utc)):
+            self.assertEqual(self.coordinator.step(action="entry", trade_day_utc="2026-10-08", shared_top_gainers=ranking)["status"], "WAITING")
+        self.assertEqual(advance(1, 10, 9)["status"], "WAITING")
+        self.assertEqual(strategy._place_market_short_with_shrink_retry.call_count, 1)
+        self.assertEqual(advance(2, 9, 10)["status"], "WAITING")
+        self.assertEqual(strategy._place_market_short_with_shrink_retry.call_count, 1)
+        result = advance(3, 10, 9)
+        self.assertEqual(result["status"], "SUCCESS")
+        self.assertEqual(result["scale_in_added"], 1)
+        self.assertEqual(strategy._place_market_short_with_shrink_retry.call_count, 2)
+        for call in strategy._place_market_short_with_shrink_retry.call_args_list:
+            self.assertAlmostEqual(call.kwargs["target_notional"], 49.5)
+        self.assertAlmostEqual(self.store.list_open_positions()[0]["qty"], 9.9)
 
     def test_step_recovers_unknown_attempt_before_dispatch(self):
         """In-flight UNKNOWN order attempts must be queried and recovered."""
@@ -190,6 +369,35 @@ class TestAccountCoordinator(unittest.TestCase):
         result = self.coordinator.step(max_duration_sec=10.0)
         self.assertTrue(result["entry_plan_ready"])
 
+    def test_entry_without_shared_ranking_loads_real_ranker(self):
+        self.client.create_order.return_value = {
+            "orderId": 101, "status": "FILLED", "executedQty": "2.0", "avgPrice": "50.0",
+        }
+        with patch("infra.binance_top10_monitor.build_top_gainers", return_value=[
+            {"symbol": "SOLUSDT", "current_price": 50.0},
+        ]) as ranker:
+            result = self.coordinator.step(action="entry")
+        ranker.assert_called_once()
+        self.assertEqual(result["opened"], 1)
+        self.assertEqual(result["errors"], 0)
+
+    def test_entry_ranking_failure_is_retry_without_orders(self):
+        with patch("infra.binance_top10_monitor.build_top_gainers", side_effect=RuntimeError("ranking unavailable")):
+            result = self.coordinator.step(action="entry")
+        self.assertEqual(result["status"], "RETRY")
+        self.assertEqual(result["reason"], "RANKING_UNAVAILABLE")
+        self.assertEqual(result["errors"], 1)
+        self.assertGreaterEqual(result["retry_after_sec"], 10)
+        self.client.create_order.assert_not_called()
+
+    def test_entry_explicit_empty_ranking_does_not_refetch(self):
+        with patch("infra.binance_top10_monitor.build_top_gainers") as ranker:
+            result = self.coordinator.step(action="entry", shared_top_gainers=[])
+        ranker.assert_not_called()
+        self.assertEqual(result["status"], "COMPLETED")
+        self.assertEqual(result["opened"], 0)
+        self.client.create_order.assert_not_called()
+
     def test_step_entry_natively_creates_intents_and_episode(self):
         """Native entry creates OrderIntent, creates order attempt, and creates PositionEpisode."""
         self.client.create_order.return_value = {
@@ -199,7 +407,6 @@ class TestAccountCoordinator(unittest.TestCase):
             "avgPrice": "50.0",
         }
         mock_strategy = MagicMock()
-        self.coordinator.strategy = mock_strategy
 
         result = self.coordinator.step(
             action="entry",
@@ -246,7 +453,6 @@ class TestAccountCoordinator(unittest.TestCase):
             episode_id="ep_loss",
         )
         mock_manager = MagicMock()
-        self.coordinator.manager = mock_manager
 
         self.client.create_order.return_value = {
             "orderId": 202,
@@ -291,7 +497,6 @@ class TestAccountCoordinator(unittest.TestCase):
             status="OPEN",
         )
         mock_manager = MagicMock()
-        self.coordinator.manager = mock_manager
 
         self.client.create_order.return_value = {
             "orderId": 999,
@@ -355,7 +560,6 @@ class TestAccountCoordinator(unittest.TestCase):
             status="OPEN",
         )
         mock_manager = MagicMock()
-        self.coordinator.manager = mock_manager
 
         self.client.create_order.return_value = {
             "orderId": 888,
@@ -543,7 +747,6 @@ class TestAccountCoordinator(unittest.TestCase):
             episode_id="ep_htp",
         )
         mock_manager = MagicMock()
-        self.coordinator.manager = mock_manager
 
         self.client.create_order.return_value = {
             "orderId": 303,
@@ -569,7 +772,6 @@ class TestAccountCoordinator(unittest.TestCase):
     def test_step_orphan_cleanup_natively_cancels_orders(self):
         """Native orphan cleanup cancels orders on inactive symbols."""
         mock_manager = MagicMock()
-        self.coordinator.manager = mock_manager
 
         # Open order on LINKUSDT, but no open positions
         self.client.get_open_orders.return_value = [

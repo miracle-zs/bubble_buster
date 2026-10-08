@@ -78,16 +78,24 @@ def format_task_status(
         opened = safe_int(payload.get("opened"), 0)
         failed = safe_int(payload.get("failed"), 0)
         skipped = safe_int(payload.get("skipped"), 0)
+        errors = max(failed, safe_int(payload.get("errors"), 0))
         status_raw = str(payload.get("status") or "").upper()
-        if status_raw in {"SUCCESS", "FAILED", "SKIPPED", "RUNNING"}:
+        if status_raw == "WAITING":
+            status = "RUNNING"
+        elif status_raw in {"RETRY", "TIMED_OUT"}:
+            status = status_from_error_count(max(1, errors), opened)
+        elif status_raw in {"SUCCESS", "FAILED", "PARTIAL", "SKIPPED", "RUNNING"}:
             status = status_raw
         else:
-            status = status_from_error_count(failed, opened)
+            status = status_from_error_count(errors, opened)
         entry_failed_symbols = format_symbol_field(payload.get("entry_failed_symbols"))
         skipped_symbols = format_symbol_field(payload.get("skipped_symbols"))
         parts = [f"opened={opened}", f"failed={failed}", f"skipped={skipped}"]
         append_summary_part(parts, "failed_symbols", entry_failed_symbols)
         append_summary_part(parts, "skipped_symbols", skipped_symbols)
+        if errors:
+            append_summary_part(parts, "errors", errors)
+        append_summary_part(parts, "reason", payload.get("reason") or "")
         summary = " ".join(parts)
 
     elif task_key == "daily_loss_cut":

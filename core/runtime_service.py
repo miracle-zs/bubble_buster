@@ -289,7 +289,7 @@ class StrategyRuntimeService:
         if not isinstance(result, dict):
             return False
         status = str(result.get("status", "")).strip().upper()
-        if status in {"SUCCESS", "DISABLED"}:
+        if status in {"SUCCESS", "COMPLETED", "PARTIAL", "DISABLED"}:
             return True
         if status != "SKIPPED":
             return False
@@ -336,14 +336,16 @@ class StrategyRuntimeService:
         return current_monotonic < self._entry_retry_not_before_by_account.get(account_id, 0.0)
 
     def _schedule_entry_retry(self, account_id: str, trade_day: date, result: object) -> None:
-        if not isinstance(result, dict):
+        if self._is_entry_result_complete(result):
             return
-        status = str(result.get("status", "")).strip().upper()
-        reason = str(result.get("reason", "")).strip().upper()
-        if status != "RETRY" and reason not in TRANSIENT_ENTRY_REASONS:
+        # All incomplete results need backoff, including exceptions/unknown statuses.
+        payload = result if isinstance(result, dict) else {}
+        # A persisted candle wait is normal strategy progression, not a failed
+        # attempt. Keep its original polling cadence/pre-close signal window.
+        if str(payload.get("status", "")).strip().upper() == "WAITING":
             return
         try:
-            retry_after_sec = float(result.get("retry_after_sec", 10.0))
+            retry_after_sec = float(payload.get("retry_after_sec", 10.0))
         except (TypeError, ValueError):
             retry_after_sec = 10.0
         retry_after_sec = min(60.0, max(1.0, retry_after_sec))
@@ -394,6 +396,7 @@ class StrategyRuntimeService:
                 result = future.result()
             except Exception as exc:  # noqa: BLE001
                 LOGGER.warning("service entry background failed account=%s: %s", aid, exc)
+                self._schedule_entry_retry(aid, trade_day, {"status": "FAILED"})
                 self._record_task_execution(
                     account_id=aid,
                     task_name="entry",
@@ -1103,7 +1106,7 @@ class StrategyRuntimeService:
                 results[aid] = coord.step(
                     action="hourly_take_profit",
                     now_local=now_local,
-                    config=ctx,
+                    config={**ctx, "hourly_exchange_take_profit_drop_pct": drop_pct},
                 )
             except Exception as exc:
                 results[aid] = {"error": str(exc)}
@@ -1194,6 +1197,11 @@ class StrategyRuntimeService:
             if isinstance(pending_recovery, dict) and int(pending_recovery.get("total", 0)) > 0:
                 LOGGER.warning("service pending exit setup recovery account=%s: %s", account_id, pending_recovery)
 
+        coord = ctx.get("coordinator")
+        if coord is None or not hasattr(coord, "step"):
+            raise RuntimeError(f"AccountCoordinator is required for account={account_id} position management")
+        summary = coord.step(action="manage", account_snapshot=account_snapshot, config=ctx)
+
         if balance_sampler is not None:
             try:
                 sampled = self._call_with_optional_account_snapshot(
@@ -1214,34 +1222,102 @@ class StrategyRuntimeService:
             reduce_ratio,
             giveback_pct,
         ) = self._portfolio_take_profit_settings(account_id)
-        enabled, loss_pct, reset_hour, reset_minute = self._portfolio_loss_cut_settings(account_id)
+        if take_profit_enabled and hasattr(manager, "run_portfolio_take_profit"):
+            equity = wallet_summary.get("equity") if wallet_summary is not None else None
+            if equity is None:
+                portfolio_take_profit_result = {
+                    "status": "SKIPPED",
+                    "reason": "NO_CURRENT_EQUITY_SNAPSHOT",
+                }
+            else:
+                try:
+                    result = manager.run_portfolio_take_profit(  # type: ignore[attr-defined]
+                        current_equity_usdt=float(equity),
+                        now_local=local_dt,
+                        profit_pct=profit_pct,
+                        reset_hour=take_profit_hour,
+                        reset_minute=take_profit_minute,
+                        reduce_ratio=reduce_ratio,
+                        giveback_pct=giveback_pct,
+                    )
+                    if isinstance(result, dict):
+                        portfolio_take_profit_result = result
+                        if str(result.get("status") or "").upper() in {"TRIGGERED", "TRIGGERED_RETRY"}:
+                            LOGGER.warning(
+                                "service portfolio take-profit account=%s result=%s",
+                                account_id,
+                                result,
+                            )
+                            self._record_task_execution(
+                                account_id=account_id,
+                                task_name="equity_recovery_take_profit",
+                                payload=result,
+                                task_cycle=local_dt.date().isoformat(),
+                            )
+                except Exception as exc:  # noqa: BLE001
+                    portfolio_take_profit_result = {"status": "ERROR", "error": str(exc)}
+                    LOGGER.exception("service portfolio take-profit failed account=%s: %s", account_id, exc)
+                    self._record_task_execution(
+                        account_id=account_id,
+                        task_name="equity_recovery_take_profit",
+                        payload=portfolio_take_profit_result,
+                        error=str(exc),
+                        task_cycle=local_dt.date().isoformat(),
+                    )
 
-        coord = ctx.get("coordinator")
-        if coord is None or not hasattr(coord, "step"):
-            raise RuntimeError(f"AccountCoordinator is required for account={account_id} position management")
-        bal = wallet_summary.get("wallet_balance") if wallet_summary else None
-        eq = wallet_summary.get("equity") if wallet_summary else None
-        coord_cfg = dict(ctx)
-        coord_cfg.update({
-            "portfolio_take_profit_enabled": take_profit_enabled,
-            "portfolio_take_profit_pct": profit_pct,
-            "portfolio_take_profit_reduce_ratio": reduce_ratio,
-            "portfolio_take_profit_giveback_pct": giveback_pct,
-            "portfolio_loss_cut_enabled": enabled,
-            "portfolio_loss_cut_pct": loss_pct,
-        })
-        summary = coord.step(
-            action="manage",
-            now_local=local_dt,
-            wallet_balance=float(bal) if bal is not None else None,
-            equity=float(eq) if eq is not None else None,
-            config=coord_cfg,
-        )
-        if isinstance(summary, dict):
-            if "portfolio_take_profit" in summary:
-                portfolio_take_profit_result = summary["portfolio_take_profit"]
-            if "portfolio_loss_cut" in summary:
-                portfolio_result = summary["portfolio_loss_cut"]
+        enabled, loss_pct, reset_hour, reset_minute = self._portfolio_loss_cut_settings(account_id)
+        if enabled and hasattr(manager, "run_portfolio_loss_cut"):
+            equity = wallet_summary.get("equity") if wallet_summary is not None else None
+            if equity is None:
+                portfolio_result = {"status": "SKIPPED", "reason": "NO_CURRENT_EQUITY_SNAPSHOT"}
+            else:
+                try:
+                    result = manager.run_portfolio_loss_cut(  # type: ignore[attr-defined]
+                        current_equity_usdt=float(equity),
+                        now_local=local_dt,
+                        loss_pct=loss_pct,
+                        reset_hour=reset_hour,
+                        reset_minute=reset_minute,
+                    )
+                    if isinstance(result, dict):
+                        portfolio_result = result
+                        if bool(result.get("triggered")):
+                            LOGGER.warning(
+                                "service portfolio loss-cut account=%s result=%s",
+                                account_id,
+                                result,
+                            )
+                except Exception as exc:  # noqa: BLE001
+                    portfolio_result = {"status": "ERROR", "error": str(exc)}
+                    LOGGER.exception("service portfolio loss-cut failed account=%s: %s", account_id, exc)
+
+        # The fixed daily-baseline rule replaces the legacy rolling-low
+        # recovery rule for an account; never let both exit engines act on the
+        # same positions in one manage cycle.
+        if (
+            not take_profit_enabled
+            and strategy is not None
+            and hasattr(strategy, "run_equity_recovery_take_profit")
+        ):
+            try:
+                result = strategy.run_equity_recovery_take_profit()  # type: ignore[attr-defined]
+                if isinstance(result, dict) and result.get("status") in {"TRIGGERED", "PARTIAL"}:
+                    LOGGER.info("service equity recovery take-profit account=%s result: %s", account_id, result)
+                    self._record_task_execution(
+                        account_id=account_id,
+                        task_name="equity_recovery_take_profit",
+                        payload=result,
+                        task_cycle=local_dt.date().isoformat(),
+                    )
+            except Exception as exc:  # noqa: BLE001
+                LOGGER.warning("service equity recovery take-profit failed account=%s: %s", account_id, exc)
+                self._record_task_execution(
+                    account_id=account_id,
+                    task_name="equity_recovery_take_profit",
+                    payload={"status": "FAILED", "error": str(exc)},
+                    error=str(exc),
+                    task_cycle=local_dt.date().isoformat(),
+                )
 
         return {
             "account_id": account_id,

@@ -460,12 +460,23 @@ class Top10ShortStrategy:
                     "exit_setup_failed": 0,
                 }
 
+            candidate_exclusions = set(open_symbols)
+            if resumed_wait:
+                # A first tranche is already an open position, but its persisted
+                # add-on signal must still be evaluated on subsequent scans.
+                pending = self._load_entry_wait_state().get("pending", {})
+                if isinstance(pending, dict):
+                    for item in pending.values():
+                        if isinstance(item, dict) and str(item.get("phase") or self.ENTRY_PHASE_INITIAL).upper() not in {
+                            self.ENTRY_PHASE_INITIAL, self.ENTRY_PHASE_COMPLETE,
+                        }:
+                            candidate_exclusions.discard(str(item.get("symbol") or ""))
             candidates, skipped_symbols = MarketRankScanner.select_entry_candidates(
                 ranked=ranked,
-                open_symbols=open_symbols,
+                open_symbols=candidate_exclusions,
                 target_count=self.top_n,
             )
-            expected_total_positions = len(open_symbols) + len(candidates)
+            expected_total_positions = len(set(open_symbols) | {item.symbol for item in candidates})
 
             if len(candidates) < self.top_n:
                 LOGGER.warning(
@@ -1019,6 +1030,24 @@ class Top10ShortStrategy:
                 }
 
             failed_count = entry_failed_count + exit_setup_failed_count + scale_in_failed_count
+            # A non-blocking candle scan yields with persisted work remaining.
+            # Keep the run resumable; finalizing it here would make the next
+            # invocation skip the initial/second tranche as RUN_ALREADY_EXISTS.
+            wait_state = self._load_entry_wait_state()
+            if (
+                str(wait_state.get("run_id") or "") == run_id
+                and isinstance(wait_state.get("pending"), dict)
+                and wait_state["pending"]
+            ):
+                return {
+                    "status": "WAITING", "run_id": run_id,
+                    "opened": opened_count, "failed": failed_count,
+                    "entry_failed": entry_failed_count,
+                    "exit_setup_failed": exit_setup_failed_count,
+                    "scale_in_added": scale_in_added_count,
+                    "scale_in_failed": scale_in_failed_count,
+                    "scale_in_skipped": scale_in_skipped_count,
+                }
             summary = (
                 f"run_id={run_id}, opened={opened_count}, failed={failed_count}, "
                 f"entry_failed={entry_failed_count}, entry_deferred={entry_deferred_count}, "

@@ -72,6 +72,20 @@ class TestTaskStatus:
         assert "skipped=2" in res["summary"]
         assert "skipped_symbols=XRPUSDT" in res["summary"]
 
+    def test_entry_ranking_error_is_not_success(self):
+        result = format_task_status("entry", {
+            "status": "RETRY", "reason": "RANKING_UNAVAILABLE",
+            "errors": 1, "opened": 0, "failed": 0,
+        })
+        assert result["status"] == "FAILED"
+        assert "reason=RANKING_UNAVAILABLE" in result["summary"]
+
+    def test_entry_timeout_is_not_success(self):
+        assert format_task_status("entry", {"status": "TIMED_OUT", "errors": 1})["status"] == "FAILED"
+
+    def test_entry_waiting_for_candles_is_running(self):
+        assert format_task_status("entry", {"status": "WAITING", "opened": 1})["status"] == "RUNNING"
+
     def test_format_daily_loss_cut(self):
         payload = {
             "total": 3,
