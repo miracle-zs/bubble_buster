@@ -103,6 +103,27 @@ class DashboardServerTest(unittest.TestCase):
         self.assertEqual(snapshot["open_positions"][0]["notional"], 500.0)
         self.assertEqual(snapshot["open_positions"][0]["notional_source"], "ENTRY_PRICE_ESTIMATE")
 
+    def test_loss_cut_uses_current_risk_cycle_not_historical_lock(self) -> None:
+        scoped = self.store.scoped("acc04")
+        scoped.set_lock_state("portfolio_loss_cut_v1", {
+            "cycle_date": "2026-10-07", "baseline_equity_usdt": 289.77563058,
+            "threshold_equity_usdt": 279.63348351, "loss_pct": 3.5,
+        })
+        scoped.save_risk_cycle_target_set("LOSS_CUT", "2026-10-09", {
+            "cycle_date": "2026-10-09", "baseline_equity_usdt": 276.70522059,
+            "threshold_equity_usdt": 267.02053787, "loss_pct": 3.5,
+        }, "MONITORING")
+        provider = DashboardDataProvider(db_path=self.db_path, log_file=self.log_file,
+                                         timezone_name="Asia/Shanghai", entry_hour=7, entry_minute=40)
+        with provider._connect_ctx() as conn:
+            stop = provider._load_portfolio_loss_cut_state(conn, account_id="acc04",
+                                                         current_equity_usdt=276.5609, open_positions=3)
+        self.assertEqual(stop["cycle_date"], "2026-10-09")
+        self.assertEqual(stop["status"], "MONITORING")
+        self.assertAlmostEqual(stop["current_return_pct"], -0.05215680)
+        self.assertAlmostEqual(stop["distance_pct"], 3.44784320)
+        self.assertEqual(stop["source"], "RISK_CYCLE_TARGET_SET")
+
     def test_snapshot_exposes_backend_portfolio_loss_cut_state(self) -> None:
         account_id = "acc04"
         run_id, _ = self.store.create_run("2026-08-23", account_id=account_id)

@@ -234,6 +234,21 @@ class TestAccountCoordinator(unittest.TestCase):
             self.assertAlmostEqual(call.kwargs["target_notional"], 49.5)
         self.assertAlmostEqual(self.store.list_open_positions()[0]["qty"], 9.9)
 
+    def test_real_preclose_audit_defer_serializes_datetime_without_mutating_input(self):
+        from tests.test_strategy_rebalance import StrategyRebalanceTest
+        from datetime import datetime, timezone
+        strategy = StrategyRebalanceTest()._build_strategy(self.client, self.store, rebalance_enabled=False)
+        strategy._pending_preclose_order_event_ids = MagicMock(return_value=None)
+        hour = datetime(2026, 10, 8, 23, tzinfo=timezone.utc)
+        audit = {"symbol": "AAAUSDT", "hour_open_utc": hour, "order_event_id": 12,
+                 "position_id": 1, "order_payload": {"entry_audit": {}}}
+        with patch.object(strategy, "_utc_now_datetime", return_value=hour.replace(minute=59, second=54)):
+            result = strategy._finalize_preclose_entry_audits([audit])
+        self.assertEqual(result["skipped"], 1)
+        plan = self.store.get_entry_plan("entry_audit_AAAUSDT_12")
+        self.assertEqual(plan["plan_payload"]["audit"]["hour_open_utc"], hour.isoformat())
+        self.assertIs(audit["hour_open_utc"], hour)
+
     def test_step_recovers_unknown_attempt_before_dispatch(self):
         """In-flight UNKNOWN order attempts must be queried and recovered."""
         # 1. Setup an intent and UNKNOWN attempt in store

@@ -1331,7 +1331,10 @@ class Top10ShortStrategy:
                     status="WAITING_KLINE",
                     hour_open_utc=hour_open.isoformat(),
                     next_wakeup_utc=final_available_at.isoformat(),
-                    plan_payload={"order_event_id": order_event_id, "audit": audit},
+                    plan_payload={
+                        "order_event_id": order_event_id,
+                        "audit": {**audit, "hour_open_utc": hour_open.isoformat()},
+                    },
                 )
                 summary["skipped"] += 1
                 continue

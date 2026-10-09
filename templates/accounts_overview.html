@@ -2650,15 +2650,18 @@
     return start;
   }
 
-  function curveMetrics(rawPoints, mode) {
+  function curveMetrics(rawPoints, mode, stop) {
     var points = (rawPoints || []).filter(function (point) {
       return point && Number.isFinite(Number(point.equity));
     });
-    if (points.length < 2) return null;
+    var riskBaseline = mode !== "readonly" && stop ? Number(stop.baseline_equity) : NaN;
+    if (mode !== "readonly" && !(riskBaseline > 0)) return null;
+    if (!points.length) return null;
     var startIndex = 0;
     var latestMs = new Date(points[points.length - 1].t || "").getTime();
     if (Number.isFinite(latestMs)) {
-      var targetMs = cycleStartMs(latestMs);
+      var capturedMs = stop ? new Date(stop.baseline_captured_at_utc || "").getTime() : NaN;
+      var targetMs = Number.isFinite(capturedMs) ? capturedMs : cycleStartMs(latestMs);
       var afterIndex = -1;
       for (var i = 0; i < points.length; i += 1) {
         var pointMs = new Date(points[i].t || "").getTime();
@@ -2669,8 +2672,15 @@
       startIndex = afterIndex;
     }
     var scoped = points.slice(startIndex);
+    if (!scoped.length) return null;
+    var baseline = mode !== "readonly" ? riskBaseline : Number(scoped[0].equity);
+    if (mode !== "readonly") {
+      scoped.unshift({ equity: baseline });
+      if (stop.current_equity !== null && stop.current_equity !== undefined && Number.isFinite(Number(stop.current_equity))) {
+        scoped.push({ equity: Number(stop.current_equity) });
+      }
+    }
     if (scoped.length < 2) return null;
-    var baseline = Number(scoped[0].equity);
     if (!Number.isFinite(baseline) || baseline === 0) return null;
     var values = scoped.map(function (point) {
       return ((Number(point.equity) - baseline) / baseline) * 100;
@@ -2683,19 +2693,20 @@
     return {
       values: values,
       currentReturnPct: current,
-      currentDrawdownPct: current - peak,
-      stopDistancePct: current + portfolioStopPct
+      currentDrawdownPct: ((1 + current / 100) / (1 + peak / 100) - 1) * 100,
+      stopDistancePct: current + (stop ? Number(stop.loss_pct) : portfolioStopPct)
     };
   }
 
-  function chartGeometry(values, width, height, includeStop) {
+  function chartGeometry(values, width, height, includeStop, stopPct) {
+    stopPct = Number.isFinite(stopPct) ? stopPct : portfolioStopPct;
     var min = 0;
     var max = 0;
     for (var i = 0; i < values.length; i += 1) {
       if (values[i] < min) min = values[i];
       if (values[i] > max) max = values[i];
     }
-    if (includeStop) min = Math.min(min, -portfolioStopPct);
+    if (includeStop) min = Math.min(min, -stopPct);
     var rawSpan = max - min;
     var padding = Math.max(0.2, rawSpan * 0.12);
     min -= padding;
@@ -2712,7 +2723,7 @@
     return {
       points: coords.join(" "),
       zeroY: yFor(0),
-      stopY: yFor(-portfolioStopPct)
+      stopY: yFor(-stopPct)
     };
   }
 
@@ -2771,7 +2782,7 @@
     var hasDistance = Number.isFinite(distance);
     var riskCls = "status-ok";
     var riskText = "正常";
-    var stopDistanceText = hasDistance ? fmt(distance, 2) + "%" : "--";
+    var stopDistanceText = hasDistance ? fmt(distance, 2) + " 个百分点" : "--";
     var meterText = "安全距离";
     var meterPct = hasDistance
       ? Math.max(0, Math.min(100, distance / (portfolioStopPct * 2) * 100))
@@ -2792,7 +2803,7 @@
     } else if (status === "THRESHOLD_REACHED") {
       riskCls = "status-bad";
       riskText = "已到止损阈值";
-      stopDistanceText = hasDistance ? "已超出 " + fmt(Math.abs(distance), 2) + "%" : "已到阈值";
+      stopDistanceText = hasDistance ? "已超出 " + fmt(Math.abs(distance), 2) + " 个百分点" : "已到阈值";
       meterText = "等待策略执行";
       meterPct = 0;
     } else if (status === "MONITORING" && hasDistance) {
@@ -2834,7 +2845,7 @@
       ? null
       : Number(rawBackendReturn);
     if (!Number.isFinite(backendReturn)) backendReturn = null;
-    var metrics = cached ? curveMetrics(cached.points, mode) : null;
+    var metrics = cached ? curveMetrics(cached.points, mode, stop) : null;
     if (!metrics) {
       box.className = "spark-box";
       box.innerHTML = '<div class="spark-empty">暂无曲线</div>';
@@ -2861,7 +2872,7 @@
     var width = mode === "readonly" ? 300 : 320;
     var height = mode === "readonly" ? 50 : 126;
     var includeStop = mode !== "readonly" && portfolioStopEnabled;
-    var geometry = chartGeometry(metrics.values, width, height, includeStop);
+    var geometry = chartGeometry(metrics.values, width, height, includeStop, stop ? Number(stop.loss_pct) : portfolioStopPct);
     var area = geometry.points + " " + width + "," + height + " 0," + height;
     box.className = "spark-box " + deltaCls;
     box.innerHTML = ''
@@ -2907,7 +2918,7 @@
         var mode = String(accountModes[aid] || "full").toLowerCase();
         var curve = mode === "readonly"
           ? (payload.balance_curve || payload.equity_curve || [])
-          : (payload.strategy_equity_curve || payload.equity_curve || []);
+          : (payload.balance_curve || []);
         var points = [];
         for (var i = 0; i < curve.length; i += 1) {
           var p = curve[i] || {};
@@ -2996,17 +3007,17 @@
           + '<span class="venue-state ' + stateCls + '">Binance Futures<span class="status-dot"></span></span><a class="detail-link" href="' + base + '">详情</a></div></header>'
           + '<div class="account-card-body">'
           + '<div class="account-primary">'
-          + '<div class="metric"><span class="metric-label">策略权益 (USDT)</span><strong class="metric-value">' + fmt(r.wallet_balance_usdt, 4) + '</strong></div>'
+          + '<div class="metric"><span class="metric-label">账户权益（含浮盈亏，USDT）</span><strong class="metric-value">' + fmt(r.wallet_balance_usdt, 4) + '</strong></div>'
           + '<div class="metric"><span class="metric-label">' + String(portfolioStopHour).padStart(2, "0") + ":" + String(portfolioStopMinute).padStart(2, "0") + ' 以来收益</span><strong class="metric-value return-value spark-delta" data-account-id="' + safeAid + '">--</strong></div>'
           + '</div>'
           + '<div class="account-secondary">'
-          + '<div class="metric"><span class="metric-label">持仓数量</span><strong class="metric-value">' + fmt(r.open_positions, 0) + '</strong></div>'
+          + '<div class="metric"><span class="metric-label">本地策略持仓数</span><strong class="metric-value">' + fmt(r.open_positions, 0) + '</strong></div>'
           + '<div class="metric"><span class="metric-label">距周期高点回撤</span><strong class="metric-value current-drawdown" data-account-id="' + safeAid + '">--</strong></div>'
           + '<div class="metric"><span class="metric-label">距组合止损</span><strong class="metric-value stop-distance" data-account-id="' + safeAid + '">--</strong></div>'
           + '</div>'
           + '<div class="risk-summary"><span>风险状态</span><strong class="risk-state" data-account-id="' + safeAid + '">计算中</strong></div>'
           + '<div class="spark-block">'
-          + '<div class="spark-title"><span class="label">本周期策略权益曲线</span><span class="label">' + (portfolioStopEnabled ? ("止损阈值 -" + fmt(portfolioStopPct, 2) + "%") : "组合止损未启用") + '</span></div>'
+          + '<div class="spark-title"><span class="label">本周期账户权益曲线</span><span class="label">' + (portfolioStopEnabled ? ("止损阈值 -" + fmt(r.portfolio_loss_cut ? r.portfolio_loss_cut.loss_pct : portfolioStopPct, 2) + "%") : "组合止损未启用") + '</span></div>'
           + '<div class="spark-box" data-account-id="' + safeAid + '"><div class="spark-empty">加载中...</div></div>'
           + '<div class="stop-meter"><span>-' + fmt(portfolioStopPct, 2) + '%</span><span class="stop-meter-track"><span class="stop-meter-fill" data-account-id="' + safeAid + '"></span></span><span class="stop-meter-label" data-account-id="' + safeAid + '">计算中</span></div>'
           + "</div></div>"

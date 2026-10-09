@@ -13,6 +13,15 @@ from core.task_status import (
 
 
 class TestTaskStatus:
+    def test_entry_partial_fills_still_report_outer_exception(self):
+        result = format_task_status("entry", {
+            "status": "FAILED", "opened": 3, "failed": 0,
+            "error": "Object of type datetime is not JSON serializable",
+        })
+        assert result["status"] == "FAILED"
+        assert "errors=1" in result["summary"]
+        assert "datetime is not JSON serializable" in result["summary"]
+
     def test_safe_conversions(self):
         assert safe_int("10") == 10
         assert safe_int(12.3) == 12

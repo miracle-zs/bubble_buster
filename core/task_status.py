@@ -79,6 +79,8 @@ def format_task_status(
         failed = safe_int(payload.get("failed"), 0)
         skipped = safe_int(payload.get("skipped"), 0)
         errors = max(failed, safe_int(payload.get("errors"), 0))
+        if payload.get("error"):
+            errors = max(1, errors)
         status_raw = str(payload.get("status") or "").upper()
         if status_raw == "WAITING":
             status = "RUNNING"
@@ -96,6 +98,7 @@ def format_task_status(
         if errors:
             append_summary_part(parts, "errors", errors)
         append_summary_part(parts, "reason", payload.get("reason") or "")
+        append_summary_part(parts, "error", str(payload.get("error") or "")[:160])
         summary = " ".join(parts)
 
     elif task_key == "daily_loss_cut":

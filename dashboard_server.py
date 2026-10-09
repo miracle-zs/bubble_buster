@@ -1697,22 +1697,29 @@ class DashboardDataProvider:
 
         The curve is useful for presentation, but it is not authoritative for
         whether the manager has actually latched and completed a portfolio
-        loss-cut. Keep those states tied to the same scoped lock used by the
-        position manager.
+        loss-cut. Prefer the manager's account-scoped risk cycle; use legacy
+        locks only when no migrated risk cycle exists.
         """
         normalized_account_id = str(account_id or "").strip()
         if not normalized_account_id:
             return None
+        source = "BACKEND_LOCK"
+        row = None
         try:
-            row = conn.execute(
-                """
-                SELECT holder, updated_at_utc
-                FROM locks
-                WHERE lock_name = ?
-                LIMIT 1
-                """,
-                (f"{normalized_account_id}:{PORTFOLIO_LOSS_CUT_LOCK_NAME}",),
-            ).fetchone()
+            if conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='risk_cycle_target_sets'").fetchone():
+                row = conn.execute(
+                    """SELECT targets_json AS holder, updated_at_utc
+                       FROM risk_cycle_target_sets WHERE account_id=? AND cycle_type='LOSS_CUT'
+                       ORDER BY cycle_key DESC, updated_at_utc DESC LIMIT 1""",
+                    (normalized_account_id,),
+                ).fetchone()
+                if row is not None:
+                    source = "RISK_CYCLE_TARGET_SET"
+            if row is None:
+                row = conn.execute(
+                    "SELECT holder, updated_at_utc FROM locks WHERE lock_name=? LIMIT 1",
+                    (f"{normalized_account_id}:{PORTFOLIO_LOSS_CUT_LOCK_NAME}",),
+                ).fetchone()
         except sqlite3.Error:
             return None
         if row is None or row["holder"] is None:
@@ -1767,7 +1774,7 @@ class DashboardDataProvider:
 
         return {
             "status": status,
-            "source": "BACKEND_LOCK",
+            "source": source,
             "cycle_date": state.get("cycle_date"),
             "baseline_equity": rounded(baseline_equity),
             "baseline_captured_at_utc": state.get("baseline_captured_at_utc"),
