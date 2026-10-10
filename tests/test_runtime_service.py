@@ -127,6 +127,33 @@ def _wait_until(predicate, timeout: float = 1.0) -> bool:
 
 
 class RuntimeServiceTest(unittest.TestCase):
+    def test_previous_stop_keeps_0740_entry_schedule_after_restart(self):
+        from types import SimpleNamespace
+        for _restart in range(2):
+            service, strategy, _, _ = self._create_service(
+                timezone_name="Asia/Shanghai", entry_misfire_grace_min=20,
+            )
+            service.account_runtimes["default"]["portfolio_loss_cut_enabled"] = True
+            strategy.store = SimpleNamespace(get_risk_cycle_target_set=lambda kind, key: {
+                "targets": {"cycle_date": "2026-10-10", "triggered": True},
+            } if key == "2026-10-10" else None)
+            tz = ZoneInfo("Asia/Shanghai")
+            self.assertFalse(service._should_run_entry("default", datetime(2026, 10, 11, 7, 39, 59, tzinfo=tz)))
+            self.assertTrue(service._should_run_entry("default", datetime(2026, 10, 11, 7, 40, tzinfo=tz)))
+            self.assertTrue(service._should_run_entry("default", datetime(2026, 10, 11, 7, 59, 59, tzinfo=tz)))
+            self.assertFalse(service._should_run_entry("default", datetime(2026, 10, 11, 8, 0, 1, tzinfo=tz)))
+
+    def test_no_previous_stop_retains_original_entry_window(self):
+        from types import SimpleNamespace
+        service, strategy, _, _ = self._create_service(timezone_name="Asia/Shanghai", entry_misfire_grace_min=20)
+        service.account_runtimes["default"]["portfolio_loss_cut_enabled"] = True
+        strategy.store = SimpleNamespace(get_risk_cycle_target_set=lambda kind, key: {
+            "targets": {"cycle_date": key, "triggered": False},
+        })
+        tz = ZoneInfo("Asia/Shanghai")
+        self.assertTrue(service._should_run_entry("default", datetime(2026, 10, 11, 7, 40, tzinfo=tz)))
+        self.assertFalse(service._should_run_entry("default", datetime(2026, 10, 11, 8, 0, 1, tzinfo=tz)))
+
     def _create_service(self, **overrides):
         cfg = ServiceRuntimeConfig(
             timezone_name=overrides.get("timezone_name", "UTC"),

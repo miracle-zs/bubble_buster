@@ -53,6 +53,29 @@ class PortfolioLossCutTest(unittest.TestCase):
             account_id="acc01",
         )
 
+    def test_preclose_new_position_is_not_closed_by_previous_cycle_stop(self):
+        self._insert_short("BTCUSDT")
+        self.store.save_risk_cycle_target_set("LOSS_CUT", "2026-07-27", {
+            "cycle_date": "2026-07-27", "triggered": True, "close_complete": True,
+            "baseline_equity_usdt": 100.0,
+        }, status="TRIGGERED")
+        client = MagicMock()
+        manager = self._manager(client)
+        tz = ZoneInfo("Asia/Shanghai")
+        result = manager.run_portfolio_loss_cut(
+            current_equity_usdt=80, now_local=datetime(2026, 7, 28, 7, 59, 50, tzinfo=tz),
+        )
+        self.assertEqual(result["status"], "PRE_RESET")
+        client.create_order.assert_not_called()
+        self.store.add_wallet_snapshot("2026-07-28T00:00:00+00:00", 80.0)
+        result = manager.run_portfolio_loss_cut(
+            current_equity_usdt=80, now_local=datetime(2026, 7, 28, 8, 0, 1, tzinfo=tz),
+        )
+        self.assertEqual(result["status"], "MONITORING")
+        self.assertEqual(result["baseline_equity"], 80.0)
+        self.assertFalse(self.store.get_risk_cycle_target_set("LOSS_CUT", "2026-07-28")["targets"]["triggered"])
+        client.create_order.assert_not_called()
+
     def test_uses_first_08_snapshot_and_closes_all_position_directions(self) -> None:
         short_id = self._insert_short("BTCUSDT")
         # 08:00 Asia/Shanghai is 00:00 UTC. The first snapshot must be used as

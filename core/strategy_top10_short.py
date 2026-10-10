@@ -281,7 +281,10 @@ class Top10ShortStrategy:
         self._entry_wait_stop_event.set()
 
     def _portfolio_entry_latched(self) -> bool:
-        """A persisted portfolio stop forbids new exposure until its next reset."""
+        """A portfolio stop blocks entry until 07:30 local on the next day.
+
+        Entry unlock is independent from the manager's 08:00 equity reset.
+        """
         record = self.store.get_latest_risk_cycle_target_set("LOSS_CUT")
         if not isinstance(record, dict):
             return False
@@ -292,14 +295,14 @@ class Top10ShortStrategy:
             return False
         cycle = str(state.get("cycle_date") or record.get("cycle_key") or "")
         try:
-            reset = datetime.fromisoformat(cycle).replace(
+            unlock = datetime.fromisoformat(cycle).replace(
                 tzinfo=self.runtime_timezone,
-                hour=getattr(self, "portfolio_loss_cut_reset_hour", 8),
-                minute=getattr(self, "portfolio_loss_cut_reset_minute", 0),
+                hour=7,
+                minute=30,
             ) + timedelta(days=1)
         except ValueError:
             return True  # Invalid triggered state is not permission to trade.
-        return self._utc_now_datetime() < reset.astimezone(timezone.utc)
+        return self._utc_now_datetime() < unlock.astimezone(timezone.utc)
 
     def run_entry(
         self,

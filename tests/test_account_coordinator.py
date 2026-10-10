@@ -410,6 +410,14 @@ class TestAccountCoordinator(unittest.TestCase):
             result = strategy.run_entry(trade_day_utc="2026-10-08")
         self.assertEqual(result["reason"], "PORTFOLIO_LOSS_CUT_LATCHED")
         strategy.recover_pending_entries.assert_not_called()
+        # Entry unlock is 07:30 Shanghai, independent from the 08:00 baseline.
+        for stamp, expected in [
+            (datetime(2026, 10, 8, 23, 29, 59, tzinfo=timezone.utc), True),
+            (datetime(2026, 10, 8, 23, 30, tzinfo=timezone.utc), False),
+            (datetime(2026, 10, 8, 23, 59, 50, tzinfo=timezone.utc), False),
+        ]:
+            with patch.object(strategy, "_utc_now_datetime", return_value=stamp):
+                self.assertEqual(strategy._portfolio_entry_latched(), expected)
         with patch.object(strategy, "_utc_now_datetime", return_value=datetime(2026, 10, 9, 0, tzinfo=timezone.utc)):
             self.assertFalse(strategy._portfolio_entry_latched())
 
