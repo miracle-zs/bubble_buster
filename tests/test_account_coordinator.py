@@ -3,6 +3,7 @@
 import os
 import tempfile
 import unittest
+from datetime import timedelta
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -248,6 +249,11 @@ class TestAccountCoordinator(unittest.TestCase):
         plan = self.store.get_entry_plan("entry_audit_AAAUSDT_12")
         self.assertEqual(plan["plan_payload"]["audit"]["hour_open_utc"], hour.isoformat())
         self.assertIs(audit["hour_open_utc"], hour)
+        with patch.object(strategy, "_utc_now_datetime", return_value=hour + timedelta(hours=1, seconds=2)), patch.object(
+            strategy, "_fetch_hour_candle_with_retry", return_value=(10, 9, hour + timedelta(hours=1)),
+        ):
+            strategy._finalize_preclose_entry_audits([audit])
+        self.assertEqual(self.store.get_entry_plan("entry_audit_AAAUSDT_12")["status"], "COMPLETED")
 
     def test_step_recovers_unknown_attempt_before_dispatch(self):
         """In-flight UNKNOWN order attempts must be queried and recovered."""
@@ -383,6 +389,52 @@ class TestAccountCoordinator(unittest.TestCase):
 
         result = self.coordinator.step(max_duration_sec=10.0)
         self.assertTrue(result["entry_plan_ready"])
+
+    def test_expired_audit_does_not_wake_entry(self):
+        self.store.save_entry_plan("entry_audit_AAAUSDT_12", "AAAUSDT", "WAITING_KLINE",
+                                   next_wakeup_utc="2026-10-05T00:00:00Z")
+        self.assertIsNone(self.coordinator.check_entry_plan_wakeups())
+        self.store.save_entry_plan("bearish_hour_entry_wait_v1", "ALL", "WAITING_KLINE",
+                                   next_wakeup_utc="2026-10-05T00:00:00Z")
+        self.assertEqual(self.coordinator.check_entry_plan_wakeups()["plan_id"], "bearish_hour_entry_wait_v1")
+
+    def test_triggered_loss_cycle_blocks_real_entry_before_recovery(self):
+        from tests.test_strategy_rebalance import StrategyRebalanceTest
+        from datetime import datetime, timezone
+        strategy = StrategyRebalanceTest()._build_strategy(self.client, self.store)
+        strategy.recover_pending_entries = MagicMock()
+        self.store.save_risk_cycle_target_set("LOSS_CUT", "2026-10-08", {
+            "cycle_date": "2026-10-08", "triggered": True, "close_complete": True,
+        }, status="TRIGGERED")
+        with patch.object(strategy, "_utc_now_datetime", return_value=datetime(2026, 10, 8, 9, tzinfo=timezone.utc)):
+            result = strategy.run_entry(trade_day_utc="2026-10-08")
+        self.assertEqual(result["reason"], "PORTFOLIO_LOSS_CUT_LATCHED")
+        strategy.recover_pending_entries.assert_not_called()
+        with patch.object(strategy, "_utc_now_datetime", return_value=datetime(2026, 10, 9, 0, tzinfo=timezone.utc)):
+            self.assertFalse(strategy._portfolio_entry_latched())
+
+    def test_real_resumed_entry_preserves_original_sizing_slots(self):
+        from tests.test_strategy_rebalance import StrategyRebalanceTest
+        from datetime import datetime, timezone
+        strategy = StrategyRebalanceTest()._build_strategy(self.client, self.store)
+        strategy.top_n = 10
+        strategy.entry_wait_bearish_hour_enabled = True
+        strategy._prewarm_entry_candidates = MagicMock()
+        strategy._get_all_position_risks = MagicMock(return_value=[])
+        strategy._compute_account_equity_usdt = MagicMock(return_value=300)
+        strategy.rebalance_before_entry = MagicMock(return_value={})
+        ranking = [{"symbol": "AAAUSDT", "change": 10, "current_price": 10, "volume": 1e7}]
+        with patch.object(strategy, "_utc_now_datetime", return_value=datetime(2026, 10, 8, 0, 40, tzinfo=timezone.utc)):
+            result = strategy.run_entry(trade_day_utc="2026-10-08", shared_top_gainers=ranking)
+        self.assertEqual(result["status"], "WAITING")
+        self.assertAlmostEqual(strategy._prewarm_entry_candidates.call_args.kwargs["target_notional"], 54)
+        plan = strategy._load_entry_wait_state()
+        self.assertEqual(plan["sizing_slot_count"], 10)
+        strategy.top_n = 1  # Even a smaller resumed candidate/config set retains its original slots.
+        with patch.object(strategy, "_utc_now_datetime", return_value=datetime(2026, 10, 8, 0, 45, tzinfo=timezone.utc)):
+            result = strategy.run_entry(trade_day_utc="2026-10-08", shared_top_gainers=ranking)
+        self.assertEqual(result["status"], "WAITING")
+        self.assertAlmostEqual(strategy._prewarm_entry_candidates.call_args.kwargs["target_notional"], 54)
 
     def test_entry_without_shared_ranking_loads_real_ranker(self):
         self.client.create_order.return_value = {

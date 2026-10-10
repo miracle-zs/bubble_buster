@@ -153,8 +153,13 @@ class AccountCoordinator:
 
     def check_entry_plan_wakeups(self) -> Optional[Dict[str, Any]]:
         """Check if an active entry plan waiting for candle close has reached its wakeup time."""
-        plan = self.store.get_active_entry_plan()
+        # Candle audits are housekeeping, not authority to create today's run.
+        plan = self.store.get_entry_plan("bearish_hour_entry_wait_v1")
+        if not plan and self.strategy is None:
+            plan = self.store.get_active_entry_plan()
         if not plan:
+            return None
+        if str(plan.get("plan_id") or "").split(":")[-1].startswith("entry_audit_"):
             return None
         if plan.get("status") == "WAITING_KLINE":
             next_wakeup = plan.get("next_wakeup_utc", "")

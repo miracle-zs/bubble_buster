@@ -280,11 +280,36 @@ class Top10ShortStrategy:
     def request_entry_wait_stop(self) -> None:
         self._entry_wait_stop_event.set()
 
+    def _portfolio_entry_latched(self) -> bool:
+        """A persisted portfolio stop forbids new exposure until its next reset."""
+        record = self.store.get_latest_risk_cycle_target_set("LOSS_CUT")
+        if not isinstance(record, dict):
+            return False
+        state = record.get("targets")
+        if not isinstance(state, dict):
+            return False
+        if not state.get("triggered"):
+            return False
+        cycle = str(state.get("cycle_date") or record.get("cycle_key") or "")
+        try:
+            reset = datetime.fromisoformat(cycle).replace(
+                tzinfo=self.runtime_timezone,
+                hour=getattr(self, "portfolio_loss_cut_reset_hour", 8),
+                minute=getattr(self, "portfolio_loss_cut_reset_minute", 0),
+            ) + timedelta(days=1)
+        except ValueError:
+            return True  # Invalid triggered state is not permission to trade.
+        return self._utc_now_datetime() < reset.astimezone(timezone.utc)
+
     def run_entry(
         self,
         trade_day_utc: Optional[str] = None,
         shared_top_gainers: Optional[List[Dict[str, Any]]] = None,
     ) -> Dict[str, object]:
+        if self._portfolio_entry_latched():
+            self.request_entry_wait_stop()
+            return {"status": "RETRY", "reason": "PORTFOLIO_LOSS_CUT_LATCHED",
+                    "retry_after_sec": 60.0, "opened": 0, "failed": 0}
         if self.order_state is not None and not self.order_state.entry_allowed():
             wait_until_ready = getattr(self.order_state, "wait_until_entry_allowed", None)
             if callable(wait_until_ready):
@@ -477,6 +502,9 @@ class Top10ShortStrategy:
                 target_count=self.top_n,
             )
             expected_total_positions = len(set(open_symbols) | {item.symbol for item in candidates})
+            previous_slots = self._load_entry_wait_state().get("sizing_slot_count", 0) if resumed_wait else 0
+            self._entry_sizing_slot_count = max(self.top_n, expected_total_positions, int(previous_slots or 0))
+            expected_total_positions = self._entry_sizing_slot_count
 
             if len(candidates) < self.top_n:
                 LOGGER.warning(
@@ -641,6 +669,10 @@ class Top10ShortStrategy:
                 try:
                     self._mutation_lock.acquire()
                     mutation_acquired = True
+                    if self._portfolio_entry_latched():
+                        self.request_entry_wait_stop()
+                        self._entry_wait_interrupted = True
+                        break
                     if entry_stage == self.ENTRY_STAGE_SCALE_IN:
                         scale_result = self._add_scale_in_tranche(
                             ready_entry=ready_entry,
@@ -1412,6 +1444,13 @@ class Top10ShortStrategy:
                         event_time_utc=str(entry_audit.get("filled_at_utc") or self._utc_now_iso()),
                         order_payload=payload,
                     )
+                    if entry_audit.get("final_candle_available"):
+                        audit_plan_id = f"entry_audit_{symbol}_{order_event_id}"
+                        if self.store.get_entry_plan(audit_plan_id):
+                            self.store.save_entry_plan(
+                                plan_id=audit_plan_id, symbol=symbol,
+                                status="COMPLETED", plan_payload={},
+                            )
                 except Exception as exc:  # noqa: BLE001
                     LOGGER.warning(
                         "Failed to persist final preclose candle audit: account=%s symbol=%s error=%s",
@@ -2093,6 +2132,12 @@ class Top10ShortStrategy:
             "signal_base_time_utc": signal_base_time_utc.astimezone(timezone.utc).isoformat(),
             "deadline_utc": deadline.astimezone(timezone.utc).isoformat(),
             "pending": serialized,
+            "sizing_slot_count": max(
+                self.top_n,
+                int(getattr(self, "_entry_sizing_slot_count", self.top_n)),
+                int(existing.get("sizing_slot_count", 0) or 0)
+                if str(existing.get("run_id") or "") == str(run_id or "") else 0,
+            ),
             "updated_at_utc": self._utc_now_iso(),
         }
         wakeup_time = next_wakeup_utc or deadline

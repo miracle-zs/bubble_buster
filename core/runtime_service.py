@@ -444,6 +444,10 @@ class StrategyRuntimeService:
                 continue
             strategy = self.account_runtimes[aid].get("strategy")
             coord = self.account_runtimes[aid].get("coordinator")
+            if strategy is not None:
+                _, _, reset_hour, reset_minute = self._portfolio_loss_cut_settings(aid)
+                strategy.portfolio_loss_cut_reset_hour = reset_hour
+                strategy.portfolio_loss_cut_reset_minute = reset_minute
             has_pending_wait = bool(
                 strategy is not None
                 and hasattr(strategy, "has_pending_entry_wait")
