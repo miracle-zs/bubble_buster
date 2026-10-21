@@ -708,6 +708,7 @@ class PositionManager:
         if eval_res.status == "SKIPPED":
             return {"status": "SKIPPED", "reason": eval_res.reason, "cycle_date": cycle_key}
 
+        threshold_equity = eval_res.threshold_equity
         state["current_equity_usdt"] = current_equity
         state["updated_at_utc"] = self._utc_now_iso()
 
@@ -718,7 +719,7 @@ class PositionManager:
                 "cycle_date": cycle_key,
                 "baseline_equity": round(baseline_equity, 8),
                 "current_equity": round(current_equity, 8),
-                "threshold_equity": round(eval_res.threshold_equity, 8),
+                "threshold_equity": round(threshold_equity, 8),
             }
 
         if not already_triggered:
@@ -736,7 +737,7 @@ class PositionManager:
                 "cycle_date": cycle_key,
                 "baseline_equity": round(baseline_equity, 8),
                 "current_equity": round(current_equity, 8),
-                "threshold_equity": round(eval_res.threshold_equity, 8),
+                "threshold_equity": round(threshold_equity, 8),
             }
 
         close_summary = self._close_all_exchange_positions_for_portfolio_loss_cut()

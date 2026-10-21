@@ -131,6 +131,13 @@ class PortfolioLossCutTest(unittest.TestCase):
         client.get_position_risk.return_value = []
         manager = self._manager(client)
 
+        monitoring = manager.run_portfolio_loss_cut(
+            current_equity_usdt=99.0,
+            now_local=datetime(2026, 7, 28, 8, 30, tzinfo=ZoneInfo("Asia/Shanghai")),
+            loss_pct=3.5,
+        )
+        self.assertEqual(monitoring["status"], "MONITORING")
+
         triggered = manager.run_portfolio_loss_cut(
             current_equity_usdt=96.0,
             now_local=datetime(2026, 7, 28, 9, 0, tzinfo=ZoneInfo("Asia/Shanghai")),
@@ -280,6 +287,55 @@ class PortfolioLossCutTest(unittest.TestCase):
             service._entry_executor.shutdown(wait=True, cancel_futures=True)
             service._manage_executor.shutdown(wait=True, cancel_futures=True)
             service._scheduled_executor.shutdown(wait=True, cancel_futures=True)
+
+    def test_has_pending_entry_wait_clears_plan_when_portfolio_latched(self) -> None:
+        from core.strategy_top10_short import Top10ShortStrategy
+
+        client = MagicMock()
+        client.get_position_risk.return_value = []
+        strategy = Top10ShortStrategy(
+            client=client,
+            store=self.store,
+            notifier=MagicMock(),
+            leverage=2,
+            top_n=10,
+            volume_threshold=0.0,
+            tp_price_drop_pct=20.0,
+            sl_liq_buffer_pct=1.0,
+            max_hold_hours=47.5,
+            trigger_price_type="CONTRACT_PRICE",
+            allocation_splits=10,
+            entry_fee_buffer_pct=1.0,
+            entry_shrink_retry_count=3,
+            entry_shrink_step_pct=10.0,
+            entry_rank_fetch_multiplier=3,
+            ranker_max_workers=4,
+            ranker_weight_limit_per_minute=1000,
+            ranker_min_request_interval_ms=20,
+            account_id="acc01",
+        )
+        self.store.save_entry_plan(
+            plan_id="bearish_hour_entry_wait_v1",
+            symbol="ALL",
+            status="WAITING_KLINE",
+            hour_open_utc="2026-07-28T01:00:00+00:00",
+            next_wakeup_utc="2026-07-28T02:00:01+00:00",
+            plan_payload={"run_id": self.run_id, "pending": {"1": {"symbol": "BTCUSDT"}}},
+        )
+        self.assertTrue(strategy.has_pending_entry_wait())
+
+        today_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        self.store.save_risk_cycle_target_set(
+            cycle_type="LOSS_CUT",
+            cycle_key=today_str,
+            targets={"cycle_date": today_str, "triggered": True},
+            status="TRIGGERED",
+        )
+        self.assertTrue(strategy._portfolio_entry_latched())
+        self.assertFalse(strategy.has_pending_entry_wait())
+        plan = self.store.get_entry_plan("bearish_hour_entry_wait_v1")
+        self.assertEqual(plan["status"], "COMPLETED")
+        self.assertEqual(plan["plan_payload"], {})
 
 
 if __name__ == "__main__":

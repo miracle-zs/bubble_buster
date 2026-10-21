@@ -226,6 +226,20 @@ class Top10ShortStrategy:
         return str(symbol or "").strip().upper() in self.protection_exempt_symbols
 
     def has_pending_entry_wait(self) -> bool:
+        if self._portfolio_entry_latched():
+            state = self._load_entry_wait_state()
+            if isinstance(state.get("pending"), dict) and state["pending"]:
+                run_id = str(state.get("run_id") or "").strip()
+                if run_id:
+                    opened_count = self.store.count_run_opened_positions(run_id)
+                    run_status = "SUCCESS" if opened_count > 0 else "SKIPPED"
+                    self.store.finalize_run(
+                        run_id,
+                        run_status,
+                        f"run_id={run_id}, opened={opened_count}, stopped_by_portfolio_loss_cut",
+                    )
+                self._clear_entry_wait_state()
+            return False
         state = self._load_entry_wait_state()
         pending = state.get("pending")
         if not isinstance(pending, dict) or not pending:
@@ -311,8 +325,20 @@ class Top10ShortStrategy:
     ) -> Dict[str, object]:
         if self._portfolio_entry_latched():
             self.request_entry_wait_stop()
-            return {"status": "RETRY", "reason": "PORTFOLIO_LOSS_CUT_LATCHED",
-                    "retry_after_sec": 60.0, "opened": 0, "failed": 0}
+            state = self._load_entry_wait_state()
+            if isinstance(state.get("pending"), dict) and state["pending"]:
+                run_id = str(state.get("run_id") or "").strip()
+                if run_id:
+                    opened_count = self.store.count_run_opened_positions(run_id)
+                    run_status = "SUCCESS" if opened_count > 0 else "SKIPPED"
+                    self.store.finalize_run(
+                        run_id,
+                        run_status,
+                        f"run_id={run_id}, opened={opened_count}, stopped_by_portfolio_loss_cut",
+                    )
+                self._clear_entry_wait_state()
+            return {"status": "SKIPPED", "reason": "PORTFOLIO_LOSS_CUT_LATCHED",
+                    "opened": 0, "failed": 0}
         if self.order_state is not None and not self.order_state.entry_allowed():
             wait_until_ready = getattr(self.order_state, "wait_until_entry_allowed", None)
             if callable(wait_until_ready):
