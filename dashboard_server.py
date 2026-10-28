@@ -2020,6 +2020,67 @@ class DashboardDataProvider:
             tuple(params),
         )
 
+    def _resample_equity_pairs(
+        self,
+        curve: List[Tuple[str, float]],
+        max_points: int,
+    ) -> List[Tuple[str, float]]:
+        target = max(2, int(max_points))
+        total_points = len(curve)
+        if total_points <= target:
+            return list(curve)
+        if target == 2:
+            return [curve[0], curve[-1]]
+
+        interior_count = total_points - 2
+        bucket_count = max(1, target // 4)
+        selected: List[int] = [0]
+        for bucket in range(bucket_count):
+            start = 1 + int(bucket * interior_count / bucket_count)
+            end = 1 + int((bucket + 1) * interior_count / bucket_count)
+            if end <= start:
+                continue
+            min_idx = max_idx = start
+            min_equity = max_equity = curve[start][1]
+            for idx in range(start + 1, end):
+                equity = curve[idx][1]
+                if equity < min_equity:
+                    min_idx = idx
+                    min_equity = equity
+                if equity > max_equity:
+                    max_idx = idx
+                    max_equity = equity
+            selected.extend(sorted({start, min_idx, max_idx, end - 1}))
+        selected.append(total_points - 1)
+        selected = sorted(set(selected))
+        if len(selected) <= target:
+            return [curve[idx] for idx in selected]
+
+        interior = selected[1:-1]
+        keep_interior = max(0, target - 2)
+        sampled_interior: List[int] = []
+        if keep_interior > 0 and interior:
+            if keep_interior >= len(interior):
+                sampled_interior = interior
+            elif keep_interior == 1:
+                sampled_interior = [interior[len(interior) // 2]]
+            else:
+                step = (len(interior) - 1) / float(keep_interior - 1)
+                used: Set[int] = set()
+                for i in range(keep_interior):
+                    pick = interior[int(round(i * step))]
+                    if pick in used:
+                        continue
+                    sampled_interior.append(pick)
+                    used.add(pick)
+                if len(sampled_interior) < keep_interior:
+                    for pick in interior:
+                        if pick in used:
+                            continue
+                        sampled_interior.append(pick)
+                        used.add(pick)
+        return [curve[idx] for idx in [0] + sampled_interior + [total_points - 1]]
+
     def _load_all_time_account_pnl(
         self,
         conn: sqlite3.Connection,
@@ -3022,26 +3083,30 @@ class DashboardDataProvider:
                     )
 
                 for account_id in account_ids:
-                    wallet_rows = self._query_wallet_rows(
-                        conn=conn,
-                        window_start_utc=window_start_utc,
-                        account_id=account_id,
+                    where_sql = "WHERE error IS NULL AND account_id = ?"
+                    params: List[Any] = [account_id]
+                    if window_start_utc:
+                        where_sql += " AND captured_at_utc >= ?"
+                        params.append(window_start_utc)
+                    cursor = conn.execute(
+                        f"""
+                        SELECT captured_at_utc, balance_usdt
+                        FROM wallet_snapshots
+                        {where_sql}
+                        ORDER BY captured_at_utc ASC, id ASC
+                        """,
+                        tuple(params),
                     )
-                    raw_curve: List[Dict[str, Any]] = []
-                    for row in wallet_rows:
-                        balance = self._safe_float(row.get("balance_usdt"))
-                        captured_at = str(row.get("captured_at_utc") or "").strip()
+                    raw_curve: List[Tuple[str, float]] = []
+                    for row in cursor:
+                        balance = self._safe_float(row["balance_usdt"])
+                        captured_at = str(row["captured_at_utc"] or "").strip()
                         if balance is None or not captured_at:
                             continue
-                        raw_curve.append(
-                            {
-                                "t": captured_at,
-                                "equity": round(balance, 8),
-                            }
-                        )
+                        raw_curve.append((captured_at, round(balance, 8)))
 
-                    curve = self._resample_curve(raw_curve, points_limit)
-                    baseline = self._safe_float(curve[0].get("equity")) if curve else None
+                    curve = self._resample_equity_pairs(raw_curve, points_limit)
+                    baseline = curve[0][1] if curve else None
                     if baseline is None or baseline <= 0:
                         payload["series"].append(
                             {
@@ -3060,11 +3125,10 @@ class DashboardDataProvider:
                         continue
 
                     points: List[Dict[str, Any]] = []
-                    for point in curve:
-                        equity = self._safe_float(point.get("equity")) or 0.0
+                    for captured_at, equity in curve:
                         points.append(
                             {
-                                "t": point.get("t"),
+                                "t": captured_at,
                                 "equity": round(equity, 8),
                                 "relative_pct": round((equity / baseline - 1.0) * 100.0, 6),
                             }
