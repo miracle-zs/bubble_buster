@@ -23,6 +23,7 @@ from core.storage.models import (
     WalletSnapshotRecord,
 )
 from core.storage.uow import UnitOfWork, get_current_uow
+from core.wallet_snapshot_rollup import upsert_wallet_snapshot_hourly_rollup
 
 
 def utc_now_iso() -> str:
@@ -1484,6 +1485,7 @@ class StateStore:
         error: Optional[str] = None,
     ) -> int:
         with self._connect_ctx() as conn:
+            error_value = (error or "")[:1000] or None
             cursor = conn.execute(
                 """
                 INSERT INTO wallet_snapshots (
@@ -1496,11 +1498,20 @@ class StateStore:
                     captured_at_utc,
                     float(balance_usdt),
                     source[:24],
-                    (error or "")[:1000] or None,
+                    error_value,
                     utc_now_iso(),
                 ),
             )
-            return int(cursor.lastrowid)
+            snapshot_id = int(cursor.lastrowid)
+            if error_value is None:
+                upsert_wallet_snapshot_hourly_rollup(
+                    conn=conn,
+                    account_id=self.account_id,
+                    snapshot_id=snapshot_id,
+                    captured_at_utc=captured_at_utc,
+                    balance_usdt=float(balance_usdt),
+                )
+            return snapshot_id
 
     def get_latest_wallet_snapshot(self) -> Optional[Dict[str, Any]]:
         with self._connect_ctx() as conn:

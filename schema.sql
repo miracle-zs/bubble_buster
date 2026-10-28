@@ -79,6 +79,33 @@ CREATE INDEX IF NOT EXISTS idx_wallet_snapshots_captured_at ON wallet_snapshots(
 CREATE INDEX IF NOT EXISTS idx_wallet_snapshots_account_captured_at ON wallet_snapshots(account_id, captured_at_utc);
 CREATE INDEX IF NOT EXISTS idx_wallet_snapshots_account_id_id ON wallet_snapshots(account_id, id);
 
+CREATE TABLE IF NOT EXISTS wallet_snapshot_hourly_rollups (
+    account_id TEXT NOT NULL,
+    hour_start_epoch INTEGER NOT NULL,
+    first_snapshot_id INTEGER NOT NULL,
+    first_captured_at_utc TEXT NOT NULL,
+    first_balance_usdt REAL NOT NULL,
+    first_epoch_us INTEGER NOT NULL,
+    min_snapshot_id INTEGER NOT NULL,
+    min_captured_at_utc TEXT NOT NULL,
+    min_balance_usdt REAL NOT NULL,
+    min_epoch_us INTEGER NOT NULL,
+    max_snapshot_id INTEGER NOT NULL,
+    max_captured_at_utc TEXT NOT NULL,
+    max_balance_usdt REAL NOT NULL,
+    max_epoch_us INTEGER NOT NULL,
+    last_snapshot_id INTEGER NOT NULL,
+    last_captured_at_utc TEXT NOT NULL,
+    last_balance_usdt REAL NOT NULL,
+    last_epoch_us INTEGER NOT NULL,
+    PRIMARY KEY (account_id, hour_start_epoch)
+) WITHOUT ROWID;
+
+CREATE TABLE IF NOT EXISTS wallet_snapshot_hourly_rollup_state (
+    account_id TEXT PRIMARY KEY,
+    completed_at_utc TEXT NOT NULL
+) WITHOUT ROWID;
+
 CREATE TABLE IF NOT EXISTS cashflow_events (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     account_id TEXT NOT NULL DEFAULT 'default',

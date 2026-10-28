@@ -17,6 +17,10 @@ from urllib.parse import parse_qs, urlparse
 from zoneinfo import ZoneInfo
 
 from core.state_store import SQLITE_BUSY_TIMEOUT_MS
+from core.wallet_snapshot_rollup import (
+    load_hourly_wallet_snapshot_candidates,
+    upsert_wallet_snapshot_hourly_rollup,
+)
 from core.task_status import format_task_status, task_status_template
 from web.template_loader import load_template
 
@@ -1855,7 +1859,8 @@ class DashboardDataProvider:
         source: str = "API",
         error: Optional[str] = None,
     ) -> None:
-        conn.execute(
+        error_value = (error or "")[:1000] or None
+        cursor = conn.execute(
             """
             INSERT INTO wallet_snapshots (account_id, captured_at_utc, balance_usdt, source, error, created_at_utc)
             VALUES (?, ?, ?, ?, ?, ?)
@@ -1865,10 +1870,18 @@ class DashboardDataProvider:
                 captured_at_utc,
                 float(balance_usdt),
                 source[:24],
-                (error or "")[:1000] or None,
+                error_value,
                 datetime.now(timezone.utc).replace(microsecond=0).isoformat(),
             ),
         )
+        if error_value is None:
+            upsert_wallet_snapshot_hourly_rollup(
+                conn=conn,
+                account_id=account_id,
+                snapshot_id=int(cursor.lastrowid),
+                captured_at_utc=captured_at_utc,
+                balance_usdt=float(balance_usdt),
+            )
 
     def _get_latest_wallet_snapshot(
         self,
@@ -3027,19 +3040,30 @@ class DashboardDataProvider:
                     if window_start_utc:
                         where_sql += " AND captured_at_utc >= ?"
                         wallet_params.append(window_start_utc)
-                    wallet_rows = conn.execute(
-                        f"""
-                        SELECT id, captured_at_utc, balance_usdt
-                        FROM wallet_snapshots
-                        {where_sql}
-                        ORDER BY captured_at_utc ASC, id ASC
-                        """,
-                        tuple(wallet_params),
-                    ).fetchall()
+                    wallet_rows = load_hourly_wallet_snapshot_candidates(
+                        conn=conn,
+                        account_id=account_id,
+                        window_start_utc=window_start_utc,
+                    )
+                    if wallet_rows is None or len(wallet_rows) < points_limit:
+                        wallet_rows = conn.execute(
+                            f"""
+                            SELECT id, captured_at_utc, balance_usdt
+                            FROM wallet_snapshots
+                            {where_sql}
+                            ORDER BY captured_at_utc ASC, id ASC
+                            """,
+                            tuple(wallet_params),
+                        ).fetchall()
                     raw_curve: List[Dict[str, Any]] = []
                     for row in wallet_rows:
-                        balance = self._safe_float(row["balance_usdt"])
-                        captured_at = str(row["captured_at_utc"] or "").strip()
+                        if isinstance(row, sqlite3.Row):
+                            balance_value = row["balance_usdt"]
+                            captured_at_value = row["captured_at_utc"]
+                        else:
+                            _, captured_at_value, balance_value = row
+                        balance = self._safe_float(balance_value)
+                        captured_at = str(captured_at_value or "").strip()
                         if balance is None or not captured_at:
                             continue
                         raw_curve.append(
