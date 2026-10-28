@@ -18,8 +18,9 @@ from zoneinfo import ZoneInfo
 
 from core.state_store import SQLITE_BUSY_TIMEOUT_MS
 from core.wallet_snapshot_rollup import (
+    load_four_hour_wallet_snapshot_candidates,
     load_hourly_wallet_snapshot_candidates,
-    upsert_wallet_snapshot_hourly_rollup,
+    upsert_wallet_snapshot_rollups,
 )
 from core.task_status import format_task_status, task_status_template
 from web.template_loader import load_template
@@ -1875,7 +1876,7 @@ class DashboardDataProvider:
             ),
         )
         if error_value is None:
-            upsert_wallet_snapshot_hourly_rollup(
+            upsert_wallet_snapshot_rollups(
                 conn=conn,
                 account_id=account_id,
                 snapshot_id=int(cursor.lastrowid),
@@ -2987,8 +2988,12 @@ class DashboardDataProvider:
         )
         effective_start_utc = max(launch_start_utc, requested_start_utc)
         window_start_utc = effective_start_utc.isoformat()
-        hourly_point_capacity = int(
-            (now_utc - effective_start_utc).total_seconds() / 3600.0 * 4
+        window_duration_hours = (now_utc - effective_start_utc).total_seconds() / 3600.0
+        hourly_point_capacity = int(window_duration_hours * 4)
+        four_hour_point_capacity = int(window_duration_hours)
+        use_four_hour_rollup = (
+            parsed_window_hours is None
+            and points_limit <= four_hour_point_capacity
         )
         use_hourly_rollup = points_limit <= hourly_point_capacity
 
@@ -3045,14 +3050,20 @@ class DashboardDataProvider:
                         where_sql += " AND captured_at_utc >= ?"
                         wallet_params.append(window_start_utc)
                     wallet_rows = (
-                        load_hourly_wallet_snapshot_candidates(
+                        load_four_hour_wallet_snapshot_candidates(
                             conn=conn,
                             account_id=account_id,
                             window_start_utc=window_start_utc,
                         )
-                        if use_hourly_rollup
+                        if use_four_hour_rollup
                         else None
                     )
+                    if wallet_rows is None and use_hourly_rollup:
+                        wallet_rows = load_hourly_wallet_snapshot_candidates(
+                            conn=conn,
+                            account_id=account_id,
+                            window_start_utc=window_start_utc,
+                        )
                     if wallet_rows is None:
                         wallet_rows = conn.execute(
                             f"""

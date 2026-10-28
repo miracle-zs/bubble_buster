@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Build the derived hourly curve table used by equity comparison."""
+"""Build derived hourly and four-hour wallet curve tables."""
 
 import argparse
 import sqlite3
@@ -14,16 +14,22 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from core.wallet_snapshot_rollup import (  # noqa: E402
-    HOUR_MICROSECONDS,
+    FOUR_HOUR_SECONDS,
+    HOUR_SECONDS,
     _epoch_microseconds,
-    insert_hourly_rollup_aggregates,
-    merge_hourly_sample,
+    insert_rollup_aggregates,
+    merge_rollup_sample,
 )
 
 DEFAULT_DB = ROOT / "state.db"
 
 
-def backfill(db_path: Path) -> Tuple[int, int, int, float]:
+def _bucket_start_epoch(epoch_us: int, bucket_seconds: int) -> int:
+    bucket_width_us = bucket_seconds * 1_000_000
+    return (epoch_us // bucket_width_us) * bucket_seconds
+
+
+def backfill(db_path: Path) -> Tuple[int, int, int, int, float]:
     conn = sqlite3.connect(str(db_path), timeout=30.0)
     conn.execute("PRAGMA busy_timeout = 30000")
     started = time.perf_counter()
@@ -34,13 +40,16 @@ def backfill(db_path: Path) -> Tuple[int, int, int, float]:
                 "SELECT name FROM sqlite_master WHERE type = 'table'"
             )
         }
-        if not {
+        required_tables = {
             "wallet_snapshots",
             "wallet_snapshot_hourly_rollups",
             "wallet_snapshot_hourly_rollup_state",
-        }.issubset(required):
+            "wallet_snapshot_four_hour_rollups",
+            "wallet_snapshot_four_hour_rollup_state",
+        }
+        if not required_tables.issubset(required):
             raise RuntimeError(
-                "hourly rollup tables are missing; start the updated app once to apply schema.sql first"
+                "wallet rollup tables are missing; start the updated app once to apply schema.sql first"
             )
 
         conn.execute("BEGIN IMMEDIATE")
@@ -50,10 +59,16 @@ def backfill(db_path: Path) -> Tuple[int, int, int, float]:
                 "SELECT DISTINCT account_id FROM wallet_snapshots ORDER BY account_id"
             )
         ]
-        conn.execute("DELETE FROM wallet_snapshot_hourly_rollups")
-        conn.execute("DELETE FROM wallet_snapshot_hourly_rollup_state")
+        for table in (
+            "wallet_snapshot_hourly_rollups",
+            "wallet_snapshot_hourly_rollup_state",
+            "wallet_snapshot_four_hour_rollups",
+            "wallet_snapshot_four_hour_rollup_state",
+        ):
+            conn.execute(f"DELETE FROM {table}")
 
-        aggregates: Dict[Tuple[str, int], tuple] = {}
+        hourly: Dict[Tuple[str, int], tuple] = {}
+        four_hour: Dict[Tuple[str, int], tuple] = {}
         snapshot_rows = 0
         for snapshot_id, account_id, captured_at_utc, balance_usdt in conn.execute(
             """
@@ -68,30 +83,51 @@ def backfill(db_path: Path) -> Tuple[int, int, int, float]:
             captured_at_utc = str(captured_at_utc)
             balance_usdt = float(balance_usdt)
             epoch_us = _epoch_microseconds(captured_at_utc)
-            hour_start_epoch = (epoch_us // HOUR_MICROSECONDS) * 3600
-            key = (account_id, hour_start_epoch)
             candidate = (snapshot_id, captured_at_utc, balance_usdt, epoch_us)
-            aggregates[key] = merge_hourly_sample(aggregates.get(key), candidate)
+            for bucket_seconds, aggregates in (
+                (HOUR_SECONDS, hourly),
+                (FOUR_HOUR_SECONDS, four_hour),
+            ):
+                bucket_start_epoch = _bucket_start_epoch(epoch_us, bucket_seconds)
+                key = (account_id, bucket_start_epoch)
+                aggregates[key] = merge_rollup_sample(
+                    aggregates.get(key), candidate
+                )
             snapshot_rows += 1
 
-        rollup_rows = insert_hourly_rollup_aggregates(
+        hourly_rows = insert_rollup_aggregates(
             conn,
             (
-                (account_id, hour_start_epoch, samples)
-                for (account_id, hour_start_epoch), samples in aggregates.items()
+                (account_id, bucket_start_epoch, samples)
+                for (account_id, bucket_start_epoch), samples in hourly.items()
             ),
+            HOUR_SECONDS,
+        )
+        four_hour_rows = insert_rollup_aggregates(
+            conn,
+            (
+                (account_id, bucket_start_epoch, samples)
+                for (account_id, bucket_start_epoch), samples in four_hour.items()
+            ),
+            FOUR_HOUR_SECONDS,
         )
         completed_at_utc = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
-        conn.executemany(
-            """
-            INSERT INTO wallet_snapshot_hourly_rollup_state (
-                account_id, completed_at_utc
-            ) VALUES (?, ?)
-            """,
-            ((account_id, completed_at_utc) for account_id in account_ids),
-        )
+        for state_table in (
+            "wallet_snapshot_hourly_rollup_state",
+            "wallet_snapshot_four_hour_rollup_state",
+        ):
+            conn.executemany(
+                f"INSERT INTO {state_table} (account_id, completed_at_utc) VALUES (?, ?)",
+                ((account_id, completed_at_utc) for account_id in account_ids),
+            )
         conn.commit()
-        return snapshot_rows, rollup_rows, len(account_ids), time.perf_counter() - started
+        return (
+            snapshot_rows,
+            hourly_rows,
+            four_hour_rows,
+            len(account_ids),
+            time.perf_counter() - started,
+        )
     except Exception:
         conn.rollback()
         raise
@@ -108,10 +144,11 @@ def main() -> int:
         help=f"SQLite database path (default: {DEFAULT_DB})",
     )
     args = parser.parse_args()
-    snapshots, rollups, accounts, elapsed = backfill(args.db)
+    snapshots, hourly_rows, four_hour_rows, accounts, elapsed = backfill(args.db)
     print(
-        f"Backfilled {snapshots:,} valid snapshots into {rollups:,} hourly rows "
-        f"for {accounts:,} accounts in {elapsed:.2f}s."
+        f"Backfilled {snapshots:,} valid snapshots for {accounts:,} accounts into "
+        f"{hourly_rows:,} hourly rows and {four_hour_rows:,} four-hour rows "
+        f"in {elapsed:.2f}s."
     )
     return 0
 

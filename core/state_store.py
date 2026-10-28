@@ -23,7 +23,7 @@ from core.storage.models import (
     WalletSnapshotRecord,
 )
 from core.storage.uow import UnitOfWork, get_current_uow
-from core.wallet_snapshot_rollup import upsert_wallet_snapshot_hourly_rollup
+from core.wallet_snapshot_rollup import upsert_wallet_snapshot_rollups
 
 
 def utc_now_iso() -> str:
@@ -1504,7 +1504,7 @@ class StateStore:
             )
             snapshot_id = int(cursor.lastrowid)
             if error_value is None:
-                upsert_wallet_snapshot_hourly_rollup(
+                upsert_wallet_snapshot_rollups(
                     conn=conn,
                     account_id=self.account_id,
                     snapshot_id=snapshot_id,

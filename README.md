@@ -293,8 +293,8 @@ protection_exempt_symbols = XAUUSDT
   - `GET /api/accounts/summary`
   - `GET /api/accounts/summary/fast`（轻量账户数据，优先返回）
   - `GET /api/accounts/summary/details`（后台缓存的任务与开单进度详情）
-  - `GET /api/accounts/equity-comparison`（完成小时汇总回填后按小时首值/高低值/末值读取；新数据库为空或未回填时仍读原始快照）
-- 更新已有数据库后，服务启动创建汇总表，再运行 `python3 scripts/backfill_wallet_snapshot_hourly_rollups.py --db state.db` 一次。回填在一个 SQLite 写事务中完成；完成前接口继续使用原始快照。
+  - `GET /api/accounts/equity-comparison`（全时段优先读取 4 小时桶，7 天和 30 天窗口读取小时桶；新数据库为空或未回填时仍读原始快照）
+- 更新已有数据库后，服务启动创建汇总表，再运行 `python3 scripts/backfill_wallet_snapshot_hourly_rollups.py --db state.db` 一次。脚本同时回填小时和 4 小时汇总，在一个 SQLite 写事务中完成；完成前接口使用已完成的汇总或原始快照。
   - `GET /api/account/{account_id}/snapshot`
 
 ### `[notify]`
