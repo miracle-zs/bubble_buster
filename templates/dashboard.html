@@ -2268,15 +2268,14 @@
     refreshTick += 1;
     if (isMobile) {
       var fullEvery = 3;
-      refreshCurveFast();
       refreshCore({ lite: (refreshTick % fullEvery) !== 0 });
       if (fullLoadedOnce && (refreshTick % fullEvery) === 0) refreshDetails();
       return;
     }
-    refreshCurveFast();
     refreshCore({ lite: false });
     if (fullLoadedOnce && (refreshTick % 2) === 0) refreshDetails();
   }, Math.max(2000, REFRESH_SEC * 1000));
+  setInterval(refreshCurveFast, Math.max(60000, REFRESH_SEC * 1000));
 })();
 </script>
 </body>
