@@ -1438,6 +1438,9 @@
       "curve_points=" + encodeURIComponent(String(curvePoints)),
       "log_lines=" + encodeURIComponent(lite ? "0" : "80")
     ];
+    if (opts.curveType === "strategy" || opts.curveType === "balance" || opts.curveType === "both") {
+      q.push("curve_type=" + encodeURIComponent(opts.curveType));
+    }
     xhr.open("GET", apiUrl + "?" + q.join("&"), true);
     xhr.onreadystatechange = function () {
       if (xhr.readyState !== 4) return;
@@ -1507,14 +1510,28 @@
     }
     latestData.curve_window_hours = curvePayload.curve_window_hours;
     latestData.curve_points = curvePayload.curve_points;
-    latestData.strategy_equity_curve = curvePayload.strategy_equity_curve || [];
-    latestData.balance_curve = curvePayload.balance_curve || [];
-    latestData.equity_curve = curvePayload.equity_curve || latestData.strategy_equity_curve || [];
-    if (curvePayload.drawdown_stats_strategy) {
-      latestData.drawdown_stats_strategy = curvePayload.drawdown_stats_strategy;
-    }
-    if (curvePayload.drawdown_stats_balance) {
-      latestData.drawdown_stats_balance = curvePayload.drawdown_stats_balance;
+    if (curvePayload.curve_type === "strategy") {
+      latestData.strategy_equity_curve = curvePayload.strategy_equity_curve || [];
+      latestData.equity_curve = curvePayload.equity_curve || latestData.strategy_equity_curve;
+      if (curvePayload.drawdown_stats_strategy) {
+        latestData.drawdown_stats_strategy = curvePayload.drawdown_stats_strategy;
+      }
+    } else if (curvePayload.curve_type === "balance") {
+      latestData.balance_curve = curvePayload.balance_curve || [];
+      latestData.equity_curve = curvePayload.equity_curve || latestData.balance_curve;
+      if (curvePayload.drawdown_stats_balance) {
+        latestData.drawdown_stats_balance = curvePayload.drawdown_stats_balance;
+      }
+    } else {
+      latestData.strategy_equity_curve = curvePayload.strategy_equity_curve || [];
+      latestData.balance_curve = curvePayload.balance_curve || [];
+      latestData.equity_curve = curvePayload.equity_curve || latestData.strategy_equity_curve || [];
+      if (curvePayload.drawdown_stats_strategy) {
+        latestData.drawdown_stats_strategy = curvePayload.drawdown_stats_strategy;
+      }
+      if (curvePayload.drawdown_stats_balance) {
+        latestData.drawdown_stats_balance = curvePayload.drawdown_stats_balance;
+      }
     }
     if (curvePayload.drawdown_stats) {
       latestData.drawdown_stats = curvePayload.drawdown_stats;
@@ -1990,7 +2007,7 @@
   }
 
   function refreshCurveFast() {
-    fetchDashboard(api + "/curve", { lite: true }, function (err, d) {
+    fetchDashboard(api + "/curve", { lite: true, curveType: currentCurveTab }, function (err, d) {
       if (err) {
         if (el.curveTitle) el.curveTitle.textContent = "权益曲线（加载失败，请稍后重试）";
         return;
@@ -2243,12 +2260,14 @@
     el.tabStrategy.addEventListener("click", function () {
       currentCurveTab = "strategy";
       rerenderFromLatest();
+      refreshCurveFast();
     });
   }
   if (el.tabBalance) {
     el.tabBalance.addEventListener("click", function () {
       currentCurveTab = "balance";
       rerenderFromLatest();
+      refreshCurveFast();
     });
   }
   if (el.windowRow) {

@@ -1949,10 +1949,17 @@ class DashboardDataProvider:
             end = 1 + int((bucket + 1) * interior_count / bucket_count)
             if end <= start:
                 continue
-            indices = list(range(start, end))
-            min_idx = min(indices, key=lambda idx: self._safe_float(curve[idx].get("equity")) or 0.0)
-            max_idx = max(indices, key=lambda idx: self._safe_float(curve[idx].get("equity")) or 0.0)
-            selected.extend(sorted({indices[0], min_idx, max_idx, indices[-1]}))
+            min_idx = max_idx = start
+            min_equity = max_equity = self._safe_float(curve[start].get("equity")) or 0.0
+            for idx in range(start + 1, end):
+                equity = self._safe_float(curve[idx].get("equity")) or 0.0
+                if equity < min_equity:
+                    min_idx = idx
+                    min_equity = equity
+                if equity > max_equity:
+                    max_idx = idx
+                    max_equity = equity
+            selected.extend(sorted({start, min_idx, max_idx, end - 1}))
         selected.append(total_points - 1)
         selected = sorted(set(selected))
         if len(selected) <= target:
@@ -2472,6 +2479,7 @@ class DashboardDataProvider:
         include_curves: bool = True,
         include_balance_curve: bool = True,
         include_trade_stats: bool = True,
+        include_strategy_curve: bool = True,
     ) -> Dict[str, Any]:
         now_utc = datetime.now(timezone.utc)
         now_local = now_utc.astimezone(self.local_tz)
@@ -2835,26 +2843,28 @@ class DashboardDataProvider:
                         account_id=scoped_account,
                     )
 
-                if include_curves:
+                if include_curves and (include_strategy_curve or include_balance_curve):
                     wallet_rows = self._query_wallet_rows(
                         conn=conn,
                         window_start_utc=window_start_utc,
                         account_id=scoped_account,
                     )
-                    strategy_curve, strategy_stats = self._build_strategy_equity_curve(
-                        conn=conn,
-                        now_utc=now_utc,
-                        wallet_balance_usdt=self._safe_float(data["wallet"].get("balance_usdt")),
-                        window_start_utc=window_start_utc,
-                        max_points=points_limit,
-                        account_id=scoped_account,
-                        include_trade_stats=include_trade_stats,
-                        wallet_rows=wallet_rows,
-                    )
-                    data["strategy_equity_curve"] = strategy_curve[-points_limit:]
-                    data["drawdown_stats_strategy"] = strategy_stats
-                    data["summary"]["net_cashflow_usdt"] = strategy_stats.get("net_cashflow_usdt", 0.0)
-                    data["equity_curve"] = data["strategy_equity_curve"]
+                    strategy_stats: Optional[Dict[str, Any]] = None
+                    balance_stats: Optional[Dict[str, Any]] = None
+                    if include_strategy_curve:
+                        strategy_curve, strategy_stats = self._build_strategy_equity_curve(
+                            conn=conn,
+                            now_utc=now_utc,
+                            wallet_balance_usdt=self._safe_float(data["wallet"].get("balance_usdt")),
+                            window_start_utc=window_start_utc,
+                            max_points=points_limit,
+                            account_id=scoped_account,
+                            include_trade_stats=include_trade_stats,
+                            wallet_rows=wallet_rows,
+                        )
+                        data["strategy_equity_curve"] = strategy_curve[-points_limit:]
+                        data["drawdown_stats_strategy"] = strategy_stats
+                        data["summary"]["net_cashflow_usdt"] = strategy_stats.get("net_cashflow_usdt", 0.0)
                     if include_balance_curve:
                         balance_curve, balance_stats = self._build_balance_curve(
                             conn=conn,
@@ -2867,11 +2877,16 @@ class DashboardDataProvider:
                         )
                         data["balance_curve"] = balance_curve[-points_limit:]
                         data["drawdown_stats_balance"] = balance_stats
+                    if include_strategy_curve and include_balance_curve:
+                        data["equity_curve"] = data["strategy_equity_curve"]
                         data["drawdown_stats"] = data["drawdown_stats_balance"]
-                    else:
-                        data["balance_curve"] = []
-                        data["drawdown_stats_balance"] = dict(strategy_stats)
+                    elif include_strategy_curve and strategy_stats is not None:
+                        data["equity_curve"] = data["strategy_equity_curve"]
                         data["drawdown_stats"] = data["drawdown_stats_strategy"]
+                        data["drawdown_stats_balance"] = dict(strategy_stats)
+                    elif balance_stats is not None:
+                        data["equity_curve"] = data["balance_curve"]
+                        data["drawdown_stats"] = data["drawdown_stats_balance"]
         except sqlite3.Error as exc:
             data["summary"]["last_run_status"] = "DB_ERROR"
             data["db_error"] = str(exc)
@@ -2889,6 +2904,7 @@ class DashboardDataProvider:
         include_curves: bool = True,
         include_balance_curve: bool = True,
         include_trade_stats: bool = True,
+        include_strategy_curve: bool = True,
     ) -> Dict[str, Any]:
         """Return a snapshot cached with a short TTL to coalesce rapid requests.
 
@@ -2907,6 +2923,7 @@ class DashboardDataProvider:
             include_details,
             include_log,
             include_curves,
+            include_strategy_curve,
             include_balance_curve,
             include_trade_stats,
         )
@@ -2926,6 +2943,7 @@ class DashboardDataProvider:
             include_details=include_details,
             include_log=include_log,
             include_curves=include_curves,
+            include_strategy_curve=include_strategy_curve,
             include_balance_curve=include_balance_curve,
             include_trade_stats=include_trade_stats,
         )

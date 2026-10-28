@@ -9,7 +9,7 @@ import time
 from dataclasses import dataclass
 from logging.handlers import TimedRotatingFileHandler
 from pathlib import Path
-from typing import Optional
+from typing import Literal, Optional
 
 from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
@@ -853,9 +853,12 @@ def create_app(config_path: Optional[str] = None) -> FastAPI:
         account_id: str,
         window_hours: Optional[float] = Query(default=24.0, gt=0.0, le=8784.0),
         curve_points: Optional[int] = Query(default=None, ge=100, le=5000),
+        curve_type: Optional[Literal["strategy", "balance", "both"]] = Query(default=None),
     ):
         ctx: DashboardRuntimeContext = request.app.state.ctx
         try:
+            include_strategy_curve = curve_type in (None, "strategy", "both")
+            include_balance_curve = curve_type in (None, "balance", "both")
             payload = ctx.provider.cached_snapshot(
                 log_lines=0,
                 window_hours=window_hours,
@@ -864,10 +867,12 @@ def create_app(config_path: Optional[str] = None) -> FastAPI:
                 include_details=False,
                 include_log=False,
                 include_curves=True,
-                include_balance_curve=True,
+                include_strategy_curve=include_strategy_curve,
+                include_balance_curve=include_balance_curve,
                 include_trade_stats=False,
             )
             payload["account_id"] = account_id
+            payload["curve_type"] = curve_type or "both"
             return JSONResponse(payload)
         except Exception as exc:  # noqa: BLE001
             raise HTTPException(status_code=500, detail=f"account curve failed: {exc}") from exc
