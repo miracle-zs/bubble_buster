@@ -2955,6 +2955,7 @@ class DashboardDataProvider:
         self,
         window_hours: Optional[float] = 168.0,
         curve_points: int = 600,
+        include_events: bool = True,
     ) -> Dict[str, Any]:
         """Return normalized wallet-equity curves starting at portfolio TP launch."""
         now_utc = datetime.now(timezone.utc).replace(microsecond=0)
@@ -3089,15 +3090,16 @@ class DashboardDataProvider:
             payload["db_error"] = str(exc)
             return payload
 
-        comparison_account_ids = set(account_ids)
-        payload["events"] = [
-            event
-            for event in self._portfolio_take_profit_comparison_events(
-                window_start_utc=window_start_utc,
-                end_utc=now_utc.isoformat(),
-            )
-            if str(event.get("account_id") or "").strip() in comparison_account_ids
-        ]
+        if include_events:
+            comparison_account_ids = set(account_ids)
+            payload["events"] = [
+                event
+                for event in self._portfolio_take_profit_comparison_events(
+                    window_start_utc=window_start_utc,
+                    end_utc=now_utc.isoformat(),
+                )
+                if str(event.get("account_id") or "").strip() in comparison_account_ids
+            ]
         return payload
 
     def _portfolio_take_profit_comparison_events(

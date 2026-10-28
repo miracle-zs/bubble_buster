@@ -774,6 +774,7 @@ def create_app(config_path: Optional[str] = None) -> FastAPI:
         window_hours: Optional[float] = Query(default=168.0, gt=0.0, le=8784.0),
         curve_points: int = Query(default=600, ge=100, le=5000),
         all_time: bool = Query(default=False),
+        include_events: bool = Query(default=True),
     ):
         ctx: DashboardRuntimeContext = request.app.state.ctx
         try:
@@ -781,6 +782,7 @@ def create_app(config_path: Optional[str] = None) -> FastAPI:
                 ctx.provider.accounts_equity_comparison(
                     window_hours=None if all_time else window_hours,
                     curve_points=curve_points,
+                        include_events=include_events,
                 )
             )
         except Exception as exc:  # noqa: BLE001

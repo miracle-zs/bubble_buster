@@ -617,7 +617,7 @@
       setStatus("正在读取快照", "loading");
       el("notice").style.display = "none";
       var query = range === "all" ? "all_time=true" : "window_hours=" + encodeURIComponent(range);
-      fetch(pathPrefix + "/api/accounts/equity-comparison?" + query + "&curve_points=600&_=" + Date.now(), { cache: "no-store" })
+      fetch(pathPrefix + "/api/accounts/equity-comparison?" + query + "&curve_points=600&include_events=false&_=" + Date.now(), { cache: "no-store" })
         .then(function (response) {
           if (!response.ok) throw new Error("HTTP " + response.status);
           return response.json();
