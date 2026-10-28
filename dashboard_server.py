@@ -3022,15 +3022,24 @@ class DashboardDataProvider:
                     )
 
                 for account_id in account_ids:
-                    wallet_rows = self._query_wallet_rows(
-                        conn=conn,
-                        window_start_utc=window_start_utc,
-                        account_id=account_id,
-                    )
+                    where_sql = "WHERE error IS NULL AND account_id = ?"
+                    wallet_params: List[Any] = [account_id]
+                    if window_start_utc:
+                        where_sql += " AND captured_at_utc >= ?"
+                        wallet_params.append(window_start_utc)
+                    wallet_rows = conn.execute(
+                        f"""
+                        SELECT id, captured_at_utc, balance_usdt
+                        FROM wallet_snapshots
+                        {where_sql}
+                        ORDER BY captured_at_utc ASC, id ASC
+                        """,
+                        tuple(wallet_params),
+                    ).fetchall()
                     raw_curve: List[Dict[str, Any]] = []
                     for row in wallet_rows:
-                        balance = self._safe_float(row.get("balance_usdt"))
-                        captured_at = str(row.get("captured_at_utc") or "").strip()
+                        balance = self._safe_float(row["balance_usdt"])
+                        captured_at = str(row["captured_at_utc"] or "").strip()
                         if balance is None or not captured_at:
                             continue
                         raw_curve.append(
@@ -3039,6 +3048,7 @@ class DashboardDataProvider:
                                 "equity": round(balance, 8),
                             }
                         )
+                    del wallet_rows
 
                     curve = self._resample_curve(raw_curve, points_limit)
                     baseline = self._safe_float(curve[0].get("equity")) if curve else None
