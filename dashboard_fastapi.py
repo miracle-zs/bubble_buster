@@ -311,7 +311,6 @@ def create_dashboard_context(config_path: str) -> DashboardRuntimeContext:
     root_store.init_schema()
 
     balance_fetcher = None
-    close_price_fetcher = None
     live_position_clients = {}
     # If runtime service is enabled, wallet snapshots are persisted in background.
     # In that mode dashboard reads DB snapshots and skips direct balance polling.
@@ -393,7 +392,6 @@ def create_dashboard_context(config_path: str) -> DashboardRuntimeContext:
         entry_hour=entry_hour,
         entry_minute=entry_minute,
         balance_fetcher=balance_fetcher,
-        close_price_fetcher=close_price_fetcher,
         balance_cache_ttl_sec=balance_refresh_sec,
         default_curve_points=curve_points,
         account_strategy_notes=account_strategy_notes,
