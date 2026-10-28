@@ -2987,6 +2987,10 @@ class DashboardDataProvider:
         )
         effective_start_utc = max(launch_start_utc, requested_start_utc)
         window_start_utc = effective_start_utc.isoformat()
+        hourly_point_capacity = int(
+            (now_utc - effective_start_utc).total_seconds() / 3600.0 * 4
+        )
+        use_hourly_rollup = points_limit <= hourly_point_capacity
 
         payload: Dict[str, Any] = {
             "generated_at_utc": now_utc.isoformat(),
@@ -3040,12 +3044,16 @@ class DashboardDataProvider:
                     if window_start_utc:
                         where_sql += " AND captured_at_utc >= ?"
                         wallet_params.append(window_start_utc)
-                    wallet_rows = load_hourly_wallet_snapshot_candidates(
-                        conn=conn,
-                        account_id=account_id,
-                        window_start_utc=window_start_utc,
+                    wallet_rows = (
+                        load_hourly_wallet_snapshot_candidates(
+                            conn=conn,
+                            account_id=account_id,
+                            window_start_utc=window_start_utc,
+                        )
+                        if use_hourly_rollup
+                        else None
                     )
-                    if wallet_rows is None or len(wallet_rows) < points_limit:
+                    if wallet_rows is None:
                         wallet_rows = conn.execute(
                             f"""
                             SELECT id, captured_at_utc, balance_usdt
