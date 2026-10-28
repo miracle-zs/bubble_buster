@@ -5,7 +5,7 @@ import time
 from concurrent.futures import Future, ThreadPoolExecutor, wait
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
-from typing import Any, Callable, Dict, List, Optional, Set
+from typing import Any, Callable, Dict, List, Optional, Set, Union
 from zoneinfo import ZoneInfo
 
 from core.task_status import format_task_status
@@ -109,11 +109,7 @@ class StrategyRuntimeService:
         }
         self.cycle_no = 0
 
-        try:
-            self.timezone = ZoneInfo(cfg.timezone_name)
-        except Exception:  # noqa: BLE001
-            LOGGER.warning("Invalid timezone=%s, fallback to UTC", cfg.timezone_name)
-            self.timezone = ZoneInfo("UTC")
+        self.timezone = ZoneInfo(cfg.timezone_name)
 
         now_monotonic = now_monotonic if now_monotonic is not None else time.monotonic()
         self._next_manage_monotonic = (
@@ -127,6 +123,7 @@ class StrategyRuntimeService:
         self._entry_retry_day_by_account: Dict[str, date] = {}
         self._entry_readiness_warned_day_by_account: Dict[str, date] = {}
         self._last_loss_cut_local_date: Optional[date] = None
+        self._last_loss_cut_date_by_account: Dict[str, date] = {}
         self._last_loss_cut_skipped_date: Optional[date] = None
         self._last_noon_protection_local_date: Optional[date] = None
         self._noon_protection_pending_symbols_by_account: Dict[str, Optional[Set[str]]] = {}
@@ -135,8 +132,13 @@ class StrategyRuntimeService:
         self._last_morning_protection_local_date_by_account: Dict[str, date] = {}
         self._last_hourly_exchange_take_profit_hour_by_account: Dict[str, str] = {}
         self._last_orphan_exit_order_cleanup_local_date: Optional[date] = None
+        self._last_orphan_cleanup_date_by_account: Dict[str, date] = {}
         self._next_readonly_wallet_snapshot_monotonic_by_account: Dict[str, float] = {}
+        self._readonly_snapshot_executor = ThreadPoolExecutor(max_workers=self.max_account_workers, thread_name_prefix="readonly-snapshot")
+        self._readonly_snapshot_futures_by_account: Dict[str, Future] = {}
         self._last_cashflow_minute_by_account: Dict[str, str] = {}
+        self._cashflow_executor = ThreadPoolExecutor(max_workers=self.max_account_workers, thread_name_prefix="cashflow")
+        self._cashflow_futures_by_account: Dict[str, Future] = {}
         self._shared_ranking_cache: Optional[List[Dict[str, Any]]] = None
         self._shared_ranking_cache_day: Optional[date] = None
         self._shared_ranking_cache_expires_at: Optional[datetime] = None
@@ -157,8 +159,12 @@ class StrategyRuntimeService:
             max_workers=self.max_account_workers,
             thread_name_prefix="scheduled",
         )
+        self._orphan_cleanup_executor = ThreadPoolExecutor(
+            max_workers=self.max_account_workers,
+            thread_name_prefix="orphan-cleanup",
+        )
         self._scheduled_futures_by_task_account: Dict[tuple[str, str], Future] = {}
-        self._scheduled_future_day_by_task_account: Dict[tuple[str, str], date] = {}
+        self._scheduled_future_day_by_task_account: Dict[tuple[str, str], Union[date, str]] = {}
         self.last_cycle_completed_at_utc: Optional[str] = None
         self.last_cycle_duration_sec: Optional[float] = None
 
@@ -354,6 +360,10 @@ class StrategyRuntimeService:
             self._entry_retry_not_before_by_account.get(account_id, 0.0),
             time.monotonic() + retry_after_sec,
         )
+
+    @staticmethod
+    def _account_task_is_running(result: object) -> bool:
+        return isinstance(result, dict) and bool(result.get("running"))
 
     @staticmethod
     def _account_task_succeeded(result: object) -> bool:
@@ -645,7 +655,8 @@ class StrategyRuntimeService:
         self,
         calls: Dict[str, Callable[[], object]],
         task_name: str,
-        task_day: Optional[date] = None,
+        task_day: Optional[Union[date, str]] = None,
+        scheduler_wait_sec: Optional[float] = None,
     ) -> Dict[str, object]:
         if not calls:
             return {}
@@ -674,7 +685,8 @@ class StrategyRuntimeService:
                     existing_day,
                     task_day,
                 )
-            future = self._scheduled_executor.submit(call)
+            executor = self._orphan_cleanup_executor if task_name == "orphan-cleanup" else self._scheduled_executor
+            future = executor.submit(call)
             self._scheduled_futures_by_task_account[key] = future
             if task_day is not None:
                 self._scheduled_future_day_by_task_account[key] = task_day
@@ -682,6 +694,8 @@ class StrategyRuntimeService:
         if not futures:
             return results
         timeout_sec = max(0.1, float(self.cfg.account_task_timeout_sec))
+        if scheduler_wait_sec is not None:
+            timeout_sec = min(timeout_sec, max(0.0, scheduler_wait_sec))
         done, pending = wait(set(futures), timeout=timeout_sec)
         for future in done:
             aid = futures[future]
@@ -694,7 +708,7 @@ class StrategyRuntimeService:
         for future in pending:
             aid = futures[future]
             LOGGER.warning(
-                "service %s account exceeded hard scheduler timeout %.2fs, continue in background account=%s",
+                "service %s account still running after scheduler wait %.2fs account=%s",
                 task_name,
                 timeout_sec,
                 aid,
@@ -785,6 +799,7 @@ class StrategyRuntimeService:
         )
 
     def _run_daily_loss_cut_if_due(self, now_local: datetime) -> None:
+        self._collect_expired_loss_cut_futures(now_local)
         today = now_local.date()
         if self._last_loss_cut_local_date == today:
             return
@@ -825,27 +840,62 @@ class StrategyRuntimeService:
 
         results: Dict[str, object] = {}
         calls: Dict[str, Callable[[], object]] = {}
+        deadline = time.monotonic() + max(0.0, (window_end - now_local).total_seconds())
         for aid in account_ids:
+            if self._last_loss_cut_date_by_account.get(aid) == today:
+                continue
             actx = self.account_runtimes[aid]
             coord = actx.get("coordinator")
             if coord is None or not hasattr(coord, "step"):
                 raise RuntimeError(f"AccountCoordinator is required for account={aid} daily loss-cut")
-            calls[aid] = lambda c=coord, ctx=actx: c.step(action="loss_cut", config=ctx)
-        results.update(self._run_account_task_calls(calls, "daily-loss-cut", task_day=today))
+            calls[aid] = lambda c=coord, ctx=actx, end=deadline: (
+                c.step(action="loss_cut", config=ctx)
+                if time.monotonic() < end else {"error": "daily loss-cut execution window expired before task started"}
+            )
+        results.update(self._run_account_task_calls(calls, "daily-loss-cut", task_day=today, scheduler_wait_sec=0.1))
         for aid, res in results.items():
+            if self._account_task_is_running(res):
+                continue
+            if self._account_task_succeeded(res):
+                self._last_loss_cut_date_by_account[aid] = today
             self._record_task_execution(
                 account_id=aid,
                 task_name="daily_loss_cut",
                 payload=res if isinstance(res, dict) else {},
                 task_cycle=today.isoformat(),
             )
-        if len(results) == len(account_ids) and all(
-            self._account_task_succeeded(results.get(aid)) for aid in account_ids
-        ):
+        if all(self._last_loss_cut_date_by_account.get(aid) == today for aid in account_ids):
             self._last_loss_cut_local_date = today
         else:
             LOGGER.warning("service daily loss-cut not fully successful, will retry in the same window: %s", results)
         LOGGER.info("service daily loss-cut result: %s", results)
+
+    def _collect_expired_loss_cut_futures(self, now_local: datetime) -> None:
+        window = timedelta(minutes=max(1, int(getattr(self.cfg, "daily_loss_cut_grace_min", 30))))
+        for key, future in list(self._scheduled_futures_by_task_account.items()):
+            if key[0] != "daily-loss-cut":
+                continue
+            task_day = self._scheduled_future_day_by_task_account.get(key)
+            if not isinstance(task_day, date) or now_local < self._loss_cut_schedule_for_day(task_day) + window:
+                continue
+            cancelled = future.cancel()
+            if not cancelled and not future.done():
+                continue
+            self._scheduled_futures_by_task_account.pop(key, None)
+            self._scheduled_future_day_by_task_account.pop(key, None)
+            if cancelled:
+                result = {"error": "daily loss-cut execution window expired before task started"}
+            else:
+                try:
+                    result = future.result()
+                except Exception as exc:  # noqa: BLE001
+                    result = {"error": str(exc)}
+            if self._account_task_succeeded(result):
+                self._last_loss_cut_date_by_account[key[1]] = task_day
+            self._record_task_execution(
+                account_id=key[1], task_name="daily_loss_cut",
+                payload=result if isinstance(result, dict) else {}, task_cycle=task_day.isoformat(),
+            )
 
     def _noon_protection_schedule_for_day(self, day: date) -> datetime:
         return datetime(
@@ -937,8 +987,10 @@ class StrategyRuntimeService:
                     noon_time_utc=noon_time_utc,
                     config=actx,
                 )
-        results.update(self._run_account_task_calls(calls, "noon-protection", task_day=today))
+        results.update(self._run_account_task_calls(calls, "noon-protection", task_day=today, scheduler_wait_sec=0.1))
         for aid, res in results.items():
+            if self._account_task_is_running(res):
+                continue
             self._record_task_execution(
                 account_id=aid,
                 task_name="noon_protection",
@@ -1004,6 +1056,7 @@ class StrategyRuntimeService:
 
     def _run_morning_protection_if_due(self, now_local: datetime) -> None:
         results: Dict[str, object] = {}
+        calls: Dict[str, Callable[[], object]] = {}
 
         for aid, ctx in self.account_runtimes.items():
             mode = str(ctx.get("mode", "full")).strip().lower()
@@ -1044,21 +1097,22 @@ class StrategyRuntimeService:
             )
             if coord is None or not hasattr(coord, "step"):
                 raise RuntimeError(f"AccountCoordinator is required for account={aid} morning protection")
-            try:
-                results[aid] = coord.step(
+            calls[aid] = lambda c=coord, t=target, hours=min_hold_hours, config=ctx: c.step(
                     action="morning_protection",
-                    check_time_utc=target.astimezone(timezone.utc),
-                    min_hold_hours=min_hold_hours,
-                    config=ctx,
+                    check_time_utc=t.astimezone(timezone.utc),
+                    min_hold_hours=hours,
+                    config=config,
                 )
-            except Exception as exc:
-                results[aid] = {"error": str(exc)}
-            if self._account_task_succeeded(results[aid]):
+        results.update(self._run_account_task_calls(calls, "morning-protection", task_day=now_local.date(), scheduler_wait_sec=0.1))
+        for aid, result in results.items():
+            if self._account_task_succeeded(result):
                 self._last_morning_protection_local_date_by_account[aid] = today
 
         if results:
             LOGGER.info("service morning protection result: %s", results)
             for aid, res in results.items():
+                if self._account_task_is_running(res):
+                    continue
                 self._record_task_execution(
                     account_id=aid,
                     task_name="morning_protection",
@@ -1068,6 +1122,7 @@ class StrategyRuntimeService:
 
     def _run_hourly_exchange_take_profit_if_due(self, now_local: datetime) -> None:
         results: Dict[str, object] = {}
+        calls: Dict[str, Callable[[], object]] = {}
         hour_key = now_local.strftime("%Y-%m-%dT%H")
 
         for aid, ctx in self.account_runtimes.items():
@@ -1106,20 +1161,21 @@ class StrategyRuntimeService:
             )
             if coord is None or not hasattr(coord, "step"):
                 raise RuntimeError(f"AccountCoordinator is required for account={aid} hourly take profit")
-            try:
-                results[aid] = coord.step(
+            calls[aid] = lambda c=coord, config=ctx, drop=drop_pct, current=now_local: c.step(
                     action="hourly_take_profit",
-                    now_local=now_local,
-                    config={**ctx, "hourly_exchange_take_profit_drop_pct": drop_pct},
+                    now_local=current,
+                    config={**config, "hourly_exchange_take_profit_drop_pct": drop},
                 )
-            except Exception as exc:
-                results[aid] = {"error": str(exc)}
-            if self._account_task_succeeded(results[aid]):
+        results.update(self._run_account_task_calls(calls, "hourly-take-profit", task_day=hour_key, scheduler_wait_sec=0.1))
+        for aid, result in results.items():
+            if self._account_task_succeeded(result):
                 self._last_hourly_exchange_take_profit_hour_by_account[aid] = hour_key
 
         if results:
             LOGGER.info("service hourly exchange take-profit result: %s", results)
             for aid, res in results.items():
+                if self._account_task_is_running(res):
+                    continue
                 self._record_task_execution(
                     account_id=aid,
                     task_name="hourly_exchange_take_profit",
@@ -1133,11 +1189,11 @@ class StrategyRuntimeService:
 
         run_count = 0
         while now_monotonic >= self._next_manage_monotonic and run_count < max(1, self.cfg.manager_max_catch_up_runs):
-            summary = self.run_manage_tick(now_local=now_local)
+            summary = self.run_manage_tick(now_local=now_local, scheduler_wait_sec=0.1)
             run_count += 1
             LOGGER.info("service manage summary: %s", summary)
             for aid, res in summary.items():
-                if isinstance(res, dict):
+                if isinstance(res, dict) and not self._account_task_is_running(res):
                     self._record_task_execution(
                         account_id=aid,
                         task_name="manage",
@@ -1374,7 +1430,7 @@ class StrategyRuntimeService:
                 error_text,
             )
 
-    def run_manage_tick(self, now_local: Optional[datetime] = None) -> Dict[str, Dict[str, object]]:
+    def run_manage_tick(self, now_local: Optional[datetime] = None, scheduler_wait_sec: Optional[float] = None) -> Dict[str, Dict[str, object]]:
         self.cycle_no += 1
         account_ids = [
             aid
@@ -1420,6 +1476,8 @@ class StrategyRuntimeService:
 
         if submitted:
             timeout_sec = max(0.1, float(self.cfg.account_task_timeout_sec))
+            if scheduler_wait_sec is not None:
+                timeout_sec = min(timeout_sec, max(0.0, scheduler_wait_sec))
             done, pending = wait(set(submitted), timeout=timeout_sec)
             for future in done:
                 aid = submitted[future]
@@ -1428,7 +1486,7 @@ class StrategyRuntimeService:
             for future in pending:
                 aid = submitted[future]
                 LOGGER.warning(
-                    "service manage account exceeded hard scheduler timeout %.2fs, continue in background account=%s",
+                    "service manage account still running after scheduler wait %.2fs account=%s",
                     timeout_sec,
                     aid,
                 )
@@ -1469,22 +1527,23 @@ class StrategyRuntimeService:
         target = self._orphan_exit_order_cleanup_schedule_for_day(today)
         if now_local < target:
             return
-        results: Dict[str, Dict[str, object]] = {}
+        calls: Dict[str, Callable[[], object]] = {}
+        account_ids = []
         for aid, ctx in self.account_runtimes.items():
             if str(ctx.get("mode", "full")).strip().lower() != "full":
+                continue
+            account_ids.append(aid)
+            if self._last_orphan_cleanup_date_by_account.get(aid) == today:
                 continue
             coord = ctx.get("coordinator")
             if coord is None or not hasattr(coord, "step"):
                 raise RuntimeError(f"AccountCoordinator is required for account={aid} orphan cleanup")
-            try:
-                results[aid] = coord.step(action="orphan_cleanup", config=ctx)
-            except Exception as exc:  # noqa: BLE001
-                LOGGER.exception("service orphan exit order cleanup failed account=%s: %s", aid, exc)
-                results[aid] = {"account_id": aid, "error": str(exc)}
-        if not any(
-            "error" in result or int(result.get("failed", 0)) > 0
-            for result in results.values()
-        ):
+            calls[aid] = lambda c=coord, config=ctx: c.step(action="orphan_cleanup", config=config)
+        results = self._run_account_task_calls(calls, "orphan-cleanup", task_day=today, scheduler_wait_sec=0.1)
+        for aid, result in results.items():
+            if self._account_task_succeeded(result):
+                self._last_orphan_cleanup_date_by_account[aid] = today
+        if all(self._last_orphan_cleanup_date_by_account.get(aid) == today for aid in account_ids):
             self._last_orphan_exit_order_cleanup_local_date = today
         LOGGER.info("service orphan exit order cleanup summary: %s", results)
 
@@ -1510,6 +1569,14 @@ class StrategyRuntimeService:
 
     def _run_cashflow_sync_if_due(self, now_local: datetime) -> None:
         """Run one unfiltered income request per account/minute at staggered seconds."""
+        for aid, future in list(self._cashflow_futures_by_account.items()):
+            if not future.done():
+                continue
+            self._cashflow_futures_by_account.pop(aid, None)
+            try:
+                LOGGER.info("service cashflow sync account=%s inserted=%s", aid, future.result())
+            except Exception as exc:  # noqa: BLE001
+                LOGGER.warning("service cashflow sync failed account=%s: %s", aid, exc)
         account_ids = [
             aid
             for aid, ctx in sorted(self.account_runtimes.items())
@@ -1522,7 +1589,6 @@ class StrategyRuntimeService:
 
         default_slots = (5, 20, 35, 50)
         minute_key = now_local.strftime("%Y-%m-%dT%H:%M")
-        calls: Dict[str, Callable[[], object]] = {}
         for index, aid in enumerate(account_ids):
             ctx = self.account_runtimes[aid]
             configured_slot = ctx.get("cashflow_second_offset")
@@ -1531,7 +1597,8 @@ class StrategyRuntimeService:
             except (TypeError, ValueError):
                 slot = default_slots[index % 4]
             slot = max(0, min(59, slot))
-            if now_local.second < slot or self._last_cashflow_minute_by_account.get(aid) == minute_key:
+            if (now_local.second < slot or self._last_cashflow_minute_by_account.get(aid) == minute_key
+                    or aid in self._cashflow_futures_by_account):
                 continue
 
             # Mark before I/O: a timeout must not cause repeated 30-weight calls
@@ -1539,22 +1606,22 @@ class StrategyRuntimeService:
             self._last_cashflow_minute_by_account[aid] = minute_key
             sampler = ctx["balance_sampler"]
             utc_time = now_local.astimezone(timezone.utc)
-            calls[aid] = (lambda s=sampler, u=utc_time: s.sync_cashflows_once(now_utc=u))
-
-        if not calls:
-            return
-
-        results = self._run_account_task_calls(calls, "cashflow-sync")
-        for aid, res in results.items():
-            if isinstance(res, dict) and res.get("slow"):
-                LOGGER.warning("service cashflow sync account=%s is slow, continuing in background", aid)
-            elif isinstance(res, dict) and "error" in res:
-                LOGGER.warning("service cashflow sync failed account=%s: %s", aid, res["error"])
-            else:
-                LOGGER.info("service cashflow sync account=%s inserted=%s", aid, res)
+            self._cashflow_futures_by_account[aid] = self._cashflow_executor.submit(sampler.sync_cashflows_once, now_utc=utc_time)
 
     def _run_balance_snapshot_for_readonly_accounts(self, now_monotonic: float) -> None:
         """为 readonly 账户执行余额快照采集。"""
+        for aid, future in list(self._readonly_snapshot_futures_by_account.items()):
+            if not future.done():
+                continue
+            self._readonly_snapshot_futures_by_account.pop(aid, None)
+            try:
+                result = future.result()
+                if isinstance(result, dict) and "error" in result:
+                    LOGGER.warning("service readonly wallet snapshot failed account=%s: %s", aid, result["error"])
+                else:
+                    LOGGER.info("service readonly wallet snapshot account=%s: %s", aid, result)
+            except Exception as exc:  # noqa: BLE001
+                LOGGER.warning("service readonly wallet snapshot failed account=%s: %s", aid, exc)
         readonly_accounts = [
             aid
             for aid, ctx in self.account_runtimes.items()
@@ -1563,7 +1630,6 @@ class StrategyRuntimeService:
         if not readonly_accounts:
             return
 
-        calls: Dict[str, Callable[[], object]] = {}
         for aid in readonly_accounts:
             ctx = self.account_runtimes.get(aid)
             if not ctx:
@@ -1572,23 +1638,11 @@ class StrategyRuntimeService:
             if balance_sampler is None:
                 continue
             next_due = self._next_readonly_wallet_snapshot_monotonic_by_account.get(aid, 0.0)
-            if now_monotonic < next_due:
+            if now_monotonic < next_due or aid in self._readonly_snapshot_futures_by_account:
                 continue
             interval = max(1.0, float(self.cfg.readonly_wallet_snapshot_interval_sec))
             self._next_readonly_wallet_snapshot_monotonic_by_account[aid] = now_monotonic + interval
-            calls[aid] = balance_sampler.run_once
-
-        if not calls:
-            return
-
-        results = self._run_account_task_calls(calls, "readonly-wallet-snapshot")
-        for aid, res in results.items():
-            if isinstance(res, dict) and res.get("slow"):
-                LOGGER.warning("service readonly wallet snapshot account=%s is slow, continuing in background", aid)
-            elif isinstance(res, dict) and "error" in res:
-                LOGGER.warning("service readonly wallet snapshot failed account=%s: %s", aid, res["error"])
-            else:
-                LOGGER.info("service readonly wallet snapshot account=%s: %s", aid, res)
+            self._readonly_snapshot_futures_by_account[aid] = self._readonly_snapshot_executor.submit(balance_sampler.run_once)
 
     def run_forever(self, stop_event: Optional[threading.Event] = None) -> None:
         stopper = stop_event or threading.Event()
@@ -1647,4 +1701,7 @@ class StrategyRuntimeService:
             self._entry_executor.shutdown(wait=True, cancel_futures=True)
             self._manage_executor.shutdown(wait=True, cancel_futures=True)
             self._scheduled_executor.shutdown(wait=True, cancel_futures=True)
+            self._orphan_cleanup_executor.shutdown(wait=True, cancel_futures=True)
+            self._cashflow_executor.shutdown(wait=True, cancel_futures=True)
+            self._readonly_snapshot_executor.shutdown(wait=True, cancel_futures=True)
             LOGGER.info("runtime service stopped")

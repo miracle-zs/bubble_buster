@@ -255,9 +255,12 @@ class RuntimeServiceTest(unittest.TestCase):
         now_local = datetime(2026, 2, 13, 0, 0, tzinfo=ZoneInfo("UTC"))
         for mono in [0.0, 1.0, 2.0, 30.0, 59.0]:
             service.run_cycle(now_local=now_local, now_monotonic=mono)
+            for future in service._readonly_snapshot_futures_by_account.values():
+                future.result(timeout=1)
         self.assertEqual(sampler.calls, 1)
 
         service.run_cycle(now_local=now_local, now_monotonic=60.0)
+        service._readonly_snapshot_futures_by_account["readonly01"].result(timeout=1)
         self.assertEqual(sampler.calls, 2)
 
     def test_manage_recovers_preclose_structure_before_position_management(self):
@@ -2284,3 +2287,273 @@ def test_runtime_service_records_task_executions(tmp_path) -> None:
     assert "noon_protection" in latest
     assert latest["noon_protection"]["status"] == "SUCCESS"
     assert "updated=1" in latest["noon_protection"]["summary"]
+
+
+def test_slow_manage_does_not_block_following_scheduler_cycle() -> None:
+    entered, release, cycle_done = Event(), Event(), Event()
+    service, _, _, _ = RuntimeServiceTest()._create_service(account_task_timeout_sec=1.0)
+    service._run_manage_for_account = MagicMock(side_effect=lambda *args: (entered.set(), release.wait(3), {"total": 1})[-1])
+    service._next_manage_monotonic = 0
+    worker = Thread(target=lambda: (service.run_cycle(now_local=datetime(2026, 2, 13, 1, 0, tzinfo=ZoneInfo("UTC")), now_monotonic=0), cycle_done.set()))
+    worker.start()
+    try:
+        assert entered.wait(1)
+        assert cycle_done.wait(0.3), "Slow position management blocked scheduler cycle"
+        assert len(service._manage_futures_by_account) > 0
+    finally:
+        release.set()
+        worker.join(3)
+        for executor in (service._entry_executor, service._manage_executor, service._scheduled_executor, service._cashflow_executor):
+            executor.shutdown(wait=True, cancel_futures=True)
+
+
+def test_slow_morning_protection_does_not_block_and_is_not_duplicated() -> None:
+    entered, release, returned = Event(), Event(), Event()
+    service, _, _, _ = RuntimeServiceTest()._create_service(account_task_timeout_sec=1.0)
+    service.account_runtimes = {"acc01": {"mode": "full", "morning_protection_enabled": True, "morning_protection_hour": 7, "morning_protection_minute": 55, "coordinator": MagicMock()}}
+    coordinator = service.account_runtimes["acc01"]["coordinator"]
+    coordinator.step.side_effect = lambda **kwargs: (entered.set(), release.wait(3), {"errors": 0})[-1]
+    now = datetime(2026, 2, 13, 7, 55, tzinfo=ZoneInfo("UTC"))
+    worker = Thread(target=lambda: (service._run_morning_protection_if_due(now), returned.set()))
+    worker.start()
+    try:
+        assert entered.wait(1)
+        assert returned.wait(0.3), "Slow morning protection blocked scheduler"
+        service._run_morning_protection_if_due(now)
+        assert coordinator.step.call_count == 1
+        release.set()
+        service._scheduled_futures_by_task_account[("morning-protection", "acc01")].result(timeout=1)
+        service._run_morning_protection_if_due(now)
+        service._run_morning_protection_if_due(now)
+        assert coordinator.step.call_count == 1
+        assert service._last_morning_protection_local_date_by_account["acc01"] == now.date()
+    finally:
+        release.set()
+        worker.join(3)
+        for executor in (service._entry_executor, service._manage_executor, service._scheduled_executor, service._cashflow_executor):
+            executor.shutdown(wait=True, cancel_futures=True)
+
+
+def test_slow_hourly_task_collects_old_hour_before_starting_new_hour() -> None:
+    entered, release = Event(), Event()
+    service, _, _, _ = RuntimeServiceTest()._create_service(account_task_timeout_sec=1.0)
+    coordinator = MagicMock()
+    calls = []
+
+    def run(**kwargs):
+        calls.append(kwargs["now_local"])
+        if len(calls) == 1:
+            entered.set()
+            release.wait(3)
+        return {"errors": 0}
+
+    coordinator.step.side_effect = run
+    service.account_runtimes = {"acc01": {"mode": "full", "hourly_exchange_take_profit_enabled": True, "hourly_exchange_take_profit_minute": 0, "coordinator": coordinator}}
+    first = datetime(2026, 2, 13, 10, 0, tzinfo=ZoneInfo("UTC"))
+    second = first + timedelta(hours=1)
+    try:
+        service._run_hourly_exchange_take_profit_if_due(first)
+        assert entered.wait(1)
+        service._run_hourly_exchange_take_profit_if_due(second)
+        assert len(calls) == 1
+        release.set()
+        service._scheduled_futures_by_task_account[("hourly-take-profit", "acc01")].result(timeout=1)
+        service._run_hourly_exchange_take_profit_if_due(second)
+        assert calls == [first, second]
+        assert service._last_hourly_exchange_take_profit_hour_by_account["acc01"] == second.strftime("%Y-%m-%dT%H")
+    finally:
+        release.set()
+        for executor in (service._entry_executor, service._manage_executor, service._scheduled_executor, service._cashflow_executor):
+            executor.shutdown(wait=True, cancel_futures=True)
+
+
+def test_failed_morning_protection_is_retried() -> None:
+    service, _, _, _ = RuntimeServiceTest()._create_service(account_task_timeout_sec=1.0)
+    coordinator = MagicMock()
+    coordinator.step.side_effect = [{"errors": 1}, {"errors": 0}]
+    service.account_runtimes = {"acc01": {"mode": "full", "morning_protection_enabled": True, "morning_protection_hour": 7, "morning_protection_minute": 55, "coordinator": coordinator}}
+    now = datetime(2026, 2, 13, 7, 55, tzinfo=ZoneInfo("UTC"))
+    try:
+        service._run_morning_protection_if_due(now)
+        assert "acc01" not in service._last_morning_protection_local_date_by_account
+        service._run_morning_protection_if_due(now)
+        assert coordinator.step.call_count == 2
+        assert service._last_morning_protection_local_date_by_account["acc01"] == now.date()
+    finally:
+        for executor in (service._entry_executor, service._manage_executor, service._scheduled_executor, service._cashflow_executor):
+            executor.shutdown(wait=True, cancel_futures=True)
+
+
+def test_slow_orphan_cleanup_does_not_block_or_repeat_completed_accounts() -> None:
+    entered, release, returned = Event(), Event(), Event()
+    service, _, _, _ = RuntimeServiceTest()._create_service(account_task_timeout_sec=1.0)
+    fast, slow = MagicMock(), MagicMock()
+    fast.step.return_value = {"failed": 0}
+    slow.step.side_effect = lambda **kwargs: (entered.set(), release.wait(3), {"failed": 0})[-1]
+    service.account_runtimes = {"fast": {"mode": "full", "coordinator": fast}, "slow": {"mode": "full", "coordinator": slow}}
+    now = datetime(2026, 2, 13, 3, 30, tzinfo=ZoneInfo("UTC"))
+    worker = Thread(target=lambda: (service._run_orphan_exit_order_cleanup_if_due(now), returned.set()))
+    worker.start()
+    try:
+        assert entered.wait(1)
+        assert returned.wait(0.3), "Slow orphan cleanup blocked scheduler"
+        service._run_orphan_exit_order_cleanup_if_due(now)
+        assert fast.step.call_count == 1
+        assert slow.step.call_count == 1
+        release.set()
+        service._scheduled_futures_by_task_account[("orphan-cleanup", "slow")].result(timeout=1)
+        service._run_orphan_exit_order_cleanup_if_due(now)
+        assert service._last_orphan_exit_order_cleanup_local_date == now.date()
+        assert fast.step.call_count == 1
+    finally:
+        release.set()
+        worker.join(3)
+        for executor in (service._entry_executor, service._manage_executor, service._scheduled_executor, service._cashflow_executor):
+            executor.shutdown(wait=True, cancel_futures=True)
+
+
+def test_slow_readonly_snapshot_does_not_block_or_skip_next_due_run() -> None:
+    entered, release, returned = Event(), Event(), Event()
+    service, _, _, _ = RuntimeServiceTest()._create_service(account_task_timeout_sec=1.0, readonly_wallet_snapshot_interval_sec=60)
+    sampler = MagicMock()
+    sampler.run_once.side_effect = lambda: (entered.set(), release.wait(3), {"ok": True})[-1]
+    service.account_runtimes = {"readonly03": {"mode": "readonly", "balance_sampler": sampler}}
+    worker = Thread(target=lambda: (service._run_balance_snapshot_for_readonly_accounts(0), returned.set()))
+    worker.start()
+    try:
+        assert entered.wait(1)
+        assert returned.wait(0.3), "Slow readonly snapshot blocked scheduler"
+        service._run_balance_snapshot_for_readonly_accounts(60)
+        assert sampler.run_once.call_count == 1
+        release.set()
+        service._readonly_snapshot_futures_by_account["readonly03"].result(timeout=1)
+        service._run_balance_snapshot_for_readonly_accounts(61)
+        service._readonly_snapshot_futures_by_account["readonly03"].result(timeout=1)
+        assert sampler.run_once.call_count == 2
+    finally:
+        release.set()
+        worker.join(3)
+        for name in ("_entry_executor", "_manage_executor", "_scheduled_executor", "_cashflow_executor", "_readonly_snapshot_executor"):
+            executor = getattr(service, name, None)
+            if executor is not None:
+                executor.shutdown(wait=True, cancel_futures=True)
+
+
+def test_slow_daily_loss_cut_does_not_block_or_repeat_successful_account() -> None:
+    entered, release, returned = Event(), Event(), Event()
+    service, _, _, _ = RuntimeServiceTest()._create_service(account_task_timeout_sec=1.0, daily_loss_cut_enabled=True)
+    service._record_task_execution = MagicMock()
+    fast, slow = MagicMock(), MagicMock()
+    fast.step.return_value = {"errors": 0}
+    slow.step.side_effect = lambda **kwargs: (entered.set(), release.wait(3), {"errors": 0})[-1]
+    service.account_runtimes = {"fast": {"mode": "full", "coordinator": fast}, "slow": {"mode": "full", "coordinator": slow}}
+    now = datetime(2026, 2, 13, 11, 55, tzinfo=ZoneInfo("UTC"))
+    worker = Thread(target=lambda: (service._run_daily_loss_cut_if_due(now), returned.set()))
+    worker.start()
+    try:
+        assert entered.wait(1)
+        assert returned.wait(0.3), "Slow daily loss cut blocked scheduler"
+        assert len(service._record_task_execution.call_args_list) == 1
+        service._run_daily_loss_cut_if_due(now)
+        assert fast.step.call_count == 1
+        assert slow.step.call_count == 1
+        assert len(service._record_task_execution.call_args_list) == 1
+        release.set()
+        service._scheduled_futures_by_task_account[("daily-loss-cut", "slow")].result(timeout=1)
+        service._run_daily_loss_cut_if_due(now)
+        assert service._last_loss_cut_local_date == now.date()
+        assert fast.step.call_count == 1
+        assert len(service._record_task_execution.call_args_list) == 2
+    finally:
+        release.set()
+        worker.join(3)
+        for name in ("_entry_executor", "_manage_executor", "_scheduled_executor", "_cashflow_executor", "_readonly_snapshot_executor"):
+            getattr(service, name).shutdown(wait=True, cancel_futures=True)
+
+
+def test_slow_noon_protection_is_collected_and_retried_for_failed_symbols() -> None:
+    entered, release = Event(), Event()
+    service, _, _, _ = RuntimeServiceTest()._create_service(account_task_timeout_sec=1.0, noon_protection_enabled=True)
+    coordinator = MagicMock()
+    calls = []
+
+    def run(**kwargs):
+        calls.append(kwargs)
+        if len(calls) == 1:
+            entered.set()
+            release.wait(3)
+            return {"errors": 1, "failed_symbols": ["BTCUSDT"]}
+        return {"errors": 0}
+
+    coordinator.step.side_effect = run
+    service.account_runtimes = {"acc01": {"mode": "full", "coordinator": coordinator, "noon_protection_enabled": True}}
+    now = datetime(2026, 2, 13, 12, 0, tzinfo=ZoneInfo("UTC"))
+    try:
+        service._run_noon_protection_if_due(now)
+        assert entered.wait(1)
+        service._run_noon_protection_if_due(now + timedelta(seconds=60))
+        assert len(calls) == 1
+        release.set()
+        service._scheduled_futures_by_task_account[("noon-protection", "acc01")].result(timeout=1)
+        service._run_noon_protection_if_due(now + timedelta(seconds=120))
+        assert len(calls) == 1
+        service._run_noon_protection_if_due(now + timedelta(seconds=180))
+        assert len(calls) == 2
+        assert calls[1]["symbols"] == {"BTCUSDT"}
+        assert not service._noon_protection_pending_symbols_by_account
+    finally:
+        release.set()
+        for name in ("_entry_executor", "_manage_executor", "_scheduled_executor", "_cashflow_executor", "_readonly_snapshot_executor"):
+            getattr(service, name).shutdown(wait=True, cancel_futures=True)
+
+
+def test_slow_orphan_cleanup_cannot_block_daily_loss_cut_worker() -> None:
+    entered, release, risk_started = Event(), Event(), Event()
+    service, _, _, _ = RuntimeServiceTest()._create_service(account_task_timeout_sec=1.0, daily_loss_cut_enabled=True)
+    coordinator = MagicMock()
+    def step(action, **kwargs):
+        if action == "orphan_cleanup":
+            entered.set()
+            release.wait(3)
+        elif action == "loss_cut":
+            risk_started.set()
+        return {"failed": 0, "errors": 0}
+    coordinator.step.side_effect = step
+    service.account_runtimes = {"cleanup": {"mode": "full", "daily_loss_cut_enabled": False, "coordinator": coordinator}, "risk": {"mode": "loss_cut_only", "coordinator": coordinator}}
+    try:
+        service._run_orphan_exit_order_cleanup_if_due(datetime(2026, 2, 13, 3, 30, tzinfo=ZoneInfo("UTC")))
+        assert entered.wait(1)
+        service._run_daily_loss_cut_if_due(datetime(2026, 2, 13, 11, 55, tzinfo=ZoneInfo("UTC")))
+        assert risk_started.wait(0.3), "Orphan cleanup occupied the only risk worker"
+    finally:
+        release.set()
+        for name in ("_entry_executor", "_manage_executor", "_scheduled_executor", "_cashflow_executor", "_readonly_snapshot_executor", "_orphan_cleanup_executor"):
+            executor = getattr(service, name, None)
+            if executor is not None:
+                executor.shutdown(wait=True, cancel_futures=True)
+
+
+def test_daily_loss_cut_window_end_cancels_queued_work_and_records_running_result() -> None:
+    entered, release = Event(), Event()
+    service, _, _, _ = RuntimeServiceTest()._create_service(account_task_timeout_sec=1.0, daily_loss_cut_enabled=True)
+    first, queued = MagicMock(), MagicMock()
+    first.step.side_effect = lambda **kwargs: (entered.set(), release.wait(3), {"errors": 0, "closed": 1})[-1]
+    queued.step.return_value = {"errors": 0}
+    service.account_runtimes = {"first": {"mode": "full", "coordinator": first}, "queued": {"mode": "full", "coordinator": queued}}
+    service._record_task_execution = MagicMock()
+    now = datetime(2026, 2, 13, 11, 55, tzinfo=ZoneInfo("UTC"))
+    end = now + timedelta(minutes=30)
+    try:
+        service._run_daily_loss_cut_if_due(now)
+        assert entered.wait(1)
+        service._run_daily_loss_cut_if_due(end)
+        release.set()
+        service._scheduled_futures_by_task_account[("daily-loss-cut", "first")].result(timeout=1)
+        service._run_daily_loss_cut_if_due(end + timedelta(seconds=1))
+        assert queued.step.call_count == 0
+        assert ("daily-loss-cut", "first") not in service._scheduled_futures_by_task_account
+        assert any(call.kwargs.get("payload", {}).get("closed") == 1 for call in service._record_task_execution.call_args_list)
+    finally:
+        release.set()
+        for name in ("_entry_executor", "_manage_executor", "_scheduled_executor", "_cashflow_executor", "_readonly_snapshot_executor", "_orphan_cleanup_executor"):
+            getattr(service, name).shutdown(wait=True, cancel_futures=True)

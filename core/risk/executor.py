@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from typing import Any, Callable, Dict, Optional, Tuple
 
 from core.market_fill_reconciler import MarketFillReconciler
+from core.execution.models import AttemptStatus
 from core.risk.models import ExitIntent
 from core.state_store import StateStore
 from infra.binance_futures_client import (
@@ -458,6 +459,21 @@ class CentralExitExecutor:
             raise_on_error=True,
         )
 
+        if attempt.status != AttemptStatus.FILLED.value:
+            message = f"Market close remains {attempt.status}"
+            if attempt.status in {
+                AttemptStatus.SUBMITTING.value,
+                AttemptStatus.UNKNOWN.value,
+                AttemptStatus.ACKNOWLEDGED.value,
+                AttemptStatus.PARTIALLY_FILLED.value,
+            }:
+                raise OrderStateUnknownError(
+                    symbol=symbol,
+                    client_order_id=attempt.client_order_id,
+                    cause=BinanceAPIError("UNKNOWN", message),
+                )
+            raise BinanceAPIError("ORDER_NOT_FILLED", message)
+
         order_dict = (
             attempt.exchange_response
             if isinstance(attempt.exchange_response, dict)
@@ -470,7 +486,11 @@ class CentralExitExecutor:
             }
         )
 
-        if position_id is not None and close_status is not None:
+        if (
+            position_id is not None
+            and close_status is not None
+            and attempt.status == AttemptStatus.FILLED.value
+        ):
             with self.store.unit_of_work():
                 self.store.mark_position_closed(
                     position_id=position_id,

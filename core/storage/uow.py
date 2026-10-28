@@ -117,6 +117,17 @@ class UnitOfWork:
     def _handle_normal_exit(self) -> None:
         if self.conn is None:
             return
+        if self._rolled_back:
+            if self.is_nested and self.savepoint_name:
+                self.conn.execute(f"RELEASE SAVEPOINT {self.savepoint_name}")
+            for cb in self._after_rollback_callbacks:
+                try:
+                    cb()
+                except Exception as cb_exc:
+                    LOGGER.warning("UnitOfWork after_rollback callback failed: %s", cb_exc)
+            self._after_rollback_callbacks.clear()
+            self._after_commit_callbacks.clear()
+            return
         if self.is_nested and self.savepoint_name:
             self.conn.execute(f"RELEASE SAVEPOINT {self.savepoint_name}")
             if self.parent is not None:
@@ -165,4 +176,4 @@ class UnitOfWork:
             self.conn.execute(f"ROLLBACK TO {self.savepoint_name}")
         else:
             self.conn.rollback()
-            self._rolled_back = True
+        self._rolled_back = True

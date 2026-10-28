@@ -129,9 +129,65 @@ class StateStore:
                 conn.executescript(schema_sql)
             else:
                 raise ValueError("schema_path is required for StateStore.init_schema")
+            conn.execute("BEGIN IMMEDIATE")
+            self._migrate_execution_fill_identity(conn)
+            self._migrate_exchange_order_identity(conn)
             self._backfill_order_event_account_ids(conn)
             self._repair_legacy_run_foreign_keys(conn)
             self._apply_schema_migrations(conn)
+
+    @staticmethod
+    def _migrate_execution_fill_identity(conn: sqlite3.Connection) -> None:
+        indexes = conn.execute("PRAGMA index_list(execution_fills)").fetchall()
+        legacy = any(
+            row[2] and [col[2] for col in conn.execute(f"PRAGMA index_info('{row[1]}')")] == ["exchange_trade_id"]
+            for row in indexes
+        )
+        if not legacy:
+            return
+        conn.execute("""
+            CREATE TABLE execution_fills_scoped (
+                fill_id TEXT PRIMARY KEY, attempt_id TEXT NOT NULL, intent_id TEXT NOT NULL,
+                account_id TEXT NOT NULL DEFAULT 'default', symbol TEXT NOT NULL,
+                exchange_trade_id TEXT NOT NULL, exchange_order_id TEXT, side TEXT NOT NULL,
+                price REAL NOT NULL, qty REAL NOT NULL, commission REAL NOT NULL DEFAULT 0,
+                commission_asset TEXT NOT NULL DEFAULT 'USDT', trade_time_utc TEXT NOT NULL,
+                created_at_utc TEXT NOT NULL, UNIQUE(account_id, symbol, exchange_trade_id),
+                FOREIGN KEY(attempt_id) REFERENCES order_attempts(attempt_id),
+                FOREIGN KEY(intent_id) REFERENCES order_intents(intent_id)
+            )
+        """)
+        conn.execute("INSERT INTO execution_fills_scoped SELECT * FROM execution_fills")
+        conn.execute("DROP TABLE execution_fills")
+        conn.execute("ALTER TABLE execution_fills_scoped RENAME TO execution_fills")
+        for column in ("attempt_id", "intent_id", "exchange_trade_id"):
+            suffix = "trade_id" if column == "exchange_trade_id" else column.removesuffix("_id")
+            conn.execute(f"CREATE INDEX idx_execution_fills_{suffix} ON execution_fills({column})")
+
+    @classmethod
+    def _migrate_exchange_order_identity(cls, conn: sqlite3.Connection) -> None:
+        conn.execute("CREATE TABLE IF NOT EXISTS schema_migrations (version TEXT PRIMARY KEY, applied_at_utc TEXT NOT NULL, description TEXT)")
+        version = "20261028_01_exchange_order_identity"
+        if conn.execute("SELECT 1 FROM schema_migrations WHERE version = ?", (version,)).fetchone():
+            return
+        rows = conn.execute("SELECT account_id, order_key, symbol, order_id, client_order_id, source, raw_json FROM exchange_order_state").fetchall()
+        for row in rows:
+            try:
+                payload = json.loads(row["raw_json"] or "{}")
+                if not isinstance(payload, dict):
+                    payload = {}
+            except (TypeError, ValueError):
+                payload = {}
+            payload.setdefault("symbol", row["symbol"])
+            if not any(payload.get(k) for k in ("orderId", "algoId", "aid", "i")) and row["order_id"]:
+                payload["orderId"] = row["order_id"]
+            if not any(payload.get(k) for k in ("clientOrderId", "clientAlgoId", "caid", "c")) and row["client_order_id"]:
+                payload["clientOrderId"] = row["client_order_id"]
+            if row["source"] == "ALGO_UPDATE" and not payload.get("algoId"):
+                payload["algoId"] = payload.get("aid") or payload.get("orderId")
+            new_key = cls._exchange_order_key(payload)
+            conn.execute("UPDATE exchange_order_state SET order_key = ? WHERE account_id = ? AND order_key = ?", (new_key, row["account_id"], row["order_key"]))
+        conn.execute("INSERT INTO schema_migrations VALUES (?, ?, ?)", (version, utc_now_iso(), "Scope exchange order identity by symbol and order type"))
 
     def create_run(self, trade_day_utc: str, account_id: str = "default") -> Tuple[str, bool]:
         """Creates a run for a UTC trade day.
@@ -2060,15 +2116,17 @@ class StateStore:
 
     @staticmethod
     def _exchange_order_key(order: Dict[str, Any]) -> str:
-        order_id = order.get("orderId") or order.get("algoId") or order.get("actualOrderId")
+        symbol = str(order.get("symbol") or order.get("s") or "").strip().upper()
+        is_algo = any(order.get(k) not in (None, "") for k in ("algoId", "aid", "clientAlgoId", "caid", "algoStatus"))
+        kind = "algo" if is_algo else "order"
+        order_id = (order.get("algoId") or order.get("aid") or order.get("orderId")) if is_algo else (order.get("orderId") or order.get("i") or order.get("actualOrderId"))
         if order_id not in (None, ""):
-            return f"id:{order_id}"
-        client_id = order.get("clientOrderId") or order.get("clientAlgoId") or order.get("c")
+            return json.dumps(["v2", symbol, kind, "id", str(order_id)], separators=(",", ":"))
+        client_id = order.get("clientOrderId") or order.get("clientAlgoId") or order.get("caid") or order.get("c")
         if client_id not in (None, ""):
-            return f"client:{client_id}"
-        symbol = str(order.get("symbol") or order.get("s") or "").upper()
+            return json.dumps(["v2", symbol, kind, "client", str(client_id)], separators=(",", ":"))
         event_time = order.get("updateTime") or order.get("time") or order.get("T") or order.get("E")
-        return f"fallback:{symbol}:{event_time or 0}"
+        return json.dumps(["v2", symbol, kind, "fallback", str(event_time or 0)], separators=(",", ":"))
 
     def upsert_exchange_order_state(
         self,
@@ -2219,15 +2277,16 @@ class StateStore:
     def reconcile_open_order_state(self, orders: List[Dict[str, Any]]) -> None:
         returned_keys = {self._exchange_order_key(order) for order in orders or [] if isinstance(order, dict)}
         returned_by_id = {
-            str(order.get("orderId") or order.get("algoId") or "").strip(): order
+            (str(order.get("symbol") or order.get("s") or "").strip().upper(), str(order.get("orderId") or order.get("i") or "").strip()): order
             for order in orders or []
             if isinstance(order, dict)
-            and str(order.get("orderId") or order.get("algoId") or "").strip()
+            and not any(order.get(k) not in (None, "") for k in ("algoId", "aid", "clientAlgoId", "caid", "algoStatus"))
+            and str(order.get("orderId") or order.get("i") or "").strip()
         }
         with self._connect_ctx() as conn:
             active_rows = conn.execute(
                 """
-                SELECT order_key, raw_json FROM exchange_order_state
+                SELECT order_key, symbol, raw_json FROM exchange_order_state
                 WHERE account_id = ? AND status IN (
                     'NEW', 'PENDING', 'ACTIVE', 'PARTIALLY_FILLED', 'TRIGGERING', 'TRIGGERED'
                 )
@@ -2251,7 +2310,7 @@ class StateStore:
                     or ""
                 ).strip()
                 if actual_order_id:
-                    linked_actual = returned_by_id.get(actual_order_id)
+                    linked_actual = returned_by_id.get((str(row["symbol"]).upper(), actual_order_id))
                 if linked_actual is not None:
                     linked_status = str(linked_actual.get("status") or "TRIGGERED").upper()
                     conn.execute(
@@ -2290,28 +2349,10 @@ class StateStore:
         symbol: str,
         order_id: object = None,
         client_order_id: object = None,
+        order_kind: Optional[str] = None,
     ) -> Optional[str]:
-        normalized_symbol = str(symbol or "").strip().upper()
-        normalized_order_id = str(order_id).strip() if order_id not in (None, "") else ""
-        normalized_client_id = str(client_order_id).strip() if client_order_id not in (None, "") else ""
-        with self._connect_ctx() as conn:
-            row = conn.execute(
-                """
-                SELECT status FROM exchange_order_state
-                WHERE account_id = ? AND symbol = ?
-                  AND ((? != '' AND order_id = ?) OR (? != '' AND client_order_id = ?))
-                ORDER BY event_time_utc DESC LIMIT 1
-                """,
-                (
-                    self.account_id,
-                    normalized_symbol,
-                    normalized_order_id,
-                    normalized_order_id,
-                    normalized_client_id,
-                    normalized_client_id,
-                ),
-            ).fetchone()
-            return str(row["status"]).upper() if row is not None and row["status"] else None
+        row = self.get_exchange_order_state(symbol=symbol, order_id=order_id, client_order_id=client_order_id, order_kind=order_kind)
+        return str(row["status"]).upper() if row is not None and row["status"] else None
 
     def get_exchange_order_state(
         self,
@@ -2319,23 +2360,36 @@ class StateStore:
         symbol: str,
         order_id: object = None,
         client_order_id: object = None,
+        order_kind: Optional[str] = None,
     ) -> Optional[Dict[str, Any]]:
         normalized_symbol = str(symbol or "").strip().upper()
         normalized_order_id = str(order_id).strip() if order_id not in (None, "") else ""
         normalized_client_id = str(client_order_id).strip() if client_order_id not in (None, "") else ""
+        if order_kind not in (None, "order", "algo"):
+            raise ValueError("order_kind must be order or algo")
+        kind_id_key = json.dumps(["v2", normalized_symbol, order_kind, "id", normalized_order_id], separators=(",", ":"))
+        kind_client_key = json.dumps(["v2", normalized_symbol, order_kind, "client", normalized_client_id], separators=(",", ":"))
         with self._connect_ctx() as conn:
             row = conn.execute(
                 """
                 SELECT * FROM exchange_order_state
                 WHERE account_id = ? AND symbol = ?
-                  AND ((? != '' AND order_id = ?) OR (? != '' AND client_order_id = ?))
-                ORDER BY event_time_utc DESC LIMIT 1
+                  AND ((? != '' AND order_id = ? AND (? = '' OR client_order_id IS NULL OR client_order_id = ?)) OR (? != '' AND client_order_id = ?))
+                  AND (? IS NULL OR order_key = ? OR order_key = ?)
+                ORDER BY CASE WHEN ? != '' AND client_order_id = ? THEN 0 ELSE 1 END, event_time_utc DESC LIMIT 1
                 """,
                 (
                     self.account_id,
                     normalized_symbol,
                     normalized_order_id,
                     normalized_order_id,
+                    normalized_client_id,
+                    normalized_client_id,
+                    normalized_client_id,
+                    normalized_client_id,
+                    order_kind,
+                    kind_id_key,
+                    kind_client_key,
                     normalized_client_id,
                     normalized_client_id,
                 ),
@@ -2358,6 +2412,7 @@ class StateStore:
     def update_parent_algo_order_status(
         self,
         *,
+        symbol: str,
         actual_order_id: object,
         status: str,
         event_time_utc: str,
@@ -2372,9 +2427,9 @@ class StateStore:
                 """
                 SELECT order_key, raw_json
                 FROM exchange_order_state
-                WHERE account_id = ? AND raw_json IS NOT NULL
+                WHERE account_id = ? AND symbol = ? AND raw_json IS NOT NULL
                 """,
-                (self.account_id,),
+                (self.account_id, str(symbol or "").strip().upper()),
             ).fetchall()
             parent_keys: List[str] = []
             for row in rows:
@@ -3167,10 +3222,24 @@ class StateStore:
                     commission, commission_asset, trade_time_utc, created_at_utc
                 )
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(exchange_trade_id) DO UPDATE SET
+                ON CONFLICT(account_id, symbol, exchange_trade_id) DO UPDATE SET
                     exchange_order_id = COALESCE(excluded.exchange_order_id, execution_fills.exchange_order_id),
                     commission = excluded.commission,
-                    commission_asset = excluded.commission_asset
+                    commission_asset = excluded.commission_asset,
+                    qty = CASE
+                        WHEN substr(excluded.exchange_trade_id, 1, 3) = 'tr_'
+                        THEN MAX(execution_fills.qty, excluded.qty)
+                        ELSE execution_fills.qty
+                    END,
+                    price = CASE
+                        WHEN substr(excluded.exchange_trade_id, 1, 3) = 'tr_'
+                             AND excluded.qty >= execution_fills.qty AND excluded.price > 0
+                        THEN excluded.price
+                        ELSE execution_fills.price
+                    END
+                WHERE execution_fills.account_id = excluded.account_id
+                  AND execution_fills.symbol = excluded.symbol
+                  AND execution_fills.attempt_id = excluded.attempt_id
                 """,
                 (
                     fill_id,
@@ -3251,6 +3320,19 @@ class StateStore:
                 ),
             )
 
+    def mark_interrupted_submissions_unknown(self) -> int:
+        """Mark submissions left by a previous runtime for exchange reconciliation."""
+        with self._connect_ctx() as conn:
+            cursor = conn.execute(
+                """
+                UPDATE order_attempts
+                SET status = 'UNKNOWN', updated_at_utc = ?
+                WHERE account_id = ? AND status = 'SUBMITTING'
+                """,
+                (utc_now_iso(), self.account_id),
+            )
+            return int(cursor.rowcount or 0)
+
     def list_unknown_order_attempts(self) -> List[Dict[str, Any]]:
         with self._connect_ctx() as conn:
             rows = conn.execute(
@@ -3258,6 +3340,39 @@ class StateStore:
                 (self.account_id,),
             ).fetchall()
             return [dict(r) for r in rows]
+
+    def list_in_flight_market_exit_attempts(self) -> List[Dict[str, Any]]:
+        """List acknowledged or partially filled market exits that need status reconciliation."""
+        with self._connect_ctx() as conn:
+            rows = conn.execute(
+                """
+                SELECT a.* FROM order_attempts a
+                JOIN order_intents i ON i.intent_id = a.intent_id AND i.account_id = a.account_id
+                WHERE a.account_id = ?
+                  AND a.status IN ('ACKNOWLEDGED', 'PARTIALLY_FILLED')
+                  AND i.order_type = 'MARKET'
+                  AND i.intent_scope IN ('POSITION', 'EXIT')
+                ORDER BY a.created_at_utc ASC
+                """,
+                (self.account_id,),
+            ).fetchall()
+            return [dict(r) for r in rows]
+
+    def find_unresolved_market_exit(self, symbol: str, side: str, intent_key: str) -> Optional[Dict[str, Any]]:
+        with self._connect_ctx() as conn:
+            row = conn.execute(
+                """
+                SELECT a.* FROM order_attempts a
+                JOIN order_intents i ON i.intent_id = a.intent_id AND i.account_id = a.account_id
+                WHERE a.account_id = ? AND i.symbol = ? AND i.side = ?
+                  AND i.order_type = 'MARKET' AND i.intent_scope IN ('POSITION', 'EXIT')
+                  AND i.client_intent_key != ?
+                  AND a.status IN ('SUBMITTING', 'UNKNOWN', 'ACKNOWLEDGED', 'PARTIALLY_FILLED')
+                ORDER BY a.created_at_utc DESC LIMIT 1
+                """,
+                (self.account_id, str(symbol).upper(), str(side).upper(), intent_key),
+            ).fetchone()
+            return dict(row) if row else None
 
     # -------------------------------------------------------------------------
     # Position Episodes

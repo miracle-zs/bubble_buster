@@ -86,7 +86,7 @@ class AccountCoordinator:
 
     @_serialized_step
     def recover_unknown_attempts(self) -> Tuple[List[OrderAttempt], Set[str]]:
-        """Query and actively recover in-flight UNKNOWN attempts.
+        """Reconcile UNKNOWN attempts and active market exits.
 
         Returns:
             Tuple of (list_of_attempts_processed, set_of_symbols_still_uncertain)
@@ -94,18 +94,24 @@ class AccountCoordinator:
         uncertain_symbols: Set[str] = set()
         recovered_attempts: List[OrderAttempt] = []
 
-        raw_unknowns = self.store.list_unknown_order_attempts()
-        for row in raw_unknowns:
+        raw_attempts = self.store.list_unknown_order_attempts()
+        raw_attempts.extend(self.store.list_in_flight_market_exit_attempts())
+        raw_attempts.sort(key=lambda row: str(row.get("created_at_utc") or ""))
+        for row in raw_attempts:
             attempt_id = str(row["attempt_id"])
             symbol = str(row["symbol"])
             try:
                 attempt = self.engine.recover_unknown_attempt(attempt_id)
                 recovered_attempts.append(attempt)
-                if attempt.status == AttemptStatus.UNKNOWN.value:
+                if attempt.status in {
+                    AttemptStatus.UNKNOWN.value,
+                    AttemptStatus.ACKNOWLEDGED.value,
+                    AttemptStatus.PARTIALLY_FILLED.value,
+                }:
                     uncertain_symbols.add(symbol)
             except Exception as exc:
                 LOGGER.error(
-                    "AccountCoordinator: failed to recover unknown attempt=%s symbol=%s: %s",
+                    "AccountCoordinator: failed to reconcile attempt=%s symbol=%s: %s",
                     attempt_id,
                     symbol,
                     exc,
@@ -646,6 +652,32 @@ class AccountCoordinator:
 
         # 1. Recover UNKNOWN attempts first on any step
         recovered_attempts, uncertain_symbols = self.recover_unknown_attempts()
+
+        if self.manager is not None and action in {
+            "manage", "loss_cut", "noon_protection", "morning_protection", "hourly_take_profit",
+        }:
+            recovered_market_exit = False
+            for attempt in recovered_attempts:
+                if attempt.executed_qty <= 0:
+                    continue
+                intent_row = self.store.get_order_intent(attempt.intent_id)
+                if (intent_row and str(intent_row.get("order_type") or "").upper() == "MARKET"
+                        and str(intent_row.get("intent_scope") or "").upper() in {"POSITION", "EXIT"}):
+                    recovered_market_exit = True
+                    break
+            if recovered_market_exit:
+                provider = getattr(self.manager, "snapshot_provider", None)
+                if provider is not None:
+                    try:
+                        provider.invalidate()
+                        refreshed_snapshot = provider.capture(force=True)
+                    except Exception as exc:  # noqa: BLE001
+                        LOGGER.warning("Account snapshot refresh after recovered market exit failed account=%s: %s", self.account_id, exc)
+                        return {"errors": 1, "error": "ACCOUNT_SNAPSHOT_REFRESH_FAILED"}
+                    if action == "manage":
+                        account_snapshot = refreshed_snapshot
+                elif account_snapshot is not None:
+                    return {"errors": 1, "error": "ACCOUNT_SNAPSHOT_REFRESH_UNAVAILABLE"}
 
         # Production accounts retain the complete strategy/policy workflows.
         # The kernel-only path below is not a substitute for candle timing,

@@ -5,6 +5,7 @@ import tempfile
 import types
 import unittest
 from pathlib import Path
+import pytest
 
 if importlib.util.find_spec("requests") is None:
     requests_stub = types.ModuleType("requests")
@@ -34,10 +35,104 @@ if importlib.util.find_spec("requests") is None:
     sys.modules["requests"] = requests_stub
     sys.modules["requests.adapters"] = adapters_stub
 
-from core.runtime_components import create_components
+from core.runtime_components import MergedSection, create_components
 
 
-def test_create_components_skips_invalid_account_and_keeps_valid_accounts(tmp_path) -> None:
+def test_invalid_boolean_value_fails_configuration_loading() -> None:
+    with pytest.raises(ValueError, match="Invalid boolean value for enabled"):
+        MergedSection({"enabled": "sometimes"}).getboolean("enabled")
+
+
+def test_invalid_runtime_timezone_fails_configuration_loading(tmp_path) -> None:
+    cfg = configparser.ConfigParser()
+    cfg.read_string(f"""
+[accounts]
+enabled = acc01
+mode.acc01 = readonly
+[binance]
+api_key = key
+api_secret = secret
+[runtime]
+db_path = {tmp_path / 'state.db'}
+default_account_id = acc01
+timezone = Not/A_Timezone
+[strategy]
+[notify]
+enabled = false
+""")
+    with pytest.raises(RuntimeError, match="acc01: Invalid runtime timezone"):
+        create_components(cfg, base_dir=str(tmp_path))
+
+
+def test_readonly_default_account_has_no_strategy_or_manager(tmp_path) -> None:
+    cfg = configparser.ConfigParser()
+    cfg.read_string(f"""
+[accounts]
+enabled = readonly01
+mode.readonly01 = readonly
+[binance]
+api_key = key
+api_secret = secret
+[runtime]
+db_path = {tmp_path / 'state.db'}
+default_account_id = readonly01
+timezone = UTC
+[strategy]
+[notify]
+enabled = false
+""")
+    strategy, manager, sampler, _, _, accounts = create_components(cfg, base_dir=str(tmp_path))
+    assert strategy is None
+    assert manager is None
+    assert sampler is accounts["readonly01"]["balance_sampler"]
+
+
+def test_startup_recovers_interrupted_submissions_for_configured_account(tmp_path) -> None:
+    from unittest.mock import MagicMock
+    from core.state_store import StateStore
+    from infra.binance_futures_client import BinanceAPIError
+
+    db_path = tmp_path / "state.db"
+    schema = Path(__file__).resolve().parents[1] / "schema.sql"
+    store = StateStore(str(db_path), str(schema), account_id="acc01")
+    store.init_schema()
+    store.save_order_intent(
+        intent_id="interrupted", client_intent_key="interrupted", symbol="BTCUSDT",
+        side="SELL", order_type="MARKET", target_qty=1, intent_scope="ENTRY",
+    )
+    store.save_order_attempt(
+        attempt_id="attempt", intent_id="interrupted", symbol="BTCUSDT",
+        client_order_id="original-client-id", status="SUBMITTING", submitted_qty=1,
+    )
+    other = store.scoped("other")
+    other.save_order_intent(
+        intent_id="other-intent", client_intent_key="other-intent", symbol="ETHUSDT",
+        side="SELL", order_type="MARKET", target_qty=1, intent_scope="ENTRY",
+    )
+    other.save_order_attempt(
+        attempt_id="other-attempt", intent_id="other-intent", symbol="ETHUSDT",
+        client_order_id="other-client-id", status="SUBMITTING", submitted_qty=1,
+    )
+    cfg = configparser.ConfigParser()
+    cfg.read_string(
+        f"[accounts]\nenabled=acc01\nmode.acc01=full\n"
+        f"[binance]\napi_key=dummy\napi_secret=dummy\n"
+        f"[strategy]\n[runtime]\ndb_path={db_path}\ndefault_account_id=acc01\n"
+        f"[notify]\nenabled=false\n"
+    )
+
+    *_, runtimes = create_components(cfg, base_dir=str(tmp_path))
+    assert store.get_order_attempt("attempt")["status"] == "UNKNOWN"
+    assert other.get_order_attempt("other-attempt")["status"] == "SUBMITTING"
+    coordinator = runtimes["acc01"]["coordinator"]
+    coordinator.client.get_order = MagicMock(side_effect=BinanceAPIError("NETWORK", "timeout"))
+    coordinator.strategy = MagicMock()
+    result = coordinator.step(action="entry")
+    assert result["status"] == "RETRY"
+    coordinator.strategy.run_entry.assert_not_called()
+
+
+def test_create_components_fails_if_any_enabled_account_is_invalid(tmp_path) -> None:
     cfg_path = tmp_path / "config.ini"
     db_path = tmp_path / "state.db"
     cfg_path.write_text(
@@ -83,24 +178,8 @@ serverchan_sendkey =
     cfg = configparser.ConfigParser()
     assert cfg.read(str(cfg_path))
 
-    strategy, manager, wallet_sampler, runtime_cfg, service_cfg, account_runtimes = create_components(
-        cfg,
-        base_dir=str(tmp_path),
-    )
-
-    assert "good" in account_runtimes
-    assert "bad" not in account_runtimes
-    assert strategy is account_runtimes["good"]["strategy"]
-    assert manager is account_runtimes["good"]["manager"]
-    assert wallet_sampler is account_runtimes["good"]["balance_sampler"]
-    snapshot_provider = account_runtimes["good"]["snapshot_provider"]
-    assert strategy.snapshot_provider is snapshot_provider
-    assert manager.snapshot_provider is snapshot_provider
-    assert wallet_sampler.snapshot_provider is snapshot_provider
-    assert manager.order_state is account_runtimes["good"]["user_stream"]
-    assert wallet_sampler.cashflow_inline is False
-    assert runtime_cfg.get("default_account_id") == "good"
-    assert service_cfg.max_account_workers >= 1
+    with pytest.raises(RuntimeError, match="bad:.*API key"):
+        create_components(cfg, base_dir=str(tmp_path))
 
 
 def test_create_components_applies_orphan_exit_order_cleanup_schedule(tmp_path) -> None:
@@ -110,6 +189,7 @@ def test_create_components_applies_orphan_exit_order_cleanup_schedule(tmp_path) 
         f"""
 [accounts]
 enabled = acc01
+mode.acc01 = full
 
 [binance]
 api_key = k

@@ -37,6 +37,26 @@ class DashboardServerTest(unittest.TestCase):
         with sqlite3.connect(self.db_path) as conn:
             conn.execute("UPDATE runs SET started_at_utc = ?", (timestamp,))
 
+    def test_overview_latest_wallet_balance_is_per_account_and_uses_seek_index(self) -> None:
+        provider = DashboardDataProvider(
+            db_path=self.db_path, log_file=self.log_file, timezone_name="UTC", entry_hour=7, entry_minute=40,
+            overview_account_ids=["acc01", "acc02"],
+        )
+        store1, store2 = self.store.scoped("acc01"), self.store.scoped("acc02")
+        store1.add_wallet_snapshot("2026-01-01T00:00:00+00:00", 100, source="API")
+        store1.add_wallet_snapshot("2026-01-02T00:00:00+00:00", 0, source="API", error="fetch failed")
+        store1.add_wallet_snapshot("2026-01-03T00:00:00+00:00", 90, source="API")
+        store2.add_wallet_snapshot("2026-01-01T00:00:00+00:00", 200, source="API")
+        with sqlite3.connect(self.db_path) as raw:
+            raw.row_factory = sqlite3.Row
+            rows = provider._configured_accounts_summary_rows(raw, ["acc01", "acc02"])
+            plan = raw.execute(
+                "EXPLAIN QUERY PLAN SELECT balance_usdt FROM wallet_snapshots WHERE account_id = ? AND error IS NULL ORDER BY id DESC LIMIT 1",
+                ("acc01",),
+            ).fetchall()
+        self.assertEqual([row["wallet_balance_usdt"] for row in rows], [90, 200])
+        self.assertTrue(any("idx_wallet_snapshots_account_id_id" in str(tuple(row)) for row in plan))
+
     def test_snapshot_contains_runs_positions_events(self) -> None:
         run_id, _ = self.store.create_run("2026-02-13")
         self.store.finalize_run(run_id, "SUCCESS", "done")
@@ -954,7 +974,8 @@ class DashboardServerTest(unittest.TestCase):
         self.assertNotIn("MAX(id) AS max_id FROM wallet_snapshots GROUP BY account_id", combined_sql)
         wallet_queries = [sql for sql in seen_sql if "FROM wallet_snapshots" in sql]
         self.assertEqual(len(wallet_queries), 1)
-        self.assertIn("WHERE account_id IN", wallet_queries[0])
+        self.assertIn("WHERE account_id = ?", wallet_queries[0])
+        self.assertIn("ORDER BY id DESC LIMIT 1", wallet_queries[0])
 
     def test_accounts_summary_reads_cached_trade_stats_without_live_fetch(self) -> None:
         class CachedFetcher:
@@ -1794,21 +1815,12 @@ class DashboardServerTest(unittest.TestCase):
             close_order_id=None,
         )
 
-        calls = {"ids": []}
-
-        def _mock_close_price_fetcher(symbol: str, order_id: int) -> float | None:
-            calls["ids"].append(order_id)
-            if symbol == "AZTECUSDT" and order_id == 7001:
-                return 0.8
-            return None
-
         provider = DashboardDataProvider(
             db_path=self.db_path,
             log_file=self.log_file,
             timezone_name="UTC",
             entry_hour=7,
             entry_minute=40,
-            close_price_fetcher=_mock_close_price_fetcher,
         )
         snapshot = provider.snapshot(log_lines=0)
         strategy_stats = snapshot["drawdown_stats_strategy"]
@@ -1818,7 +1830,6 @@ class DashboardServerTest(unittest.TestCase):
         self.assertAlmostEqual(strategy_stats["trade_realized_pnl"], 0.0)
         self.assertEqual(len(unpriced), 1)
         self.assertEqual(unpriced[0]["detected_reason"], "MISSING_EXCHANGE_REALIZED_PNL")
-        self.assertEqual(calls["ids"], [])
 
     def test_trade_outcome_stats_include_profit_factor_and_avg_ratio(self) -> None:
         run_id, _ = self.store.create_run("2026-02-16")

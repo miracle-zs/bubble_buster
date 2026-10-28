@@ -493,7 +493,7 @@ CREATE TABLE IF NOT EXISTS execution_fills (
     intent_id TEXT NOT NULL,
     account_id TEXT NOT NULL DEFAULT 'default',
     symbol TEXT NOT NULL,
-    exchange_trade_id TEXT NOT NULL UNIQUE,
+    exchange_trade_id TEXT NOT NULL,
     exchange_order_id TEXT,
     side TEXT NOT NULL,
     price REAL NOT NULL,
@@ -502,6 +502,7 @@ CREATE TABLE IF NOT EXISTS execution_fills (
     commission_asset TEXT NOT NULL DEFAULT 'USDT',
     trade_time_utc TEXT NOT NULL,
     created_at_utc TEXT NOT NULL,
+    UNIQUE(account_id, symbol, exchange_trade_id),
     FOREIGN KEY(attempt_id) REFERENCES order_attempts(attempt_id),
     FOREIGN KEY(intent_id) REFERENCES order_intents(intent_id)
 );

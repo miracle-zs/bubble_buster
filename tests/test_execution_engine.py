@@ -75,6 +75,21 @@ class ExecutionEngineTest(unittest.TestCase):
         # Reconciler was invoked
         self.reconciler.record_market_order.assert_called_once()
 
+    def test_equal_exchange_ids_in_different_symbols_are_retained(self) -> None:
+        self.client.create_order.return_value = {
+            "orderId": 123, "status": "FILLED", "executedQty": "1", "avgPrice": "10"
+        }
+        for index, symbol in enumerate(("BTCUSDT", "ETHUSDT")):
+            intent = OrderIntent(
+                intent_id=f"collision-{index}", account_id="acc_exec",
+                client_intent_key=f"collision-{index}", symbol=symbol, side="BUY",
+                order_type="MARKET", target_qty=1, intent_scope="ENTRY",
+            )
+            self.engine.submit_intent(intent)
+            fills = self.store.list_execution_fills_for_intent(intent.intent_id)
+            self.assertEqual(len(fills), 1)
+            self.assertEqual(fills[0]["exchange_trade_id"], "tr_123")
+
     def test_submit_intent_rejected_on_api_error(self) -> None:
         self.client.create_order.side_effect = BinanceAPIError(-2019, "Margin insufficient")
 
@@ -156,6 +171,101 @@ class ExecutionEngineTest(unittest.TestCase):
         self.assertEqual(attempt.status, AttemptStatus.REJECTED.value)
         saved_intent = self.store.get_order_intent("intent-4")
         self.assertEqual(saved_intent["status"], IntentStatus.FAILED.value)
+
+    def test_unresolved_unknown_is_not_submitted_again(self) -> None:
+        self.client.create_order.side_effect = OrderStateUnknownError(
+            "DOGEUSDT", "cid-unknown", BinanceAPIError("NETWORK", "timeout")
+        )
+        self.client.get_order.side_effect = BinanceAPIError("NETWORK", "lookup timeout")
+        intent = OrderIntent(
+            intent_id="unknown-retry",
+            account_id="acc_exec",
+            client_intent_key="unknown-retry",
+            symbol="DOGEUSDT",
+            side="SELL",
+            order_type="MARKET",
+            target_qty=100.0,
+            intent_scope="ENTRY",
+        )
+
+        first = self.engine.submit_intent(intent, client_order_id="cid-unknown")
+        second = self.engine.submit_intent(intent, client_order_id="cid-unknown")
+        self.assertEqual(first.status, AttemptStatus.UNKNOWN.value)
+        self.assertEqual(second.status, AttemptStatus.UNKNOWN.value)
+        self.client.create_order.assert_called_once()
+        with self.assertRaises(OrderStateUnknownError):
+            self.engine.submit_intent(intent, client_order_id="cid-unknown", raise_on_error=True)
+        self.client.create_order.assert_called_once()
+
+    def test_partial_market_close_retry_keeps_position_open(self) -> None:
+        from core.risk.executor import CentralExitExecutor
+
+        run_id, _ = self.store.create_run("2026-10-01", account_id="acc_exec")
+        position_id = self.store.insert_position(
+            run_id=run_id, symbol="SOLUSDT", side="SHORT", qty=10, entry_price=10,
+            liq_price_open=None, tp_price=None, sl_price=15, tp_order_id=None,
+            sl_order_id=None, tp_client_order_id=None, sl_client_order_id=None,
+            opened_at_utc="2026-10-01T00:00:00Z", expire_at_utc="2026-10-02T00:00:00Z",
+        )
+        self.client.create_order.side_effect = OrderStateUnknownError(
+            "SOLUSDT", "cid-close", BinanceAPIError("NETWORK", "timeout")
+        )
+        self.client.get_order.return_value = {
+            "orderId": 123, "status": "PARTIALLY_FILLED", "executedQty": "4", "avgPrice": "11",
+        }
+        executor = CentralExitExecutor(self.client, self.store, market_fill_reconciler=self.reconciler)
+        executor._execution_engine = self.engine
+
+        for _ in range(2):
+            with self.assertRaises(OrderStateUnknownError):
+                executor.close_market_order(
+                    symbol="SOLUSDT", qty=10, position_id=position_id,
+                    client_order_id="cid-close", close_status="CLOSED_SL", close_reason="STOP_LOSS",
+                )
+            self.assertEqual(self.store.get_position(position_id)["status"], "OPEN")
+        self.client.create_order.assert_called_once()
+        self.client.get_order.return_value = {
+            "orderId": 123, "status": "FILLED", "executedQty": "10", "avgPrice": "11",
+        }
+        result = executor.close_market_order(
+            symbol="SOLUSDT", qty=10, position_id=position_id,
+            client_order_id="cid-close", close_status="CLOSED_SL", close_reason="STOP_LOSS",
+        )
+        self.assertEqual(result["status"], "FILLED")
+        self.assertEqual(self.store.get_position(position_id)["status"], "CLOSED_SL")
+        intent = self.store.get_order_intent_by_key("close_SOLUSDT_cid-close")
+        fills = self.store.list_execution_fills_for_intent(intent["intent_id"])
+        self.assertEqual(sum(fill["qty"] for fill in fills), 10)
+        self.client.create_order.assert_called_once()
+
+    def test_direct_partial_market_close_does_not_mark_position_closed(self) -> None:
+        from core.risk.executor import CentralExitExecutor
+
+        run_id, _ = self.store.create_run("2026-10-01", account_id="acc_exec")
+        position_id = self.store.insert_position(
+            run_id=run_id, symbol="SOLUSDT", side="SHORT", qty=10, entry_price=10,
+            liq_price_open=None, tp_price=None, sl_price=15, tp_order_id=None,
+            sl_order_id=None, tp_client_order_id=None, sl_client_order_id=None,
+            opened_at_utc="2026-10-01T00:00:00Z", expire_at_utc="2026-10-02T00:00:00Z",
+        )
+        self.client.create_order.return_value = {
+            "orderId": 124, "status": "PARTIALLY_FILLED", "executedQty": "4", "avgPrice": "11",
+        }
+        executor = CentralExitExecutor(self.client, self.store, market_fill_reconciler=self.reconciler)
+        executor._execution_engine = self.engine
+
+        with self.assertRaises(OrderStateUnknownError):
+            executor.close_market_order(
+                symbol="SOLUSDT", qty=10, position_id=position_id,
+                client_order_id="cid-partial", close_status="CLOSED_SL", close_reason="STOP_LOSS",
+            )
+
+        self.assertEqual(self.store.get_position(position_id)["status"], "OPEN")
+        intent = self.store.get_order_intent_by_key("close_SOLUSDT_cid-partial")
+        attempt = self.store.get_latest_order_attempt_for_intent(intent["intent_id"])
+        self.assertEqual(attempt["status"], AttemptStatus.PARTIALLY_FILLED.value)
+        self.assertIsNotNone(self.store.find_unresolved_market_exit("SOLUSDT", "BUY", "another-close"))
+        self.assertEqual(self.client.create_order.call_count, 1)
 
     def test_position_episode_sync_on_exit_fill(self) -> None:
         self.store.save_position_episode(
@@ -479,6 +589,28 @@ class ExecutionEngineTest(unittest.TestCase):
         call_kwargs = self.client.create_order.call_args.kwargs
         self.assertNotIn("龙虾", call_kwargs["newClientOrderId"])
         self.assertNotIn("price", call_kwargs)
+
+    def test_hedge_mode_protection_omits_reduce_only(self) -> None:
+        self.client.create_order.return_value = {"orderId": 33, "status": "NEW"}
+        intent = OrderIntent(
+            intent_id="hedge-stop", account_id="acc_exec", client_intent_key="hedge-stop",
+            symbol="BTCUSDT", side="BUY", order_type="STOP_MARKET", target_qty=1,
+            intent_scope="PROTECTION", target_price=12,
+        )
+        self.engine.submit_intent(intent, position_side="SHORT", stop_price="12")
+        params = self.client.create_order.call_args.kwargs
+        self.assertEqual(params["positionSide"], "SHORT")
+        self.assertNotIn("reduceOnly", params)
+
+    def test_hedge_mode_exit_must_close_the_selected_side(self) -> None:
+        intent = OrderIntent(
+            intent_id="hedge-wrong-side", account_id="acc_exec", client_intent_key="hedge-wrong-side",
+            symbol="BTCUSDT", side="BUY", order_type="MARKET", target_qty=1,
+            intent_scope="EXIT",
+        )
+        with self.assertRaises(ValueError):
+            self.engine.submit_intent(intent, position_side="LONG")
+        self.client.create_order.assert_not_called()
 
     def test_submit_intent_enforces_reduce_only_on_exit(self) -> None:
         self.client.create_order.return_value = {

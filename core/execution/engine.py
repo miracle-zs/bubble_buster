@@ -114,6 +114,20 @@ class ExecutionEngine:
         raise_on_error: bool = False,
     ) -> OrderAttempt:
         """Submit an OrderIntent through the execution state machine."""
+        hedge_side = position_side in {"LONG", "SHORT"}
+        is_exit = reduce_only or close_position or intent.intent_scope.upper() in {"EXIT", "PROTECTION"}
+        if hedge_side and is_exit:
+            expected_side = "SELL" if position_side == "LONG" else "BUY"
+            if intent.side.upper() != expected_side:
+                raise ValueError(f"Cannot close {position_side} position with {intent.side} order")
+        if intent.order_type.upper() == "MARKET" and intent.intent_scope.upper() in {"POSITION", "EXIT"}:
+            unresolved = self.store.find_unresolved_market_exit(intent.symbol, intent.side, intent.client_intent_key)
+            if isinstance(unresolved, dict):
+                raise OrderStateUnknownError(
+                    symbol=intent.symbol,
+                    client_order_id=str(unresolved["client_order_id"]),
+                    cause=BinanceAPIError("UNKNOWN", f"Previous market exit remains {unresolved['status']}"),
+                )
         # 1. Short DB transaction: persist or verify intent
         with self.store.unit_of_work():
             existing_intent = self.store.get_order_intent_by_key(intent.client_intent_key)
@@ -165,7 +179,19 @@ class ExecutionEngine:
                     if recovered.status in {
                         AttemptStatus.ACKNOWLEDGED.value,
                         AttemptStatus.PARTIALLY_FILLED.value,
+                        AttemptStatus.UNKNOWN.value,
                     }:
+                        if raise_on_error and (
+                            recovered.status == AttemptStatus.UNKNOWN.value
+                            or intent.order_type.upper() == "MARKET"
+                        ):
+                            raise OrderStateUnknownError(
+                                symbol=recovered.symbol,
+                                client_order_id=recovered.client_order_id,
+                                cause=BinanceAPIError(
+                                    "UNKNOWN", f"Previous order remains {recovered.status}"
+                                ),
+                            )
                         return recovered
                 elif att_status in {
                     AttemptStatus.ACKNOWLEDGED.value,
@@ -178,7 +204,31 @@ class ExecutionEngine:
                         prev_dict.get("attempt_id"),
                         att_status,
                     )
-                    return self._dict_to_attempt(prev_dict)
+                    previous = self._dict_to_attempt(prev_dict)
+                    if intent.order_type.upper() == "MARKET" and att_status in {
+                        AttemptStatus.ACKNOWLEDGED.value,
+                        AttemptStatus.PARTIALLY_FILLED.value,
+                    }:
+                        previous = self.recover_unknown_attempt(previous)
+                        if previous.status == AttemptStatus.FILLED.value:
+                            return previous
+                        if previous.status in {
+                            AttemptStatus.CANCELED.value,
+                            AttemptStatus.REJECTED.value,
+                            AttemptStatus.EXPIRED.value,
+                        }:
+                            if raise_on_error:
+                                raise BinanceAPIError(
+                                    "ORDER_NOT_FILLED", f"Previous market order ended {previous.status}"
+                                )
+                            return previous
+                    if raise_on_error and intent.order_type.upper() == "MARKET":
+                        raise OrderStateUnknownError(
+                            symbol=previous.symbol,
+                            client_order_id=previous.client_order_id,
+                            cause=BinanceAPIError("UNKNOWN", f"Previous order remains {previous.status}"),
+                        )
+                    return previous
                 elif att_status == AttemptStatus.FILLED.value:
                     return self._dict_to_attempt(prev_dict)
 
@@ -267,7 +317,7 @@ class ExecutionEngine:
                 order_params["workingType"] = working_type
             if price_protect is not None:
                 order_params["priceProtect"] = price_protect
-            if reduce_only and not close_position:
+            if reduce_only and not close_position and not hedge_side:
                 order_params["reduceOnly"] = True
             if close_position:
                 order_params["closePosition"] = True
@@ -664,7 +714,7 @@ class ExecutionEngine:
                         self._sync_position_episode(intent=intent_obj, attempt=attempt, executed_delta=executed_delta)
 
             LOGGER.info(
-                "Successfully recovered unknown order account=%s symbol=%s cid=%s status=%s",
+            "Successfully reconciled order account=%s symbol=%s cid=%s status=%s",
                 self.store.account_id,
                 attempt.symbol,
                 attempt.client_order_id,
@@ -705,7 +755,7 @@ class ExecutionEngine:
                 )
         except Exception as exc:
             LOGGER.warning(
-                "Failed to recover unknown order account=%s symbol=%s cid=%s: %s",
+                "Failed to reconcile order account=%s symbol=%s cid=%s: %s",
                 self.store.account_id,
                 attempt.symbol,
                 attempt.client_order_id,

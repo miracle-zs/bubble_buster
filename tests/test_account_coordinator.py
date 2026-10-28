@@ -6,6 +6,7 @@ import unittest
 from datetime import timedelta
 from pathlib import Path
 from unittest.mock import MagicMock, patch
+import pytest
 
 from core.decision.kernel import DecisionKernel
 from core.execution.coordinator import AccountCoordinator
@@ -295,6 +296,45 @@ class TestAccountCoordinator(unittest.TestCase):
         # Verify attempt transitioned to FILLED
         att = self.store.get_order_attempt("att_unk")
         self.assertEqual(att["status"], AttemptStatus.FILLED.value)
+
+    def test_reconciles_partially_filled_market_exit(self):
+        self.store.save_order_intent(
+            intent_id="intent_partial_exit",
+            client_intent_key="key_partial_exit",
+            symbol="SOLUSDT",
+            side="BUY",
+            order_type="MARKET",
+            target_qty=10.0,
+            intent_scope="POSITION",
+            status=IntentStatus.SUBMITTED.value,
+        )
+        self.store.save_order_attempt(
+            attempt_id="att_partial_exit",
+            intent_id="intent_partial_exit",
+            symbol="SOLUSDT",
+            client_order_id="cid_partial_exit",
+            exchange_order_id="123",
+            status=AttemptStatus.PARTIALLY_FILLED.value,
+            submitted_qty=10.0,
+            executed_qty=4.0,
+        )
+        self.client.get_order.return_value = {
+            "orderId": 123,
+            "status": "FILLED",
+            "executedQty": "10",
+            "avgPrice": "11",
+            "clientOrderId": "cid_partial_exit",
+        }
+
+        recovered, uncertain = self.coordinator.recover_unknown_attempts()
+
+        self.assertEqual([attempt.status for attempt in recovered], [AttemptStatus.FILLED.value])
+        self.assertEqual(uncertain, set())
+        self.client.get_order.assert_called_once_with(
+            symbol="SOLUSDT", orig_client_order_id="cid_partial_exit",
+        )
+        self.assertEqual(self.store.get_order_attempt("att_partial_exit")["status"], AttemptStatus.FILLED.value)
+        self.assertIsNone(self.store.find_unresolved_market_exit("SOLUSDT", "BUY", "another-close"))
 
     def test_step_freezes_uncertain_symbol_if_recovery_remains_unknown(self):
         """If an attempt cannot be verified, its symbol is marked uncertain and frozen from entry."""
@@ -907,3 +947,37 @@ class TestAccountCoordinator(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+@pytest.mark.parametrize("refresh_fails", [False, True])
+def test_recovered_market_close_refreshes_snapshot_before_management(tmp_path, refresh_fails):
+    from core.state_store import StateStore
+    from core.execution.engine import ExecutionEngine
+    from core.execution.coordinator import AccountCoordinator
+    from infra.binance_futures_client import BinanceAPIError, OrderStateUnknownError
+
+    store = StateStore(str(tmp_path / "state.db"), str(Path(__file__).resolve().parents[1] / "schema.sql"), account_id="acc")
+    store.init_schema()
+    client = MagicMock()
+    client.format_order_qty.return_value = "1"
+    client.create_order.side_effect = OrderStateUnknownError("BTCUSDT", "exit-1", BinanceAPIError(-1000, "timeout"))
+    client.get_order.return_value = {"orderId": 42, "status": "UNKNOWN", "executedQty": "0"}
+    engine = ExecutionEngine(client=client, store=store, reconciler=MagicMock())
+    intent = OrderIntent(intent_id="exit", account_id="acc", client_intent_key="exit", symbol="BTCUSDT", side="BUY", order_type="MARKET", target_qty=1, intent_scope="POSITION")
+    engine.submit_intent(intent, client_order_id="exit-1")
+    client.get_order.return_value = {"orderId": 42, "status": "FILLED", "executedQty": "1", "avgPrice": "10"}
+    manager = MagicMock()
+    stale, fresh = object(), object()
+    manager.snapshot_provider.capture.return_value = fresh
+    if refresh_fails:
+        manager.snapshot_provider.capture.side_effect = RuntimeError("offline")
+    manager.run_once.return_value = {"errors": 0}
+    coordinator = AccountCoordinator("acc", store, engine, client=client, manager=manager)
+    result = coordinator.step(action="manage", account_snapshot=stale)
+    manager.snapshot_provider.invalidate.assert_called_once()
+    manager.snapshot_provider.capture.assert_called_once_with(force=True)
+    if refresh_fails:
+        assert result["error"] == "ACCOUNT_SNAPSHOT_REFRESH_FAILED"
+        manager.run_once.assert_not_called()
+    else:
+        manager.run_once.assert_called_once_with(account_snapshot=fresh)

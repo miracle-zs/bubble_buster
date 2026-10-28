@@ -130,7 +130,7 @@ class AuditProbeRegressionTest(unittest.TestCase):
         sampler.sync_cashflows_once.side_effect = sync
         cfg = ServiceRuntimeConfig(
             "UTC", 7, 40, 120, True, True, 11, 55, 60, 3, 1, False,
-            account_task_timeout_sec=0.1,
+            account_task_timeout_sec=1.0,
         )
         service = StrategyRuntimeService(
             MagicMock(),
@@ -158,13 +158,15 @@ class AuditProbeRegressionTest(unittest.TestCase):
         try:
             self.assertTrue(entered.wait(2))
             dispatched = protection.wait(0.25)
+            service._run_cashflow_sync_if_due(datetime(2026, 9, 22, 11, 56, 5, tzinfo=timezone.utc))
+            self.assertEqual(sampler.sync_cashflows_once.call_count, 1)
         finally:
             release.set()
             worker.join(3)
-            for executor in [service._entry_executor, service._manage_executor, service._scheduled_executor]:
+            for executor in [service._entry_executor, service._manage_executor, service._scheduled_executor, service._cashflow_executor]:
                 executor.shutdown(wait=True, cancel_futures=True)
 
-        self.assertTrue(dispatched, "Protection dispatch blocked behind cashflow I/O despite 0.1s task timeout")
+        self.assertTrue(dispatched, "Protection dispatch blocked behind cashflow I/O")
 
 
 if __name__ == "__main__":

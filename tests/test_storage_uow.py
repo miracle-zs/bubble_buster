@@ -418,3 +418,24 @@ class UnitOfWorkTransactionTest(unittest.TestCase):
 
         # Inner callback must NOT be executed because outer transaction rolled back
         self.assertEqual(inner_commits, [])
+
+    def test_manual_rollback_runs_rollback_callbacks_and_discards_commit_callbacks(self) -> None:
+        commit_calls = []
+        rollback_calls = []
+
+        with self.store.unit_of_work() as uow:
+            uow.add_after_commit(lambda: commit_calls.append("committed"))
+            uow.add_after_rollback(lambda: rollback_calls.append("rolled_back"))
+            uow.rollback()
+
+        self.assertEqual(commit_calls, [])
+        self.assertEqual(rollback_calls, ["rolled_back"])
+
+        with self.store.unit_of_work() as outer:
+            with self.store.unit_of_work() as inner:
+                inner.add_after_commit(lambda: commit_calls.append("nested_committed"))
+                inner.add_after_rollback(lambda: rollback_calls.append("nested_rolled_back"))
+                inner.rollback()
+
+        self.assertEqual(commit_calls, [])
+        self.assertEqual(rollback_calls, ["rolled_back", "nested_rolled_back"])

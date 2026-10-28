@@ -313,6 +313,7 @@ class BinanceUserStreamState:
                     symbol=str(normalized.get("symbol") or ""),
                     order_id=normalized.get("orderId"),
                     client_order_id=normalized.get("clientOrderId"),
+                    order_kind="order",
                 )
                 self.store.upsert_exchange_order_state(
                     normalized,
@@ -328,6 +329,7 @@ class BinanceUserStreamState:
                     "REJECTED",
                 }:
                     self.store.update_parent_algo_order_status(
+                        symbol=str(normalized.get("symbol") or ""),
                         actual_order_id=actual_order_id,
                         status=actual_status,
                         event_time_utc=event_time,
@@ -347,6 +349,8 @@ class BinanceUserStreamState:
             raw_order = payload.get("o") or payload.get("a")
             if isinstance(raw_order, dict):
                 normalized = self._normalize_order_update(raw_order)
+                if not normalized.get("algoId"):
+                    normalized["algoId"] = normalized.get("orderId")
                 actual_order_id = (
                     raw_order.get("actualOrderId")
                     or raw_order.get("actualOrderID")
@@ -359,6 +363,7 @@ class BinanceUserStreamState:
                     actual = self.store.get_exchange_order_state(
                         symbol=str(normalized.get("symbol") or ""),
                         order_id=actual_order_id,
+                        order_kind="order",
                     )
                     actual_status = str((actual or {}).get("status") or "").upper()
                     if actual_status in {"FILLED", "CANCELED", "EXPIRED", "REJECTED"}:

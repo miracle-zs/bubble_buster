@@ -51,7 +51,6 @@ class DashboardDataProvider:
         entry_hour: int,
         entry_minute: int,
         balance_fetcher: Optional[Callable[[], float]] = None,
-        close_price_fetcher: Optional[Callable[[str, int], Optional[float]]] = None,
         balance_cache_ttl_sec: int = 60,
         default_curve_points: int = 600,
         account_strategy_notes: Optional[Dict[str, str]] = None,
@@ -69,10 +68,8 @@ class DashboardDataProvider:
         self.entry_hour = entry_hour % 24
         self.entry_minute = entry_minute % 60
         self.balance_fetcher = balance_fetcher
-        self.close_price_fetcher = close_price_fetcher
         self.balance_cache_ttl_sec = max(5, int(balance_cache_ttl_sec))
         self.default_curve_points = max(100, min(5000, int(default_curve_points)))
-        self._close_price_cache: Dict[Tuple[str, int], Optional[float]] = {}
         self._task_status_cache_key: Optional[Tuple[Tuple[str, int, int], ...]] = None
         self._task_status_cache_value: Optional[Dict[str, Dict[str, Dict[str, Any]]]] = None
         self._task_log_file_identity: Optional[Tuple[Tuple[str, int], ...]] = None
@@ -1849,87 +1846,6 @@ class DashboardDataProvider:
                 }
             return {"balance_usdt": None, "as_of_utc": None, "source": "ERROR", "error": self._balance_last_error}
 
-    def _extract_close_price(self, row: Dict[str, Any]) -> Optional[float]:
-        payload: Dict[str, Any] = {}
-        raw = row.get("close_raw_json")
-        if isinstance(raw, str) and raw.strip():
-            try:
-                parsed = json.loads(raw)
-                if isinstance(parsed, dict):
-                    payload = parsed
-            except ValueError:
-                payload = {}
-
-        avg_price = self._safe_float(payload.get("avgPrice"))
-        if avg_price and avg_price > 0:
-            return avg_price
-
-        cum_quote = self._safe_float(payload.get("cumQuote"))
-        executed_qty = self._safe_float(payload.get("executedQty") or payload.get("origQty") or row.get("close_event_qty"))
-        if cum_quote and executed_qty and executed_qty > 0 and cum_quote > 0:
-            return cum_quote / executed_qty
-
-        payload_price = self._safe_float(payload.get("price"))
-        if payload_price and payload_price > 0:
-            return payload_price
-
-        event_price = self._safe_float(row.get("close_event_price"))
-        if event_price and event_price > 0:
-            return event_price
-
-        status = str(row.get("status") or "").upper()
-        close_reason = str(row.get("close_reason") or "").upper()
-        if status == "CLOSED_TP" or close_reason == "TAKE_PROFIT_FILLED":
-            tp_price = self._safe_float(row.get("tp_price"))
-            if tp_price and tp_price > 0:
-                return tp_price
-        if status == "CLOSED_SL" or close_reason == "STOP_LOSS_FILLED":
-            sl_price = self._safe_float(row.get("sl_price"))
-            if sl_price and sl_price > 0:
-                return sl_price
-
-        if self.close_price_fetcher is not None:
-            symbol = str(row.get("symbol") or "").upper().strip()
-            candidate_order_ids: List[int] = []
-
-            for order_id_raw in (
-                row.get("close_order_id"),
-                row.get("tp_order_id"),
-                row.get("sl_order_id"),
-            ):
-                try:
-                    parsed_order_id = int(order_id_raw) if order_id_raw is not None else None
-                except (TypeError, ValueError):
-                    parsed_order_id = None
-                if parsed_order_id and parsed_order_id > 0 and parsed_order_id not in candidate_order_ids:
-                    candidate_order_ids.append(parsed_order_id)
-
-            if symbol and candidate_order_ids:
-                for order_id in candidate_order_ids:
-                    cache_key = (symbol, order_id)
-                    if cache_key in self._close_price_cache:
-                        cached = self._close_price_cache[cache_key]
-                        if cached is not None:
-                            return cached
-                        continue
-
-                    fetched_price: Optional[float] = None
-                    try:
-                        fetched_price = self.close_price_fetcher(symbol, order_id)
-                        if fetched_price is not None and fetched_price > 0:
-                            fetched_price = float(fetched_price)
-                        else:
-                            fetched_price = None
-                    except Exception as exc:  # noqa: BLE001
-                        LOGGER.debug("close_price_fetcher failed for %s order_id=%s: %s", symbol, order_id, exc)
-                        fetched_price = None
-
-                    self._close_price_cache[cache_key] = fetched_price
-                    if fetched_price is not None:
-                        return fetched_price
-
-        return None
-
     def _insert_wallet_snapshot(
         self,
         conn: sqlite3.Connection,
@@ -2343,14 +2259,9 @@ class DashboardDataProvider:
             f"""
             SELECT
                 p.id, p.symbol, p.side, p.qty, p.entry_price,
-                p.tp_price, p.sl_price,
-                p.tp_order_id, p.sl_order_id,
                 p.status, p.close_reason, p.close_order_id,
                 p.closed_at_utc, p.updated_at_utc,
-                oe.event_time_utc AS close_event_time_utc,
-                oe.price AS close_event_price,
-                oe.qty AS close_event_qty,
-                oe.raw_json AS close_raw_json
+                oe.event_time_utc AS close_event_time_utc
             FROM positions p
             LEFT JOIN runs r ON r.run_id = p.run_id
             LEFT JOIN order_events oe ON oe.id = (
@@ -3681,17 +3592,12 @@ class DashboardDataProvider:
         )
         latest_wallet_rows = self._query_rows(
             conn,
-            f"""
-            SELECT account_id, balance_usdt
-            FROM (
-                SELECT account_id, balance_usdt,
-                       ROW_NUMBER() OVER (PARTITION BY account_id ORDER BY id DESC) AS rn
-                FROM wallet_snapshots
-                WHERE account_id IN ({placeholders}) AND error IS NULL
-            )
-            WHERE rn = 1
-            """,
-            tuple(account_ids),
+            " UNION ALL ".join(
+                "SELECT ? AS account_id, (SELECT balance_usdt FROM wallet_snapshots "
+                "WHERE account_id = ? AND error IS NULL ORDER BY id DESC LIMIT 1) AS balance_usdt"
+                for _ in account_ids
+            ),
+            tuple(value for aid in account_ids for value in (aid, aid)),
         )
         open_by_account = {
             str(row.get("account_id") or ""): self._safe_int(row.get("open_positions"), 0)

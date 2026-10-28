@@ -12,7 +12,7 @@ from core.account_snapshot import AccountSnapshotProvider
 from core.position_manager import PositionManager
 from core.runtime_service import ServiceRuntimeConfig, StrategyRuntimeService
 from core.state_store import StateStore
-from infra.binance_futures_client import BinanceFuturesClient, BinanceRateLimitError
+from infra.binance_futures_client import BinanceAPIError, BinanceFuturesClient, BinanceRateLimitError
 from infra.binance_rate_limit import BinanceRateLimitCoordinator
 from infra.binance_top10_monitor import DailyOpenPriceStream, build_top_gainers
 from infra.binance_user_stream import BinanceUserStreamState
@@ -199,6 +199,35 @@ class BinanceWeightOptimizationTest(unittest.TestCase):
 
         self.assertEqual(results, [True, True])
         self.assertEqual(client.get_account.call_count, 1)
+
+    def test_missing_algo_endpoint_keeps_existing_protection_and_stream_uncertain(self) -> None:
+        self.store.upsert_exchange_order_state(
+            {"symbol": "BTCUSDT", "algoId": 777, "clientAlgoId": "sl-777", "status": "NEW"},
+            source="ALGO_UPDATE",
+        )
+        client = BinanceFuturesClient(api_key="k", api_secret="s")
+        client.background_requests = lambda: nullcontext()
+        algo_available = False
+        def request(method, path, params=None, signed=False):
+            if path == "/fapi/v1/openOrders":
+                return []
+            if path == "/fapi/v1/openAlgoOrders":
+                if algo_available:
+                    return [{"symbol": "BTCUSDT", "algoId": 777, "clientAlgoId": "sl-777", "algoStatus": "NEW"}]
+                raise BinanceAPIError(-1000, "endpoint unavailable", http_status=404)
+            raise AssertionError(path)
+        client._request = MagicMock(side_effect=request)
+        provider = MagicMock()
+        provider.capture.return_value.positions = []
+        stream = BinanceUserStreamState(client=client, store=self.store, snapshot_provider=provider, account_id="acc01")
+        self.assertFalse(stream.verify_rest())
+        self.assertFalse(stream.is_certain())
+        self.assertEqual(self.store.get_exchange_order_state(symbol="BTCUSDT", order_id=777, order_kind="algo")["status"], "NEW")
+        algo_available = True
+        stream._next_verify_monotonic = 0
+        self.assertTrue(stream.verify_rest())
+        self.assertTrue(stream.is_certain())
+        self.assertEqual(self.store.get_exchange_order_state(symbol="BTCUSDT", order_id=777, order_kind="algo")["status"], "NEW")
 
     def test_rate_limit_verification_enters_backoff_without_repeating_request(self) -> None:
         client = MagicMock()
@@ -650,6 +679,8 @@ class BinanceWeightOptimizationTest(unittest.TestCase):
         try:
             for second in (4, 5, 19, 20, 34, 35, 49, 50, 59):
                 service._run_cashflow_sync_if_due(base.replace(second=second))
+                for future in service._cashflow_futures_by_account.values():
+                    future.result(timeout=1)
 
             self.assertEqual([len(samplers[f"acc0{index}"].calls) for index in range(1, 5)], [1, 1, 1, 1])
             self.assertEqual(
@@ -660,6 +691,7 @@ class BinanceWeightOptimizationTest(unittest.TestCase):
             service._entry_executor.shutdown(wait=False, cancel_futures=True)
             service._manage_executor.shutdown(wait=False, cancel_futures=True)
             service._scheduled_executor.shutdown(wait=False, cancel_futures=True)
+            service._cashflow_executor.shutdown(wait=True, cancel_futures=True)
 
 
 if __name__ == "__main__":

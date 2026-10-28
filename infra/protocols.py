@@ -26,6 +26,7 @@ class UserStreamStoreProtocol(Protocol):
         symbol: str,
         order_id: Optional[int] = None,
         client_order_id: Optional[str] = None,
+        order_kind: Optional[str] = None,
     ) -> Optional[str]: ...
 
     def upsert_exchange_order_state(
@@ -39,15 +40,16 @@ class UserStreamStoreProtocol(Protocol):
         symbol: str,
         order_id: Optional[int] = None,
         client_order_id: Optional[str] = None,
+        order_kind: Optional[str] = None,
     ) -> Optional[Dict[str, Any]]: ...
 
     def update_parent_algo_order_status(
         self,
         symbol: str,
-        client_algo_id: str,
-        actual_order_id: int,
+        actual_order_id: object,
         status: str,
-    ) -> bool: ...
+        event_time_utc: str,
+    ) -> int: ...
 
     def add_order_event(
         self,

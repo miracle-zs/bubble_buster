@@ -5,6 +5,7 @@ import os
 import threading
 from pathlib import Path
 from typing import Dict, Optional, Set, Tuple
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from core.account_config import parse_account_settings
 from core.account_snapshot import AccountSnapshotProvider
@@ -52,7 +53,12 @@ class MergedSection:
         raw = self.values.get(key)
         if raw is None or str(raw).strip() == "":
             return bool(fallback)
-        return str(raw).strip().lower() in {"1", "true", "yes", "on"}
+        value = str(raw).strip().lower()
+        if value in {"1", "true", "yes", "on"}:
+            return True
+        if value in {"0", "false", "no", "off"}:
+            return False
+        raise ValueError(f"Invalid boolean value for {key}: {raw!r}")
 
 
 def resolve_path(raw: str, base_dir: Optional[str] = None) -> str:
@@ -118,6 +124,11 @@ def _build_single_account_components(
     root_store: StateStore,
     rate_limit_coordinator=None,
 ) -> Dict[str, object]:
+    timezone_name = runtime_cfg.get("timezone", fallback="Asia/Shanghai").strip()
+    try:
+        ZoneInfo(timezone_name)
+    except ZoneInfoNotFoundError as exc:
+        raise ValueError(f"Invalid runtime timezone: {timezone_name!r}") from exc
     ranker_max_workers = max(1, strategy_cfg.getint("ranker_max_workers", fallback=24))
     default_pool_size = max(32, ranker_max_workers * 2)
     proxies = _build_proxies_from_section(notify_cfg)
@@ -276,6 +287,16 @@ def _build_single_account_components(
         cashflow_inline=False,
     )
 
+    # Runtime entry points hold the process lock while components are built,
+    # before this account can submit any new orders.
+    interrupted = scoped_store.mark_interrupted_submissions_unknown()
+    if interrupted:
+        LOGGER.warning(
+            "Marked interrupted order submissions for recovery account=%s count=%s",
+            account_id,
+            interrupted,
+        )
+
     ledger = TradingLedger(store=scoped_store)
     engine = ExecutionEngine(
         client=client,
@@ -410,6 +431,7 @@ def create_components(
     account_runtimes: Dict[str, Dict[str, object]] = {}
     if cfg.has_section("accounts"):
         parsed_accounts = parse_account_settings(_serialize_config(cfg))
+        account_errors = []
         for account_id, settings in parsed_accounts.items():
             try:
                 account_runtimes[account_id] = _build_single_account_components(
@@ -423,7 +445,9 @@ def create_components(
                     rate_limit_coordinator=rate_limit_coordinator,
                 )
             except Exception as exc:  # noqa: BLE001
-                LOGGER.error("Skip account due to invalid config account=%s error=%s", account_id, exc)
+                account_errors.append(f"{account_id}: {exc}")
+        if account_errors:
+            raise RuntimeError("Failed to create configured account runtimes: " + "; ".join(account_errors))
 
     if not account_runtimes:
         if cfg.has_section("accounts"):
@@ -551,8 +575,8 @@ def create_components(
     )
 
     return (
-        selected_ctx["strategy"],
-        selected_ctx["manager"],
+        selected_ctx.get("strategy"),
+        selected_ctx.get("manager"),
         selected_ctx["balance_sampler"],
         cfg["runtime"],
         service_cfg,

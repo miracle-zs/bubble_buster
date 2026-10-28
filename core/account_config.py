@@ -34,7 +34,10 @@ def parse_account_settings(cfg_text: str) -> Dict[str, AccountSettings]:
     base_binance = _normalize_items(cfg["binance"])
     result: Dict[str, AccountSettings] = {}
     for account_id in account_ids:
-        mode = cfg.get("accounts", f"mode.{account_id}", fallback="full").strip() or "full"
+        mode_key = f"mode.{account_id}"
+        if not cfg.has_option("accounts", mode_key):
+            raise ValueError(f"Missing required [accounts] {mode_key}")
+        mode = cfg.get("accounts", mode_key).strip()
         if mode not in VALID_ACCOUNT_MODES:
             raise ValueError(f"Invalid mode for account={account_id}: {mode}")
 

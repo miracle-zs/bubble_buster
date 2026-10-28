@@ -90,7 +90,7 @@ class TestCentralExitExecutor:
         # First call (stop order) raises -2021, second call (market close) succeeds
         client.create_order.side_effect = [
             BinanceAPIError(code=-2021, message="Order would immediately trigger."),
-            {"orderId": 999, "clientOrderId": "nsi-test"},
+            {"orderId": 999, "clientOrderId": "nsi-test", "status": "FILLED", "executedQty": "10"},
         ]
 
         store = MagicMock()
@@ -178,3 +178,30 @@ class TestCentralExitExecutor:
         )
         assert client.cancel_order.call_count == 2
 
+
+
+def test_unknown_market_close_blocks_new_intent_until_reconciled(tmp_path):
+    from pathlib import Path
+    from core.state_store import StateStore
+    from infra.binance_futures_client import OrderStateUnknownError
+
+    store = StateStore(str(tmp_path / "state.db"), str(Path(__file__).resolve().parents[1] / "schema.sql"), account_id="acc01")
+    store.init_schema()
+    client = MagicMock()
+    client.format_order_qty.return_value = "1"
+    client.create_order.side_effect = [
+        OrderStateUnknownError("BTCUSDT", "close-1", BinanceAPIError(-1000, "timeout")),
+        {"orderId": 7, "status": "FILLED", "executedQty": "1", "avgPrice": "10"},
+    ]
+    executor = CentralExitExecutor(client, store, market_fill_reconciler=MagicMock())
+    with pytest.raises(OrderStateUnknownError):
+        executor.close_market_order("BTCUSDT", qty=1, client_order_id="close-1")
+    with pytest.raises(OrderStateUnknownError):
+        executor.close_market_order("BTCUSDT", qty=1, client_order_id="close-2")
+    assert client.create_order.call_count == 1
+    assert store.find_unresolved_market_exit("ETHUSDT", "BUY", "new") is None
+    assert store.scoped("acc02").find_unresolved_market_exit("BTCUSDT", "BUY", "new") is None
+    with store._connect_ctx() as conn:
+        conn.execute("UPDATE order_attempts SET status = 'REJECTED' WHERE client_order_id = ?", ("close-1",))
+    executor.close_market_order("BTCUSDT", qty=1, client_order_id="close-2")
+    assert client.create_order.call_count == 2
