@@ -7,6 +7,7 @@ import sys
 import threading
 import time
 from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
 from logging.handlers import TimedRotatingFileHandler
 from pathlib import Path
 from typing import Literal, Optional
@@ -873,6 +874,35 @@ def create_app(config_path: Optional[str] = None) -> FastAPI:
                 include_balance_curve=include_balance_curve,
                 include_trade_stats=False,
             )
+            if (
+                ctx.provider.account_modes.get(account_id, "full") == "readonly"
+                and curve_type in (None, "balance", "both")
+            ):
+                balance_curve = payload.get("balance_curve") or []
+                if balance_curve:
+                    try:
+                        latest_at = datetime.fromisoformat(
+                            str(balance_curve[-1].get("t") or "")
+                        )
+                        if latest_at.tzinfo is None:
+                            latest_at = latest_at.replace(tzinfo=timezone.utc)
+                        latest_local = latest_at.astimezone(ctx.provider.local_tz)
+                        cycle_start_local = latest_local.replace(
+                            hour=ctx.portfolio_loss_cut_hour,
+                            minute=ctx.portfolio_loss_cut_minute,
+                            second=0,
+                            microsecond=0,
+                        )
+                        if latest_local < cycle_start_local:
+                            cycle_start_local -= timedelta(days=1)
+                        payload["balance_curve_cycle_baseline"] = (
+                            ctx.provider.get_wallet_snapshot_at_or_after(
+                                account_id,
+                                cycle_start_local.astimezone(timezone.utc).isoformat(),
+                            )
+                        )
+                    except ValueError:
+                        payload["balance_curve_cycle_baseline"] = None
             payload["account_id"] = account_id
             payload["curve_type"] = curve_type or "both"
             return JSONResponse(payload)

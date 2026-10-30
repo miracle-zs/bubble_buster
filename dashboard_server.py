@@ -2034,6 +2034,40 @@ class DashboardDataProvider:
             tuple(params),
         )
 
+    def get_wallet_snapshot_at_or_after(
+        self,
+        account_id: str,
+        captured_at_utc: str,
+    ) -> Optional[Dict[str, Any]]:
+        """Return the exact first wallet snapshot at or after a timestamp."""
+        account_id = (account_id or "").strip()
+        if not account_id or not os.path.exists(self.db_path):
+            return None
+        try:
+            with self._connect_ctx() as conn:
+                row = conn.execute(
+                    """
+                    SELECT captured_at_utc, balance_usdt
+                    FROM wallet_snapshots
+                    WHERE account_id = ? AND error IS NULL AND captured_at_utc >= ?
+                    ORDER BY captured_at_utc ASC, id ASC
+                    LIMIT 1
+                    """,
+                    (account_id, captured_at_utc),
+                ).fetchone()
+        except sqlite3.Error as exc:
+            LOGGER.warning(
+                "Failed to load cycle baseline for account=%s: %s", account_id, exc
+            )
+            return None
+        if row is None:
+            return None
+        equity = self._safe_float(row["balance_usdt"])
+        captured_at = str(row["captured_at_utc"] or "").strip()
+        if equity is None or not captured_at:
+            return None
+        return {"t": captured_at, "equity": round(equity, 8)}
+
     def _load_all_time_account_pnl(
         self,
         conn: sqlite3.Connection,

@@ -2650,18 +2650,32 @@
     return start;
   }
 
-  function curveMetrics(rawPoints, mode, stop) {
+  function curveMetrics(rawPoints, mode, stop, cycleBaseline) {
     var points = (rawPoints || []).filter(function (point) {
       return point && Number.isFinite(Number(point.equity));
     });
     var riskBaseline = mode !== "readonly" && stop ? Number(stop.baseline_equity) : NaN;
     if (mode !== "readonly" && !(riskBaseline > 0)) return null;
     if (!points.length) return null;
+    var exactCycleBaseline = null;
+    if (mode === "readonly" && cycleBaseline) {
+      var cycleBaselineEquity = Number(cycleBaseline.equity);
+      var cycleBaselineMs = new Date(cycleBaseline.t || "").getTime();
+      if (Number.isFinite(cycleBaselineEquity) && Number.isFinite(cycleBaselineMs)) {
+        exactCycleBaseline = {
+          t: cycleBaseline.t,
+          equity: cycleBaselineEquity,
+          ms: cycleBaselineMs
+        };
+      }
+    }
     var startIndex = 0;
     var latestMs = new Date(points[points.length - 1].t || "").getTime();
     if (Number.isFinite(latestMs)) {
       var capturedMs = stop ? new Date(stop.baseline_captured_at_utc || "").getTime() : NaN;
-      var targetMs = Number.isFinite(capturedMs) ? capturedMs : cycleStartMs(latestMs);
+      var targetMs = exactCycleBaseline
+        ? exactCycleBaseline.ms
+        : (Number.isFinite(capturedMs) ? capturedMs : cycleStartMs(latestMs));
       var afterIndex = -1;
       for (var i = 0; i < points.length; i += 1) {
         var pointMs = new Date(points[i].t || "").getTime();
@@ -2673,7 +2687,15 @@
     }
     var scoped = points.slice(startIndex);
     if (!scoped.length) return null;
-    var baseline = mode !== "readonly" ? riskBaseline : Number(scoped[0].equity);
+    if (exactCycleBaseline) {
+      scoped = scoped.filter(function (point) {
+        return new Date(point.t || "").getTime() > exactCycleBaseline.ms;
+      });
+      scoped.unshift({ t: exactCycleBaseline.t, equity: exactCycleBaseline.equity });
+    }
+    var baseline = mode !== "readonly"
+      ? riskBaseline
+      : (exactCycleBaseline ? exactCycleBaseline.equity : Number(scoped[0].equity));
     if (mode !== "readonly") {
       scoped.unshift({ equity: baseline });
       if (stop.current_equity !== null && stop.current_equity !== undefined && Number.isFinite(Number(stop.current_equity))) {
@@ -2845,7 +2867,9 @@
       ? null
       : Number(rawBackendReturn);
     if (!Number.isFinite(backendReturn)) backendReturn = null;
-    var metrics = cached ? curveMetrics(cached.points, mode, stop) : null;
+    var metrics = cached
+      ? curveMetrics(cached.points, mode, stop, cached.cycleBaseline)
+      : null;
     if (!metrics) {
       box.className = "spark-box";
       box.innerHTML = '<div class="spark-empty">暂无曲线</div>';
@@ -2930,6 +2954,7 @@
         }
         curveCache[aid] = {
           points: points.slice(-160),
+          cycleBaseline: payload.balance_curve_cycle_baseline || null,
           portfolioLossCut: payload.portfolio_loss_cut || portfolioStopStates[aid] || null,
           ts: Date.now()
         };
@@ -2992,7 +3017,7 @@
           + '<div class="readonly-metric readonly-secondary"><span class="metric-label">盈亏比</span><strong class="metric-value">' + profitFactorText + '</strong></div>'
           + '<div class="readonly-chart"><div>'
           + '<div class="spark-box" data-account-id="' + safeAid + '"><div class="spark-empty">加载中...</div></div>'
-          + '</div><div class="readonly-chart-meta"><span class="metric-label">本周期权益曲线</span><strong class="metric-value spark-delta" data-account-id="' + safeAid + '">--</strong></div></div>'
+          + '</div><div class="readonly-chart-meta"><span class="metric-label" title="按周期首条权益快照计算，含浮盈亏，不等同已实现净盈亏">本周期权益变化（含浮盈亏）</span><strong class="metric-value spark-delta" data-account-id="' + safeAid + '">--</strong></div></div>'
           + '<div class="readonly-action"><a class="detail-link" href="' + base + '">余额曲线 / 交易统计</a></div>'
           + "</article>";
       } else {
