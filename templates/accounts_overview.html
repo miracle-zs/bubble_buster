@@ -1783,7 +1783,7 @@
         <div class="entry-progress-heading-copy">
           <div class="entry-progress-kicker">开仓执行追踪</div>
           <h2 class="section-title">今日开单进度 <span class="entry-progress-strategy-badge">先阳后阴 · 信号独立开仓</span></h2>
-          <p class="entry-progress-heading-note">首笔等待首根 1h 阴线收盘确认；第二笔须在出现阳线反弹后，等待下一根阴线收盘独立开仓。</p>
+          <p class="entry-progress-heading-note">首笔等待 1h 阴线信号；第二笔在出现阳线后等待下一根阴线信号独立开仓。启用收盘前入场时，信号可在收盘前触发。</p>
         </div>
         <div class="section-heading-actions">
           <div id="entry-progress-updated" class="entry-progress-updated">数据更新时间 --</div>
@@ -2522,7 +2522,7 @@
       + '<div class="entry-progress-stat warn"><span class="entry-progress-stat-label">待触发</span><strong>' + waitingTotal + '</strong><span class="entry-progress-stat-note">等待信号确认</span></div>'
       + '<div class="entry-progress-stat ' + anomalyStatClass + '"><span class="entry-progress-stat-label">异常</span><strong>' + failedTotal + '</strong><span class="entry-progress-stat-note">' + anomalyStatNote + '</span></div>'
       + '<div class="entry-progress-stat neutral"><span class="entry-progress-stat-label">账号状态</span><strong>' + completedAccounts + ' / ' + accountRows.length + '</strong><span class="entry-progress-stat-note">今日完成账号</span></div>'
-      + '<div class="entry-progress-stat neutral"><span class="entry-progress-stat-label">仓位记录</span><strong>' + positionTotal + '</strong><span class="entry-progress-stat-note">持仓合约行数（单合约可包含多次入场动作）</span></div>'
+      + '<div class="entry-progress-stat neutral"><span class="entry-progress-stat-label">仓位记录</span><strong>' + positionTotal + '</strong><span class="entry-progress-stat-note">最近一次运行的持仓记录行数，包含已关闭仓位</span></div>'
       + '<div class="entry-progress-next-action"><span class="entry-progress-next-label">下一检查</span><strong>' + escapeHtml(nextCheckLabel) + '</strong><span class="entry-progress-next-state"><i class="entry-progress-next-pulse"></i>' + escapeHtml(nextActionLabel) + ' · <span id="entry-progress-countdown">--</span></span></div>'
       + '</div>';
     html += '<div class="entry-progress-timeline"><div class="entry-progress-timeline-head"><div class="entry-progress-timeline-title"><span class="entry-progress-timeline-kicker">入场时序</span><strong>共同入场窗口</strong><span>' + escapeHtml(timelineCaption) + '</span></div><div class="entry-progress-timeline-legend"><span class="entry-progress-phase-legend is-initial"><i></i>首笔入场</span><span class="entry-progress-phase-legend is-scale-in"><i></i>二次入场</span><span class="entry-progress-phase-legend is-wait-bullish"><i></i>等待阳线</span><span class="entry-progress-phase-legend is-wait-bearish"><i></i>阳线已确认 · 等阴线</span><span class="entry-progress-zone">北京时间 UTC+8</span></div></div><div class="entry-progress-timeline-track">';
@@ -3014,7 +3014,7 @@
           + '<div class="readonly-metric readonly-secondary"><span class="metric-label">盈亏比</span><strong class="metric-value">' + profitFactorText + '</strong></div>'
           + '<div class="readonly-chart"><div>'
           + '<div class="spark-box" data-account-id="' + safeAid + '"><div class="spark-empty">加载中...</div></div>'
-          + '</div><div class="readonly-chart-meta"><span class="metric-label" aria-label="按周期首条权益快照计算，含浮盈亏，不等同已实现净盈亏">本周期权益变化（含浮盈亏）</span><strong class="metric-value spark-delta" data-account-id="' + safeAid + '">--</strong></div></div>'
+          + '</div><div class="readonly-chart-meta"><span class="metric-label" title="按周期首条权益快照计算，含浮盈亏，不等同已实现净盈亏" aria-label="按周期首条权益快照计算，含浮盈亏，不等同已实现净盈亏">本周期权益变化（含浮盈亏）</span><strong class="metric-value spark-delta" data-account-id="' + safeAid + '">--</strong></div></div>'
           + '<div class="readonly-action"><a class="detail-link" href="' + base + '">余额曲线 / 交易统计</a></div>'
           + "</article>";
       } else {
