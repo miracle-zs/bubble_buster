@@ -49,7 +49,7 @@
       align-items: center;
       justify-content: space-between;
       gap: 16px;
-      margin-bottom: 24px;
+      margin-bottom: 16px;
       color: var(--muted);
       font-size: 12px;
     }
@@ -84,13 +84,13 @@
       display: grid;
       grid-template-columns: minmax(0, 1fr) auto;
       align-items: end;
-      gap: 28px;
-      margin-bottom: 18px;
+      gap: 20px;
+      margin-bottom: 14px;
     }
     .eyebrow {
-      margin: 0 0 9px;
+      margin: 0 0 6px;
       color: var(--accent);
-      font-size: 11px;
+      font-size: 10px;
       font-weight: 800;
       letter-spacing: 0.14em;
       text-transform: uppercase;
@@ -100,17 +100,17 @@
       margin: 0;
       color: #f4faff;
       font-family: "Avenir Next", "PingFang SC", sans-serif;
-      font-size: clamp(28px, 4vw, 52px);
+      font-size: clamp(22px, 3vw, 34px);
       font-weight: 700;
-      letter-spacing: -0.045em;
-      line-height: 1.05;
+      letter-spacing: -0.02em;
+      line-height: 1.15;
     }
     .hero-copy {
-      max-width: 720px;
-      margin: 12px 0 0;
+      max-width: 760px;
+      margin: 8px 0 0;
       color: #96b2c1;
-      font-size: 14px;
-      line-height: 1.7;
+      font-size: 13px;
+      line-height: 1.55;
     }
     .hero-copy strong { color: #d9edf7; font-weight: 700; }
     .controls {
@@ -156,12 +156,12 @@
       display: grid;
       grid-template-columns: repeat(4, minmax(0, 1fr));
       gap: 10px;
-      margin: 22px 0 14px;
+      margin: 16px 0 12px;
     }
     .summary-card {
       position: relative;
       min-width: 0;
-      padding: 14px 15px 13px;
+      padding: 11px 13px 10px;
       overflow: hidden;
       border: 1px solid var(--line);
       border-radius: 11px;
@@ -204,9 +204,9 @@
       margin-bottom: 4px;
       color: #f2f9fd;
       font-family: ui-monospace, Menlo, Monaco, Consolas, monospace;
-      font-size: 25px;
+      font-size: 22px;
       font-weight: 700;
-      letter-spacing: -0.04em;
+      letter-spacing: -0.03em;
     }
     .summary-change.is-positive { color: var(--good); }
     .summary-change.is-negative { color: var(--bad); }
@@ -215,8 +215,8 @@
       display: flex;
       justify-content: space-between;
       gap: 10px;
-      margin-top: 12px;
-      padding-top: 9px;
+      margin-top: 10px;
+      padding-top: 8px;
       border-top: 1px solid rgba(55, 101, 127, 0.32);
       color: var(--muted);
       font-size: 10px;
@@ -224,8 +224,8 @@
     .summary-range strong { color: #c7dce7; font-family: ui-monospace, Menlo, Monaco, Consolas, monospace; font-weight: 600; }
     .chart-panel {
       position: relative;
-      min-height: 585px;
-      padding: 17px 18px 14px;
+      min-height: 530px;
+      padding: 15px 16px 12px;
       border: 1px solid #28526a;
       border-radius: 14px;
       background:
@@ -243,12 +243,12 @@
     .chart-title { margin: 0; color: #e9f6fc; font-size: 15px; font-weight: 800; }
     .chart-subtitle { margin: 5px 0 0; color: var(--muted); font-size: 11px; line-height: 1.5; }
     .chart-meta { color: #66879a; font-size: 10px; text-align: right; white-space: nowrap; }
-    #equity-chart { width: 100%; height: 470px; }
+    #equity-chart { width: 100%; height: 430px; }
     .chart-empty {
       display: none;
       align-items: center;
       justify-content: center;
-      height: 470px;
+      height: 430px;
       color: var(--muted);
       font-size: 13px;
     }
@@ -337,9 +337,9 @@
 
     <section class="hero">
       <div>
-        <p class="eyebrow">ACCOUNT / EQUITY / RELATIVE VIEW</p>
-        <h1>四账户权益，放在同一条时间线上。</h1>
-        <p class="hero-copy">数据从组合止盈正式上线时刻开始；每个账户在这个范围内的<strong>首个有效权益快照归一化为 0%</strong>，曲线只回答一个问题：组合上线以后，谁在持续积累，谁在回吐。</p>
+        <p class="eyebrow">多账户横向对比 · 相对收益走势</p>
+        <h1>多账户权益走势同轴对比</h1>
+        <p class="hero-copy">基于统一时间轴与归一化基准（起点设为 0%），横向评估不同实盘策略的表现差异，直观展示各账户是在稳健积累还是持续回吐。</p>
       </div>
       <div class="controls" aria-label="图表筛选">
         <div id="range-controls" class="control-group" role="group" aria-label="时间范围">
@@ -507,7 +507,9 @@
       emptyElement.style.display = activeRows.length ? "none" : "flex";
       el("chart-title").textContent = mode === "relative" ? "相对权益变化（%）" : "账户权益（USDT）";
       el("chart-subtitle").textContent = mode === "relative"
-        ? "组合止盈上线后的首个有效快照 = 0%；策略事件不叠加到主图，避免跨账户时间差造成视觉干扰。"
+        ? (range === "all"
+            ? "组合止盈上线后的首个有效快照 = 0%；策略事件不叠加到主图，避免跨账户时间差造成视觉干扰。"
+            : "以所选时间区间（" + rangeLabel() + "）首个快照归一化（0%）；策略事件不叠加到主图。")
         : "显示服务器记录的权益快照；策略事件不叠加到主图。";
       if (!chart) chart = echarts.init(chartElement, null, { renderer: "canvas" });
       var chartSeries = activeRows.map(function (row, index) {
@@ -528,7 +530,7 @@
             silent: true,
             symbol: ["none", "none"],
             lineStyle: { color: "rgba(164, 197, 211, 0.42)", type: "dashed", width: 1 },
-            label: { color: "#9fb8c5", fontSize: 10, formatter: "上线后首个快照" },
+            label: { color: "#9fb8c5", fontSize: 10, formatter: range === "all" ? "上线后首个快照" : "区间初始基准" },
             data: mode === "relative" ? [{ yAxis: 0 }] : []
           } : undefined
         };

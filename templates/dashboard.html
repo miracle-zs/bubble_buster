@@ -392,8 +392,7 @@
         text-align: center;
       }
     }
-  </style>
-  <style>
+
     /* Account detail — restrained operations sheet, shared with the overview. */
     html { background: #071019; }
     body {
@@ -1004,7 +1003,7 @@
           </div>
           <p class="risk-description" id="riskDescription">正在根据周期权益曲线计算风险距离。</p>
           <div class="risk-meter">
-            <div class="risk-meter-head"><span>止损预算使用</span><strong id="riskMeterLabel">--</strong></div>
+            <div class="risk-meter-head"><span>已消耗止损空间</span><strong id="riskMeterLabel">--</strong></div>
             <div class="risk-meter-track"><span class="risk-meter-fill" id="riskMeterFill"></span></div>
             <div class="risk-meter-scale"><span>周期起点</span><span id="riskMeterLimit">止损 -3.5%</span></div>
           </div>
@@ -1017,7 +1016,7 @@
       <header class="surface-head">
         <div class="surface-heading">
           <h2 class="surface-title" id="positionsHeading">当前持仓</h2>
-          <div class="surface-subtitle">名义金额优先按交易所敞口或标记价计算；缺失时按入场价估算，数量保留用于核对</div>
+          <div class="surface-subtitle">持仓名义价值优先基于实时标记价计算，缺失时按入场价预估；保留原始持仓张数用于对账</div>
         </div>
         <span class="surface-count" id="positionsCount">0</span>
       </header>
@@ -1033,7 +1032,7 @@
       <header class="surface-head">
         <div class="surface-heading">
           <h2 class="surface-title" id="activityHeading">账户活动</h2>
-          <div class="surface-subtitle">运行、订单与资金变动按同一时区展示</div>
+          <div class="surface-subtitle">运行调度、委托成交与资金流水（统一按北京时间 UTC+8 展示）</div>
         </div>
       </header>
       <div class="activity-tabs" role="tablist" aria-label="账户活动分类">
