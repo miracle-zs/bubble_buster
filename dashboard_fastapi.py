@@ -245,13 +245,6 @@ def create_dashboard_context(config_path: str) -> DashboardRuntimeContext:
         max(900, int(runtime_cfg.get("dashboard_trade_stats_refresh_sec", 900))),
     )
     curve_points = max(100, int(runtime_cfg.get("dashboard_curve_points", 600)))
-    balance_refresh_sec = max(5, int(runtime_cfg.get("manager_interval_sec", 60)))
-    run_with_dashboard = runtime_cfg.get("run_service_with_dashboard", "false").strip().lower() in {
-        "1",
-        "true",
-        "yes",
-        "on",
-    }
     rate_limit_coordinator = get_shared_rate_limit_coordinator(
         runtime_cfg.get("binance_rate_limit_scope", "binance-futures-ip").strip()
         or "binance-futures-ip"
@@ -311,31 +304,6 @@ def create_dashboard_context(config_path: str) -> DashboardRuntimeContext:
     )
     root_store.init_schema()
 
-    balance_fetcher = None
-    live_position_clients = {}
-    # If runtime service is enabled, wallet snapshots are persisted in background.
-    # In that mode dashboard reads DB snapshots and skips direct balance polling.
-    if cfg.has_section("binance"):
-        binance_cfg = cfg["binance"]
-        api_key = binance_cfg.get("api_key", "").strip()
-        api_secret = binance_cfg.get("api_secret", "").strip()
-        if api_key and api_secret:
-            default_pool_size = max(32, int(binance_cfg.get("http_pool_maxsize", fallback=64)))
-            client = BinanceFuturesClient(
-                api_key=api_key,
-                api_secret=api_secret,
-                base_url=binance_cfg.get("base_url", "https://fapi.binance.com").strip(),
-                timeout_sec=binance_cfg.getint("timeout_sec", fallback=10),
-                retry_count=binance_cfg.getint("retry_count", fallback=3),
-                retry_delay_sec=binance_cfg.getfloat("retry_delay_sec", fallback=1.0),
-                recv_window=binance_cfg.getint("recv_window", fallback=5000),
-                http_pool_maxsize=default_pool_size,
-                proxies=build_proxies(cfg),
-                rate_limit_coordinator=rate_limit_coordinator,
-            )
-            # The dashboard process never calls this client from an HTTP path.
-            # Full-account snapshots are persisted by StrategyRuntimeService.
-
     # 为 readonly 账户创建 TradeStatsFetcher
     trade_stats_fetchers = {}
     for aid in overview_account_ids:
@@ -392,8 +360,6 @@ def create_dashboard_context(config_path: str) -> DashboardRuntimeContext:
         timezone_name=timezone_name,
         entry_hour=entry_hour,
         entry_minute=entry_minute,
-        balance_fetcher=balance_fetcher,
-        balance_cache_ttl_sec=balance_refresh_sec,
         default_curve_points=curve_points,
         account_strategy_notes=account_strategy_notes,
         account_modes=account_modes,
@@ -402,7 +368,6 @@ def create_dashboard_context(config_path: str) -> DashboardRuntimeContext:
         equity_comparison_account_ids=equity_comparison_account_ids or None,
         live_wallet_account_id=default_account_id,
         trade_stats_fetchers=trade_stats_fetchers,
-        live_position_clients=live_position_clients,
     )
 
     echarts_src = _ensure_local_echarts_asset()

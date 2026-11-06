@@ -33,9 +33,9 @@ import urllib.error
 import urllib.parse
 import urllib.request
 import zipfile
-from collections import Counter, defaultdict
+from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, replace
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Iterable, Optional

@@ -27,7 +27,7 @@ from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from statistics import mean, median
-from typing import Iterable, Optional
+from typing import Optional
 from zoneinfo import ZoneInfo
 
 

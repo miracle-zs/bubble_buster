@@ -30,7 +30,6 @@ from replay_independent_strategy_portfolio import (  # noqa: E402
     MarketData,
     StrategyReplay,
     SHANGHAI,
-    UTC,
     clean_for_json,
     iso,
     open_db,

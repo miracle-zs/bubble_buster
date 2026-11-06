@@ -7,7 +7,7 @@ import argparse
 import json
 import sqlite3
 from collections import defaultdict
-from datetime import date, datetime
+from datetime import date
 from pathlib import Path
 from statistics import mean, median
 

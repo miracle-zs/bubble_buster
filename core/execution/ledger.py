@@ -15,7 +15,6 @@ from core.execution.models import (
     AttemptStatus,
     EpisodeStatus,
     ExecutionFill,
-    IntentScope,
     IntentStatus,
     OrderAttempt,
     OrderIntent,

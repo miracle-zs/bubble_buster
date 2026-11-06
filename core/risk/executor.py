@@ -6,7 +6,7 @@ import logging
 import time
 import uuid
 from dataclasses import dataclass
-from typing import Any, Callable, Dict, Optional, Tuple
+from typing import Any, Callable, Dict, Optional
 
 from core.market_fill_reconciler import MarketFillReconciler
 from core.execution.models import AttemptStatus

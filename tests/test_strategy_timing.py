@@ -1,9 +1,8 @@
 """Unit tests for pure TimingController candlestick logic and state machine."""
 
 from datetime import datetime, timedelta, timezone
-import pytest
 
-from core.strategy.models import RankEntry, ReadyEntry
+from core.strategy.models import RankEntry
 from core.strategy.timing import (
     ENTRY_PHASE_COMPLETE,
     ENTRY_PHASE_INITIAL,

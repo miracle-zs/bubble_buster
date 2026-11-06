@@ -13,9 +13,7 @@ from __future__ import annotations
 import hashlib
 import logging
 import math
-import re
 import uuid
-from datetime import datetime, timezone
 from typing import Any, Callable, Dict, List, Optional
 
 from infra.binance_futures_client import (
@@ -27,11 +25,9 @@ from core.execution.ledger import TradingLedger
 from core.execution.models import (
     AttemptStatus,
     EpisodeStatus,
-    ExecutionFill,
     IntentStatus,
     OrderAttempt,
     OrderIntent,
-    PositionEpisode,
     utc_now_iso,
 )
 from core.market_fill_reconciler import MarketFillReconciler

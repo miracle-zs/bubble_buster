@@ -4,7 +4,7 @@ import logging
 import os
 import threading
 from pathlib import Path
-from typing import Dict, Optional, Set, Tuple
+from typing import Dict, Optional, Set, Union
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from core.account_config import parse_account_settings
@@ -69,7 +69,9 @@ def resolve_path(raw: str, base_dir: Optional[str] = None) -> str:
     return str((base / value).resolve())
 
 
-def _build_proxies_from_section(notify_cfg: MergedSection) -> Optional[Dict[str, str]]:
+def _build_proxies_from_section(
+    notify_cfg: Union[MergedSection, configparser.SectionProxy, Dict[str, str]],
+) -> Optional[Dict[str, str]]:
     http_proxy = notify_cfg.get("http_proxy", "").strip()
     https_proxy = notify_cfg.get("https_proxy", "").strip()
     if http_proxy and https_proxy:
@@ -79,21 +81,7 @@ def _build_proxies_from_section(notify_cfg: MergedSection) -> Optional[Dict[str,
 
 def build_proxies(cfg: configparser.ConfigParser) -> Optional[Dict[str, str]]:
     notify_section = cfg["notify"] if cfg.has_section("notify") else {}
-    http_proxy = notify_section.get("http_proxy", "").strip()
-    https_proxy = notify_section.get("https_proxy", "").strip()
-    if http_proxy and https_proxy:
-        return {"http": http_proxy, "https": https_proxy}
-    return None
-
-
-def resolve_runtime_paths(
-    runtime_cfg: configparser.SectionProxy,
-    base_dir: Optional[str] = None,
-) -> Tuple[str, str, str]:
-    db_path = resolve_path(runtime_cfg.get("db_path", "state.db"), base_dir)
-    log_dir = resolve_path(runtime_cfg.get("log_dir", "logs"), base_dir)
-    lock_file = resolve_path(runtime_cfg.get("lock_file", "runtime.lock"), base_dir)
-    return db_path, log_dir, lock_file
+    return _build_proxies_from_section(notify_section)
 
 
 def _normalize_items(section: configparser.SectionProxy) -> Dict[str, str]:

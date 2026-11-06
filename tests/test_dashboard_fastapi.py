@@ -125,13 +125,13 @@ portfolio_take_profit_enabled = true
             self.assertEqual(overview.status_code, 200)
             self.assertIn("账户总览", overview.text)
             self.assertIn("组合止损 -3.5% 已启用", overview.text)
-            self.assertIn("本周期权益曲线", overview.text)
+            self.assertIn("本周期账户权益曲线", overview.text)
             self.assertNotIn('if (mode !== "readonly") {\n      var latestMs', overview.text)
             self.assertIn('href="accounts/comparison/"', overview.text)
 
             comparison_page = client.get("/accounts/comparison/")
             self.assertEqual(comparison_page.status_code, 200)
-            self.assertIn("四账户权益，放在同一条时间线上", comparison_page.text)
+            self.assertIn("<h1>多账户权益走势同轴对比</h1>", comparison_page.text)
             self.assertIn("../../static/vendor/echarts.min.js", comparison_page.text)
             self.assertIn("pathPrefix + \"/api/accounts/equity-comparison?\"", comparison_page.text)
             self.assertNotIn('class="events-panel"', comparison_page.text)
@@ -152,7 +152,10 @@ portfolio_take_profit_enabled = true
             self.assertIn("入场价 / 标记价", compact.text)
             self.assertIn("未实现盈亏", compact.text)
             self.assertIn("止盈 / 止损", compact.text)
-            self.assertIn("名义金额优先按交易所敞口或标记价计算", compact.text)
+            self.assertIn(
+                "持仓名义价值优先基于实时标记价计算，缺失时按入场价预估；保留原始持仓张数用于对账",
+                compact.text,
+            )
 
             health = client.get("/healthz")
             self.assertEqual(health.status_code, 200)

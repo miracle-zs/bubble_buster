@@ -6,7 +6,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from scripts.migrate_historical_episodes_and_fills import HistoricalDataMigrator, MIGRATION_VERSION
+from scripts.migrate_historical_episodes_and_fills import HistoricalDataMigrator
 from core.state_store import StateStore
 
 

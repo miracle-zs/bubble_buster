@@ -18,7 +18,7 @@ import argparse
 import csv
 import json
 import sys
-from collections import Counter, defaultdict
+from collections import Counter
 from datetime import date, datetime, timedelta
 from pathlib import Path
 from statistics import mean, median
@@ -28,7 +28,6 @@ if str(SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR))
 
 from replay_independent_strategy_portfolio import (  # noqa: E402
-    ENTRY_PRECLOSE_SECONDS,
     ENTRY_WAIT_HOURS,
     EntryOrder,
     MarketData,

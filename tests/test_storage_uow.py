@@ -1,11 +1,8 @@
 """Unit tests for Unit of Work (UoW) and dual-access storage models."""
 
-import os
-import sqlite3
 import tempfile
 import unittest
 from pathlib import Path
-from typing import Any, Dict
 
 from core.state_store import StateStore
 from core.storage.models import (
@@ -16,10 +13,7 @@ from core.storage.models import (
     PositionState,
     RunRecord,
     RunState,
-    TaskExecutionRecord,
-    WalletSnapshotRecord,
 )
-from core.storage.uow import UnitOfWork, get_current_uow
 
 
 class DualAccessModelsTest(unittest.TestCase):
@@ -196,7 +190,7 @@ class UnitOfWorkTransactionTest(unittest.TestCase):
 
         pos_id = None
         try:
-            with self.store.unit_of_work() as uow:
+            with self.store.unit_of_work():
                 pos_id = self.store.insert_position(
                     run_id=run_id,
                     symbol="ETHUSDT",
@@ -233,8 +227,8 @@ class UnitOfWorkTransactionTest(unittest.TestCase):
     def test_nested_unit_of_work_savepoints(self) -> None:
         run_id, _ = self.store.create_run("2026-07-18")
 
-        with self.store.unit_of_work() as outer_uow:
-            pos1_id = self.store.insert_position(
+        with self.store.unit_of_work():
+            self.store.insert_position(
                 run_id=run_id,
                 symbol="BTCUSDT",
                 side="SHORT",
@@ -256,7 +250,7 @@ class UnitOfWorkTransactionTest(unittest.TestCase):
                 with self.store.unit_of_work() as inner_uow:
                     self.assertTrue(inner_uow.is_nested)
                     self.assertIsNotNone(inner_uow.savepoint_name)
-                    pos2_id = self.store.insert_position(
+                    self.store.insert_position(
                         run_id=run_id,
                         symbol="ETHUSDT",
                         side="SHORT",
@@ -277,7 +271,7 @@ class UnitOfWorkTransactionTest(unittest.TestCase):
                 pass
 
             # Outer continues and adds another position
-            pos3_id = self.store.insert_position(
+            self.store.insert_position(
                 run_id=run_id,
                 symbol="SOLUSDT",
                 side="SHORT",
@@ -431,7 +425,7 @@ class UnitOfWorkTransactionTest(unittest.TestCase):
         self.assertEqual(commit_calls, [])
         self.assertEqual(rollback_calls, ["rolled_back"])
 
-        with self.store.unit_of_work() as outer:
+        with self.store.unit_of_work():
             with self.store.unit_of_work() as inner:
                 inner.add_after_commit(lambda: commit_calls.append("nested_committed"))
                 inner.add_after_rollback(lambda: rollback_calls.append("nested_rolled_back"))

@@ -66,7 +66,6 @@ class BinanceUserStreamState:
         self._certain = False
         self._connected = False
         self._last_verified_monotonic = 0.0
-        self._last_event_monotonic = 0.0
         self._last_error: Optional[str] = "STARTUP_UNVERIFIED"
         self._verify_failure_count = 0
         self._next_verify_monotonic = 0.0
@@ -298,7 +297,6 @@ class BinanceUserStreamState:
         event_type = str(payload.get("e") or "").strip()
         event_time = _event_time_iso(payload)
         with self._lock:
-            self._last_event_monotonic = time.monotonic()
             # Stream events are deltas, so they cannot establish a complete
             # baseline after startup/reconnect. Only successful REST
             # verification may transition uncertain -> certain.

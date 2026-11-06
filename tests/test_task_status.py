@@ -1,6 +1,5 @@
 """Unit tests for core/task_status.py pure formatting functions."""
 
-import pytest
 from core.task_status import (
     append_summary_part,
     format_symbol_field,

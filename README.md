@@ -93,11 +93,13 @@ flowchart LR
 PROJECT_DIR=/root/bubble_buster
 cd "$PROJECT_DIR"
 python3 -m pip install -r requirements.txt
-cp config.ini.example config.ini
+cp config.production.multi.ini.example config.ini
 ```
 
-至少填写：
-- `[binance]` `api_key` / `api_secret`
+按实际账户修改模板：
+- `[accounts] enabled`：只保留需要运行的账户，并为每个启用账户设置 `mode.<account_id>`（`full` / `loss_cut_only` / `readonly`）。
+- `[account.<account_id>.binance] api_key` / `api_secret`：替换每个启用账户的占位凭证。这些值会覆盖全局 `[binance]`，不能只修改全局凭证。
+- `[runtime] default_account_id`：设为启用列表中的一个账户；按需同步 `[accounts] equity_comparison_accounts`。
 - `[notify]` `enabled` / `serverchan_sendkey`（可选）
 
 ---
@@ -161,7 +163,7 @@ python3 main.py --config /root/bubble_buster/config.ini loss-cut
 
 ### 配置隔离（必须）
 
-账户 B 使用单独配置：`config_b.ini`（项目已提供模板）。
+账户 B 使用单独配置：复制 `config.production.multi.ini.example` 为 `config_b.ini`，只启用该账户并设置 `mode.<account_id> = loss_cut_only`。
 
 关键项：
 - `daily_loss_cut_enabled = true`
@@ -471,8 +473,7 @@ bubble_buster/
 │   ├── binance_top10_monitor.py
 │   └── notifier.py
 ├── schema.sql
-├── config.ini.example
-├── config_b.ini
+├── config.production.multi.ini.example
 ├── cron.example
 └── tests/
 ```

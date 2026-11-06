@@ -1,5 +1,4 @@
 from datetime import date, datetime, timezone
-import pytest
 
 from core.risk.evaluators import (
     calculate_merged_stop_loss,

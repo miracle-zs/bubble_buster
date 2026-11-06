@@ -5,11 +5,10 @@ from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from typing import Dict
 from pathlib import Path
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 from dashboard_server import (
     DashboardDataProvider,
-    _safe_query_int,
     render_account_dashboard_html,
     render_accounts_overview_html,
 )
@@ -297,7 +296,8 @@ class DashboardServerTest(unittest.TestCase):
         )
         self.assertEqual(overview_row["portfolio_loss_cut"]["status"], "TRIGGERED_COMPLETE")
 
-    def test_snapshot_enriches_positions_from_live_exchange_data(self) -> None:
+    @patch("socket.socket.connect")
+    def test_snapshot_enriches_positions_from_live_exchange_data(self, connect) -> None:
         run_id, _ = self.store.create_run("2026-02-13")
         now = datetime.now(timezone.utc).replace(microsecond=0)
         self.store.insert_position(
@@ -357,15 +357,12 @@ class DashboardServerTest(unittest.TestCase):
             },
             source="USER_STREAM",
         )
-        live_client = Mock()
-
         provider = DashboardDataProvider(
             db_path=self.db_path,
             log_file=self.log_file,
             timezone_name="UTC",
             entry_hour=7,
             entry_minute=40,
-            live_position_clients={"default": live_client},
         )
 
         row = provider.snapshot(log_lines=0)["open_positions"][0]
@@ -378,12 +375,10 @@ class DashboardServerTest(unittest.TestCase):
         self.assertEqual(row["notional_source"], "MARK_PRICE")
         self.assertEqual(row["tp_order_status"], "NEW")
         self.assertEqual(row["sl_order_status"], "NEW")
-        live_client.get_position_risk.assert_not_called()
-        live_client.get_open_orders.assert_not_called()
+        connect.assert_not_called()
 
-    def test_readonly_snapshot_shows_exchange_positions_without_strategy_rows(self) -> None:
-        live_client = Mock()
-        default_client = Mock()
+    @patch("socket.socket.connect")
+    def test_readonly_snapshot_shows_exchange_positions_without_strategy_rows(self, connect) -> None:
         readonly_store = self.store.scoped("readonly01")
         readonly_store.replace_account_state(
             captured_at_utc=datetime.now(timezone.utc).replace(microsecond=0).isoformat(),
@@ -449,7 +444,6 @@ class DashboardServerTest(unittest.TestCase):
             entry_minute=40,
             account_modes={"readonly01": "readonly"},
             overview_account_ids=["readonly01"],
-            live_position_clients={"readonly01": live_client, "default": default_client},
         )
 
         snapshot = provider.snapshot(
@@ -485,16 +479,12 @@ class DashboardServerTest(unittest.TestCase):
         self.assertEqual(row["sl_order_status"], "NEW")
         self.assertEqual(row["tp_order_id"], 1001)
         self.assertEqual(row["sl_order_id"], 1002)
-        live_client.get_position_risk.assert_not_called()
-        live_client.get_open_orders.assert_not_called()
-        live_client.get_account.assert_not_called()
-        default_client.get_position_risk.assert_not_called()
 
         summary_row = provider.accounts_summary()["accounts"][0]
         self.assertEqual(summary_row["account_id"], "readonly01")
         self.assertEqual(summary_row["open_positions"], 1)
         self.assertEqual(summary_row["open_symbols"], 1)
-        live_client.get_position_risk.assert_not_called()
+        connect.assert_not_called()
 
     def test_snapshot_without_trade_stats_still_returns_curve_stats(self) -> None:
         now = datetime.now(timezone.utc).replace(microsecond=0)
@@ -2228,7 +2218,11 @@ class DashboardServerTest(unittest.TestCase):
         self.assertNotIn("rows.sort(function (a, b)", html)
         self.assertNotIn("toggleSymbolDetail", html)
         self.assertNotIn(".task-symbol-toggle", html)
-        self.assertNotIn('title="', html)
+        self.assertIn(
+            'title="按周期首条权益快照计算，含浮盈亏，不等同已实现净盈亏" '
+            'aria-label="按周期首条权益快照计算，含浮盈亏，不等同已实现净盈亏"',
+            html,
+        )
 
     def test_render_overview_throttles_refresh_and_uses_lightweight_curve_points(self) -> None:
         html = render_accounts_overview_html(refresh_sec=5)
@@ -2236,12 +2230,6 @@ class DashboardServerTest(unittest.TestCase):
         self.assertIn("setInterval(fetchSummary, Math.max(15, refreshSec) * 1000)", html)
         self.assertIn('/curve"', html)
         self.assertIn("?window_hours=24&curve_points=160", html)
-
-    def test_safe_query_int_handles_invalid_values(self) -> None:
-        self.assertEqual(_safe_query_int("abc", default=80, min_value=0, max_value=300), 80)
-        self.assertEqual(_safe_query_int(None, default=80, min_value=0, max_value=300), 80)
-        self.assertEqual(_safe_query_int("9999", default=80, min_value=0, max_value=300), 300)
-        self.assertEqual(_safe_query_int("-1", default=80, min_value=0, max_value=300), 0)
 
     def test_live_wallet_snapshot_uses_configured_account_id(self) -> None:
         calls = {"n": 0}

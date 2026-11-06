@@ -1,11 +1,8 @@
 """Tests for DashboardDataProvider.cached_snapshot short-TTL cache."""
 
-import copy
 import sqlite3
-import tempfile
 import time
 import threading
-from unittest.mock import patch
 
 import pytest
 

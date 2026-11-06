@@ -1,11 +1,9 @@
 import logging
-import math
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from functools import wraps
 import hashlib
-from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
 from datetime import date, datetime, time as dt_time, timedelta, timezone
 from typing import Any, Callable, Dict, Iterator, List, Optional, Set, Tuple
@@ -46,13 +44,6 @@ def _serialized_account_mutation(method):
 
 
 from core.strategy import (
-    ENTRY_PHASE_COMPLETE,
-    ENTRY_PHASE_INITIAL,
-    ENTRY_PHASE_POST_INITIAL_CANDLE,
-    ENTRY_PHASE_WAIT_BEARISH,
-    ENTRY_PHASE_WAIT_BULLISH,
-    ENTRY_STAGE_INITIAL,
-    ENTRY_STAGE_SCALE_IN,
     EntryStructureWindow,
     MarketRankScanner,
     PlannedOrder,
@@ -66,7 +57,6 @@ from core.strategy import (
 
 class Top10ShortStrategy:
     INSUFFICIENT_MARGIN_ERROR_CODES = {-2019, -2027, -2028}
-    COOLING_OFF_ERROR_CODES = {-4192}
     REBALANCE_MODE_EQUAL_RISK = "equal_risk"
     REBALANCE_MODE_AGE_DECAY = "age_decay"
     EQUITY_RECOVERY_LOCK_NAME = "equity_recovery_take_profit_v1"
@@ -141,10 +131,8 @@ class Top10ShortStrategy:
         mutation_lock: Optional[Any] = None,
         order_state: Optional[Any] = None,
         snapshot_provider: Optional[AccountSnapshotProvider] = None,
-        non_blocking_entry_wait: bool = False,
     ):
         self.client = client
-        self.non_blocking_entry_wait = bool(non_blocking_entry_wait)
         self.store = store
         self.notifier = notifier
         self.leverage = leverage
@@ -2833,7 +2821,7 @@ class Top10ShortStrategy:
                     )
                     continue
 
-                order = self.exit_executor.close_market_order(
+                self.exit_executor.close_market_order(
                     symbol=symbol,
                     qty=reduce_qty,
                     side="BUY",
@@ -3510,13 +3498,6 @@ class Top10ShortStrategy:
             try:
                 if plan.side == "SELL":
                     self._ensure_sell_mode_for_rebalance(symbol=plan.symbol, risk=risk_map.get(plan.symbol))
-                order_params: Dict[str, object] = {
-                    "symbol": plan.symbol,
-                    "side": plan.side,
-                    "type": "MARKET",
-                    "quantity": self.client.format_order_qty(plan.symbol, plan.qty),
-                    "newOrderRespType": "RESULT",
-                }
                 if plan.side == "BUY":
                     order = self.exit_executor.close_market_order(
                         symbol=plan.symbol,
@@ -3654,16 +3635,6 @@ class Top10ShortStrategy:
             now_utc=self._utc_now_datetime(),
             half_life_hours=self.rebalance_age_decay_half_life_hours,
         )
-
-    def _age_decay_weight(self, age_hours: float) -> float:
-        return RebalanceCalculator.age_decay_weight(
-            age_hours=age_hours,
-            half_life_hours=self.rebalance_age_decay_half_life_hours,
-        )
-
-    @classmethod
-    def _position_age_hours(cls, pos: Dict[str, object], now_utc: datetime) -> float:
-        return RebalanceCalculator.position_age_hours(pos=pos, now_utc=now_utc)
 
     @staticmethod
     def _parse_iso_utc(text: str) -> datetime:
@@ -4562,11 +4533,6 @@ class Top10ShortStrategy:
             return True
         msg = str(exc.message or "").lower()
         return "insufficient" in msg and "margin" in msg
-
-    @classmethod
-    def _is_cooling_off_error(cls, exc: BinanceAPIError) -> bool:
-        code = cls._safe_int(getattr(exc, "code", None))
-        return code in cls.COOLING_OFF_ERROR_CODES
 
     @staticmethod
     def _is_rate_limit_error(exc: BaseException) -> bool:

@@ -9,11 +9,8 @@ import glob
 import re
 import threading
 from contextlib import contextmanager
-from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any, Callable, Dict, List, Optional, Set, Tuple
-from urllib.parse import parse_qs, urlparse
 from zoneinfo import ZoneInfo
 
 from core.state_store import SQLITE_BUSY_TIMEOUT_MS
@@ -34,19 +31,6 @@ PORTFOLIO_TAKE_PROFIT_LAUNCH_AT_UTC = "2026-08-10T01:32:10+00:00"
 PORTFOLIO_LOSS_CUT_LOCK_NAME = "portfolio_loss_cut_v1"
 
 
-@dataclass(frozen=True)
-class DashboardServerConfig:
-    host: str
-    port: int
-    db_path: str
-    log_file: str
-    timezone_name: str
-    entry_hour: int
-    entry_minute: int
-    refresh_sec: int
-    curve_points: int = 600
-
-
 class DashboardDataProvider:
     def __init__(
         self,
@@ -65,7 +49,6 @@ class DashboardDataProvider:
         equity_comparison_account_ids: Optional[List[str]] = None,
         live_wallet_account_id: str = "default",
         trade_stats_fetchers: Optional[Dict[str, Any]] = None,
-        live_position_clients: Optional[Dict[str, Any]] = None,
         live_position_cache_ttl_sec: int = 30,
     ):
         self.db_path = db_path
@@ -112,11 +95,6 @@ class DashboardDataProvider:
         )
         self.live_wallet_account_id = (live_wallet_account_id or "").strip() or "default"
         self.trade_stats_fetchers = trade_stats_fetchers or {}
-        self.live_position_clients = {
-            str(k).strip(): v
-            for k, v in (live_position_clients or {}).items()
-            if str(k).strip() and v is not None
-        }
         self.live_position_cache_ttl_sec = max(5, int(live_position_cache_ttl_sec))
         self._readonly_position_cache: Dict[str, Tuple[datetime, List[Dict[str, Any]]]] = {}
         self._readonly_position_cache_errors: Dict[str, Optional[str]] = {}
@@ -132,14 +110,6 @@ class DashboardDataProvider:
         except Exception:  # noqa: BLE001
             LOGGER.warning("Invalid dashboard timezone=%s, fallback UTC", timezone_name)
             self.local_tz = timezone.utc
-
-    def set_live_position_clients(self, clients: Optional[Dict[str, Any]]) -> None:
-        """Attach account-scoped exchange clients without persisting live risk data."""
-        self.live_position_clients = {
-            str(k).strip(): v
-            for k, v in (clients or {}).items()
-            if str(k).strip() and v is not None
-        }
 
     @staticmethod
     def _live_order_status(
@@ -360,21 +330,6 @@ class DashboardDataProvider:
                 -int(order.get("order_id") or 0) if str(order.get("order_id") or "").isdigit() else 0,
             ),
         )[0]
-
-    @staticmethod
-    def _account_position_index(account_payload: Any) -> Dict[Tuple[str, str], Dict[str, Any]]:
-        if not isinstance(account_payload, dict):
-            return {}
-        result: Dict[Tuple[str, str], Dict[str, Any]] = {}
-        for row in account_payload.get("positions") or []:
-            if not isinstance(row, dict):
-                continue
-            symbol = str(row.get("symbol") or "").strip().upper()
-            if not symbol:
-                continue
-            position_side = str(row.get("positionSide") or "BOTH").strip().upper() or "BOTH"
-            result[(symbol, position_side)] = row
-        return result
 
     def _local_exchange_risks(self, account_id: str) -> List[Dict[str, Any]]:
         """Read the latest persisted account snapshot in Binance-shaped rows."""
@@ -763,37 +718,6 @@ class DashboardDataProvider:
                 return default
 
     @staticmethod
-    def _status_from_error_count(errors: int, successes: int) -> str:
-        if errors <= 0:
-            return "SUCCESS"
-        if successes > 0:
-            return "PARTIAL"
-        return "FAILED"
-
-    @staticmethod
-    def _format_symbol_field(value: Any) -> str:
-        if isinstance(value, str):
-            symbols = [x.strip().upper() for x in value.split(",") if x.strip()]
-        elif isinstance(value, list):
-            symbols = [str(x).strip().upper() for x in value if str(x).strip()]
-        else:
-            symbols = []
-        if not symbols:
-            return "-"
-        unique: List[str] = []
-        for sym in symbols:
-            if sym not in unique:
-                unique.append(sym)
-        return ",".join(unique)
-
-    @staticmethod
-    def _append_summary_part(parts: List[str], key: str, value: Any) -> None:
-        text = str(value).strip()
-        if text == "" or text == "-":
-            return
-        parts.append(f"{key}={text}")
-
-    @staticmethod
     def _log_time_from_line(line: str) -> Optional[str]:
         if len(line) < 19:
             return None
@@ -811,19 +735,6 @@ class DashboardDataProvider:
         time_local: Optional[str],
     ) -> Dict[str, Any]:
         return format_task_status(task_key, payload, time_local)
-
-    @staticmethod
-    def _read_log_lines(path: str, max_lines: int = 25000) -> List[str]:
-        if not os.path.exists(path):
-            return []
-        try:
-            with open(path, "r", encoding="utf-8") as f:
-                lines = f.read().splitlines()
-            if max_lines > 0 and len(lines) > max_lines:
-                return lines[-max_lines:]
-            return lines
-        except OSError:
-            return []
 
     @staticmethod
     def _read_task_log_lines(path: str, markers: Tuple[str, ...]) -> List[str]:
@@ -1369,7 +1280,6 @@ class DashboardDataProvider:
             if entry_failed_count is None:
                 entry_failed_count = max(0, failed_count - exit_setup_failed_count)
             skipped_count = self._run_message_count(message, "skipped_existing", default=0) or 0
-            entry_deferred_count = self._run_message_count(message, "entry_deferred", default=0) or 0
             scale_in_failed_count = self._run_message_count(message, "scale_in_failed", default=0) or 0
             scale_in_skipped_count = self._run_message_count(message, "scale_in_skipped", default=0) or 0
             waiting_count = len(waiting_symbols)
@@ -3847,10 +3757,6 @@ def render_accounts_overview_html(
     )
 
 
-def _json_bytes(payload: Dict[str, Any]) -> bytes:
-    return json.dumps(payload, ensure_ascii=False).encode("utf-8")
-
-
 _CURVE_PAYLOAD_KEYS = {
     "strategy_equity_curve",
     "balance_curve",
@@ -3865,205 +3771,3 @@ def _strip_curve_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
     for key in _CURVE_PAYLOAD_KEYS:
         payload.pop(key, None)
     return payload
-
-
-def _safe_query_int(
-    raw_value: Optional[str],
-    default: int,
-    min_value: int,
-    max_value: int,
-) -> int:
-    try:
-        value = int(raw_value) if raw_value not in (None, "") else int(default)
-    except (TypeError, ValueError):
-        value = int(default)
-    return max(min_value, min(max_value, value))
-
-
-def _make_handler(provider: DashboardDataProvider, cfg: DashboardServerConfig):
-    class Handler(BaseHTTPRequestHandler):
-        def do_GET(self) -> None:  # noqa: N802
-            parsed = urlparse(self.path)
-            path = parsed.path
-
-            if path == "/":
-                body = render_dashboard_html(cfg.refresh_sec).encode("utf-8")
-                self.send_response(200)
-                self.send_header("Content-Type", "text/html; charset=utf-8")
-                self.send_header("Content-Length", str(len(body)))
-                self.end_headers()
-                self.wfile.write(body)
-                return
-
-            if path in {"/api/dashboard", "/api/dashboard/core", "/api/dashboard/details"}:
-                params = parse_qs(parsed.query)
-                lines = _safe_query_int(
-                    params.get("log_lines", ["80"])[0],
-                    default=80,
-                    min_value=0,
-                    max_value=300,
-                )
-                window_hours_raw = params.get("window_hours", [None])[0]
-                curve_points_raw = params.get("curve_points", [None])[0]
-                include_details = path != "/api/dashboard/core"
-                include_log = path != "/api/dashboard/core"
-                include_curves = path != "/api/dashboard/details"
-                include_balance_curve = path != "/api/dashboard/core"
-                include_trade_stats = path != "/api/dashboard/core"
-                window_hours: Optional[float] = None
-                curve_points: Optional[int] = None
-                try:
-                    if window_hours_raw not in (None, ""):
-                        window_hours = float(window_hours_raw)
-                except ValueError:
-                    window_hours = None
-                try:
-                    if curve_points_raw not in (None, ""):
-                        curve_points = int(curve_points_raw)
-                except ValueError:
-                    curve_points = None
-                body = _json_bytes(
-                    provider.snapshot(
-                        log_lines=min(lines, 300),
-                        window_hours=window_hours,
-                        curve_points=curve_points,
-                        include_details=include_details,
-                        include_log=include_log,
-                        include_curves=include_curves,
-                        include_balance_curve=include_balance_curve,
-                        include_trade_stats=include_trade_stats,
-                    )
-                )
-                self.send_response(200)
-                self.send_header("Content-Type", "application/json; charset=utf-8")
-                self.send_header("Cache-Control", "no-store")
-                self.send_header("Content-Length", str(len(body)))
-                self.end_headers()
-                self.wfile.write(body)
-                return
-
-            if path == "/api/accounts/summary":
-                body = _json_bytes(provider.accounts_summary())
-                self.send_response(200)
-                self.send_header("Content-Type", "application/json; charset=utf-8")
-                self.send_header("Cache-Control", "no-store")
-                self.send_header("Content-Length", str(len(body)))
-                self.end_headers()
-                self.wfile.write(body)
-                return
-
-            if path.startswith("/api/account/"):
-                account_suffix = path[len("/api/account/") :].strip()
-                include_details = True
-                include_log = True
-                include_curves = True
-                endpoint_kind = ""
-                account_id = ""
-                if account_suffix.endswith("/snapshot"):
-                    endpoint_kind = "snapshot"
-                    account_id = account_suffix[: -len("/snapshot")].strip().strip("/")
-                elif account_suffix.endswith("/core"):
-                    endpoint_kind = "core"
-                    account_id = account_suffix[: -len("/core")].strip().strip("/")
-                    include_details = False
-                    include_log = False
-                    include_curves = False
-                elif account_suffix.endswith("/details"):
-                    endpoint_kind = "details"
-                    account_id = account_suffix[: -len("/details")].strip().strip("/")
-                    include_curves = False
-                elif account_suffix.endswith("/curve"):
-                    endpoint_kind = "curve"
-                    account_id = account_suffix[: -len("/curve")].strip().strip("/")
-                    include_details = False
-                    include_log = False
-                else:
-                    account_id = ""
-                if not account_id:
-                    self.send_response(404)
-                    self.end_headers()
-                    return
-                params = parse_qs(parsed.query)
-                lines = _safe_query_int(
-                    params.get("log_lines", ["80"])[0],
-                    default=80,
-                    min_value=0,
-                    max_value=300,
-                )
-                window_hours_raw = params.get("window_hours", [None])[0]
-                curve_points_raw = params.get("curve_points", [None])[0]
-                window_hours: Optional[float] = None
-                curve_points: Optional[int] = None
-                try:
-                    if window_hours_raw not in (None, ""):
-                        window_hours = float(window_hours_raw)
-                except ValueError:
-                    window_hours = None
-                try:
-                    if curve_points_raw not in (None, ""):
-                        curve_points = int(curve_points_raw)
-                except ValueError:
-                    curve_points = None
-                payload = provider.snapshot(
-                    log_lines=min(lines, 300),
-                    window_hours=window_hours,
-                    curve_points=curve_points,
-                    account_id=account_id or None,
-                    include_details=include_details,
-                    include_log=include_log,
-                    include_curves=include_curves,
-                    include_balance_curve=include_curves,
-                    include_trade_stats=endpoint_kind in {"snapshot", "core"},
-                )
-                if endpoint_kind == "core":
-                    payload = _strip_curve_payload(payload)
-                body = _json_bytes(payload)
-                self.send_response(200)
-                self.send_header("Content-Type", "application/json; charset=utf-8")
-                self.send_header("Cache-Control", "no-store")
-                self.send_header("Content-Length", str(len(body)))
-                self.end_headers()
-                self.wfile.write(body)
-                return
-
-            if path == "/healthz":
-                body = _json_bytes({"ok": True})
-                self.send_response(200)
-                self.send_header("Content-Type", "application/json; charset=utf-8")
-                self.send_header("Content-Length", str(len(body)))
-                self.end_headers()
-                self.wfile.write(body)
-                return
-
-            self.send_response(404)
-            self.end_headers()
-
-        def log_message(self, fmt: str, *args: Any) -> None:  # noqa: A003
-            LOGGER.debug("dashboard_http: " + fmt, *args)
-
-    return Handler
-
-
-def run_dashboard_server(cfg: DashboardServerConfig) -> None:
-    provider = DashboardDataProvider(
-        db_path=cfg.db_path,
-        log_file=cfg.log_file,
-        timezone_name=cfg.timezone_name,
-        entry_hour=cfg.entry_hour,
-        entry_minute=cfg.entry_minute,
-        default_curve_points=cfg.curve_points,
-    )
-    handler_cls = _make_handler(provider=provider, cfg=cfg)
-
-    server = ThreadingHTTPServer((cfg.host, cfg.port), handler_cls)
-    LOGGER.info(
-        "dashboard server started: http://%s:%s (db=%s, log=%s)",
-        cfg.host,
-        cfg.port,
-        cfg.db_path,
-        cfg.log_file,
-    )
-    try:
-        server.serve_forever()
-    finally:
-        server.server_close()

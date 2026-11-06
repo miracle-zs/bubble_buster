@@ -9,7 +9,7 @@ import time
 from contextlib import contextmanager
 from datetime import datetime
 from logging.handlers import TimedRotatingFileHandler
-from typing import Any, Dict, Iterator, Optional
+from typing import Any, Dict, Iterator
 from zoneinfo import ZoneInfo
 
 from core.runtime_components import create_components, resolve_path

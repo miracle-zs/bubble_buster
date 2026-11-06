@@ -11,7 +11,7 @@ runs, order events, and execution records. All records inherit from `DualAccessR
 from __future__ import annotations
 
 import json
-from typing import Any, Dict, List, Optional, Tuple, Type, TypeVar
+from typing import Any, Dict, Optional, Tuple, Type, TypeVar
 
 T = TypeVar("T", bound="DualAccessRecord")
 

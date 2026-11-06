@@ -369,6 +369,7 @@ class RuntimeServiceTest(unittest.TestCase):
         service, _, _, _ = self._create_service(entry_hour=7, entry_minute=40)
         coordinator = MagicMock()
         coordinator.step.return_value = {"status": "COMPLETED", "opened": 0, "errors": 0}
+        coordinator.check_entry_plan_wakeups.return_value = None
         service.account_runtimes["default"]["coordinator"] = coordinator
         service._get_entry_ranking = MagicMock(return_value=[])
         due = datetime(2026, 2, 13, 7, 40, tzinfo=ZoneInfo("UTC"))
@@ -376,6 +377,7 @@ class RuntimeServiceTest(unittest.TestCase):
         self.assertTrue(_wait_until(lambda: (service._collect_entry_futures(due) or not service._entry_futures)))
         self.assertEqual(service._last_entry_local_date_by_account.get("default"), due.date())
         service.run_cycle(now_local=due, now_monotonic=101.0)
+        self.assertFalse(service._entry_futures)
         entries = [c for c in coordinator.step.call_args_list if c.kwargs.get("action") == "entry"]
         self.assertEqual(len(entries), 1)
 

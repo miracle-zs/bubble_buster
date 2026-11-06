@@ -21,7 +21,6 @@ import time
 import uuid
 from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Set, Tuple
 
-from infra.binance_futures_client import BinanceFuturesClient
 from core.execution.engine import ExecutionEngine, sanitize_client_order_id
 from core.execution.ledger import TradingLedger
 from core.execution.models import (
@@ -33,7 +32,6 @@ from core.execution.models import (
     OrderAttempt,
     OrderIntent,
     PositionEpisode,
-    TaskOccurrence,
     utc_now_iso,
 )
 from core.state_store import StateStore
@@ -270,9 +268,6 @@ class AccountCoordinator:
         episodes_map: Dict[str, PositionEpisode] = {
             ep.symbol: ep for ep in open_episodes_list
         }
-
-        # Load in-flight intents
-        active_intents = self.ledger.list_active_intents()
 
         bal = wallet_balance if wallet_balance is not None else 1000.0
         eq = equity if equity is not None else (bal + total_unrealized_pnl)

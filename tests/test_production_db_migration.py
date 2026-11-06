@@ -1,6 +1,5 @@
 """Test proving production database migration and verification."""
 
-import os
 import sqlite3
 import unittest
 from pathlib import Path

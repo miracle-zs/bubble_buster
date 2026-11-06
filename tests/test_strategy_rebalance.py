@@ -1732,7 +1732,6 @@ class StrategyRebalanceTest(unittest.TestCase):
         )
         inserted = store.insert_position.call_args.kwargs
         self.assertEqual(inserted["status"], "PENDING_ENTRY")
-        entry_fill = store.set_position_entry_fill.call_args.kwargs
         kwargs = store.set_entry_structure_protection.call_args.kwargs
         self.assertEqual(kwargs["stop_price"], 0.02590)
         self.assertEqual(kwargs["position_id"], 5618)

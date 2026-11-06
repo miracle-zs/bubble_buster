@@ -15,8 +15,6 @@ from core.risk import (
     CentralExitExecutor,
     DailyLossCutEvaluationInput,
     DynamicStopEvaluationInput,
-    ExitActionType,
-    ExitIntent,
     HourlyExchangeTakeProfitEvaluationInput,
     MorningProtectionEvaluationInput,
     NoonProtectionEvaluationInput,
@@ -29,7 +27,6 @@ from core.risk import (
     evaluate_noon_protection_candidate,
     evaluate_portfolio_loss_cut_threshold,
     evaluate_portfolio_take_profit_threshold,
-    is_immediate_trigger_error,
     is_morning_protection_hold_satisfied,
     resolve_morning_protection_old_sl,
 )
@@ -1888,40 +1885,6 @@ class PositionManager:
         # legitimately execute less than the previous order's quantity.
         item["portfolio_fill_recorded_qty"] = 0.0
 
-    def _build_portfolio_take_profit_reduction_plan(
-        self,
-        reduce_ratio: float,
-    ) -> List[Dict[str, object]]:
-        risks = self._get_all_position_risks()
-        plan: List[Dict[str, object]] = []
-        for risk in risks:
-            symbol = str(risk.get("symbol") or "").strip().upper()
-            if not symbol or self._is_protection_exempt(symbol):
-                continue
-            position_amt = self._safe_float(risk.get("positionAmt"), default=0.0)
-            initial_qty = abs(position_amt)
-            if initial_qty <= 1e-12:
-                continue
-            position_side = str(risk.get("positionSide") or "BOTH").strip().upper() or "BOTH"
-            tracked_pos = (
-                self._find_open_position_for_exchange_symbol(symbol)
-                if position_amt < 0
-                else None
-            )
-            plan.append(
-                {
-                    "key": f"{symbol}:{position_side}",
-                    "symbol": symbol,
-                    "position_side": position_side,
-                    "initial_qty": initial_qty,
-                    "target_remaining_qty": initial_qty * (1.0 - reduce_ratio),
-                    "tracked_position_id": int(tracked_pos["id"]) if tracked_pos is not None else None,
-                    "action_complete": False,
-                    "protection_complete": tracked_pos is None,
-                }
-            )
-        return plan
-
     def _execute_portfolio_take_profit_reduction_plan(
         self,
         reduction_plan: List[Dict[str, object]],
@@ -2473,8 +2436,6 @@ class PositionManager:
         caps = self._load_morning_protection_caps()
         caps_updated_at_by_key = self._load_morning_protection_updated_at_by_key()
         active_cap_keys = set()
-        min_hold_seconds = max(0.0, float(min_hold_hours)) * 3600.0
-
         for risk in candidate_risks:
             symbol = str(risk.get("symbol") or "").strip()
             position_amt = self._safe_float(risk.get("positionAmt"), default=0.0)
@@ -3336,30 +3297,6 @@ class PositionManager:
             client_id_tag=client_id_tag,
         )
 
-    def _close_protection_immediate(
-        self,
-        symbol: str,
-        qty: float,
-        side: str,
-        position_id: Optional[int],
-        position_side: Optional[str] = None,
-        use_reduce_only: bool = True,
-        close_status: str = "CLOSED_NOON_PROTECTION",
-        close_reason: str = "NOON_PROTECTION_IMMEDIATE_TRIGGER",
-        client_id_tag: str = "nsi",
-    ) -> Dict[str, object]:
-        return self.exit_executor.close_protection_immediate(
-            symbol=symbol,
-            qty=qty,
-            side=side,
-            position_id=position_id,
-            position_side=position_side,
-            use_reduce_only=use_reduce_only,
-            close_status=close_status,
-            close_reason=close_reason,
-            client_id_tag=client_id_tag,
-        )
-
     @staticmethod
     def _resolve_close_side_for_exchange_position(
         position_amt: float,
@@ -3374,10 +3311,6 @@ class PositionManager:
             return "BUY", False
         # One-way mode (BOTH).
         return ("BUY" if position_amt < 0 else "SELL"), True
-
-    @staticmethod
-    def _is_immediate_trigger_error(exc: BinanceAPIError) -> bool:
-        return is_immediate_trigger_error(exc)
 
     def _update_dynamic_stop(
         self,
@@ -3664,66 +3597,6 @@ class PositionManager:
             position_id=position_id,
             order=order,
         )
-
-    def _build_close_fill_payload_from_user_trades(
-        self,
-        symbol: str,
-        order: Dict[str, Any],
-    ) -> Optional[Dict[str, Any]]:
-        order_id = self._safe_optional_int(order.get("actualOrderId")) or self._safe_optional_int(order.get("orderId"))
-        if order_id is None:
-            return None
-        try:
-            trades = self.client.get_user_trades(symbol=symbol, order_id=order_id, limit=1000)
-        except Exception as exc:  # noqa: BLE001
-            LOGGER.debug("get_user_trades failed for %s/%s: %s", symbol, order_id, exc)
-            return None
-
-        buy_trades = [
-            trade for trade in trades
-            if str(trade.get("side") or "").strip().upper() == "BUY"
-            and self._safe_float(trade.get("qty"), default=0.0) > 0
-        ]
-        if not buy_trades:
-            return None
-
-        executed_qty = sum(self._safe_float(trade.get("qty"), default=0.0) for trade in buy_trades)
-        quote_qty = sum(self._safe_float(trade.get("quoteQty"), default=0.0) for trade in buy_trades)
-        if executed_qty <= 0:
-            return None
-        avg_price = quote_qty / executed_qty if quote_qty > 0 else None
-        if avg_price is None:
-            weighted = sum(
-                self._safe_float(trade.get("qty"), default=0.0) * self._safe_float(trade.get("price"), default=0.0)
-                for trade in buy_trades
-            )
-            avg_price = weighted / executed_qty if weighted > 0 else None
-        if avg_price is None or avg_price <= 0:
-            return None
-
-        event_time_ms = max(int(self._safe_float(trade.get("time"), default=0.0)) for trade in buy_trades)
-        event_time_utc = datetime.fromtimestamp(event_time_ms / 1000.0, tz=timezone.utc).replace(microsecond=0).isoformat()
-        return {
-            "orderId": order_id,
-            "clientOrderId": order.get("clientOrderId") or order.get("clientAlgoId"),
-            "type": order.get("type") or order.get("orderType") or "MARKET",
-            "side": "BUY",
-            "price": str(avg_price),
-            "origQty": str(executed_qty),
-            "executedQty": str(executed_qty),
-            "cumQuote": str(quote_qty) if quote_qty > 0 else None,
-            "avgPrice": str(avg_price),
-            "status": "FILLED",
-            "reduceOnly": order.get("reduceOnly", True),
-            "realizedPnl": str(sum(self._safe_float(trade.get("realizedPnl"), default=0.0) for trade in buy_trades)),
-            "commission": str(sum(self._safe_float(trade.get("commission"), default=0.0) for trade in buy_trades)),
-            "commissionAsset": str(buy_trades[-1].get("commissionAsset") or "").upper() or None,
-            "time": event_time_ms,
-            "eventTime": event_time_utc,
-            "source": "userTrades",
-            "rawOrder": order,
-            "trades": buy_trades,
-        }
 
     def _cancel_exit_orders(self, pos: Dict[str, object]) -> None:
         symbol = str(pos["symbol"])
