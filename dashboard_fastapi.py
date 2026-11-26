@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Literal, Optional
 
 from fastapi import FastAPI, HTTPException, Query, Request
+from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
@@ -599,6 +600,7 @@ def _shutdown_trade_stats_background_refresh(app: FastAPI) -> None:
 
 def create_app(config_path: Optional[str] = None) -> FastAPI:
     app = FastAPI(title="Bubble Buster Dashboard", version="1.1.0")
+    app.add_middleware(GZipMiddleware, minimum_size=1024)
     static_root = (Path(__file__).resolve().parent / "app_static").resolve()
     static_root.mkdir(parents=True, exist_ok=True)
     app.mount("/static", StaticFiles(directory=str(static_root)), name="static")
@@ -612,6 +614,9 @@ def create_app(config_path: Optional[str] = None) -> FastAPI:
                 headers={"Allow": "GET, HEAD, OPTIONS"},
             )
         response = await call_next(request)
+        response.headers.setdefault("X-Content-Type-Options", "nosniff")
+        response.headers.setdefault("X-Frame-Options", "SAMEORIGIN")
+        response.headers.setdefault("Referrer-Policy", "same-origin")
         if request.url.path.startswith("/static/") and response.status_code in {200, 304}:
             response.headers["Cache-Control"] = "public, max-age=604800, stale-while-revalidate=86400"
         return response
@@ -644,6 +649,13 @@ def create_app(config_path: Optional[str] = None) -> FastAPI:
     @app.get("/", response_class=HTMLResponse)
     def overview_page(request: Request):
         ctx: DashboardRuntimeContext = request.app.state.ctx
+        nav_accounts = sorted(
+            (
+                {"id": aid, "mode": ctx.provider.account_modes.get(aid, "full")}
+                for aid in ctx.provider.overview_account_ids
+            ),
+            key=lambda item: (1 if str(item["mode"]).lower() == "readonly" else 0, item["id"]),
+        )
         return HTMLResponse(
             render_accounts_overview_html(
                 ctx.refresh_sec,
@@ -653,6 +665,7 @@ def create_app(config_path: Optional[str] = None) -> FastAPI:
                 portfolio_loss_cut_pct=ctx.portfolio_loss_cut_pct,
                 portfolio_loss_cut_hour=ctx.portfolio_loss_cut_hour,
                 portfolio_loss_cut_minute=ctx.portfolio_loss_cut_minute,
+                nav_accounts=nav_accounts,
             )
         )
 
@@ -669,6 +682,13 @@ def create_app(config_path: Optional[str] = None) -> FastAPI:
         account_id: str,
     ):
         ctx: DashboardRuntimeContext = request.app.state.ctx
+        nav_accounts = sorted(
+            (
+                {"id": aid, "mode": ctx.provider.account_modes.get(aid, "full")}
+                for aid in ctx.provider.overview_account_ids
+            ),
+            key=lambda item: (1 if str(item["mode"]).lower() == "readonly" else 0, item["id"]),
+        )
         return HTMLResponse(
             render_account_dashboard_html(
                 ctx.refresh_sec,
@@ -680,6 +700,7 @@ def create_app(config_path: Optional[str] = None) -> FastAPI:
                 portfolio_loss_cut_pct=ctx.portfolio_loss_cut_pct,
                 portfolio_loss_cut_hour=ctx.portfolio_loss_cut_hour,
                 portfolio_loss_cut_minute=ctx.portfolio_loss_cut_minute,
+                nav_accounts=nav_accounts,
             )
         )
 

@@ -2123,13 +2123,19 @@ class DashboardServerTest(unittest.TestCase):
         self.assertNotIn('id="winRate"', html)
 
     def test_render_account_dashboard_html_blocks_inline_script_termination(self) -> None:
+        baseline = render_account_dashboard_html(
+            refresh_sec=5,
+            account_id="acc01",
+            strategy_note="TP 9%",
+        )
         html = render_account_dashboard_html(
             refresh_sec=5,
             account_id="</script><script>alert(1)</script>",
             strategy_note="</script><script>alert(2)</script>",
         )
 
-        self.assertEqual(html.count("</script>"), 1)
+        self.assertEqual(baseline.count("</script>"), 2)
+        self.assertEqual(html.count("</script>"), baseline.count("</script>"))
         self.assertNotIn("<script>alert", html)
         self.assertIn("\\u003c/script\\u003e", html)
 
@@ -2167,6 +2173,31 @@ assert.deepEqual(basic, { opened: '12', failed: '0', skipped: '0' });
         import subprocess
         if shutil.which("node"):
             subprocess.run(["node", "-e", script], check=True, capture_output=True, text=True)
+
+    def test_phase2_primer_quiet_ops_shared_assets_and_nav(self) -> None:
+        nav = [{"id": "acc01", "mode": "full"}, {"id": "readonly01", "mode": "readonly"}]
+        overview_html = render_accounts_overview_html(refresh_sec=5, nav_accounts=nav)
+        self.assertIn('href="static/ops.css?v=2"', overview_html)
+        self.assertIn('src="static/ops.js?v=2"', overview_html)
+        self.assertIn('class="ops-topbar"', overview_html)
+        self.assertIn('"id": "readonly01"', overview_html)
+        self.assertNotIn("!important", overview_html)
+        self.assertNotIn("entry-progress-kicker", overview_html)
+        self.assertNotIn("entry-progress-timeline-kicker", overview_html)
+
+        detail_html = render_account_dashboard_html(
+            refresh_sec=5,
+            account_id="acc01",
+            account_mode="full",
+            nav_accounts=nav,
+        )
+        self.assertIn('href="../../static/ops.css?v=2"', detail_html)
+        self.assertIn('src="../../static/ops.js?v=2"', detail_html)
+        self.assertIn('class="ops-topbar"', detail_html)
+        self.assertIn('"id": "readonly01"', detail_html)
+        self.assertNotIn("background-size: 100% 48px", detail_html)
+        self.assertNotIn("inset 3px 0 0", detail_html)
+        self.assertNotIn("!important", detail_html)
 
     def test_render_overview_uses_readable_task_layout(self) -> None:
         html = render_accounts_overview_html(

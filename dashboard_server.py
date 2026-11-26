@@ -3676,14 +3676,18 @@ def _render_dashboard_template(
     portfolio_loss_cut_pct: float = 3.5,
     portfolio_loss_cut_hour: int = 8,
     portfolio_loss_cut_minute: int = 0,
+    nav_accounts: Optional[List[Dict[str, str]]] = None,
 ) -> str:
     safe_stop_pct = min(100.0, max(0.001, float(portfolio_loss_cut_pct)))
+    static_base = "../../static" if account_id else "static"
     replacements = {
         "__REFRESH_SEC__": str(max(2, refresh_sec)),
         "__ECHARTS_SRC__": echarts_src or "https://cdn.jsdelivr.net/npm/echarts@5/dist/echarts.min.js",
+        "__STATIC_BASE__": static_base,
         "__ACCOUNT_ID_JSON__": _inline_script_json(account_id),
         "__ACCOUNT_MODE_JSON__": _inline_script_json(account_mode),
         "__STRATEGY_NOTE_JSON__": _inline_script_json(strategy_note),
+        "__NAV_ACCOUNTS_JSON__": _inline_script_json(nav_accounts or []),
         "__PORTFOLIO_STOP_ENABLED__": "true" if portfolio_loss_cut_enabled else "false",
         "__PORTFOLIO_STOP_PCT__": f"{safe_stop_pct:g}",
         "__PORTFOLIO_STOP_HOUR__": str(int(portfolio_loss_cut_hour) % 24),
@@ -3710,6 +3714,7 @@ def render_account_dashboard_html(
     portfolio_loss_cut_pct: float = 3.5,
     portfolio_loss_cut_hour: int = 8,
     portfolio_loss_cut_minute: int = 0,
+    nav_accounts: Optional[List[Dict[str, str]]] = None,
 ) -> str:
     safe_account_id = (account_id or "").strip()
     if not safe_account_id:
@@ -3727,6 +3732,7 @@ def render_account_dashboard_html(
         portfolio_loss_cut_pct=portfolio_loss_cut_pct,
         portfolio_loss_cut_hour=portfolio_loss_cut_hour,
         portfolio_loss_cut_minute=portfolio_loss_cut_minute,
+        nav_accounts=nav_accounts,
     )
 
 
@@ -3738,6 +3744,7 @@ def render_accounts_overview_html(
     portfolio_loss_cut_pct: float = 3.5,
     portfolio_loss_cut_hour: int = 8,
     portfolio_loss_cut_minute: int = 0,
+    nav_accounts: Optional[List[Dict[str, str]]] = None,
 ) -> str:
     safe_entry_hour = int(entry_hour) % 24
     safe_entry_minute = int(entry_minute) % 60
@@ -3750,6 +3757,7 @@ def render_accounts_overview_html(
     replacements = {
         "__REFRESH_SEC__": str(max(15, refresh_sec)),
         "__ENTRY_TIME__": f"{safe_entry_hour:02d}:{safe_entry_minute:02d}",
+        "__NAV_ACCOUNTS_JSON__": _inline_script_json(nav_accounts or []),
         "__PORTFOLIO_STOP_ENABLED__": "true" if stop_enabled else "false",
         "__PORTFOLIO_STOP_PCT__": f"{safe_stop_pct:g}",
         "__PORTFOLIO_STOP_HOUR__": str(safe_stop_hour),

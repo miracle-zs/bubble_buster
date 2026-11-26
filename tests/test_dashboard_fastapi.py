@@ -118,11 +118,27 @@ portfolio_take_profit_enabled = true
             self.assertEqual(static.status_code, 200)
             self.assertIn("max-age=", static.headers.get("cache-control", ""))
 
+            ops_css = client.get("/static/ops.css", headers={"Accept-Encoding": "gzip"})
+            self.assertEqual(ops_css.status_code, 200)
+            self.assertEqual(ops_css.headers.get("x-content-type-options"), "nosniff")
+            self.assertEqual(ops_css.headers.get("x-frame-options"), "SAMEORIGIN")
+            self.assertEqual(ops_css.headers.get("referrer-policy"), "same-origin")
+            self.assertIn("Primer Quiet Ops", ops_css.text)
+
+            ops_js = client.get("/static/ops.js", headers={"Accept-Encoding": "gzip"})
+            self.assertEqual(ops_js.status_code, 200)
+            self.assertIn("window.BBOps", ops_js.text.replace("global.BBOps", "window.BBOps"))
+
     def test_app_health_and_dashboard_api(self) -> None:
         app = create_app(config_path=str(self.config_path))
         with TestClient(app) as client:
             overview = client.get("/")
             self.assertEqual(overview.status_code, 200)
+            self.assertEqual(overview.headers.get("x-content-type-options"), "nosniff")
+            self.assertIn("static/ops.css?v=2", overview.text)
+            self.assertIn("static/ops.js?v=2", overview.text)
+            self.assertIn('class="ops-topbar"', overview.text)
+            self.assertIn('"id": "acc01"', overview.text)
             self.assertIn("账户总览", overview.text)
             self.assertIn("组合止损 -3.5% 已启用", overview.text)
             self.assertIn("本周期账户权益曲线", overview.text)
@@ -131,6 +147,9 @@ portfolio_take_profit_enabled = true
 
             comparison_page = client.get("/accounts/comparison/")
             self.assertEqual(comparison_page.status_code, 200)
+            self.assertIn("../../static/ops.css?v=2", comparison_page.text)
+            self.assertIn("../../static/ops.js?v=2", comparison_page.text)
+            self.assertIn('class="ops-topbar"', comparison_page.text)
             self.assertIn("<h1>多账户权益走势同轴对比</h1>", comparison_page.text)
             self.assertIn("../../static/vendor/echarts.min.js", comparison_page.text)
             self.assertIn("pathPrefix + \"/api/accounts/equity-comparison?\"", comparison_page.text)
@@ -141,6 +160,10 @@ portfolio_take_profit_enabled = true
 
             compact = client.get("/account/acc01/")
             self.assertEqual(compact.status_code, 200)
+            self.assertIn("../../static/ops.css?v=2", compact.text)
+            self.assertIn("../../static/ops.js?v=2", compact.text)
+            self.assertIn('class="ops-topbar"', compact.text)
+            self.assertIn('"id": "acc01"', compact.text)
             self.assertIn("acc01", compact.text)
             self.assertIn('var accountId = "acc01";', compact.text)
             self.assertIn('var accountMode = "full";', compact.text)
