@@ -43,30 +43,107 @@
     return !!(global.matchMedia && global.matchMedia("(prefers-reduced-motion: reduce)").matches);
   }
 
+  function splitStrategyParts(note) {
+    var raw = String(note || "").trim();
+    if (!raw) return [];
+    var parts = [];
+    var buf = "";
+    var depth = 0;
+    for (var i = 0; i < raw.length; i += 1) {
+      var ch = raw.charAt(i);
+      if (ch === "(" || ch === "（") {
+        depth += 1;
+        buf += ch;
+      } else if (ch === ")" || ch === "）") {
+        depth = Math.max(0, depth - 1);
+        buf += ch;
+      } else if (ch === "/" && depth === 0) {
+        var trimmed = buf.trim();
+        if (trimmed) parts.push(trimmed);
+        buf = "";
+      } else {
+        buf += ch;
+      }
+    }
+    var tail = buf.trim();
+    if (tail) parts.push(tail);
+    return parts;
+  }
+
+  function classifyStrategyPart(part, clsBase) {
+    var upper = part.toUpperCase();
+    var isTag = clsBase === "strategy-tag";
+    if (upper.indexOf("OFF") >= 0) {
+      return isTag ? "strategy-tag strategy-tag-off" : clsBase + " off";
+    }
+    if (
+      upper.indexOf("TP") >= 0
+      || part.indexOf("减仓") >= 0
+      || part.indexOf("清仓") >= 0
+      || part.indexOf("组合止盈") >= 0
+    ) {
+      return isTag ? "strategy-tag strategy-tag-primary" : clsBase + " primary";
+    }
+    return isTag ? "strategy-tag strategy-tag-protection" : clsBase;
+  }
+
   function formatStrategyTags(note, baseClass) {
     var clsBase = baseClass || "strategy-chip";
     var emptyClass = clsBase === "strategy-tag" ? "strategy-tag strategy-tag-empty" : clsBase;
-    var raw = String(note || "").trim();
-    if (!raw) return '<span class="' + emptyClass + '">未配置策略说明</span>';
-    var parts = raw.split("/").map(function (s) { return String(s || "").trim(); }).filter(Boolean);
+    var parts = splitStrategyParts(note);
+    if (!parts.length) return '<span class="' + emptyClass + '">未配置策略说明</span>';
     var html = "";
     for (var i = 0; i < parts.length; i += 1) {
       var part = parts[i];
-      var upper = part.toUpperCase();
-      var cls = clsBase === "strategy-tag" ? "strategy-tag strategy-tag-protection" : clsBase;
-      if (upper.indexOf("OFF") >= 0) {
-        cls = clsBase === "strategy-tag" ? "strategy-tag strategy-tag-off" : clsBase + " off";
-      } else if (
-        upper.indexOf("TP") >= 0
-        || part.indexOf("减仓") >= 0
-        || part.indexOf("清仓") >= 0
-        || part.indexOf("组合止盈") >= 0
-      ) {
-        cls = clsBase === "strategy-tag" ? "strategy-tag strategy-tag-primary" : clsBase + " primary";
-      }
-      html += '<span class="' + cls + '">' + escapeHtml(part) + "</span>";
+      html += '<span class="' + classifyStrategyPart(part, clsBase) + '">' + escapeHtml(part) + "</span>";
     }
-    return html || '<span class="' + emptyClass + '">未配置策略说明</span>';
+    return html;
+  }
+
+  function formatStrategyHighlights(note, allNotes, maxCount, baseClass) {
+    var limit = Math.max(1, Number(maxCount) || 2);
+    var clsBase = baseClass || "strategy-tag";
+    var parts = splitStrategyParts(note);
+    if (!parts.length) return "";
+    var pool = Array.isArray(allNotes) ? allNotes.filter(function (n) { return String(n || "").trim(); }) : [];
+    var freq = {};
+    if (pool.length >= 2) {
+      for (var i = 0; i < pool.length; i += 1) {
+        var seenInNote = {};
+        var np = splitStrategyParts(pool[i]);
+        for (var j = 0; j < np.length; j += 1) {
+          if (seenInNote[np[j]]) continue;
+          seenInNote[np[j]] = true;
+          freq[np[j]] = (freq[np[j]] || 0) + 1;
+        }
+      }
+    }
+    var candidates = pool.length >= 2
+      ? parts.filter(function (p) { return (freq[p] || 0) < pool.length; })
+      : parts.slice();
+    if (!candidates.length) candidates = parts.slice();
+    var selected = [];
+    for (var k = 0; k < candidates.length; k += 1) {
+      var c = candidates[k];
+      var cls = classifyStrategyPart(c, clsBase);
+      if (cls.indexOf("primary") >= 0 || cls.indexOf("off") >= 0) {
+        selected.push(c);
+        break;
+      }
+    }
+    var remaining = candidates.filter(function (c) { return selected.indexOf(c) < 0; });
+    remaining.sort(function (a, b) {
+      return (freq[a] || 0) - (freq[b] || 0);
+    });
+    while (selected.length < limit && remaining.length) {
+      selected.push(remaining.shift());
+    }
+    var html = "";
+    for (var m = 0; m < selected.length; m += 1) {
+      var item = selected[m];
+      html += '<span class="' + classifyStrategyPart(item, clsBase) + '" title="' + escapeHtml(item) + '">' + escapeHtml(item) + "</span>";
+    }
+    return html;
   }
 
   function resolveBasePrefix(pathname) {
@@ -187,7 +264,9 @@
     fmtPct: fmtPct,
     fmtWithUnit: fmtWithUnit,
     prefersReducedMotion: prefersReducedMotion,
+    splitStrategyParts: splitStrategyParts,
     formatStrategyTags: formatStrategyTags,
+    formatStrategyHighlights: formatStrategyHighlights,
     resolveBasePrefix: resolveBasePrefix,
     readQueryParams: readQueryParams,
     updateQueryParams: updateQueryParams,

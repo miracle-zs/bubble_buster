@@ -6,6 +6,7 @@
   <meta name="color-scheme" content="dark" />
   <meta name="theme-color" content="#0d1117" />
   <title>Bubble Buster Overview</title>
+  <link rel="icon" type="image/svg+xml" href="static/favicon.svg" />
   <link rel="stylesheet" href="static/ops.css?v=2" />
   <style>
     .wrap {
@@ -60,6 +61,23 @@
       flex-direction: column;
       justify-content: center;
       gap: 3px;
+    }
+    .command-item-btn {
+      appearance: none;
+      width: 100%;
+      border: 0;
+      border-left: 1px solid var(--border-subtle);
+      background: transparent;
+      text-align: left;
+      cursor: pointer;
+      transition: background 120ms ease;
+    }
+    .command-item-btn:hover {
+      background: var(--surface-hover);
+    }
+    .command-item-btn .command-label::after {
+      content: " ↓";
+      color: var(--muted);
     }
     .command-label {
       color: var(--muted);
@@ -310,6 +328,21 @@
     .account-card-body {
       padding: 14px;
       border-radius: 0 0 var(--radius) var(--radius);
+    }
+    .card-strategy-highlights {
+      display: flex;
+      flex-wrap: wrap;
+      align-content: flex-start;
+      gap: 6px;
+      margin-bottom: 12px;
+      min-height: 52px;
+    }
+    .card-strategy-highlights .strategy-tag {
+      display: inline-block;
+      max-width: 100%;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      vertical-align: top;
     }
     .account-primary {
       display: grid;
@@ -1355,6 +1388,7 @@
         border-left: 1px solid var(--border);
       }
       .managed-grid { grid-template-columns: 1fr; }
+      .card-strategy-highlights { min-height: 0; }
       .strategy-popover { width: min(296px, calc(100vw - 36px)); }
       .readonly-strip { grid-template-columns: 1fr 1fr; }
       .readonly-identity { grid-column: 1 / -1; border-bottom: 1px solid var(--border-subtle); }
@@ -1428,10 +1462,10 @@
         <span class="command-label">更新时间</span>
         <strong id="overview-updated-at" class="command-value">--</strong>
       </div>
-      <div class="command-item command-anomaly">
+      <button id="overview-anomaly-btn" class="command-item command-anomaly command-item-btn" type="button" aria-label="跳转到异常与任务并筛选仅异常">
         <span class="command-label">异常</span>
         <strong id="overview-anomaly-count" class="command-value status-ok">0</strong>
-      </div>
+      </button>
       <div class="command-item command-secondary">
         <span class="command-label">开单任务</span>
         <strong class="command-value">每天 __ENTRY_TIME__</strong>
@@ -1462,7 +1496,7 @@
         <div id="entry-progress-board"></div>
       </div>
     </section>
-    <section class="task-panel">
+    <section id="task-panel" class="task-panel" tabindex="-1">
       <div class="task-panel-head">
         <div>
           <h2 class="section-title">异常与任务（优先处理）</h2>
@@ -1479,7 +1513,7 @@
       <div id="task-board" class="task-board-list"></div>
     </section>
   </main>
-<script src="static/ops.js?v=3"></script>
+<script src="static/ops.js?v=4"></script>
 <script>
 (function () {
   var refreshSec = Number(document.getElementById("refresh").textContent || "5");
@@ -2692,7 +2726,26 @@
     }
   }
 
+  function managedStrategyNotes(rows) {
+    var notes = [];
+    for (var i = 0; i < (rows || []).length; i += 1) {
+      var item = rows[i] || {};
+      var m = String(item.mode || "full").toLowerCase();
+      if (m === "readonly" || m === "loss_cut_only") continue;
+      if (item.strategy_note) notes.push(String(item.strategy_note));
+    }
+    return notes;
+  }
+
+  function formatStrategyHighlights(note, allNotes) {
+    if (window.BBOps && window.BBOps.formatStrategyHighlights) {
+      return window.BBOps.formatStrategyHighlights(note, allNotes, 2, "strategy-tag");
+    }
+    return formatStrategyNote(note);
+  }
+
   function patchExistingCards(rows) {
+    var allNotes = managedStrategyNotes(rows);
     for (var i = 0; i < rows.length; i += 1) {
       var r = rows[i] || {};
       var mode = String(r.mode || "full").toLowerCase();
@@ -2719,8 +2772,14 @@
         var pfEl = card.querySelector("[data-field='readonly-pf']");
         if (pfEl) pfEl.textContent = stats.profit_factor != null ? fmt(stats.profit_factor, 2) : "--";
       } else {
+        var st = r.last_run_status || "--";
+        var venueLabel = "Binance Futures · 最近任务状态：" + st;
         var venueEl = card.querySelector(".venue-state");
-        if (venueEl) venueEl.className = "venue-state " + statusCls(r.last_run_status || "--");
+        if (venueEl) {
+          venueEl.className = "venue-state " + statusCls(st);
+          venueEl.setAttribute("title", venueLabel);
+          venueEl.setAttribute("aria-label", venueLabel);
+        }
         var openEl = card.querySelector("[data-field='open-positions']");
         if (openEl) openEl.textContent = fmt(r.open_positions, 0);
         var tagsEl = card.querySelector(".strategy-popover-tags");
@@ -2728,6 +2787,11 @@
         if (tagsEl && tagsEl.getAttribute("data-note") !== noteKey) {
           tagsEl.innerHTML = formatStrategyNote(r.strategy_note);
           tagsEl.setAttribute("data-note", noteKey);
+        }
+        var highlightsEl = card.querySelector("[data-field='strategy-highlights']");
+        if (highlightsEl && highlightsEl.getAttribute("data-note") !== noteKey) {
+          highlightsEl.innerHTML = formatStrategyHighlights(r.strategy_note, allNotes);
+          highlightsEl.setAttribute("data-note", noteKey);
         }
         var stopThresholdEl = card.querySelector("[data-field='stop-threshold-label']");
         if (stopThresholdEl) {
@@ -2763,6 +2827,7 @@
     }
 
     if (curveObserver) curveObserver.disconnect();
+    var allManagedNotes = managedStrategyNotes(rows);
     for (var j = 0; j < rows.length; j += 1) {
       var r = rows[j] || {};
       var mode = String(r.mode || "full").toLowerCase();
@@ -2795,16 +2860,19 @@
           + "</article>";
       } else {
         var stateCls = statusCls(st);
+        var venueLabel = escapeHtml("Binance Futures · 最近任务状态：" + st);
         var popoverId = "strategy-popover-" + j;
         var noteAttr = escapeHtml(String(r.strategy_note || ""));
+        var highlightsHtml = formatStrategyHighlights(r.strategy_note, allManagedNotes);
         managedHtml += '<article class="account-card" id="account-card-' + safeAid + '" data-account-id="' + safeAid + '">'
           + '<header class="account-card-head"><span class="aid">' + safeAid + '</span><div class="account-head-actions">'
           + '<div class="strategy-popover-wrap"><button class="strategy-trigger" type="button" aria-expanded="false" aria-controls="' + popoverId + '" aria-label="' + safeAid + ' 策略配置">策略</button>'
           + '<div id="' + popoverId + '" class="strategy-popover" role="dialog" aria-label="' + safeAid + ' 策略配置">'
           + '<div class="strategy-popover-head"><strong class="strategy-popover-title">策略配置</strong><span class="strategy-popover-subtitle">' + safeAid + '</span></div>'
           + '<div class="strategy-popover-tags" data-note="' + noteAttr + '">' + formatStrategyNote(r.strategy_note) + '</div></div></div>'
-          + '<span class="venue-state ' + stateCls + '">Binance Futures<span class="status-dot" aria-hidden="true"></span></span><a class="detail-link" href="' + base + '" aria-label="查看 ' + safeAid + ' 账户详情">详情</a></div></header>'
+          + '<span class="venue-state ' + stateCls + '" title="' + venueLabel + '" aria-label="' + venueLabel + '">Binance Futures<span class="status-dot" aria-hidden="true"></span></span><a class="detail-link" href="' + base + '" aria-label="查看 ' + safeAid + ' 账户详情">详情</a></div></header>'
           + '<div class="account-card-body">'
+          + (highlightsHtml ? '<div class="card-strategy-highlights" data-field="strategy-highlights" data-note="' + noteAttr + '">' + highlightsHtml + '</div>' : '')
           + '<div class="account-primary">'
           + '<div class="metric"><span class="metric-label">账户权益（含浮盈亏，USDT）</span><strong class="metric-value" data-field="wallet-balance">' + fmt(r.wallet_balance_usdt, 4) + '</strong></div>'
           + '<div class="metric"><span class="metric-label">' + String(portfolioStopHour).padStart(2, "0") + ":" + String(portfolioStopMinute).padStart(2, "0") + ' 以来收益</span><strong class="metric-value return-value spark-delta" data-account-id="' + safeAid + '">--</strong></div>'
@@ -3031,6 +3099,18 @@
   }
   if (overviewRefreshBtn) {
     overviewRefreshBtn.addEventListener("click", triggerOverviewRefresh);
+  }
+  var overviewAnomalyBtn = document.getElementById("overview-anomaly-btn");
+  if (overviewAnomalyBtn) {
+    overviewAnomalyBtn.addEventListener("click", function () {
+      toggleTaskFilter("anomaly");
+      var panel = document.getElementById("task-panel");
+      if (panel) {
+        var reduce = window.BBOps && window.BBOps.prefersReducedMotion();
+        panel.scrollIntoView({ behavior: reduce ? "auto" : "smooth", block: "start" });
+        try { panel.focus({ preventScroll: true }); } catch (e) {}
+      }
+    });
   }
 
   fetchSummary();

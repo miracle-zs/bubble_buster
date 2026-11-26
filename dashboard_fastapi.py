@@ -1,4 +1,5 @@
 import configparser
+from contextlib import asynccontextmanager
 import glob
 import logging
 import os
@@ -14,7 +15,7 @@ from typing import Literal, Optional
 
 from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.middleware.gzip import GZipMiddleware
-from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 
 from core.runtime_components import build_proxies, create_components, resolve_path
@@ -599,10 +600,36 @@ def _shutdown_trade_stats_background_refresh(app: FastAPI) -> None:
 
 
 def create_app(config_path: Optional[str] = None) -> FastAPI:
-    app = FastAPI(title="Bubble Buster Dashboard", version="1.1.0")
-    app.add_middleware(GZipMiddleware, minimum_size=1024)
     static_root = (Path(__file__).resolve().parent / "app_static").resolve()
     static_root.mkdir(parents=True, exist_ok=True)
+
+    @asynccontextmanager
+    async def lifespan(app_instance: FastAPI):
+        path = config_path or _default_config_path()
+        app_instance.state.config_path = path
+        app_instance.state.ctx = create_dashboard_context(path)
+        _ensure_strategy_log_handler(app_instance.state.ctx.log_file)
+        try:
+            # Warm the full snapshot once before accepting requests. Later
+            # refreshes run in the background and use the incremental log cache.
+            app_instance.state.ctx.provider.refresh_accounts_summary_cache()
+        except Exception as exc:  # noqa: BLE001
+            logging.getLogger(__name__).warning(
+                "Initial account summary cache warmup failed: %s",
+                exc,
+            )
+        _start_summary_background_refresh(app_instance)
+        _start_trade_stats_background_refresh(app_instance)
+        _startup_background_service(app_instance, path)
+        try:
+            yield
+        finally:
+            _shutdown_summary_background_refresh(app_instance)
+            _shutdown_trade_stats_background_refresh(app_instance)
+            _shutdown_background_service(app_instance)
+
+    app = FastAPI(title="Bubble Buster Dashboard", version="1.1.0", lifespan=lifespan)
+    app.add_middleware(GZipMiddleware, minimum_size=1024)
     app.mount("/static", StaticFiles(directory=str(static_root)), name="static")
 
     @app.middleware("http")
@@ -621,30 +648,16 @@ def create_app(config_path: Optional[str] = None) -> FastAPI:
             response.headers["Cache-Control"] = "public, max-age=604800, stale-while-revalidate=86400"
         return response
 
-    @app.on_event("startup")
-    def _startup() -> None:
-        path = config_path or _default_config_path()
-        app.state.config_path = path
-        app.state.ctx = create_dashboard_context(path)
-        _ensure_strategy_log_handler(app.state.ctx.log_file)
-        try:
-            # Warm the full snapshot once before accepting requests. Later
-            # refreshes run in the background and use the incremental log cache.
-            app.state.ctx.provider.refresh_accounts_summary_cache()
-        except Exception as exc:  # noqa: BLE001
-            logging.getLogger(__name__).warning(
-                "Initial account summary cache warmup failed: %s",
-                exc,
+    @app.get("/favicon.ico", include_in_schema=False)
+    def favicon():
+        svg_path = static_root / "favicon.svg"
+        if svg_path.exists():
+            return FileResponse(
+                svg_path,
+                media_type="image/svg+xml",
+                headers={"Cache-Control": "public, max-age=604800"},
             )
-        _start_summary_background_refresh(app)
-        _start_trade_stats_background_refresh(app)
-        _startup_background_service(app, path)
-
-    @app.on_event("shutdown")
-    def _shutdown() -> None:
-        _shutdown_summary_background_refresh(app)
-        _shutdown_trade_stats_background_refresh(app)
-        _shutdown_background_service(app)
+        return Response(status_code=204)
 
     @app.get("/", response_class=HTMLResponse)
     def overview_page(request: Request):
