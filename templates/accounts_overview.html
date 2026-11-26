@@ -29,7 +29,12 @@
     .command-brand {
       min-width: 0;
       padding: 10px 16px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
     }
+    .command-brand-copy { min-width: 0; }
     .command-brand .title {
       margin: 0;
       color: var(--text);
@@ -41,6 +46,10 @@
       margin: 4px 0 0;
       color: var(--muted);
       font-size: var(--text-xs);
+    }
+    .section-toggle:disabled {
+      opacity: 0.65;
+      cursor: progress;
     }
     .command-item {
       min-width: 0;
@@ -1405,8 +1414,11 @@
   <main class="wrap">
     <header class="command-bar">
       <div class="command-brand">
-        <h1 class="title">Bubble Buster 账户总览</h1>
-        <p class="sub">账户、开仓进度与风险状态</p>
+        <div class="command-brand-copy">
+          <h1 class="title">Bubble Buster 账户总览</h1>
+          <p class="sub">账户、开仓进度与风险状态</p>
+        </div>
+        <button id="overview-refresh-btn" class="section-toggle" type="button" aria-label="手动刷新账户总览">刷新 ↻</button>
       </div>
       <div class="command-item">
         <span class="command-label">服务</span>
@@ -1467,7 +1479,7 @@
       <div id="task-board" class="task-board-list"></div>
     </section>
   </main>
-<script src="static/ops.js?v=2"></script>
+<script src="static/ops.js?v=3"></script>
 <script>
 (function () {
   var refreshSec = Number(document.getElementById("refresh").textContent || "5");
@@ -1497,6 +1509,7 @@
   var overviewAlert = document.getElementById("overview-alert");
   var overviewAlertText = document.getElementById("overview-alert-text");
   var overviewRetryBtn = document.getElementById("overview-retry-btn");
+  var overviewRefreshBtn = document.getElementById("overview-refresh-btn");
   var overviewErrors = { summary: "", details: "" };
   var curveCache = {};
   var curveInFlight = {};
@@ -1504,7 +1517,9 @@
   var accountModes = {};
   var portfolioStopStates = {};
   var summaryRows = [];
-  var taskFilter = "anomaly";
+  var initialQuery = window.BBOps ? window.BBOps.readQueryParams() : {};
+  var validTaskFilters = { all: true, anomaly: true, symbols: true };
+  var taskFilter = validTaskFilters[initialQuery.task_filter] ? initialQuery.task_filter : "anomaly";
   var entryDetailsExpanded = false;
   var nextEntryCheckRaw = "";
   var curveTtlMs = Math.max(60000, Math.max(15, refreshSec) * 3000);
@@ -2832,6 +2847,11 @@
 
   function toggleTaskFilter(nextFilter) {
     taskFilter = nextFilter || "all";
+    if (window.BBOps) {
+      window.BBOps.updateQueryParams({
+        task_filter: taskFilter === "anomaly" ? null : taskFilter
+      });
+    }
     renderTaskBoard();
   }
 
@@ -2958,10 +2978,17 @@
       });
   }
 
+  function setOverviewRefreshBusy(busy) {
+    if (!overviewRefreshBtn) return;
+    overviewRefreshBtn.disabled = !!busy;
+    overviewRefreshBtn.textContent = busy ? "刷新中..." : "刷新 ↻";
+  }
+
   var summaryAbortController = null;
   function fetchSummary() {
     if (summaryRequestInFlight || document.hidden) return;
     summaryRequestInFlight = true;
+    setOverviewRefreshBusy(true);
     if (summaryAbortController) summaryAbortController.abort();
     summaryAbortController = new AbortController();
     fetch(summaryFastApi + "?_=" + Date.now(), { signal: summaryAbortController.signal, cache: "no-store" })
@@ -2971,6 +2998,7 @@
       })
       .then(function (payload) {
         summaryRequestInFlight = false;
+        setOverviewRefreshBusy(false);
         setOverviewError("summary", "");
         summaryRows = mergeFastRows(payload.accounts || []);
         if (window.BBOps) window.BBOps.renderNavAccounts(summaryRows);
@@ -2984,18 +3012,25 @@
       })
       .catch(function (err) {
         summaryRequestInFlight = false;
+        setOverviewRefreshBusy(false);
         if (err && err.name === "AbortError") return;
         setOverviewError("summary", "账户总览刷新失败：" + (err && err.message ? err.message : "网络异常") + "，页面可能不是最新数据");
       });
   }
 
+  function triggerOverviewRefresh() {
+    lastDetailsFetchAt = 0;
+    curveCache = {};
+    fetchSummary();
+    fetchSummaryDetails();
+    fetchHealth();
+  }
+
   if (overviewRetryBtn) {
-    overviewRetryBtn.addEventListener("click", function () {
-      lastDetailsFetchAt = 0;
-      fetchSummary();
-      fetchSummaryDetails();
-      fetchHealth();
-    });
+    overviewRetryBtn.addEventListener("click", triggerOverviewRefresh);
+  }
+  if (overviewRefreshBtn) {
+    overviewRefreshBtn.addEventListener("click", triggerOverviewRefresh);
   }
 
   fetchSummary();

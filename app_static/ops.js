@@ -148,6 +148,37 @@
     }
   }
 
+  function readQueryParams() {
+    var out = {};
+    if (!global.location || !global.location.search) return out;
+    if (typeof URLSearchParams === "function") {
+      var params = new URLSearchParams(global.location.search);
+      params.forEach(function (value, key) {
+        out[key] = value;
+      });
+    }
+    return out;
+  }
+
+  function updateQueryParams(updates) {
+    if (!global.history || !global.history.replaceState || typeof URLSearchParams !== "function") return;
+    var params = new URLSearchParams((global.location && global.location.search) || "");
+    var keys = Object.keys(updates || {});
+    for (var i = 0; i < keys.length; i += 1) {
+      var key = keys[i];
+      var val = updates[key];
+      if (val === null || val === undefined || val === "") params.delete(key);
+      else params.set(key, String(val));
+    }
+    var qs = params.toString();
+    var nextUrl = ((global.location && global.location.pathname) || "/")
+      + (qs ? "?" + qs : "")
+      + ((global.location && global.location.hash) || "");
+    try {
+      global.history.replaceState(null, "", nextUrl);
+    } catch (e) {}
+  }
+
   global.BBOps = {
     escapeHtml: escapeHtml,
     toNum: toNum,
@@ -158,6 +189,8 @@
     prefersReducedMotion: prefersReducedMotion,
     formatStrategyTags: formatStrategyTags,
     resolveBasePrefix: resolveBasePrefix,
+    readQueryParams: readQueryParams,
+    updateQueryParams: updateQueryParams,
     initTopNav: initTopNav,
     renderNavAccounts: renderNavAccounts
   };

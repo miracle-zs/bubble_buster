@@ -417,7 +417,7 @@
   </main>
 
   <script defer src="../../static/vendor/echarts.min.js"></script>
-  <script defer src="../../static/ops.js?v=2"></script>
+  <script defer src="../../static/ops.js?v=3"></script>
   <script>
   document.addEventListener("DOMContentLoaded", function () {
     "use strict";
@@ -431,11 +431,21 @@
     var FALLBACK_COLORS = ["#58a6ff", "#f0883e", "#3fb950", "#e3b341", "#39c5cf", "#f778ba"];
     var chart = null;
     var payload = null;
-    var range = "all";
-    var mode = "relative";
+    var VALID_RANGES = { "24": true, "72": true, "168": true, "720": true, "all": true };
+    var VALID_MODES = { relative: true, absolute: true };
+    var initialParams = window.BBOps ? window.BBOps.readQueryParams() : {};
+    var range = VALID_RANGES[initialParams.range] ? initialParams.range : "all";
+    var mode = VALID_MODES[initialParams.mode] ? initialParams.mode : "relative";
     var visible = {};
+    if (initialParams.hide) {
+      String(initialParams.hide).split(",").forEach(function (aid) {
+        var trimmed = aid.trim();
+        if (trimmed) visible[trimmed] = false;
+      });
+    }
     var activeAbortController = null;
     var activeRequestToken = 0;
+    var lastLoadedAt = 0;
     var navAccountsHydrated = false;
     var currentPath = (window && window.location && window.location.pathname) || "/";
     var comparisonMarker = "/accounts/comparison";
@@ -606,8 +616,13 @@
             lineStyle: { color: "#484f58", type: "dashed", width: 1 },
             label: {
               position: "insideEndTop",
-              distance: [0, 4],
-              color: "#919ba6",
+              distance: [8, 6],
+              color: "#c9d1d9",
+              backgroundColor: "rgba(13, 17, 23, 0.9)",
+              borderColor: "#30363d",
+              borderWidth: 1,
+              borderRadius: 4,
+              padding: [3, 7],
               fontSize: 12,
               formatter: range === "all" ? "上线后首个快照" : "区间初始基准"
             },
@@ -711,6 +726,25 @@
       setStatus("快照已更新", "");
     }
 
+    function syncComparisonUrl() {
+      if (!window.BBOps) return;
+      var hiddenIds = Object.keys(visible).filter(function (aid) {
+        return visible[aid] === false;
+      }).sort();
+      window.BBOps.updateQueryParams({
+        range: range === "all" ? null : range,
+        mode: mode === "relative" ? null : mode,
+        hide: hiddenIds.length ? hiddenIds.join(",") : null
+      });
+    }
+
+    function setRefreshBusy(busy) {
+      var btn = el("refresh-button");
+      if (!btn) return;
+      btn.disabled = !!busy;
+      btn.textContent = busy ? "刷新中..." : "刷新 ↻";
+    }
+
     function load() {
       activeRequestToken += 1;
       var requestToken = activeRequestToken;
@@ -718,6 +752,7 @@
         try { activeAbortController.abort(); } catch (e) {}
       }
       activeAbortController = typeof AbortController !== "undefined" ? new AbortController() : null;
+      setRefreshBusy(true);
       setStatus("正在读取快照", "loading");
       el("notice").style.display = "none";
       var query = range === "all" ? "all_time=true" : "window_hours=" + encodeURIComponent(range);
@@ -731,6 +766,8 @@
         })
         .then(function (nextPayload) {
           if (requestToken !== activeRequestToken) return;
+          lastLoadedAt = Date.now();
+          setRefreshBusy(false);
           payload = nextPayload || {};
           ensureVisibility(seriesRows());
           if (!navAccountsHydrated && window.BBOps) {
@@ -742,16 +779,21 @@
         .catch(function (error) {
           if (requestToken !== activeRequestToken) return;
           if (error && error.name === "AbortError") return;
+          setRefreshBusy(false);
           setStatus("读取失败", "error");
           el("notice").textContent = "账户对比数据读取失败：" + (error && error.message ? error.message : "网络异常");
           el("notice").style.display = "block";
         });
     }
 
+    setActiveControl("range-controls", "range", range);
+    setActiveControl("mode-controls", "mode", mode);
+
     Array.prototype.forEach.call(document.querySelectorAll("[data-range]"), function (button) {
       button.addEventListener("click", function () {
         range = button.getAttribute("data-range") || "168";
         setActiveControl("range-controls", "range", range);
+        syncComparisonUrl();
         load();
       });
     });
@@ -759,6 +801,7 @@
       button.addEventListener("click", function () {
         mode = button.getAttribute("data-mode") || "relative";
         setActiveControl("mode-controls", "mode", mode);
+        syncComparisonUrl();
         if (payload) render();
       });
     });
@@ -768,8 +811,14 @@
       if (!button) return;
       var accountId = button.getAttribute("data-account");
       visible[accountId] = visible[accountId] === false;
+      syncComparisonUrl();
       renderLegend();
       renderChart();
+    });
+    document.addEventListener("visibilitychange", function () {
+      if (!document.hidden && (Date.now() - lastLoadedAt) >= 30000) {
+        load();
+      }
     });
     if (typeof ResizeObserver !== "undefined") {
       var chartContainer = el("equity-chart");

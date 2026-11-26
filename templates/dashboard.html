@@ -132,11 +132,21 @@
       color: var(--bad-text);
       background: var(--bad-bg);
     }
-    .refresh-note {
+    .strategy-strip-meta {
       margin-left: auto;
+      display: inline-flex;
+      align-items: center;
+      gap: 10px;
+      flex-wrap: wrap;
+    }
+    .refresh-note {
       color: var(--muted);
       font-size: var(--text-xs);
       white-space: nowrap;
+    }
+    .tab-btn:disabled {
+      opacity: 0.65;
+      cursor: progress;
     }
 
     .detail-alert {
@@ -265,6 +275,26 @@
       background: var(--accent-bg);
     }
     .chart-stage { position: relative; padding: 12px 14px 14px; }
+    .chart-sparse-hint {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      flex-wrap: wrap;
+      gap: 8px 12px;
+      margin-bottom: 10px;
+      padding: 8px 12px;
+      border: 1px solid var(--border);
+      border-radius: var(--radius-sm);
+      background: var(--surface-subtle);
+      color: var(--text-secondary);
+      font-size: var(--text-xs);
+    }
+    .chart-sparse-hint[hidden] { display: none; }
+    .chart-sparse-actions {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+    }
     .chart-canvas {
       width: 100%;
       height: 348px;
@@ -586,7 +616,7 @@
       .command-cell:nth-child(2) { border-left: 0; }
       .command-cell:nth-child(4) { grid-column: 1 / -1; border-left: 0; border-top: 1px solid var(--border-subtle); }
       .strategy-strip { align-items: flex-start; flex-wrap: wrap; }
-      .refresh-note { width: 100%; margin-left: 0; }
+      .strategy-strip-meta { width: 100%; margin-left: 0; justify-content: space-between; }
       .summary-rail { grid-template-columns: repeat(2, minmax(0, 1fr)); }
       .summary-metric { min-height: 82px; border-top: 1px solid var(--border-subtle); }
       .summary-metric:nth-child(odd) { border-left: 0; }
@@ -662,7 +692,10 @@
     <section class="strategy-strip" aria-label="账户策略配置">
       <span class="strategy-strip-label">策略配置</span>
       <div class="strategy-tags" id="strategyTags"><span class="strategy-chip">未配置策略说明</span></div>
-      <span class="refresh-note">自动刷新 <span id="refresh">__REFRESH_SEC__</span>s · 页面只读</span>
+      <div class="strategy-strip-meta">
+        <span class="refresh-note">自动刷新 <span id="refresh">__REFRESH_SEC__</span>s · 页面只读</span>
+        <button id="detailRefreshBtn" class="tab-btn" type="button" aria-label="手动刷新账户详情">刷新 ↻</button>
+      </div>
     </section>
     <div id="detailAlert" class="detail-alert" role="alert" hidden>
       <span id="detailAlertText"></span>
@@ -724,6 +757,13 @@
           </div>
         </header>
         <div class="chart-stage">
+          <div class="chart-sparse-hint" id="chartSparseHint" hidden>
+            <span>当前窗口仅 1 个快照点，切换更长周期查看走势</span>
+            <div class="chart-sparse-actions">
+              <button class="tab-btn" type="button" data-sparse-window="168">切换 1W</button>
+              <button class="tab-btn" type="button" data-sparse-window="720">切换 1M</button>
+            </div>
+          </div>
           <div class="chart-canvas" id="equityChart"></div>
           <div class="chart-empty" id="chartEmpty">曲线加载中...</div>
         </div>
@@ -810,7 +850,7 @@
     </details>
   </main>
 
-<script src="__STATIC_BASE__/ops.js?v=2"></script>
+<script src="__STATIC_BASE__/ops.js?v=3"></script>
 <script>
 (function () {
   var refreshNode = document.getElementById("refresh");
@@ -836,8 +876,15 @@
     ? apiBase + "/api/account/" + encodeURIComponent(accountId)
     : pathPrefix + "/api/dashboard";
   var equityChart = null;
-  var currentCurveTab = accountMode === "readonly" ? "balance" : "strategy";
-  var currentWindowHours = 24;
+  var VALID_WINDOWS = { 1: true, 24: true, 168: true, 720: true, 8760: true };
+  var VALID_ACTIVITIES = { runs: "activity-runs", events: "activity-events", cashflow: "activity-cashflow" };
+  var initialQuery = window.BBOps ? window.BBOps.readQueryParams() : {};
+  var defaultCurveTab = accountMode === "readonly" ? "balance" : "strategy";
+  var requestedTab = initialQuery.tab === "balance" ? "balance" : (initialQuery.tab === "strategy" ? "strategy" : defaultCurveTab);
+  var currentCurveTab = accountMode === "readonly" ? "balance" : requestedTab;
+  var requestedWindow = Number(initialQuery.window);
+  var currentWindowHours = VALID_WINDOWS[requestedWindow] ? requestedWindow : 24;
+  var currentActivityKey = VALID_ACTIVITIES[initialQuery.activity] ? initialQuery.activity : "runs";
   var displayTimeZone = "Asia/Shanghai";
   var riskSnapshot = null;
   var latestData = null;
@@ -873,6 +920,8 @@
     windowRow: document.getElementById("windowRow"),
     equityChart: document.getElementById("equityChart"),
     chartEmpty: document.getElementById("chartEmpty"),
+    chartSparseHint: document.getElementById("chartSparseHint"),
+    detailRefreshBtn: document.getElementById("detailRefreshBtn"),
     riskCycleStart: document.getElementById("riskCycleStart"),
     riskState: document.getElementById("riskState"),
     riskThreshold: document.getElementById("riskThreshold"),
@@ -1366,6 +1415,7 @@
   }
 
   function showChartEmpty(message) {
+    if (el.chartSparseHint) el.chartSparseHint.hidden = true;
     if (!el.chartEmpty) return;
     el.chartEmpty.textContent = message || "暂无曲线";
     el.chartEmpty.hidden = false;
@@ -1428,6 +1478,9 @@
       return;
     }
     if (el.chartEmpty) el.chartEmpty.hidden = true;
+    if (el.chartSparseHint) {
+      el.chartSparseHint.hidden = !(points.length === 1 && currentWindowHours < 168);
+    }
 
     var first = points[0];
     var last = points[points.length - 1];
@@ -2078,12 +2131,27 @@
     }, isMobile ? 4500 : 3500);
   }
 
+  function syncDetailUrl() {
+    if (!window.BBOps) return;
+    window.BBOps.updateQueryParams({
+      tab: currentCurveTab === defaultCurveTab ? null : currentCurveTab,
+      window: currentWindowHours === 24 ? null : String(currentWindowHours),
+      activity: currentActivityKey === "runs" ? null : currentActivityKey
+    });
+  }
+
+  function setDetailRefreshBusy(busy) {
+    if (!el.detailRefreshBtn) return;
+    el.detailRefreshBtn.disabled = !!busy;
+    el.detailRefreshBtn.textContent = busy ? "刷新中..." : "刷新 ↻";
+  }
+
   function setupActivityTabs() {
     var tablist = document.querySelector(".activity-tabs");
     if (!tablist) return;
     var tabs = Array.prototype.slice.call(tablist.querySelectorAll("[data-activity-target]"));
 
-    function activateTab(tab, shouldFocus) {
+    function activateTab(tab, shouldFocus, persist) {
       if (!tab) return;
       var targetId = tab.getAttribute("data-activity-target");
       if (!targetId) return;
@@ -2096,12 +2164,21 @@
         var view = document.getElementById(t.getAttribute("data-activity-target"));
         if (view) view.hidden = !isTarget;
       }
+      var nextKey = targetId.replace(/^activity-/, "");
+      if (VALID_ACTIVITIES[nextKey]) currentActivityKey = nextKey;
+      if (persist) syncDetailUrl();
       if (shouldFocus) tab.focus();
+    }
+
+    var initialTargetId = VALID_ACTIVITIES[currentActivityKey];
+    if (initialTargetId && initialTargetId !== "activity-runs") {
+      var initialTab = tablist.querySelector('[data-activity-target="' + initialTargetId + '"]');
+      if (initialTab) activateTab(initialTab, false, false);
     }
 
     tablist.addEventListener("click", function (evt) {
       var tab = evt.target && evt.target.closest ? evt.target.closest("[data-activity-target]") : null;
-      if (tab) activateTab(tab, false);
+      if (tab) activateTab(tab, false, true);
     });
 
     tablist.addEventListener("keydown", function (evt) {
@@ -2115,28 +2192,47 @@
       if (activeIndex < 0) return;
       if (evt.key === "ArrowRight" || evt.key === "ArrowDown") {
         evt.preventDefault();
-        activateTab(tabs[(activeIndex + 1) % tabs.length], true);
+        activateTab(tabs[(activeIndex + 1) % tabs.length], true, true);
       } else if (evt.key === "ArrowLeft" || evt.key === "ArrowUp") {
         evt.preventDefault();
-        activateTab(tabs[(activeIndex - 1 + tabs.length) % tabs.length], true);
+        activateTab(tabs[(activeIndex - 1 + tabs.length) % tabs.length], true, true);
       } else if (evt.key === "Home") {
         evt.preventDefault();
-        activateTab(tabs[0], true);
+        activateTab(tabs[0], true, true);
       } else if (evt.key === "End") {
         evt.preventDefault();
-        activateTab(tabs[tabs.length - 1], true);
+        activateTab(tabs[tabs.length - 1], true, true);
       }
     });
+  }
+
+  function triggerManualRefresh() {
+    setDetailRefreshBusy(true);
+    refreshCore({ lite: false });
+    refreshCurveFast();
+    refreshDetails();
+    setTimeout(function () { setDetailRefreshBusy(false); }, 600);
   }
 
   applyAccountContext();
   setupActivityTabs();
   renderCurveTabState();
   if (el.detailRetryBtn) {
-    el.detailRetryBtn.addEventListener("click", function () {
-      refreshCore({ lite: false });
+    el.detailRetryBtn.addEventListener("click", triggerManualRefresh);
+  }
+  if (el.detailRefreshBtn) {
+    el.detailRefreshBtn.addEventListener("click", triggerManualRefresh);
+  }
+  if (el.chartSparseHint) {
+    el.chartSparseHint.addEventListener("click", function (evt) {
+      var btn = evt.target && evt.target.closest ? evt.target.closest("[data-sparse-window]") : null;
+      if (!btn) return;
+      var parsed = Number(btn.getAttribute("data-sparse-window"));
+      if (!VALID_WINDOWS[parsed]) return;
+      currentWindowHours = parsed;
+      syncDetailUrl();
+      renderCurveTabState();
       refreshCurveFast();
-      refreshDetails();
     });
   }
   refreshCurveFast();
@@ -2146,6 +2242,7 @@
   if (el.tabStrategy) {
     el.tabStrategy.addEventListener("click", function () {
       currentCurveTab = "strategy";
+      syncDetailUrl();
       rerenderFromLatest();
       refreshCurveFast();
     });
@@ -2153,6 +2250,7 @@
   if (el.tabBalance) {
     el.tabBalance.addEventListener("click", function () {
       currentCurveTab = "balance";
+      syncDetailUrl();
       rerenderFromLatest();
       refreshCurveFast();
     });
@@ -2166,6 +2264,7 @@
       var parsed = Number(raw);
       if (!Number.isFinite(parsed) || parsed <= 0) return;
       currentWindowHours = parsed;
+      syncDetailUrl();
       renderCurveTabState();
       refreshCurveFast();
     });

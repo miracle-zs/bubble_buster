@@ -2178,7 +2178,8 @@ assert.deepEqual(basic, { opened: '12', failed: '0', skipped: '0' });
         nav = [{"id": "acc01", "mode": "full"}, {"id": "readonly01", "mode": "readonly"}]
         overview_html = render_accounts_overview_html(refresh_sec=5, nav_accounts=nav)
         self.assertIn('href="static/ops.css?v=2"', overview_html)
-        self.assertIn('src="static/ops.js?v=2"', overview_html)
+        self.assertIn('src="static/ops.js?v=3"', overview_html)
+        self.assertIn('id="overview-refresh-btn"', overview_html)
         self.assertIn('class="ops-topbar"', overview_html)
         self.assertIn('"id": "readonly01"', overview_html)
         self.assertNotIn("!important", overview_html)
@@ -2192,7 +2193,9 @@ assert.deepEqual(basic, { opened: '12', failed: '0', skipped: '0' });
             nav_accounts=nav,
         )
         self.assertIn('href="../../static/ops.css?v=2"', detail_html)
-        self.assertIn('src="../../static/ops.js?v=2"', detail_html)
+        self.assertIn('src="../../static/ops.js?v=3"', detail_html)
+        self.assertIn('id="detailRefreshBtn"', detail_html)
+        self.assertIn('id="chartSparseHint"', detail_html)
         self.assertIn('class="ops-topbar"', detail_html)
         self.assertIn('"id": "readonly01"', detail_html)
         self.assertNotIn("background-size: 100% 48px", detail_html)
