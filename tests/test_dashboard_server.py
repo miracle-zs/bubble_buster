@@ -2133,6 +2133,41 @@ class DashboardServerTest(unittest.TestCase):
         self.assertNotIn("<script>alert", html)
         self.assertIn("\\u003c/script\\u003e", html)
 
+    def test_render_account_dashboard_html_prevents_placeholder_collision(self) -> None:
+        html = render_account_dashboard_html(
+            refresh_sec=5,
+            account_id="__PORTFOLIO_STOP_PCT__",
+            strategy_note="note __PORTFOLIO_STOP_HOUR__",
+            portfolio_loss_cut_pct=4.5,
+            portfolio_loss_cut_hour=9,
+        )
+        self.assertIn('var accountId = "__PORTFOLIO_STOP_PCT__";', html)
+        self.assertIn('var accountStrategyNote = "note __PORTFOLIO_STOP_HOUR__";', html)
+        self.assertIn('var portfolioStopPct = Number("4.5")', html)
+        self.assertIn('var portfolioStopHour = Number("9")', html)
+
+    def test_overview_popover_and_parse_summary_pairs_regression(self) -> None:
+        html = render_accounts_overview_html(refresh_sec=5, portfolio_loss_cut_enabled=True)
+        self.assertNotIn('popover="auto"', html)
+        self.assertNotIn('popovertarget=', html)
+        self.assertIn(".metric-value.spark-down", html)
+        self.assertNotIn('style="grid-template-columns:', html)
+
+        start = html.index("  function parseSummaryPairs(")
+        end = html.index("  function taskTimeValue(")
+        script = html[start:end] + """
+const assert = require('node:assert/strict');
+const parsed = parseSummaryPairs('reason=failed error=Binance API Error 0: Service unavailable');
+assert.equal(parsed.reason, 'failed');
+assert.equal(parsed.error, 'Binance API Error 0: Service unavailable');
+const basic = parseSummaryPairs('opened=12 failed=0 skipped=0');
+assert.deepEqual(basic, { opened: '12', failed: '0', skipped: '0' });
+"""
+        import shutil
+        import subprocess
+        if shutil.which("node"):
+            subprocess.run(["node", "-e", script], check=True, capture_output=True, text=True)
+
     def test_render_overview_uses_readable_task_layout(self) -> None:
         html = render_accounts_overview_html(
             refresh_sec=5,

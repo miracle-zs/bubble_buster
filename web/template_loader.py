@@ -18,13 +18,14 @@ def load_template(name: str, base_dir: Optional[Path] = None) -> str:
     if not target.exists():
         raise FileNotFoundError(f"Template not found: {target}")
 
+    cache_key = str(target.resolve())
     mtime = target.stat().st_mtime
-    cached = _TEMPLATE_CACHE.get(name)
+    cached = _TEMPLATE_CACHE.get(cache_key)
     if cached is not None and cached[0] == mtime:
         return cached[1]
 
     content = target.read_text(encoding="utf-8")
-    _TEMPLATE_CACHE[name] = (mtime, content)
+    _TEMPLATE_CACHE[cache_key] = (mtime, content)
     return content
 
 

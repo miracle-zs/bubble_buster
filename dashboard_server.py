@@ -3678,17 +3678,19 @@ def _render_dashboard_template(
     portfolio_loss_cut_minute: int = 0,
 ) -> str:
     safe_stop_pct = min(100.0, max(0.001, float(portfolio_loss_cut_pct)))
-    return (
-        get_dashboard_html().replace("__REFRESH_SEC__", str(max(2, refresh_sec)))
-        .replace("__ECHARTS_SRC__", echarts_src or "https://cdn.jsdelivr.net/npm/echarts@5/dist/echarts.min.js")
-        .replace("__ACCOUNT_ID_JSON__", _inline_script_json(account_id))
-        .replace("__ACCOUNT_MODE_JSON__", _inline_script_json(account_mode))
-        .replace("__STRATEGY_NOTE_JSON__", _inline_script_json(strategy_note))
-        .replace("__PORTFOLIO_STOP_ENABLED__", "true" if portfolio_loss_cut_enabled else "false")
-        .replace("__PORTFOLIO_STOP_PCT__", f"{safe_stop_pct:g}")
-        .replace("__PORTFOLIO_STOP_HOUR__", str(int(portfolio_loss_cut_hour) % 24))
-        .replace("__PORTFOLIO_STOP_MINUTE__", str(int(portfolio_loss_cut_minute) % 60))
-    )
+    replacements = {
+        "__REFRESH_SEC__": str(max(2, refresh_sec)),
+        "__ECHARTS_SRC__": echarts_src or "https://cdn.jsdelivr.net/npm/echarts@5/dist/echarts.min.js",
+        "__ACCOUNT_ID_JSON__": _inline_script_json(account_id),
+        "__ACCOUNT_MODE_JSON__": _inline_script_json(account_mode),
+        "__STRATEGY_NOTE_JSON__": _inline_script_json(strategy_note),
+        "__PORTFOLIO_STOP_ENABLED__": "true" if portfolio_loss_cut_enabled else "false",
+        "__PORTFOLIO_STOP_PCT__": f"{safe_stop_pct:g}",
+        "__PORTFOLIO_STOP_HOUR__": str(int(portfolio_loss_cut_hour) % 24),
+        "__PORTFOLIO_STOP_MINUTE__": str(int(portfolio_loss_cut_minute) % 60),
+    }
+    pattern = re.compile("|".join(re.escape(key) for key in replacements))
+    return pattern.sub(lambda m: replacements[m.group(0)], get_dashboard_html())
 
 
 def render_dashboard_html(
@@ -3745,16 +3747,18 @@ def render_accounts_overview_html(
     stop_enabled = bool(portfolio_loss_cut_enabled)
     stop_label = f"-{safe_stop_pct:g}% 已启用" if stop_enabled else "未启用"
     stop_class = "" if stop_enabled else "is-disabled"
-    return (
-        get_accounts_overview_html().replace("__REFRESH_SEC__", str(max(15, refresh_sec)))
-        .replace("__ENTRY_TIME__", f"{safe_entry_hour:02d}:{safe_entry_minute:02d}")
-        .replace("__PORTFOLIO_STOP_ENABLED__", "true" if stop_enabled else "false")
-        .replace("__PORTFOLIO_STOP_PCT__", f"{safe_stop_pct:g}")
-        .replace("__PORTFOLIO_STOP_HOUR__", str(safe_stop_hour))
-        .replace("__PORTFOLIO_STOP_MINUTE__", str(safe_stop_minute))
-        .replace("__PORTFOLIO_STOP_LABEL__", stop_label)
-        .replace("__PORTFOLIO_STOP_CLASS__", stop_class)
-    )
+    replacements = {
+        "__REFRESH_SEC__": str(max(15, refresh_sec)),
+        "__ENTRY_TIME__": f"{safe_entry_hour:02d}:{safe_entry_minute:02d}",
+        "__PORTFOLIO_STOP_ENABLED__": "true" if stop_enabled else "false",
+        "__PORTFOLIO_STOP_PCT__": f"{safe_stop_pct:g}",
+        "__PORTFOLIO_STOP_HOUR__": str(safe_stop_hour),
+        "__PORTFOLIO_STOP_MINUTE__": str(safe_stop_minute),
+        "__PORTFOLIO_STOP_LABEL__": stop_label,
+        "__PORTFOLIO_STOP_CLASS__": stop_class,
+    }
+    pattern = re.compile("|".join(re.escape(key) for key in replacements))
+    return pattern.sub(lambda m: replacements[m.group(0)], get_accounts_overview_html())
 
 
 _CURVE_PAYLOAD_KEYS = {

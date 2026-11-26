@@ -46,3 +46,14 @@ class TestTemplateLoader:
 
         c3 = load_template("test.html", base_dir=tmp_path)
         assert c3 == "v2 updated content"
+
+    def test_cache_isolates_same_filename_across_directories(self, tmp_path: Path) -> None:
+        dir_a = tmp_path / "a"
+        dir_b = tmp_path / "b"
+        dir_a.mkdir()
+        dir_b.mkdir()
+        (dir_a / "same.html").write_text("from dir a", encoding="utf-8")
+        (dir_b / "same.html").write_text("from dir b", encoding="utf-8")
+
+        assert load_template("same.html", base_dir=dir_a) == "from dir a"
+        assert load_template("same.html", base_dir=dir_b) == "from dir b"

@@ -3,6 +3,8 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta name="color-scheme" content="dark" />
+  <meta name="theme-color" content="#071019" />
   <title>Bubble Buster Overview</title>
   <style>
     :root { --bg:#0a1118; --panel:#101c27cc; --line:#20445a; --text:#eaf6ff; --muted:#8db0c4; --ok:#26d07c; --warn:#ffb340; --bad:#ff5d5d; --accent:#4ec1ff; --spark:#18d29f; --spark-fill:rgba(24,210,159,0.14); }
@@ -497,7 +499,14 @@
       color:#f2fbff;
       border-color:#4ec1ff;
       background:#173d52;
-      outline:none;
+    }
+    .command-brand-link:focus-visible,
+    .strategy-trigger:focus-visible,
+    .detail-link:focus-visible,
+    .section-toggle:focus-visible,
+    .task-filter-chip:focus-visible {
+      outline:2px solid var(--accent);
+      outline-offset:2px;
     }
     .command-item {
       min-width:0;
@@ -533,12 +542,17 @@
       justify-content:center;
       gap:7px;
       padding:0 18px;
-      border-left:1px solid #4d3033;
-      color:var(--bad);
-      background:#15171d;
+      border-left:1px solid #24485d;
+      color:#9fd4ee;
+      background:#0d1e2a;
       font-size:13px;
       font-weight:800;
       white-space:nowrap;
+    }
+    .portfolio-stop-command.is-triggered {
+      color:var(--bad);
+      border-left-color:#6d363b;
+      background:#1c1317;
     }
     .portfolio-stop-command.is-disabled {
       color:var(--muted);
@@ -574,7 +588,23 @@
       overflow:visible;
     }
     .account-card:hover,
-    .account-card:focus-within { z-index:8; }
+    .account-card:focus-within,
+    .account-card.has-open-popover { z-index:20; }
+    .overview-alert {
+      display:flex;
+      align-items:center;
+      justify-content:space-between;
+      gap:12px;
+      margin-top:10px;
+      padding:10px 14px;
+      border:1px solid #7d3f44;
+      border-radius:8px;
+      background:#221317;
+      color:#ffb4b4;
+      font-size:12px;
+      line-height:1.45;
+    }
+    .overview-alert[hidden] { display:none; }
     .account-card-head {
       position:relative;
       min-height:50px;
@@ -624,10 +654,10 @@
       appearance:none;
       min-height:24px;
       padding:3px 7px;
-      border:1px solid #2b5065;
+      border:1px solid #3d6b82;
       border-radius:4px;
       background:#10212c;
-      color:#b4cfdf;
+      color:#c0dae9;
       font-size:10px;
       font-weight:700;
       cursor:pointer;
@@ -637,12 +667,12 @@
     .strategy-popover-wrap.is-open .strategy-trigger {
       border-color:var(--accent);
       color:#edf8ff;
-      outline:none;
     }
     .strategy-popover {
       position:absolute;
       top:calc(100% + 7px);
       right:14px;
+      z-index:30;
       width:290px;
       padding:10px;
       border:1px solid #35657d;
@@ -663,8 +693,6 @@
       top:-8px;
       height:8px;
     }
-    .strategy-popover-wrap:hover .strategy-popover,
-    .strategy-popover-wrap:focus-within .strategy-popover,
     .strategy-popover-wrap.is-open .strategy-popover {
       opacity:1;
       visibility:visible;
@@ -684,7 +712,7 @@
       font-weight:800;
     }
     .strategy-popover-subtitle {
-      color:#6f91a4;
+      color:#88a9bc;
       font-size:9px;
     }
     .strategy-popover-tags {
@@ -726,7 +754,7 @@
     .strategy-tag-empty {
       border-color:transparent;
       background:transparent;
-      color:#6d8999;
+      color:#88a9bc;
       padding-left:0;
     }
     .account-card-body {
@@ -752,15 +780,19 @@
       display:block;
       color:#edf7fd;
       font-family:ui-monospace,Menlo,Monaco,Consolas,monospace;
+      font-variant-numeric:tabular-nums;
       font-size:22px;
       line-height:1.15;
       font-weight:700;
       white-space:nowrap;
     }
     .metric-value.return-value { font-size:23px; }
-    .metric-value.status-ok { color:var(--ok); }
+    .metric-value.status-ok,
+    .metric-value.spark-up { color:var(--ok); }
     .metric-value.status-warn { color:var(--warn); }
-    .metric-value.status-bad { color:var(--bad); }
+    .metric-value.status-bad,
+    .metric-value.spark-down { color:var(--bad); }
+    .metric-value.spark-flat { color:var(--accent); }
     .account-secondary {
       display:grid;
       grid-template-columns:repeat(3,minmax(0,1fr));
@@ -828,7 +860,8 @@
       font-size:10px;
     }
     .stop-meter-track {
-      height:3px;
+      height:4px;
+      border:1px solid #3d6980;
       background:#213440;
       overflow:hidden;
     }
@@ -1022,7 +1055,7 @@
     .task-empty span { font-size:11px; }
     @media (max-width: 1260px) {
       .command-bar {
-        grid-template-columns:minmax(260px,1.25fr) repeat(2,minmax(130px,0.7fr)) minmax(190px,0.9fr);
+        grid-template-columns:minmax(230px,1.35fr) minmax(100px,0.65fr) minmax(138px,0.8fr) minmax(76px,0.45fr) minmax(168px,0.85fr);
       }
       .command-item.command-secondary { display:none; }
       .managed-grid { grid-template-columns:repeat(2,minmax(0,1fr)); }
@@ -1042,10 +1075,18 @@
       .command-brand { grid-column:1 / -1; border-bottom:1px solid #203b4c; }
       .command-brand-title-row { align-items:flex-start; }
       .command-item { border-left:0; padding:8px 14px; }
-      .command-item:nth-of-type(even) { border-left:1px solid #203b4c; }
+      .command-item:nth-child(3) { border-left:1px solid #203b4c; }
+      .command-item.command-anomaly { border-top:1px solid #203b4c; border-left:0; }
       .portfolio-stop-command {
-        min-height:42px;
-        border-left:1px solid #4d3033;
+        min-height:48px;
+        padding:8px 12px;
+        border-top:1px solid #203b4c;
+        border-left:1px solid #24485d;
+        font-size:12px;
+      }
+      .portfolio-stop-command.is-triggered {
+        border-top-color:#6d363b;
+        border-left-color:#6d363b;
       }
       .managed-grid { grid-template-columns:1fr; }
       .account-card-head { min-height:46px; }
@@ -1575,7 +1616,7 @@
       justify-content:space-between;
       gap:8px;
       margin-top:5px;
-      color:#668895;
+      color:#84a6b5;
       font-size:9px;
     }
     .entry-progress-progress-foot .warn { color:#eeb765; }
@@ -1744,6 +1785,12 @@
     @media (max-width: 700px) {
       .entry-progress-timeline-legend { justify-content:flex-start; }
     }
+    @media (prefers-reduced-motion: reduce) {
+      .strategy-popover,
+      .entry-progress-row,
+      .task-filter-chip,
+      .command-brand-link { transition:none !important; }
+    }
   </style>
 </head>
 <body>
@@ -1764,7 +1811,7 @@
         <span class="command-label">更新时间</span>
         <strong id="overview-updated-at" class="command-value">--</strong>
       </div>
-      <div class="command-item command-secondary">
+      <div class="command-item command-anomaly">
         <span class="command-label">异常</span>
         <strong id="overview-anomaly-count" class="command-value status-ok">0</strong>
       </div>
@@ -1777,6 +1824,10 @@
       </div>
     </header>
     <span hidden><span id="refresh">__REFRESH_SEC__</span></span>
+    <div id="overview-alert" class="overview-alert" role="alert" hidden>
+      <span id="overview-alert-text"></span>
+      <button id="overview-retry-btn" class="section-toggle" type="button">立即重试</button>
+    </div>
     <section id="cards" class="accounts-area"></section>
     <section class="entry-progress-panel">
       <div class="entry-progress-heading">
@@ -1788,7 +1839,7 @@
         <div class="section-heading-actions">
           <div id="entry-progress-updated" class="entry-progress-updated">数据更新时间 --</div>
           <span class="entry-progress-zone">北京时间 UTC+8</span>
-          <button id="entry-progress-toggle" class="section-toggle" type="button">查看账号明细</button>
+          <button id="entry-progress-toggle" class="section-toggle" type="button" aria-expanded="false">查看账号明细</button>
         </div>
       </div>
       <div class="entry-progress-shell">
@@ -1802,10 +1853,10 @@
         </div>
         <div class="task-panel-meta">
           <div id="task-updated-at" class="task-updated">数据更新时间 --</div>
-          <div class="task-filter-bar">
-            <button id="task-filter-anomaly" class="task-filter-chip active" type="button">仅异常</button>
-            <button id="task-filter-all" class="task-filter-chip" type="button">全部</button>
-            <button id="task-filter-symbols" class="task-filter-chip" type="button">仅有symbol明细</button>
+          <div class="task-filter-bar" role="group" aria-label="任务筛选">
+            <button id="task-filter-anomaly" class="task-filter-chip active" type="button" aria-pressed="true">仅异常</button>
+            <button id="task-filter-all" class="task-filter-chip" type="button" aria-pressed="false">全部</button>
+            <button id="task-filter-symbols" class="task-filter-chip" type="button" aria-pressed="false">仅有symbol明细</button>
           </div>
         </div>
       </div>
@@ -1834,6 +1885,10 @@
   var serviceState = document.getElementById("service-state");
   var overviewUpdatedAt = document.getElementById("overview-updated-at");
   var overviewAnomalyCount = document.getElementById("overview-anomaly-count");
+  var overviewAlert = document.getElementById("overview-alert");
+  var overviewAlertText = document.getElementById("overview-alert-text");
+  var overviewRetryBtn = document.getElementById("overview-retry-btn");
+  var overviewErrors = { summary: "", details: "" };
   var curveCache = {};
   var curveInFlight = {};
   var curveObserver = null;
@@ -1846,7 +1901,22 @@
   var curveTtlMs = Math.max(60000, Math.max(15, refreshSec) * 3000);
   var summaryRequestInFlight = false;
   var summaryDetailsRequestInFlight = false;
+  var detailsHydratedOnce = false;
+  var lastDetailsFetchAt = 0;
   var detailsRetryTimer = null;
+
+  function setOverviewError(slot, message) {
+    overviewErrors[slot] = message || "";
+    if (!overviewAlert || !overviewAlertText) return;
+    var active = overviewErrors.summary || overviewErrors.details;
+    if (active) {
+      overviewAlertText.textContent = active;
+      overviewAlert.hidden = false;
+    } else {
+      overviewAlertText.textContent = "";
+      overviewAlert.hidden = true;
+    }
+  }
 
   function escapeHtml(text) {
     return String(text || "")
@@ -1923,44 +1993,64 @@
       overviewAnomalyCount.textContent = String(count);
       overviewAnomalyCount.className = "command-value " + (count > 0 ? "status-bad" : "status-ok");
     }
+    var stopCmd = document.getElementById("portfolio-stop-command");
+    if (stopCmd && portfolioStopEnabled) {
+      var anyTriggered = false;
+      for (var i = 0; i < (summaryRows || []).length; i += 1) {
+        var row = summaryRows[i] || {};
+        var stop = row.portfolio_loss_cut || portfolioStopStates[String(row.account_id || "")];
+        var st = String((stop && stop.status) || "").toUpperCase();
+        if (st === "TRIGGERED_COMPLETE" || st === "CLOSING" || st === "THRESHOLD_REACHED") {
+          anyTriggered = true;
+          break;
+        }
+      }
+      stopCmd.classList.toggle("is-triggered", anyTriggered);
+    }
   }
 
+  var healthAbortController = null;
   function fetchHealth() {
-    if (!serviceState) return;
-    var xhr = new XMLHttpRequest();
-    xhr.open("GET", healthApi + "?_=" + Date.now(), true);
-    xhr.onreadystatechange = function () {
-      if (xhr.readyState !== 4) return;
-      if (xhr.status < 200 || xhr.status >= 300) {
+    if (!serviceState || document.hidden) return;
+    if (healthAbortController) healthAbortController.abort();
+    healthAbortController = new AbortController();
+    fetch(healthApi + "?_=" + Date.now(), { signal: healthAbortController.signal, cache: "no-store" })
+      .then(function (res) {
+        if (!res.ok) throw new Error("status " + res.status);
+        return res.json();
+      })
+      .then(function (payload) {
+        var running = !!payload.service_running;
+        var enabled = !!payload.service_enabled;
+        serviceState.innerHTML = '<span class="status-dot"></span>'
+          + (running ? "运行中" : (enabled ? "已停止" : "未启用"));
+        serviceState.className = "command-value " + (running ? "status-ok" : (enabled ? "status-bad" : "status-warn"));
+      })
+      .catch(function (err) {
+        if (err && err.name === "AbortError") return;
         serviceState.innerHTML = '<span class="status-dot"></span>未知';
         serviceState.className = "command-value status-warn";
-        return;
-      }
-      var payload = {};
-      try { payload = JSON.parse(xhr.responseText || "{}"); } catch (e) {}
-      var running = !!payload.service_running;
-      var enabled = !!payload.service_enabled;
-      serviceState.innerHTML = '<span class="status-dot"></span>'
-        + (running ? "运行中" : (enabled ? "已停止" : "未启用"));
-      serviceState.className = "command-value " + (running ? "status-ok" : (enabled ? "status-bad" : "status-warn"));
-    };
-    xhr.send();
+      });
   }
 
   function parseSummaryPairs(summary) {
     var raw = String(summary || "--").trim();
     var pairs = {};
     if (!raw || raw === "--") return pairs;
-    var parts = raw.split(/\s+/);
-    for (var i = 0; i < parts.length; i += 1) {
-      var part = String(parts[i] || "");
-      if (!part) continue;
-      var eq = part.indexOf("=");
-      if (eq > 0 && eq < part.length - 1) {
-        var key = part.slice(0, eq);
-        var val = part.slice(eq + 1);
-        pairs[key] = val;
-      }
+    var matcher = /(?:^|\s)([A-Za-z0-9_.-]+)=/g;
+    var tokens = [];
+    var match;
+    while ((match = matcher.exec(raw)) !== null) {
+      tokens.push({
+        key: match[1],
+        valueStart: match.index + match[0].length,
+        matchStart: match.index
+      });
+    }
+    for (var i = 0; i < tokens.length; i += 1) {
+      var endIndex = i + 1 < tokens.length ? tokens[i + 1].matchStart : raw.length;
+      var val = raw.slice(tokens[i].valueStart, endIndex).trim();
+      if (val) pairs[tokens[i].key] = val;
     }
     return pairs;
   }
@@ -2143,22 +2233,22 @@
       // readonly 模式显示交易统计
       var stats = row && row.trade_stats;
       if (stats) {
-        var profitFactor = stats.profit_factor != null ? stats.profit_factor.toFixed(2) : "--";
+        var profitFactor = fmt(stats.profit_factor, 2);
         var statsHtml = '<div class="task-row">'
-          + '<div class="task-row-main" style="grid-template-columns: minmax(170px,1.1fr) 120px 180px minmax(260px,1.6fr);">'
+          + '<div class="task-row-main">'
           + '<div class="task-name-wrap"><span class="task-name">交易统计(近30日)</span>'
           + '<span class="task-task-tag">只读监控</span></div>'
           + '<span class="task-meta"><span class="task-badge status-ok">READONLY</span></span>'
           + '<span class="task-time">' + escapeHtml(String(stats.last_updated_utc || "").slice(0, 16)) + '</span>'
           + '<div class="task-result-lines">'
           + '<div class="task-stat-line">总盈亏=' + fmt(stats.total_realized_pnl, 4) + ' | 胜率=' + fmt(stats.win_rate_pct, 1) + '% | 盈亏比=' + profitFactor + '</div>'
-          + '<div class="task-stat-line">胜=' + stats.win_count + ' 负=' + stats.loss_count + ' | 平均盈利=' + fmt(stats.avg_win, 4) + ' | 平均亏损=' + fmt(stats.avg_loss, 4) + '</div>'
+          + '<div class="task-stat-line">胜=' + fmt(stats.win_count, 0) + ' 负=' + fmt(stats.loss_count, 0) + ' | 平均盈利=' + fmt(stats.avg_win, 4) + ' | 平均亏损=' + fmt(stats.avg_loss, 4) + '</div>'
           + '</div></div></div>';
         return statsHtml;
       }
       // 没有统计数据时显示简化信息
       return '<div class="task-row">'
-        + '<div class="task-row-main" style="grid-template-columns: minmax(170px,1.1fr) 120px 180px minmax(260px,1.6fr);">'
+        + '<div class="task-row-main">'
         + '<div class="task-name-wrap"><span class="task-name">账户监控</span>'
         + '<span class="task-task-tag">只读监控</span></div>'
         + '<span class="task-meta"><span class="task-badge status-warn">READONLY</span></span>'
@@ -2187,7 +2277,7 @@
   function fmt(v, digits) {
     if (v === null || v === undefined || v === "") return "--";
     var n = Number(v);
-    if (!Number.isFinite(n)) return String(v);
+    if (!Number.isFinite(n)) return escapeHtml(String(v));
     return n.toFixed(digits);
   }
 
@@ -2250,6 +2340,7 @@
   }
 
   function updateEntryProgressCountdown() {
+    if (document.hidden) return;
     var countdown = document.getElementById("entry-progress-countdown");
     if (!countdown) return;
     var targetMs = parseShanghaiLocalTime(nextEntryCheckRaw);
@@ -2488,6 +2579,7 @@
     if (entryProgressToggle) {
       entryProgressToggle.hidden = hasIssues;
       entryProgressToggle.textContent = showDetails ? "收起账号明细" : "查看账号明细";
+      entryProgressToggle.setAttribute("aria-expanded", showDetails ? "true" : "false");
     }
     var nextCheckLabel = nextCheckRaw ? compactLocalTime(nextCheckRaw) : "--";
     var nextActionLabel = waitingTotal > 0 ? "等待信号检查" : (completedAccounts === accountRows.length ? "今日已完成" : "等待状态同步");
@@ -2592,8 +2684,9 @@
       var progressNoteClass = failed ? "bad" : (waiting ? "warn" : "ok");
       var accountStatusText = waiting ? "等待中" : status.text;
       var accountMeta = "启动 " + compactLocalTime(progress.started_at_local) + " · " + entryProgressWindow(progress);
+      var rawAid = String(account.account_id || "");
       html += '<div class="entry-progress-row">'
-        + '<div class="entry-progress-account progress-account-cell"><div class="entry-progress-account-head"><strong>' + aid + '</strong><span class="entry-progress-account-status ' + status.cls + '">' + escapeHtml(accountStatusText) + '</span></div><span class="entry-progress-account-meta">' + escapeHtml(accountMeta) + '</span><div class="entry-progress-progress-line"><strong>' + opened + '</strong><span>/ ' + target + ' 入场动作</span><em>' + Math.round(openedPct) + '%</em></div><div class="entry-progress-meter" role="progressbar" aria-label="' + escapeHtml(aid + ' 入场动作进度') + '" aria-valuenow="' + Math.round(openedPct) + '" aria-valuemin="0" aria-valuemax="100"><span class="entry-progress-meter-initial" style="width:' + initialPct.toFixed(2) + '%"></span><span class="entry-progress-meter-scale-in" style="width:' + scaleInPct.toFixed(2) + '%"></span><span class="entry-progress-meter-waiting" style="width:' + waitingPct.toFixed(2) + '%"></span><span class="entry-progress-meter-failed" style="width:' + failedPct.toFixed(2) + '%"></span><span class="entry-progress-meter-skipped" style="width:' + skippedPct.toFixed(2) + '%"></span></div><div class="entry-progress-progress-foot"><span>入场动作</span><span class="' + progressNoteClass + '">' + escapeHtml(progressNoteParts.join(" · ")) + '</span></div></div>'
+        + '<div class="entry-progress-account progress-account-cell"><div class="entry-progress-account-head"><strong>' + aid + '</strong><span class="entry-progress-account-status ' + status.cls + '">' + escapeHtml(accountStatusText) + '</span></div><span class="entry-progress-account-meta">' + escapeHtml(accountMeta) + '</span><div class="entry-progress-progress-line"><strong>' + opened + '</strong><span>/ ' + target + ' 入场动作</span><em>' + Math.round(openedPct) + '%</em></div><div class="entry-progress-meter" role="progressbar" aria-label="' + escapeHtml(rawAid + ' 入场动作进度') + '" aria-valuenow="' + Math.round(openedPct) + '" aria-valuemin="0" aria-valuemax="100"><span class="entry-progress-meter-initial" style="width:' + initialPct.toFixed(2) + '%"></span><span class="entry-progress-meter-scale-in" style="width:' + scaleInPct.toFixed(2) + '%"></span><span class="entry-progress-meter-waiting" style="width:' + waitingPct.toFixed(2) + '%"></span><span class="entry-progress-meter-failed" style="width:' + failedPct.toFixed(2) + '%"></span><span class="entry-progress-meter-skipped" style="width:' + skippedPct.toFixed(2) + '%"></span></div><div class="entry-progress-progress-foot"><span>入场动作</span><span class="' + progressNoteClass + '">' + escapeHtml(progressNoteParts.join(" · ")) + '</span></div></div>'
         + '<div class="entry-progress-phase" aria-label="' + escapeHtml(statusTitle) + '"><span class="entry-progress-phase-label ' + phase.cls + ' phase-' + escapeHtml(phase.variant || "unknown") + '">' + escapeHtml(phase.label) + '</span><span class="entry-progress-phase-note">' + escapeHtml(phase.note) + '</span></div>'
         + '<div class="entry-progress-waiting-cell">' + waitingHtml + '</div>'
         + '<div class="entry-progress-next-cell' + (waiting ? ' is-waiting' : '') + '"><span class="entry-progress-next-cell-label">下一检查</span><strong>' + escapeHtml(nextText) + '</strong><span>' + escapeHtml(nextNote) + '</span></div></div>';
@@ -2618,6 +2711,13 @@
   }
 
   function accountElement(className, aid) {
+    if (!aid) return null;
+    var card = document.getElementById("account-card-" + aid);
+    if (card) {
+      if (card.classList && card.classList.contains(className)) return card;
+      var el = card.querySelector("." + className);
+      if (el) return el;
+    }
     var nodes = document.getElementsByClassName(className);
     for (var i = 0; i < nodes.length; i += 1) {
       if (String(nodes[i].getAttribute("data-account-id") || "") === String(aid || "")) {
@@ -2847,6 +2947,10 @@
       meter.style.width = meterPct.toFixed(2) + "%";
       meter.className = "stop-meter-fill " + riskCls;
     }
+    var stopCmd = document.getElementById("portfolio-stop-command");
+    if (stopCmd && portfolioStopEnabled && (status === "TRIGGERED_COMPLETE" || status === "CLOSING" || status === "THRESHOLD_REACHED")) {
+      stopCmd.classList.add("is-triggered");
+    }
   }
 
   function renderCurve(aid) {
@@ -2910,6 +3014,7 @@
     renderPortfolioStopState(aid, stop, metrics);
   }
 
+  var curveAbortControllers = {};
   function fetchCurve(aid) {
     if (!aid) return;
     var now = Date.now();
@@ -2925,17 +3030,16 @@
     curveInFlight[aid] = true;
     var url = pathPrefix + "/api/account/" + encodeURIComponent(aid) + "/curve"
       + "?window_hours=24&curve_points=160&_=" + now;
-    var xhr = new XMLHttpRequest();
-    xhr.open("GET", url, true);
-    xhr.onreadystatechange = function () {
-      if (xhr.readyState !== 4) return;
-      curveInFlight[aid] = false;
-      if (xhr.status < 200 || xhr.status >= 300) {
-        renderCurve(aid);
-        return;
-      }
-      try {
-        var payload = JSON.parse(xhr.responseText || "{}");
+    if (curveAbortControllers[aid]) curveAbortControllers[aid].abort();
+    var controller = new AbortController();
+    curveAbortControllers[aid] = controller;
+    fetch(url, { signal: controller.signal, cache: "no-store" })
+      .then(function (res) {
+        if (!res.ok) throw new Error("status " + res.status);
+        return res.json();
+      })
+      .then(function (payload) {
+        curveInFlight[aid] = false;
         var mode = String(accountModes[aid] || "full").toLowerCase();
         var curve = mode === "readonly"
           ? (payload.balance_curve || payload.equity_curve || [])
@@ -2955,10 +3059,13 @@
           portfolioLossCut: payload.portfolio_loss_cut || portfolioStopStates[aid] || null,
           ts: Date.now()
         };
-      } catch (e) {}
-      renderCurve(aid);
-    };
-    xhr.send();
+        renderCurve(aid);
+      })
+      .catch(function (err) {
+        curveInFlight[aid] = false;
+        if (err && err.name === "AbortError") return;
+        renderCurve(aid);
+      });
   }
 
   function primeCurveLoad() {
@@ -2979,10 +3086,59 @@
     }
   }
 
+  function patchExistingCards(rows) {
+    for (var i = 0; i < rows.length; i += 1) {
+      var r = rows[i] || {};
+      var mode = String(r.mode || "full").toLowerCase();
+      if (mode === "loss_cut_only") continue;
+      var aid = String(r.account_id || "");
+      var card = document.getElementById("account-card-" + aid);
+      if (!card) return false;
+      var balanceEl = card.querySelector("[data-field='wallet-balance']");
+      if (balanceEl) balanceEl.textContent = fmt(r.wallet_balance_usdt, 4);
+      if (mode === "readonly") {
+        var stats = r.trade_stats || {};
+        var netPnl = stats.net_realized_pnl;
+        var pnlNumber = Number(netPnl);
+        var pnlCls = Number.isFinite(pnlNumber) ? (pnlNumber >= 0 ? "status-ok" : "status-bad") : "";
+        var pnlEl = card.querySelector("[data-field='readonly-pnl']");
+        if (pnlEl) {
+          pnlEl.textContent = netPnl != null ? fmt(netPnl, 4) : "--";
+          pnlEl.className = "metric-value pnl-value" + (pnlCls ? " " + pnlCls : "");
+        }
+        var winRateEl = card.querySelector("[data-field='readonly-win-rate']");
+        if (winRateEl) winRateEl.textContent = stats.win_rate_pct != null ? fmt(stats.win_rate_pct, 1) + "%" : "--";
+        var tradesEl = card.querySelector("[data-field='readonly-trades']");
+        if (tradesEl) tradesEl.textContent = stats.total_trades != null ? fmt(stats.total_trades, 0) : "--";
+        var pfEl = card.querySelector("[data-field='readonly-pf']");
+        if (pfEl) pfEl.textContent = stats.profit_factor != null ? fmt(stats.profit_factor, 2) : "--";
+      } else {
+        var venueEl = card.querySelector(".venue-state");
+        if (venueEl) venueEl.className = "venue-state " + statusCls(r.last_run_status || "--");
+        var openEl = card.querySelector("[data-field='open-positions']");
+        if (openEl) openEl.textContent = fmt(r.open_positions, 0);
+        var tagsEl = card.querySelector(".strategy-popover-tags");
+        var noteKey = String(r.strategy_note || "");
+        if (tagsEl && tagsEl.getAttribute("data-note") !== noteKey) {
+          tagsEl.innerHTML = formatStrategyNote(r.strategy_note);
+          tagsEl.setAttribute("data-note", noteKey);
+        }
+        var stopThresholdEl = card.querySelector("[data-field='stop-threshold-label']");
+        if (stopThresholdEl) {
+          stopThresholdEl.textContent = portfolioStopEnabled
+            ? ("止损阈值 -" + fmt(r.portfolio_loss_cut ? r.portfolio_loss_cut.loss_pct : portfolioStopPct, 2) + "%")
+            : "组合止损未启用";
+        }
+      }
+    }
+    return true;
+  }
+
   function renderCards() {
     var rows = summaryRows || [];
     var managedHtml = "";
     var readonlyHtml = "";
+    var sigParts = [];
     accountModes = {};
     portfolioStopStates = {};
     for (var i = 0; i < rows.length; i += 1) {
@@ -2992,6 +3148,20 @@
       var aid = String(r.account_id || "");
       accountModes[aid] = mode;
       portfolioStopStates[aid] = r.portfolio_loss_cut || null;
+      sigParts.push(aid + ":" + mode);
+    }
+    var nextSig = sigParts.join("|");
+    if (nextSig && cards.getAttribute("data-card-sig") === nextSig && patchExistingCards(rows)) {
+      primeCurveLoad();
+      return;
+    }
+
+    if (curveObserver) curveObserver.disconnect();
+    for (var j = 0; j < rows.length; j += 1) {
+      var r = rows[j] || {};
+      var mode = String(r.mode || "full").toLowerCase();
+      if (mode === "loss_cut_only") continue;
+      var aid = String(r.account_id || "");
       var safeAid = escapeHtml(aid);
       var base = pathPrefix + "/account/" + encodeURIComponent(aid) + "/";
       var st = r.last_run_status || "--";
@@ -3005,41 +3175,42 @@
         var profitFactorText = stats.profit_factor != null ? fmt(stats.profit_factor, 2) : "--";
         var pnlNumber = Number(netPnl);
         var pnlCls = Number.isFinite(pnlNumber) ? (pnlNumber >= 0 ? "status-ok" : "status-bad") : "";
-        readonlyHtml += '<article class="readonly-strip">'
+        readonlyHtml += '<article class="readonly-strip" id="account-card-' + safeAid + '" data-account-id="' + safeAid + '">'
           + '<div class="readonly-identity"><div><span class="readonly-id">' + safeAid + '</span><span class="readonly-badge">只读监控</span></div><div class="readonly-source">Binance Futures</div></div>'
-          + '<div class="readonly-metric"><span class="metric-label">余额 (USDT)</span><strong class="metric-value">' + fmt(r.wallet_balance_usdt, 4) + '</strong></div>'
-          + '<div class="readonly-metric"><span class="metric-label">近30日净盈亏</span><strong class="metric-value pnl-value ' + pnlCls + '">' + pnlText + '</strong></div>'
-          + '<div class="readonly-metric"><span class="metric-label">胜率</span><strong class="metric-value">' + winRateText + '</strong></div>'
-          + '<div class="readonly-metric readonly-secondary"><span class="metric-label">平仓订单数</span><strong class="metric-value">' + tradeCountText + '</strong></div>'
-          + '<div class="readonly-metric readonly-secondary"><span class="metric-label">盈亏比</span><strong class="metric-value">' + profitFactorText + '</strong></div>'
+          + '<div class="readonly-metric"><span class="metric-label">余额 (USDT)</span><strong class="metric-value" data-field="wallet-balance">' + fmt(r.wallet_balance_usdt, 4) + '</strong></div>'
+          + '<div class="readonly-metric"><span class="metric-label">近30日净盈亏</span><strong class="metric-value pnl-value ' + pnlCls + '" data-field="readonly-pnl">' + pnlText + '</strong></div>'
+          + '<div class="readonly-metric"><span class="metric-label">胜率</span><strong class="metric-value" data-field="readonly-win-rate">' + winRateText + '</strong></div>'
+          + '<div class="readonly-metric readonly-secondary"><span class="metric-label">平仓订单数</span><strong class="metric-value" data-field="readonly-trades">' + tradeCountText + '</strong></div>'
+          + '<div class="readonly-metric readonly-secondary"><span class="metric-label">盈亏比</span><strong class="metric-value" data-field="readonly-pf">' + profitFactorText + '</strong></div>'
           + '<div class="readonly-chart"><div>'
           + '<div class="spark-box" data-account-id="' + safeAid + '"><div class="spark-empty">加载中...</div></div>'
           + '</div><div class="readonly-chart-meta"><span class="metric-label" title="按周期首条权益快照计算，含浮盈亏，不等同已实现净盈亏" aria-label="按周期首条权益快照计算，含浮盈亏，不等同已实现净盈亏">本周期权益变化（含浮盈亏）</span><strong class="metric-value spark-delta" data-account-id="' + safeAid + '">--</strong></div></div>'
-          + '<div class="readonly-action"><a class="detail-link" href="' + base + '">余额曲线 / 交易统计</a></div>'
+          + '<div class="readonly-action"><a class="detail-link" href="' + base + '" aria-label="查看 ' + safeAid + ' 余额曲线与交易统计">余额曲线 / 交易统计</a></div>'
           + "</article>";
       } else {
         var stateCls = statusCls(st);
-        var popoverId = "strategy-popover-" + i;
-        managedHtml += '<article class="account-card">'
+        var popoverId = "strategy-popover-" + j;
+        var noteAttr = escapeHtml(String(r.strategy_note || ""));
+        managedHtml += '<article class="account-card" id="account-card-' + safeAid + '" data-account-id="' + safeAid + '">'
           + '<header class="account-card-head"><span class="aid">' + safeAid + '</span><div class="account-head-actions">'
-          + '<div class="strategy-popover-wrap"><button class="strategy-trigger" type="button" aria-expanded="false" aria-controls="' + popoverId + '">策略</button>'
+          + '<div class="strategy-popover-wrap"><button class="strategy-trigger" type="button" aria-expanded="false" aria-controls="' + popoverId + '" aria-label="' + safeAid + ' 策略配置">策略</button>'
           + '<div id="' + popoverId + '" class="strategy-popover" role="dialog" aria-label="' + safeAid + ' 策略配置">'
           + '<div class="strategy-popover-head"><strong class="strategy-popover-title">策略配置</strong><span class="strategy-popover-subtitle">' + safeAid + '</span></div>'
-          + '<div class="strategy-popover-tags">' + formatStrategyNote(r.strategy_note) + '</div></div></div>'
-          + '<span class="venue-state ' + stateCls + '">Binance Futures<span class="status-dot"></span></span><a class="detail-link" href="' + base + '">详情</a></div></header>'
+          + '<div class="strategy-popover-tags" data-note="' + noteAttr + '">' + formatStrategyNote(r.strategy_note) + '</div></div></div>'
+          + '<span class="venue-state ' + stateCls + '">Binance Futures<span class="status-dot" aria-hidden="true"></span></span><a class="detail-link" href="' + base + '" aria-label="查看 ' + safeAid + ' 账户详情">详情</a></div></header>'
           + '<div class="account-card-body">'
           + '<div class="account-primary">'
-          + '<div class="metric"><span class="metric-label">账户权益（含浮盈亏，USDT）</span><strong class="metric-value">' + fmt(r.wallet_balance_usdt, 4) + '</strong></div>'
+          + '<div class="metric"><span class="metric-label">账户权益（含浮盈亏，USDT）</span><strong class="metric-value" data-field="wallet-balance">' + fmt(r.wallet_balance_usdt, 4) + '</strong></div>'
           + '<div class="metric"><span class="metric-label">' + String(portfolioStopHour).padStart(2, "0") + ":" + String(portfolioStopMinute).padStart(2, "0") + ' 以来收益</span><strong class="metric-value return-value spark-delta" data-account-id="' + safeAid + '">--</strong></div>'
           + '</div>'
           + '<div class="account-secondary">'
-          + '<div class="metric"><span class="metric-label">本地策略持仓数</span><strong class="metric-value">' + fmt(r.open_positions, 0) + '</strong></div>'
+          + '<div class="metric"><span class="metric-label">本地策略持仓数</span><strong class="metric-value" data-field="open-positions">' + fmt(r.open_positions, 0) + '</strong></div>'
           + '<div class="metric"><span class="metric-label">距周期高点回撤</span><strong class="metric-value current-drawdown" data-account-id="' + safeAid + '">--</strong></div>'
           + '<div class="metric"><span class="metric-label">距组合止损</span><strong class="metric-value stop-distance" data-account-id="' + safeAid + '">--</strong></div>'
           + '</div>'
           + '<div class="risk-summary"><span>风险状态</span><strong class="risk-state" data-account-id="' + safeAid + '">计算中</strong></div>'
           + '<div class="spark-block">'
-          + '<div class="spark-title"><span class="label">本周期账户权益曲线</span><span class="label">' + (portfolioStopEnabled ? ("止损阈值 -" + fmt(r.portfolio_loss_cut ? r.portfolio_loss_cut.loss_pct : portfolioStopPct, 2) + "%") : "组合止损未启用") + '</span></div>'
+          + '<div class="spark-title"><span class="label">本周期账户权益曲线</span><span class="label" data-field="stop-threshold-label">' + (portfolioStopEnabled ? ("止损阈值 -" + fmt(r.portfolio_loss_cut ? r.portfolio_loss_cut.loss_pct : portfolioStopPct, 2) + "%") : "组合止损未启用") + '</span></div>'
           + '<div class="spark-box" data-account-id="' + safeAid + '"><div class="spark-empty">加载中...</div></div>'
           + '<div class="stop-meter"><span>-' + fmt(portfolioStopPct, 2) + '%</span><span class="stop-meter-track"><span class="stop-meter-fill" data-account-id="' + safeAid + '"></span></span><span class="stop-meter-label" data-account-id="' + safeAid + '">计算中</span></div>'
           + "</div></div>"
@@ -3048,6 +3219,7 @@
     }
     var html = managedHtml ? '<div class="managed-grid">' + managedHtml + "</div>" : "";
     html += readonlyHtml;
+    cards.setAttribute("data-card-sig", nextSig);
     cards.innerHTML = html || '<div class="task-empty"><strong>暂无账户数据</strong><span>等待账户快照写入</span></div>';
     primeCurveLoad();
   }
@@ -3060,8 +3232,10 @@
     for (var i = 0; i < filters.length; i += 1) {
       var el = document.getElementById("task-filter-" + (filters[i] === "all" ? "all" : (filters[i] === "anomaly" ? "anomaly" : "symbols")));
       if (!el) continue;
-      if (filters[i] === taskFilter) el.classList.add("active");
+      var isActive = filters[i] === taskFilter;
+      if (isActive) el.classList.add("active");
       else el.classList.remove("active");
+      el.setAttribute("aria-pressed", isActive ? "true" : "false");
     }
   }
 
@@ -3168,41 +3342,68 @@
     renderTaskBoard();
   }
 
+  var summaryDetailsAbortController = null;
   function fetchSummaryDetails() {
-    if (summaryDetailsRequestInFlight) return;
+    if (summaryDetailsRequestInFlight || document.hidden) return;
     summaryDetailsRequestInFlight = true;
-    var xhr = new XMLHttpRequest();
-    xhr.open("GET", summaryDetailsApi + "?_=" + Date.now(), true);
-    xhr.onreadystatechange = function () {
-      if (xhr.readyState !== 4) return;
-      summaryDetailsRequestInFlight = false;
-      if (xhr.status < 200 || xhr.status >= 300) return;
-      var payload = {};
-      try { payload = JSON.parse(xhr.responseText || "{}"); } catch (e) { return; }
-      mergeSummaryDetails(payload);
-    };
-    xhr.send();
+    lastDetailsFetchAt = Date.now();
+    if (summaryDetailsAbortController) summaryDetailsAbortController.abort();
+    summaryDetailsAbortController = new AbortController();
+    fetch(summaryDetailsApi + "?_=" + Date.now(), { signal: summaryDetailsAbortController.signal, cache: "no-store" })
+      .then(function (res) {
+        if (!res.ok) throw new Error("HTTP " + res.status);
+        return res.json();
+      })
+      .then(function (payload) {
+        summaryDetailsRequestInFlight = false;
+        detailsHydratedOnce = true;
+        setOverviewError("details", "");
+        mergeSummaryDetails(payload);
+      })
+      .catch(function (err) {
+        summaryDetailsRequestInFlight = false;
+        if (err && err.name === "AbortError") return;
+        setOverviewError("details", "任务与开单进度读取失败：" + (err && err.message ? err.message : "网络异常"));
+      });
   }
 
+  var summaryAbortController = null;
   function fetchSummary() {
-    if (summaryRequestInFlight) return;
+    if (summaryRequestInFlight || document.hidden) return;
     summaryRequestInFlight = true;
-    var xhr = new XMLHttpRequest();
-    xhr.open("GET", summaryFastApi + "?_=" + Date.now(), true);
-    xhr.onreadystatechange = function () {
-      if (xhr.readyState !== 4) return;
-      summaryRequestInFlight = false;
-      if (xhr.status < 200 || xhr.status >= 300) return;
-      var payload = {};
-      try { payload = JSON.parse(xhr.responseText || "{}"); } catch (e) { return; }
-      summaryRows = mergeFastRows(payload.accounts || []);
-      renderCommandBar(payload);
-      renderCards();
-      renderEntryProgress();
-      renderTaskBoard();
+    if (summaryAbortController) summaryAbortController.abort();
+    summaryAbortController = new AbortController();
+    fetch(summaryFastApi + "?_=" + Date.now(), { signal: summaryAbortController.signal, cache: "no-store" })
+      .then(function (res) {
+        if (!res.ok) throw new Error("HTTP " + res.status);
+        return res.json();
+      })
+      .then(function (payload) {
+        summaryRequestInFlight = false;
+        setOverviewError("summary", "");
+        summaryRows = mergeFastRows(payload.accounts || []);
+        renderCommandBar(payload);
+        renderCards();
+        renderEntryProgress();
+        renderTaskBoard();
+        if (!detailsHydratedOnce || (Date.now() - lastDetailsFetchAt) > Math.max(5000, Math.max(15, refreshSec) * 800)) {
+          fetchSummaryDetails();
+        }
+      })
+      .catch(function (err) {
+        summaryRequestInFlight = false;
+        if (err && err.name === "AbortError") return;
+        setOverviewError("summary", "账户总览刷新失败：" + (err && err.message ? err.message : "网络异常") + "，页面可能不是最新数据");
+      });
+  }
+
+  if (overviewRetryBtn) {
+    overviewRetryBtn.addEventListener("click", function () {
+      lastDetailsFetchAt = 0;
+      fetchSummary();
       fetchSummaryDetails();
-    };
-    xhr.send();
+      fetchHealth();
+    });
   }
 
   fetchSummary();
@@ -3212,6 +3413,8 @@
     for (var i = 0; i < wraps.length; i += 1) {
       if (wraps[i] === exceptWrap) continue;
       wraps[i].classList.remove("is-open");
+      var card = wraps[i].closest ? wraps[i].closest(".account-card") : null;
+      if (card) card.classList.remove("has-open-popover");
       var button = wraps[i].querySelector(".strategy-trigger");
       if (button) button.setAttribute("aria-expanded", "false");
     }
@@ -3225,9 +3428,11 @@
       event.stopPropagation();
       var wrap = trigger.closest(".strategy-popover-wrap");
       if (!wrap) return;
+      var card = wrap.closest ? wrap.closest(".account-card") : null;
       var shouldOpen = !wrap.classList.contains("is-open");
       closeStrategyPopovers(wrap);
       wrap.classList.toggle("is-open", shouldOpen);
+      if (card) card.classList.toggle("has-open-popover", shouldOpen);
       trigger.setAttribute("aria-expanded", shouldOpen ? "true" : "false");
       if (!shouldOpen && trigger.blur) trigger.blur();
     });
@@ -3259,6 +3464,13 @@
   setInterval(fetchSummaryDetails, Math.max(15, refreshSec) * 1000);
   setInterval(fetchHealth, Math.max(30, refreshSec * 2) * 1000);
   setInterval(updateEntryProgressCountdown, 1000);
+  document.addEventListener("visibilitychange", function () {
+    if (!document.hidden) {
+      fetchSummary();
+      fetchHealth();
+      updateEntryProgressCountdown();
+    }
+  });
 })();
 </script>
 </body>

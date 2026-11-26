@@ -3,9 +3,11 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta name="color-scheme" content="dark" />
   <title>账户权益对比 · Bubble Buster</title>
   <style>
     :root {
+      color-scheme: dark;
       --bg: #071019;
       --bg-deep: #050a0f;
       --panel: #0c1822;
@@ -60,11 +62,20 @@
       min-width: 0;
     }
     .crumbs a {
+      display: inline-flex;
+      align-items: center;
+      min-height: 28px;
       color: #b8d8e8;
       text-decoration: none;
     }
     .crumbs a:hover { color: var(--accent); }
-    .crumb-sep { color: #42677b; }
+    a:focus-visible,
+    .control:focus-visible,
+    .legend-button:focus-visible {
+      outline: 2px solid var(--accent);
+      outline-offset: 2px;
+    }
+    .crumb-sep { color: #6f93a7; }
     .topline-status {
       display: inline-flex;
       align-items: center;
@@ -123,7 +134,7 @@
       display: inline-flex;
       gap: 2px;
       padding: 3px;
-      border: 1px solid #214459;
+      border: 1px solid #38647c;
       border-radius: 7px;
       background: rgba(9, 22, 32, 0.82);
     }
@@ -204,13 +215,14 @@
       margin-bottom: 4px;
       color: #f2f9fd;
       font-family: ui-monospace, Menlo, Monaco, Consolas, monospace;
+      font-variant-numeric: tabular-nums;
       font-size: 22px;
       font-weight: 700;
       letter-spacing: -0.03em;
     }
     .summary-change.is-positive { color: var(--good); }
     .summary-change.is-negative { color: var(--bad); }
-    .summary-equity { color: #9cb8c7; font-family: ui-monospace, Menlo, Monaco, Consolas, monospace; font-size: 11px; }
+    .summary-equity { color: #9cb8c7; font-family: ui-monospace, Menlo, Monaco, Consolas, monospace; font-variant-numeric: tabular-nums; font-size: 11px; }
     .summary-range {
       display: flex;
       justify-content: space-between;
@@ -242,7 +254,7 @@
     }
     .chart-title { margin: 0; color: #e9f6fc; font-size: 15px; font-weight: 800; }
     .chart-subtitle { margin: 5px 0 0; color: var(--muted); font-size: 11px; line-height: 1.5; }
-    .chart-meta { color: #66879a; font-size: 10px; text-align: right; white-space: nowrap; }
+    .chart-meta { color: #89abbd; font-size: 10px; text-align: right; white-space: nowrap; }
     #equity-chart { width: 100%; height: 430px; }
     .chart-empty {
       display: none;
@@ -266,17 +278,25 @@
       gap: 7px;
       min-height: 27px;
       padding: 4px 9px;
-      border: 1px solid #2a5268;
+      border: 1px solid #3b6982;
       border-radius: 5px;
-      color: #c0d5df;
+      color: #c8dce6;
       background: rgba(9, 22, 31, 0.76);
       cursor: pointer;
       font-size: 11px;
       font-weight: 800;
-      transition: opacity 140ms ease, border-color 140ms ease, background 140ms ease;
+      transition: color 140ms ease, border-color 140ms ease, background 140ms ease;
     }
     .legend-button:hover { border-color: #5b8ba1; }
-    .legend-button.is-muted { opacity: 0.42; }
+    .legend-button.is-muted {
+      color: #84a4b5;
+      border-style: dashed;
+      border-color: #365c72;
+      background: rgba(7, 16, 25, 0.5);
+      text-decoration: line-through;
+    }
+    .legend-button.is-muted .legend-swatch { opacity: 0.35; }
+    .legend-button.is-muted .legend-value { color: #7e9eaf; }
     .legend-swatch { width: 8px; height: 8px; border-radius: 50%; background: var(--account-color); }
     .legend-value { color: #91adbb; font-family: ui-monospace, Menlo, Monaco, Consolas, monospace; font-size: 10px; font-weight: 500; }
     .footnote {
@@ -285,7 +305,7 @@
       justify-content: space-between;
       gap: 10px 20px;
       margin-top: 12px;
-      color: #698899;
+      color: #87a8b9;
       font-size: 10px;
       line-height: 1.6;
     }
@@ -307,10 +327,12 @@
     }
     @media (max-width: 640px) {
       .page { width: min(100% - 20px, 1480px); padding-top: 12px; }
-      .topline { margin-bottom: 18px; }
-      .topline-status { display: none; }
-      h1 { font-size: 34px; }
+      .topline { flex-wrap: wrap; gap: 6px 12px; margin-bottom: 14px; }
+      .topline-status { font-size: 11px; }
+      h1 { font-size: clamp(20px, 5.5vw, 24px); }
       .hero-copy { font-size: 13px; }
+      .control { min-height: 34px; }
+      .legend-button { min-height: 34px; }
       .summary-grid { grid-template-columns: 1fr 1fr; gap: 7px; }
       .summary-card { padding: 12px 11px; }
       .summary-change { font-size: 20px; }
@@ -322,6 +344,9 @@
       .footnote { display: block; }
       .footnote span { display: block; }
     }
+    @media (prefers-reduced-motion: reduce) {
+      .control, .legend-button { transition: none !important; }
+    }
   </style>
 </head>
 <body>
@@ -332,7 +357,7 @@
         <span class="crumb-sep">/</span>
         <span>账户权益对比</span>
       </div>
-      <div class="topline-status"><span id="status-dot" class="status-dot is-loading"></span><span id="status-text">正在读取快照</span></div>
+      <div class="topline-status" role="status" aria-live="polite"><span id="status-dot" class="status-dot is-loading"></span><span id="status-text">正在读取快照</span></div>
     </div>
 
     <section class="hero">
@@ -343,15 +368,15 @@
       </div>
       <div class="controls" aria-label="图表筛选">
         <div id="range-controls" class="control-group" role="group" aria-label="时间范围">
-          <button class="control" data-range="24" type="button">24 小时</button>
-          <button class="control" data-range="72" type="button">3 天</button>
-          <button class="control" data-range="168" type="button">7 天</button>
-          <button class="control" data-range="720" type="button">30 天</button>
-          <button class="control active" data-range="all" type="button">上线以来</button>
+          <button class="control" data-range="24" type="button" aria-pressed="false">24 小时</button>
+          <button class="control" data-range="72" type="button" aria-pressed="false">3 天</button>
+          <button class="control" data-range="168" type="button" aria-pressed="false">7 天</button>
+          <button class="control" data-range="720" type="button" aria-pressed="false">30 天</button>
+          <button class="control active" data-range="all" type="button" aria-pressed="true">上线以来</button>
         </div>
         <div id="mode-controls" class="control-group" role="group" aria-label="图表模式">
-          <button class="control active" data-mode="relative" type="button">相对变化</button>
-          <button class="control" data-mode="absolute" type="button">账户权益</button>
+          <button class="control active" data-mode="relative" type="button" aria-pressed="true">相对变化</button>
+          <button class="control" data-mode="absolute" type="button" aria-pressed="false">账户权益</button>
         </div>
         <button id="refresh-button" class="control refresh" type="button">刷新 ↻</button>
       </div>
@@ -396,7 +421,8 @@
     var range = "all";
     var mode = "relative";
     var visible = {};
-    var loading = false;
+    var activeAbortController = null;
+    var activeRequestToken = 0;
     var currentPath = (window && window.location && window.location.pathname) || "/";
     var comparisonMarker = "/accounts/comparison";
     var comparisonMarkerIndex = currentPath.indexOf(comparisonMarker);
@@ -512,17 +538,24 @@
             : "以所选时间区间（" + rangeLabel() + "）首个快照归一化（0%）；策略事件不叠加到主图。")
         : "显示服务器记录的权益快照；策略事件不叠加到主图。";
       if (!chart) chart = echarts.init(chartElement, null, { renderer: "canvas" });
+      chartElement.setAttribute("aria-label", activeRows.length + " 个账户权益对比曲线");
       var chartSeries = activeRows.map(function (row, index) {
         var color = colorFor(row.account_id, index);
+        var seriesPoints = [];
+        (row.points || []).forEach(function (point) {
+          var tMs = new Date(point.t).getTime();
+          if (!Number.isFinite(tMs)) return;
+          var yVal = mode === "relative" ? Number(point.relative_pct) : Number(point.equity);
+          var eqVal = Number(point.equity);
+          seriesPoints.push([tMs, Number.isFinite(yVal) ? yVal : null, Number.isFinite(eqVal) ? eqVal : null]);
+        });
         return {
           name: row.account_id,
           type: "line",
           showSymbol: false,
           smooth: false,
           connectNulls: true,
-          data: (row.points || []).map(function (point) {
-            return [point.t, mode === "relative" ? point.relative_pct : point.equity];
-          }),
+          data: seriesPoints,
           lineStyle: { color: color, width: 2.5 },
           itemStyle: { color: color },
           emphasis: { focus: "series", lineStyle: { width: 3.5 } },
@@ -530,13 +563,21 @@
             silent: true,
             symbol: ["none", "none"],
             lineStyle: { color: "rgba(164, 197, 211, 0.42)", type: "dashed", width: 1 },
-            label: { color: "#9fb8c5", fontSize: 10, formatter: range === "all" ? "上线后首个快照" : "区间初始基准" },
+            label: {
+              position: "insideEndTop",
+              distance: [0, 4],
+              color: "#9fb8c5",
+              fontSize: 10,
+              formatter: range === "all" ? "上线后首个快照" : "区间初始基准"
+            },
             data: mode === "relative" ? [{ yAxis: 0 }] : []
           } : undefined
         };
       });
+      var reduceMotion = !!(window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches);
       chart.setOption({
-        animationDuration: 480,
+        animation: !reduceMotion,
+        animationDuration: reduceMotion ? 0 : 480,
         animationEasing: "cubicOut",
         backgroundColor: "transparent",
         grid: { top: 30, right: 22, bottom: 48, left: 66 },
@@ -549,15 +590,12 @@
           textStyle: { color: "#edf7fd", fontSize: 11 },
           formatter: function (items) {
             if (!items || !items.length) return "";
-            var html = '<div style="margin-bottom:5px;color:#9eb9c6">' + formatLocalTime(items[0].axisValue, true) + '</div>';
+            var html = '<div style="margin-bottom:5px;color:#9eb9c6">' + escapeHtml(formatLocalTime(items[0].axisValue, true)) + '</div>';
             items.forEach(function (item) {
-              var row = rows.find(function (candidate) { return candidate.account_id === item.seriesName; });
-              var point = row && (row.points || []).reduce(function (closest, candidate) {
-                if (!closest) return candidate;
-                return Math.abs(new Date(candidate.t).getTime() - new Date(item.axisValue).getTime()) < Math.abs(new Date(closest.t).getTime() - new Date(item.axisValue).getTime()) ? candidate : closest;
-              }, null);
-              var suffix = point && mode === "relative" ? " · " + formatNumber(point.equity, 2) + " USDT" : "";
-              html += '<div><span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:' + item.color + ';margin-right:6px"></span>' + escapeHtml(item.seriesName) + ' <strong>' + (mode === "relative" ? formatPct(item.value) : formatNumber(item.value, 2) + " USDT") + '</strong>' + suffix + '</div>';
+              var val = Array.isArray(item.value) ? item.value[1] : item.value;
+              var equity = Array.isArray(item.value) ? item.value[2] : null;
+              var suffix = mode === "relative" && equity != null ? " · " + formatNumber(equity, 2) + " USDT" : "";
+              html += '<div><span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:' + escapeHtml(item.color) + ';margin-right:6px"></span>' + escapeHtml(item.seriesName) + ' <strong>' + (mode === "relative" ? formatPct(val) : formatNumber(val, 2) + " USDT") + '</strong>' + suffix + '</div>';
             });
             return html;
           }
@@ -603,7 +641,9 @@
 
     function setActiveControl(groupId, key, value) {
       Array.prototype.forEach.call(el(groupId).querySelectorAll(".control"), function (button) {
-        button.classList.toggle("active", button.getAttribute("data-" + key) === value);
+        var isActive = button.getAttribute("data-" + key) === value;
+        button.classList.toggle("active", isActive);
+        button.setAttribute("aria-pressed", isActive ? "true" : "false");
       });
     }
 
@@ -613,29 +653,53 @@
       });
     }
 
+    function updateFreshnessStatus() {
+      var rows = seriesRows().filter(function (row) { return row.status === "OK" && row.points && row.points.length; });
+      if (!rows.length) {
+        setStatus("当前窗口无快照", "loading");
+        return;
+      }
+      var latest = rows.map(function (row) { return row.latest_at_utc; }).filter(Boolean).sort().slice(-1)[0];
+      var latestMs = latest ? new Date(latest).getTime() : NaN;
+      if (Number.isFinite(latestMs) && (Date.now() - latestMs) > 2 * 60 * 60 * 1000) {
+        setStatus("历史快照（截至 " + formatLocalTime(latest, false) + "）", "loading");
+        return;
+      }
+      setStatus("快照已更新", "");
+    }
+
     function load() {
-      if (loading) return;
-      loading = true;
+      activeRequestToken += 1;
+      var requestToken = activeRequestToken;
+      if (activeAbortController) {
+        try { activeAbortController.abort(); } catch (e) {}
+      }
+      activeAbortController = typeof AbortController !== "undefined" ? new AbortController() : null;
       setStatus("正在读取快照", "loading");
       el("notice").style.display = "none";
       var query = range === "all" ? "all_time=true" : "window_hours=" + encodeURIComponent(range);
-      fetch(pathPrefix + "/api/accounts/equity-comparison?" + query + "&curve_points=600&include_events=false&_=" + Date.now(), { cache: "no-store" })
+      fetch(pathPrefix + "/api/accounts/equity-comparison?" + query + "&curve_points=600&include_events=false&_=" + Date.now(), {
+        cache: "no-store",
+        signal: activeAbortController ? activeAbortController.signal : undefined
+      })
         .then(function (response) {
           if (!response.ok) throw new Error("HTTP " + response.status);
           return response.json();
         })
         .then(function (nextPayload) {
+          if (requestToken !== activeRequestToken) return;
           payload = nextPayload || {};
           ensureVisibility(seriesRows());
           render();
-          setStatus("快照已更新", "");
+          updateFreshnessStatus();
         })
         .catch(function (error) {
+          if (requestToken !== activeRequestToken) return;
+          if (error && error.name === "AbortError") return;
           setStatus("读取失败", "error");
-          el("notice").textContent = "账户对比数据读取失败：" + error.message;
+          el("notice").textContent = "账户对比数据读取失败：" + (error && error.message ? error.message : "网络异常");
           el("notice").style.display = "block";
-        })
-        .finally(function () { loading = false; });
+        });
     }
 
     Array.prototype.forEach.call(document.querySelectorAll("[data-range]"), function (button) {
@@ -661,7 +725,17 @@
       renderLegend();
       renderChart();
     });
-    window.addEventListener("resize", function () { if (chart) chart.resize(); });
+    if (typeof ResizeObserver !== "undefined") {
+      var chartContainer = el("equity-chart");
+      if (chartContainer) {
+        var resizeObserver = new ResizeObserver(function () {
+          if (chart) chart.resize();
+        });
+        resizeObserver.observe(chartContainer);
+      }
+    } else {
+      window.addEventListener("resize", function () { if (chart) chart.resize(); });
+    }
     load();
   }());
   </script>
