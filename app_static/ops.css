@@ -628,6 +628,15 @@ summary {
   cursor: help;
 }
 
+@media (pointer: coarse) {
+  .ops-term {
+    display: inline-flex;
+    align-items: center;
+    min-height: 36px;
+    padding: 4px 2px;
+  }
+}
+
 .ops-term:hover,
 .ops-term:focus-visible,
 .ops-term.is-tip-open {

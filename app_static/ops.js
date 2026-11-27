@@ -1040,6 +1040,14 @@
     document.addEventListener("keydown", function (evt) {
       if (evt.key === "Escape" && activeTooltipTerm) {
         hideTermTooltip();
+        return;
+      }
+      if ((evt.key === "Enter" || evt.key === " ") && evt.target && evt.target.closest) {
+        var term = evt.target.closest(".ops-term[data-tip]");
+        if (!term) return;
+        evt.preventDefault();
+        if (activeTooltipTerm === term) hideTermTooltip(term);
+        else showTermTooltip(term);
       }
     });
 
@@ -1063,7 +1071,11 @@
     function setOpen(nextOpen, restoreFocus) {
       pop.hidden = !nextOpen;
       btn.setAttribute("aria-expanded", nextOpen ? "true" : "false");
-      if (!nextOpen && restoreFocus && btn.focus) btn.focus();
+      if (nextOpen && pop.focus) {
+        try { pop.focus({ preventScroll: true }); } catch (e) { pop.focus(); }
+      } else if (!nextOpen && restoreFocus && btn.focus) {
+        btn.focus();
+      }
     }
 
     btn.addEventListener("click", function (evt) {
@@ -1072,6 +1084,12 @@
     });
 
     document.addEventListener("click", function (evt) {
+      if (pop.hidden) return;
+      if (pop.contains(evt.target) || btn.contains(evt.target)) return;
+      setOpen(false, false);
+    });
+
+    document.addEventListener("focusin", function (evt) {
       if (pop.hidden) return;
       if (pop.contains(evt.target) || btn.contains(evt.target)) return;
       setOpen(false, false);

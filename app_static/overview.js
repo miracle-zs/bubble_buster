@@ -165,6 +165,11 @@
         incidentBanner.hidden = true;
         return;
       }
+      var sig = severity + "|" + stoppedCount + "|" + anomalies + "|" + (serviceDown ? 1 : 0) + "|" + (freshness ? freshness.state : "");
+      if (incidentBanner.getAttribute("data-incident-sig") !== sig) {
+        incidentBanner.setAttribute("data-incident-sig", sig);
+        ops.announceStatus((severity === "bad" ? "风险关注：" : "数据时效提示：") + alerts.join(" · "));
+      }
       incidentBanner.hidden = false;
       incidentBanner.className = "ops-incident-banner" + (severity === "warn" ? " is-warn" : "");
       incidentPill.textContent = severity === "bad" ? "风险关注" : "数据时效提示";
@@ -430,7 +435,7 @@
         html += '<div class="entry-progress-timeline-event entry-progress-timeline-next is-next"><div class="entry-progress-timeline-event-top"><span class="entry-progress-timeline-event-state">下一检查</span><time>' + escapeHtml(nextCheckLabel) + "</time></div><span>待检查 " + waitingTotal + " 个信号</span></div>";
       }
       html += "</div></div>"
-        + '<div class="entry-progress-details' + (showDetails ? "" : " is-collapsed") + '" role="table" aria-label="各账号今日开单明细">'
+        + '<div id="entry-progress-details-table" class="entry-progress-details' + (showDetails ? "" : " is-collapsed") + '" role="table" aria-label="各账号今日开单明细">'
         + '<div class="entry-progress-header" role="row"><span role="columnheader">账号与进度</span><span role="columnheader">当前判断</span><span role="columnheader">等待信号</span><span role="columnheader">下一动作</span></div>';
 
       for (var n = 0; n < accountRows.length; n += 1) {
@@ -663,7 +668,7 @@
           + endDotHtml
           + '<span class="spark-crosshair" aria-hidden="true" hidden></span>'
           + '<span class="spark-active-dot" aria-hidden="true" hidden></span>'
-          + '<div class="spark-hover-tip" hidden></div>';
+          + '<div class="spark-hover-tip" aria-hidden="true" hidden></div>';
       }
 
       setAccountMetric("spark-delta", aid, signedReturn, deltaCls);
@@ -935,8 +940,8 @@
           var tradeCountText = stats.total_trades != null ? escapeHtml(fmt(stats.total_trades, 0)) : "--";
           var profitFactorText = stats.profit_factor != null ? escapeHtml(fmt(stats.profit_factor, 2)) : "--";
           var pnlCls = netPnl !== null ? (netPnl >= 0 ? "status-ok" : "status-bad") : "";
-          readonlyHtml += '<article class="readonly-strip" id="account-card-' + safeAid + '" data-account-id="' + safeAid + '">'
-            + '<div class="readonly-identity"><a class="readonly-id-link" href="' + base + '">' + safeAid + '<span class="readonly-badge">只读监控</span></a></div>'
+          readonlyHtml += '<article class="readonly-strip" id="account-card-' + safeAid + '" data-account-id="' + safeAid + '" aria-labelledby="card-title-' + safeAid + '">'
+            + '<div class="readonly-identity"><h3 class="card-title-heading" id="card-title-' + safeAid + '"><a class="readonly-id-link" href="' + base + '">' + safeAid + '<span class="readonly-badge">只读监控</span></a></h3></div>'
             + '<div class="readonly-metric readonly-balance"><span class="metric-label">余额 (USDT)</span><strong class="metric-value" data-field="wallet-balance">' + ops.fmtUsdt(row.wallet_balance_usdt, 2) + "</strong></div>"
             + '<div class="readonly-metric"><span class="metric-label">近30日净盈亏</span><strong class="metric-value pnl-value ' + pnlCls + '" data-field="readonly-pnl">' + pnlText + "</strong></div>"
             + '<div class="readonly-metric"><span class="metric-label">胜率</span><strong class="metric-value" data-field="readonly-win-rate">' + winRateText + "</strong></div>"
@@ -952,9 +957,9 @@
           var popoverId = "strategy-popover-" + j;
           var noteAttr = escapeHtml(String(row.strategy_note || ""));
           var highlightsHtml = ops.formatStrategyHighlights(row.strategy_note, allManagedNotes, 2, "strategy-tag");
-          managedHtml += '<article class="account-card" id="account-card-' + safeAid + '" data-account-id="' + safeAid + '">'
+          managedHtml += '<article class="account-card" id="account-card-' + safeAid + '" data-account-id="' + safeAid + '" aria-labelledby="card-title-' + safeAid + '">'
             + '<header class="account-card-head">'
-            + '<a class="aid-link ' + venueInfo.cls + '" href="' + base + '" title="' + safeAid + ' · ' + escapeHtml(venueInfo.label) + '"><span class="venue-dot" aria-hidden="true"></span>' + safeAid + '</a>'
+            + '<h3 class="card-title-heading" id="card-title-' + safeAid + '"><a class="aid-link ' + venueInfo.cls + '" href="' + base + '" title="' + safeAid + ' · ' + escapeHtml(venueInfo.label) + '"><span class="venue-dot" aria-hidden="true"></span>' + safeAid + '</a></h3>'
             + '<div class="account-head-actions">'
             + '<div class="strategy-popover-wrap"><button class="strategy-trigger" type="button" aria-expanded="false" aria-controls="' + popoverId + '" aria-label="' + safeAid + ' 策略配置">策略</button>'
             + '<div id="' + popoverId + '" class="strategy-popover" hidden role="region" aria-label="' + safeAid + ' 策略配置">'
@@ -1035,10 +1040,10 @@
         var isAnomaly = hasAnomalyTask(r);
         var headerStatus = mode === "readonly" ? "READONLY" : worstAccountTaskStatus(r);
         var accountCls = isAnomaly ? "task-account-card task-account-anomaly" : "task-account-card";
-        html += '<article class="' + accountCls + '">'
+        html += '<article class="' + accountCls + '" aria-labelledby="task-card-title-' + safeAid + '">'
           + '<div class="task-account-head">'
           + '<div class="task-account-title">'
-          + '<span class="task-account-id">' + safeAid + "</span>"
+          + '<h3 class="card-title-heading task-account-id" id="task-card-title-' + safeAid + '">' + safeAid + "</h3>"
           + '<span class="' + modeBadgeClass + '">' + escapeHtml(modeLabel) + "</span>"
           + (r && r.equity_recovery_take_profit_enabled ? '<span class="task-feature-badge">组合止盈监控</span>' : "")
           + "</div>"
@@ -1473,12 +1478,21 @@
       closeStrategyPopovers(null, false);
     });
 
+    document.addEventListener("focusin", function (event) {
+      if (!cards) return;
+      var openWrap = cards.querySelector(".strategy-popover-wrap.is-open");
+      if (openWrap && !(event.target && openWrap.contains(event.target))) {
+        closeStrategyPopovers(null, false);
+      }
+    });
+
     document.addEventListener("keydown", function (event) {
       if (event.key !== "Escape") return;
-      var hasOpen = cards && cards.querySelector(".strategy-popover-wrap.is-open");
-      if (hasOpen) {
+      var openWrap = cards && cards.querySelector(".strategy-popover-wrap.is-open");
+      if (openWrap) {
+        var focusInsidePopover = document.activeElement && openWrap.contains(document.activeElement);
         event.preventDefault();
-        closeStrategyPopovers(null, true);
+        closeStrategyPopovers(null, focusInsidePopover);
       }
     });
 

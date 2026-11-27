@@ -235,12 +235,14 @@
 
   function runRowHtml(r, timeZone) {
     var rawMessage = String(r.message || "");
+    var dayLabel = fmtDateOnly(r.trade_day_utc);
+    var detailKey = (r.id != null ? String(r.id) + "_" : "") + (r.trade_day_utc || "") + "_" + (r.started_at_utc || "");
     return (
       "<tr>"
-      + '<th scope="row" class="numeric">' + escapeHtml(fmtDateOnly(r.trade_day_utc)) + "</th>"
+      + '<th scope="row" class="numeric">' + escapeHtml(dayLabel) + "</th>"
       + "<td>" + statusBadge(r.status) + "</td>"
       + '<td class="numeric">' + escapeHtml(fmtAxisTime(r.started_at_utc, timeZone)) + "</td>"
-      + '<td class="message-cell"><div class="message-summary">' + escapeHtml(summarizeRunMessage(rawMessage)) + '</div><details class="row-details" data-detail-key="' + escapeHtml(r.trade_day_utc || "") + "_" + escapeHtml(r.started_at_utc || "") + '"><summary>原始记录</summary><div class="raw-message">' + escapeHtml(rawMessage) + "</div></details></td>"
+      + '<td class="message-cell"><div class="message-summary">' + escapeHtml(summarizeRunMessage(rawMessage)) + '</div><details class="row-details" data-detail-key="' + escapeHtml(detailKey) + '"><summary>原始记录（' + escapeHtml(dayLabel) + '）</summary><div class="raw-message">' + escapeHtml(rawMessage) + "</div></details></td>"
       + "</tr>"
     );
   }

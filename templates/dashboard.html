@@ -223,8 +223,8 @@ __OPS_TOPBAR__
         <button id="tab-cashflow" class="activity-tab" type="button" role="tab" aria-selected="false" aria-controls="activity-cashflow" tabindex="-1" data-activity-target="activity-cashflow">资金流水 <span class="tab-count" id="cashflowCount">0</span></button>
       </div>
       <div class="activity-view" id="activity-runs" role="tabpanel" aria-labelledby="tab-runs">
-        <div class="table-wrap" tabindex="0" role="region" aria-labelledby="tab-runs">
-          <table id="runsTable" class="detail-table is-empty" aria-labelledby="tab-runs">
+        <div class="table-wrap" tabindex="0">
+          <table id="runsTable" class="detail-table is-empty">
             <caption class="sr-only">策略运行历史记录</caption>
             <thead><tr><th scope="col">交易日 (UTC)</th><th scope="col">状态</th><th scope="col" class="numeric">开始时间</th><th scope="col">执行摘要</th></tr></thead>
             <tbody id="runsBody"><tr><td colspan="4" class="empty-row">运行记录加载中...</td></tr></tbody>
@@ -246,8 +246,8 @@ __OPS_TOPBAR__
           </select>
           <span id="eventFilterCount" class="table-filter-count" hidden></span>
         </search>
-        <div class="table-wrap" tabindex="0" role="region" aria-labelledby="tab-events">
-          <table id="eventsTable" class="detail-table is-empty" aria-labelledby="tab-events">
+        <div class="table-wrap" tabindex="0">
+          <table id="eventsTable" class="detail-table is-empty">
             <caption class="sr-only">订单事件记录</caption>
             <thead><tr><th scope="col">时间</th><th scope="col">交易对</th><th scope="col">订单类型</th><th scope="col">方向</th><th scope="col">状态</th><th scope="col" class="numeric">事件 ID</th></tr></thead>
             <tbody id="eventsBody"><tr><td colspan="6" class="empty-row">订单事件加载中...</td></tr></tbody>
@@ -255,8 +255,8 @@ __OPS_TOPBAR__
         </div>
       </div>
       <div class="activity-view" id="activity-cashflow" role="tabpanel" aria-labelledby="tab-cashflow" hidden>
-        <div class="table-wrap" tabindex="0" role="region" aria-labelledby="tab-cashflow">
-          <table id="cashflowTable" class="detail-table is-empty" aria-labelledby="tab-cashflow">
+        <div class="table-wrap" tabindex="0">
+          <table id="cashflowTable" class="detail-table is-empty">
             <caption class="sr-only">资金流水记录</caption>
             <thead><tr><th scope="col">时间</th><th scope="col">类型</th><th scope="col" class="numeric">金额</th><th scope="col">资产</th><th scope="col">交易对</th><th scope="col" class="numeric">事件 ID</th></tr></thead>
             <tbody id="cashflowBody"><tr><td colspan="6" class="empty-row">资金流水加载中...</td></tr></tbody>

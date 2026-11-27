@@ -780,6 +780,7 @@
         range = button.getAttribute("data-range") || "168";
         setActiveControl("range-controls", "range", range);
         syncComparisonUrl();
+        ops.announceStatus("时间范围已切换为 " + rangeLabel());
         load();
       });
     });
@@ -789,6 +790,7 @@
         mode = button.getAttribute("data-mode") || "relative";
         setActiveControl("mode-controls", "mode", mode);
         syncComparisonUrl();
+        ops.announceStatus("图表模式已切换为 " + (mode === "relative" ? "相对变化" : "账户权益"));
         if (payload) render();
       });
     });
@@ -824,6 +826,7 @@
         if (!chart) return;
         chart.dispatchAction({ type: "dataZoom", start: 0, end: 100 });
         updateZoomResetVisibility(false);
+        ops.announceStatus("已重置图表缩放");
       });
     }
 
@@ -833,10 +836,12 @@
         var button = event.target && event.target.closest ? event.target.closest("[data-account]") : null;
         if (!button) return;
         var accountId = button.getAttribute("data-account");
-        visible[accountId] = visible[accountId] === false;
+        var nextVisible = visible[accountId] === false;
+        visible[accountId] = nextVisible;
         syncComparisonUrl();
         renderLegend();
         renderChart();
+        ops.announceStatus(accountId + (nextVisible ? " 曲线已显示" : " 曲线已隐藏"));
       });
     }
 

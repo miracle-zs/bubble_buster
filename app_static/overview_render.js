@@ -242,14 +242,14 @@
     var cls = taskStatusCls(status);
     var timeText = String(t.time_local || "") || "--";
     var metaText = taskMetaLabel(taskKey);
-    return '<div class="task-row' + (isAnomalyRow ? " is-anomaly-row" : "") + '" role="row">'
-      + '<div class="task-row-main">'
+    return '<div class="task-row' + (isAnomalyRow ? " is-anomaly-row" : "") + '" role="none">'
+      + '<div class="task-row-main" role="row">'
       + '<div class="task-name-wrap" role="cell"><span class="task-name">' + escapeHtml(name) + "</span>"
       + (metaText ? '<span class="task-task-tag">' + escapeHtml(metaText) + "</span>" : "")
       + "</div>"
-      + '<span class="task-meta" role="cell"><span class="task-badge ' + cls + '">' + escapeHtml(statusText) + "</span></span>"
-      + '<span class="task-time" role="cell">' + escapeHtml(timeText) + "</span>"
-      + '<span class="task-result" role="cell">' + taskResultHtml(accountId, taskKey, t) + "</span>"
+      + '<div class="task-meta" role="cell"><span class="task-badge ' + cls + '">' + escapeHtml(statusText) + "</span></div>"
+      + '<div class="task-time" role="cell">' + escapeHtml(timeText) + "</div>"
+      + '<div class="task-result" role="cell">' + taskResultHtml(accountId, taskKey, t) + "</div>"
       + "</div>"
       + "</div>";
   }
@@ -262,23 +262,23 @@
       var stats = row && row.trade_stats;
       if (stats) {
         var profitFactor = fmt(stats.profit_factor, 2);
-        return '<div class="task-row" role="row">'
-          + '<div class="task-row-main">'
+        return '<div class="task-row" role="none">'
+          + '<div class="task-row-main" role="row">'
           + '<div class="task-name-wrap" role="cell"><span class="task-name">近 30 日交易统计</span>'
           + '<span class="task-task-tag">只读监控</span></div>'
-          + '<span class="task-meta" role="cell"><span class="task-badge is-readonly">只读</span></span>'
-          + '<span class="task-time" role="cell">' + escapeHtml(ops.formatBeijingTime(stats.last_updated_utc, { withYear: true })) + "</span>"
+          + '<div class="task-meta" role="cell"><span class="task-badge is-readonly">只读</span></div>'
+          + '<div class="task-time" role="cell">' + escapeHtml(ops.formatBeijingTime(stats.last_updated_utc, { withYear: true })) + "</div>"
           + '<div class="task-result-lines" role="cell">'
           + '<div class="task-stat-line">净盈亏 ' + escapeHtml(ops.fmtSignedUsdt(stats.net_realized_pnl != null ? stats.net_realized_pnl : stats.total_realized_pnl, 2)) + " USDT · 胜率 " + escapeHtml(fmt(stats.win_rate_pct, 1)) + "% · 盈亏比 " + escapeHtml(profitFactor) + "</div>"
           + '<div class="task-stat-line">胜 ' + escapeHtml(fmt(stats.win_count, 0)) + " / 负 " + escapeHtml(fmt(stats.loss_count, 0)) + " · 平均盈利 " + escapeHtml(ops.fmtUsdt(stats.avg_win, 2)) + " · 平均亏损 " + escapeHtml(ops.fmtUsdt(stats.avg_loss, 2)) + "</div>"
           + "</div></div></div>";
       }
-      return '<div class="task-row" role="row">'
-        + '<div class="task-row-main">'
+      return '<div class="task-row" role="none">'
+        + '<div class="task-row-main" role="row">'
         + '<div class="task-name-wrap" role="cell"><span class="task-name">账户监控</span>'
         + '<span class="task-task-tag">只读监控</span></div>'
-        + '<span class="task-meta" role="cell"><span class="task-badge is-readonly">只读</span></span>'
-        + '<span class="task-time" role="cell">--</span>'
+        + '<div class="task-meta" role="cell"><span class="task-badge is-readonly">只读</span></div>'
+        + '<div class="task-time" role="cell">--</div>'
         + '<div class="task-result-lines" role="cell"><div class="task-stat-line">暂无近 30 日交易统计数据</div></div>'
         + "</div></div>";
     }

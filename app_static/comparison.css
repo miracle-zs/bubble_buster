@@ -307,7 +307,6 @@
   border-style: dashed;
   border-color: var(--border);
   background: var(--surface-inset);
-  text-decoration: line-through;
 }
 
 .legend-button.is-muted .legend-swatch {

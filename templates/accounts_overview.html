@@ -38,7 +38,7 @@ __OPS_TOPBAR__
         <span class="command-label">最新快照</span>
         <strong id="overview-updated-at" class="command-value">--</strong>
       </div>
-      <button id="overview-anomaly-btn" class="command-item command-anomaly command-item-btn" type="button" aria-label="跳转到异常与任务并筛选仅异常">
+      <button id="overview-anomaly-btn" class="command-item command-anomaly command-item-btn" type="button" aria-label="任务异常，跳转到异常与任务并筛选仅异常">
         <span class="command-label">任务异常</span>
         <span class="command-anomaly-badge">
           <strong id="overview-anomaly-count" class="command-value">--</strong>
@@ -54,7 +54,7 @@ __OPS_TOPBAR__
       </div>
     </header>
 
-    <section id="fleet-incident-banner" class="ops-incident-banner" role="status" aria-live="polite" hidden>
+    <section id="fleet-incident-banner" class="ops-incident-banner" role="status" hidden>
       <div class="ops-incident-main">
         <span id="fleet-incident-pill" class="ops-incident-pill">风险关注</span>
         <span id="fleet-incident-text" class="ops-incident-text"></span>
@@ -74,12 +74,13 @@ __OPS_TOPBAR__
     <section class="entry-progress-panel" aria-labelledby="entry-progress-heading">
       <div class="entry-progress-heading">
         <div class="entry-progress-heading-copy">
-          <h2 id="entry-progress-heading" class="section-title">今日开单进度 <span class="entry-progress-strategy-badge ops-term tip-below" tabindex="0" data-tip="首笔等待 1h 阴线确认；第二笔先出阳线后再等下一根阴线独立开仓（启用收盘前入场时可在收盘前触发）">先阳后阴 · 信号独立开仓</span></h2>
+          <h2 id="entry-progress-heading" class="section-title">今日开单进度</h2>
+          <span class="entry-progress-strategy-badge ops-term tip-below" tabindex="0" data-tip="首笔等待 1h 阴线确认；第二笔先出阳线后再等下一根阴线独立开仓（启用收盘前入场时可在收盘前触发）">先阳后阴 · 信号独立开仓</span>
         </div>
         <div class="section-heading-actions">
           <div id="entry-progress-updated" class="entry-progress-updated">更新 --</div>
           <span class="entry-progress-zone">UTC+8</span>
-          <button id="entry-progress-toggle" class="ops-btn section-toggle" type="button" aria-expanded="false">查看账号明细</button>
+          <button id="entry-progress-toggle" class="ops-btn section-toggle" type="button" aria-expanded="false" aria-controls="entry-progress-details-table">查看账号明细</button>
         </div>
       </div>
       <div class="entry-progress-shell">

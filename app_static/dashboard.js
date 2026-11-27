@@ -1121,6 +1121,7 @@
 
       tablist.addEventListener("keydown", function (evt) {
         var activeTabs = visibleTabs();
+        if (!activeTabs.length) return;
         var activeIndex = -1;
         for (var i = 0; i < activeTabs.length; i += 1) {
           if (activeTabs[i].getAttribute("aria-selected") === "true") {
@@ -1128,7 +1129,7 @@
             break;
           }
         }
-        if (activeIndex < 0) return;
+        if (activeIndex < 0) activeIndex = 0;
         if (evt.key === "ArrowRight" || evt.key === "ArrowDown") {
           evt.preventDefault();
           activateTab(activeTabs[(activeIndex + 1) % activeTabs.length], true, true);

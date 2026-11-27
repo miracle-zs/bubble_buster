@@ -84,6 +84,10 @@ require({str((Path(__file__).resolve().parents[1] / "app_static/overview_render.
 const ov = globalThis.BBOverviewRender;
 assert.equal(ov.fmt('N/A<tag>', 2), 'N/A<tag>');
 assert.equal(ov.taskStatusCls('READONLY'), 'is-readonly');
+const rowMarkup = ov.taskRowHtml('acc01', 'manage', '仓位巡检', {{ status: 'FAILED', summary: 'error=boom ' + 'x'.repeat(120) }});
+assert.ok(rowMarkup.includes('class="task-row is-anomaly-row" role="none"'));
+assert.ok(rowMarkup.includes('class="task-row-main" role="row"'));
+assert.ok(!rowMarkup.includes('<span class="task-result"'));
 assert.equal(ov.worstAccountTaskStatus({{ tasks: {{ entry: {{ status: 'SUCCESS' }}, manage: {{ status: 'FAILED' }} }} }}), 'FAILED');
 assert.equal(ov.anomalyTaskCount([{{ tasks: {{ a: {{ status: 'FAILED' }}, b: {{ status: 'PARTIAL' }}, c: {{ status: 'SUCCESS' }} }} }}]), 2);
 const parsedTask = ov.formatTaskResultLines('entry', {{ summary: 'opened=3 failed=1 skipped=2 failed_symbols=BTCUSDT,ETHUSDT' }});
@@ -106,6 +110,9 @@ assert.equal(dr.fmtAdaptive(0.00123456), '0.00123456');
 assert.equal(dr.summarizeRunMessage('All symbols already have open strategy positions'), '目标交易对均已有策略持仓（已跳过）');
 assert.equal(dr.summarizeRunMessage('opened=10,failed=0,planned=2'), '开仓 10 · 失败 0 · 计划 2');
 assert.equal(dr.liveOrderLabel('ACTIVE'), '挂单中');
+const runMarkup = dr.runRowHtml({{ id: 42, trade_day_utc: '2026-09-05', status: 'SUCCESS', started_at_utc: '2026-09-05T08:00:00Z', message: 'opened=1' }}, 'Asia/Shanghai');
+assert.ok(runMarkup.includes('data-detail-key="42_2026-09-05_2026-09-05T08:00:00Z"'));
+assert.ok(runMarkup.includes('<summary>原始记录（2026-09-05）</summary>'));
 const opt = dr.buildEquityChartOption({{
   seriesData: [[Date.parse('2026-09-05T08:23:51Z'), 275.4, 0, 0]],
   markLines: [{{ yAxis: 285.4 }}, {{ yAxis: 275.41 }}],

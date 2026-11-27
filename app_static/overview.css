@@ -212,6 +212,14 @@
   background: var(--surface-elevated);
 }
 
+.card-title-heading {
+  margin: 0;
+  font-size: inherit;
+  line-height: inherit;
+  display: inline-flex;
+  align-items: center;
+}
+
 .aid-link {
   display: inline-flex;
   align-items: center;
@@ -678,6 +686,7 @@
   display: inline-flex;
   align-items: center;
   gap: 6px;
+  min-height: var(--target-size);
   color: var(--readonly-text);
   font-family: var(--font-mono);
   font-size: var(--text-md);
@@ -786,8 +795,10 @@
 .entry-progress-heading-copy {
   min-width: 0;
   display: flex;
-  flex-direction: column;
-  gap: 4px;
+  flex-direction: row;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
 }
 
 .entry-progress-heading .section-title {
