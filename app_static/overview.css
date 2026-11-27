@@ -9,7 +9,7 @@
   border: 1px solid var(--border);
   border-radius: var(--radius);
   background: var(--border-subtle);
-  overflow: hidden;
+  overflow: clip;
 }
 
 .command-brand,
@@ -77,6 +77,10 @@
 
 .command-item-btn:hover {
   background: var(--surface-hover);
+}
+
+.command-item-btn:focus-visible {
+  outline-offset: -2px;
 }
 
 .command-anomaly-badge {
@@ -182,10 +186,17 @@
   border-color: var(--border-strong);
 }
 
-.account-card:hover,
-.account-card:focus-within,
+.account-card:hover {
+  border-color: var(--border-strong);
+  z-index: 10;
+}
+
+.account-card:focus-within {
+  z-index: 15;
+}
+
 .account-card.has-open-popover {
-  z-index: 20;
+  z-index: 30;
 }
 
 .account-card-head {
@@ -643,6 +654,7 @@
   border: 1px solid var(--readonly-border);
   border-radius: var(--radius);
   background: var(--border-subtle);
+  overflow: clip;
 }
 
 .readonly-identity,
@@ -656,14 +668,6 @@
   display: flex;
   flex-direction: column;
   justify-content: center;
-}
-
-.readonly-identity {
-  border-radius: calc(var(--radius) - 1px) 0 0 calc(var(--radius) - 1px);
-}
-
-.readonly-action {
-  border-radius: 0 calc(var(--radius) - 1px) calc(var(--radius) - 1px) 0;
 }
 
 .readonly-metric .metric-label {
@@ -701,7 +705,7 @@
 
 .readonly-chart .spark-box {
   height: 50px;
-  overflow: visible;
+  overflow: clip;
 }
 
 .readonly-chart .spark-svg {
@@ -710,7 +714,7 @@
 }
 
 .readonly-chart .spark-hover-tip {
-  top: -26px;
+  top: 4px;
 }
 
 .readonly-chart-meta .metric-label { margin-bottom: 3px; }
@@ -1384,11 +1388,12 @@
 }
 
 @media (max-width: 900px) {
-  .readonly-strip { grid-template-columns: repeat(3, minmax(0, 1fr)); }
-  .readonly-identity { grid-column: 1 / -1; }
+  .readonly-strip { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .readonly-identity,
+  .readonly-balance { grid-column: 1 / -1; }
   .task-panel-head { flex-direction: column; align-items: flex-start; }
   .task-panel-meta { width: 100%; justify-content: space-between; flex-wrap: wrap; }
-  .task-head, .task-row-main { grid-template-columns: minmax(120px, 1fr) 92px 160px minmax(180px, 1.2fr); }
+  .task-head, .task-row-main { grid-template-columns: minmax(108px, 1fr) 84px 140px minmax(150px, 1.2fr); }
 }
 
 @media (max-width: 860px) {
@@ -1421,7 +1426,9 @@
   .readonly-action { grid-column: 1 / -1; }
   .entry-progress-heading { flex-direction: column; align-items: flex-start; gap: 10px; padding: 12px; }
   .section-heading-actions { width: 100%; justify-content: space-between; }
-  .entry-progress-overview { grid-template-columns: 1fr 1fr; padding: 0; }
+  .entry-progress-overview { grid-template-columns: repeat(3, minmax(0, 1fr)); padding: 0; }
+  .entry-progress-overview-primary,
+  .entry-progress-next-action { grid-column: 1 / -1; }
   .entry-progress-overview-primary,
   .entry-progress-stat,
   .entry-progress-next-action { padding: 10px 12px; }
@@ -1443,7 +1450,7 @@
   .task-result { border-top: 1px dashed var(--border); padding-top: 6px; }
 }
 
-@media (max-width: 420px) {
+@media (max-width: 540px) {
   .entry-progress-overview { grid-template-columns: 1fr; }
   .entry-progress-stat { min-height: 70px; }
 }

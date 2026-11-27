@@ -114,7 +114,12 @@ const opt = dr.buildEquityChartOption({{
 assert.equal(opt.yAxis.min, 272);
 assert.equal(opt.yAxis.max, 289);
 assert.equal(opt.dataZoom.length, 0);
+assert.equal(opt.grid.containLabel, true);
 assert.equal(opt.xAxis.axisLabel.fontFamily, ops.getChartTheme().fontMono);
+const pts30 = Array.from({{ length: 30 }}, (_, i) => [Date.parse('2026-09-05T08:00:00Z') + i * 60000, 275 + i * 0.1, 0, 0]);
+const zoomedOpt = dr.buildEquityChartOption({{ seriesData: pts30, zoomStart: 25, zoomEnd: 75, timeZone: 'Asia/Shanghai' }});
+assert.equal(zoomedOpt.dataZoom[0].start, 25);
+assert.equal(zoomedOpt.dataZoom[0].end, 75);
 assert.ok(!dr.cashflowRowHtml({{ amount: 0, income_type: 'FUNDING_FEE', asset: 'USDT', symbol: 'BTCUSDT', id: 1, event_time_utc: '2026-10-09T00:00:00Z' }}, 'Asia/Shanghai').includes('numeric warn'));
 """
         subprocess.run(["node", "-e", script], check=True, capture_output=True, text=True)

@@ -356,6 +356,8 @@
     }
 
     var showSlider = seriesData.length > 24;
+    var zoomStart = Number.isFinite(Number(params.zoomStart)) ? Number(params.zoomStart) : 0;
+    var zoomEnd = Number.isFinite(Number(params.zoomEnd)) ? Number(params.zoomEnd) : 100;
     var areaColor = echartsGraphic && echartsGraphic.LinearGradient
       ? new echartsGraphic.LinearGradient(0, 0, 0, 1, [
           { offset: 0, color: areaTop },
@@ -365,7 +367,7 @@
 
     return {
       animation: false,
-      grid: { left: 66, right: 24, top: 20, bottom: showSlider ? 68 : 36 },
+      grid: { left: 16, right: 24, top: 20, bottom: showSlider ? 68 : 36, containLabel: true },
       tooltip: {
         trigger: "axis",
         axisPointer: { type: "line", lineStyle: { color: theme.borderStrong } },
@@ -388,6 +390,8 @@
       dataZoom: showSlider ? [{
         type: "slider",
         xAxisIndex: 0,
+        start: zoomStart,
+        end: zoomEnd,
         height: 22,
         bottom: 8,
         borderColor: theme.border,

@@ -9,7 +9,7 @@
   border: 1px solid var(--border);
   border-radius: var(--radius) var(--radius) 0 0;
   background: var(--border-subtle);
-  overflow: hidden;
+  overflow: clip;
 }
 
 .account-command-main,
@@ -204,7 +204,7 @@
   border: 1px solid var(--border);
   border-radius: var(--radius);
   background: var(--surface);
-  overflow: hidden;
+  overflow: clip;
 }
 
 .surface-head {
@@ -681,9 +681,12 @@
 
 .live-unavailable {
   display: block;
+  max-width: 240px;
   margin-top: 4px;
   color: var(--muted);
   font-size: var(--text-xs);
+  white-space: normal;
+  word-break: break-word;
 }
 
 .exit-stack {
@@ -852,7 +855,7 @@
   border: 1px solid var(--border);
   border-radius: var(--radius);
   background: var(--surface);
-  overflow: hidden;
+  overflow: clip;
 }
 
 .diagnostics-panel > summary {
@@ -860,7 +863,8 @@
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 12px;
+  flex-wrap: wrap;
+  gap: 8px 12px;
   padding: 10px 14px;
   color: var(--text-secondary);
   background: var(--surface-elevated);
@@ -958,6 +962,9 @@
   .risk-facts {
     grid-template-columns: repeat(4, 1fr);
   }
+  .readonly-stats-panel .risk-facts {
+    grid-template-columns: repeat(3, 1fr);
+  }
 }
 
 @media (max-width: 820px) {
@@ -1036,7 +1043,7 @@
     flex-direction: column;
   }
   .chart-canvas {
-    height: 266px;
+    height: 296px;
   }
   .chart-stage {
     padding: 10px;
@@ -1046,6 +1053,9 @@
   }
   .risk-body {
     padding: 14px;
+  }
+  .risk-facts {
+    margin: 16px -14px -14px;
   }
   .activity-tabs {
     overflow-x: auto;

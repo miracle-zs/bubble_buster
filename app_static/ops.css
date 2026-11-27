@@ -321,7 +321,7 @@ summary {
   overflow-x: auto;
   scrollbar-width: none;
   scroll-snap-type: x proximity;
-  padding: 2px 0;
+  padding: 2px 24px 2px 0;
 }
 
 .ops-nav::-webkit-scrollbar {

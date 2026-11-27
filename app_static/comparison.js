@@ -30,6 +30,7 @@
 
     var chart = null;
     var resizeObserver = null;
+    var chartZoomRange = null;
     var payload = null;
     var VALID_RANGES = { "24": true, "72": true, "168": true, "720": true, "all": true };
     var VALID_MODES = { relative: true, absolute: true };
@@ -437,7 +438,9 @@
           var batch = evt && evt.batch && evt.batch[0] ? evt.batch[0] : evt;
           var start = batch && Number.isFinite(Number(batch.start)) ? Number(batch.start) : 0;
           var end = batch && Number.isFinite(Number(batch.end)) ? Number(batch.end) : 100;
-          updateZoomResetVisibility(start > 0.5 || end < 99.5);
+          var zoomed = start > 0.5 || end < 99.5;
+          chartZoomRange = zoomed ? { start: start, end: end } : null;
+          updateZoomResetVisibility(zoomed);
         });
         attachChartResizeObserver();
       }
@@ -491,15 +494,19 @@
       });
 
       var reduceMotion = ops.prefersReducedMotion();
+      var zoomStart = chartZoomRange ? chartZoomRange.start : 0;
+      var zoomEnd = chartZoomRange ? chartZoomRange.end : 100;
       chart.setOption({
         animation: !reduceMotion,
         animationDuration: reduceMotion ? 0 : 280,
         animationEasing: "cubicOut",
         backgroundColor: "transparent",
-        grid: { top: 32, right: 36, bottom: showSlider ? 78 : 48, left: 68 },
+        grid: { top: 32, right: 24, bottom: showSlider ? 78 : 48, left: 16, containLabel: true },
         dataZoom: showSlider ? [{
           type: "slider",
           xAxisIndex: 0,
+          start: zoomStart,
+          end: zoomEnd,
           height: 22,
           bottom: 10,
           borderColor: theme.border,
@@ -568,7 +575,7 @@
         },
         series: chartSeries
       }, true);
-      updateZoomResetVisibility(false);
+      updateZoomResetVisibility(!!(showSlider && chartZoomRange && (chartZoomRange.start > 0.5 || chartZoomRange.end < 99.5)));
     }
 
     function latestSnapshotTimestamp(rows) {
@@ -769,6 +776,7 @@
 
     Array.prototype.forEach.call(document.querySelectorAll("[data-range]"), function (button) {
       button.addEventListener("click", function () {
+        chartZoomRange = null;
         range = button.getAttribute("data-range") || "168";
         setActiveControl("range-controls", "range", range);
         syncComparisonUrl();
@@ -801,6 +809,7 @@
     var emptyActionBtn = el("chart-empty-action");
     if (emptyActionBtn) {
       emptyActionBtn.addEventListener("click", function () {
+        chartZoomRange = null;
         range = "all";
         setActiveControl("range-controls", "range", range);
         syncComparisonUrl();
@@ -811,6 +820,7 @@
     var resetZoomBtn = el("reset-zoom-button");
     if (resetZoomBtn) {
       resetZoomBtn.addEventListener("click", function () {
+        chartZoomRange = null;
         if (!chart) return;
         chart.dispatchAction({ type: "dataZoom", start: 0, end: 100 });
         updateZoomResetVisibility(false);

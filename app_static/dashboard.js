@@ -34,6 +34,7 @@
 
     var equityChart = null;
     var chartResizeObs = null;
+    var chartZoomRange = null;
     var coreTimer = null;
     var curveTimer = null;
     var VALID_WINDOWS = { 1: true, 24: true, 168: true, 720: true, 8760: true };
@@ -230,6 +231,7 @@
         if (el.curveTabGroup) el.curveTabGroup.hidden = true;
         if (el.tabStrategy) el.tabStrategy.hidden = true;
         if (el.runsTab) el.runsTab.hidden = true;
+        if (el.diagnosticsPanel) el.diagnosticsPanel.hidden = true;
       } else {
         setText(el.walletLabel, "策略权益 (USDT)");
         if (el.walletHelp) {
@@ -501,11 +503,12 @@
       if (!equityChart) {
         equityChart = window.echarts.init(el.equityChart, null, { renderer: "canvas" });
         equityChart.on("datazoom", function (evt) {
-          if (!el.chartResetZoomBtn) return;
           var batch = evt && evt.batch && evt.batch[0] ? evt.batch[0] : evt;
           var start = batch && Number.isFinite(Number(batch.start)) ? Number(batch.start) : 0;
           var end = batch && Number.isFinite(Number(batch.end)) ? Number(batch.end) : 100;
-          el.chartResetZoomBtn.hidden = !(start > 0.5 || end < 99.5);
+          var zoomed = start > 0.5 || end < 99.5;
+          chartZoomRange = zoomed ? { start: start, end: end } : null;
+          if (el.chartResetZoomBtn) el.chartResetZoomBtn.hidden = !zoomed;
         });
         attachChartResizeObserver();
       }
@@ -600,9 +603,13 @@
         areaBottom: areaBottom,
         theme: theme,
         timeZone: displayTimeZone,
+        zoomStart: chartZoomRange ? chartZoomRange.start : undefined,
+        zoomEnd: chartZoomRange ? chartZoomRange.end : undefined,
         echartsGraphic: window.echarts && window.echarts.graphic
       }), true);
-      if (el.chartResetZoomBtn) el.chartResetZoomBtn.hidden = true;
+      if (el.chartResetZoomBtn) {
+        el.chartResetZoomBtn.hidden = !(seriesData.length > 24 && chartZoomRange && (chartZoomRange.start > 0.5 || chartZoomRange.end < 99.5));
+      }
     }
 
     function ensureEcharts() {
@@ -937,6 +944,9 @@
 
       if (accountMode === "readonly" && el.runsTab) {
         el.runsTab.hidden = runs.length === 0;
+        if (el.runsTab.hidden && currentActivityKey === "runs" && activateActivityTab && el.eventsTab) {
+          activateActivityTab(el.eventsTab, false, false);
+        }
       }
 
       renderPositionsTable();
@@ -1098,6 +1108,10 @@
 
       var initialTargetId = VALID_ACTIVITIES[currentActivityKey];
       var initialTab = initialTargetId ? tablist.querySelector('[data-activity-target="' + initialTargetId + '"]') : null;
+      if (initialTab && initialTab.hidden) {
+        var visible = visibleTabs();
+        initialTab = visible.length ? visible[0] : null;
+      }
       if (initialTab) activateTab(initialTab, false, false);
 
       tablist.addEventListener("click", function (evt) {
@@ -1173,6 +1187,7 @@
 
     if (el.chartResetZoomBtn) {
       el.chartResetZoomBtn.addEventListener("click", function () {
+        chartZoomRange = null;
         if (!equityChart) return;
         equityChart.dispatchAction({ type: "dataZoom", start: 0, end: 100 });
         el.chartResetZoomBtn.hidden = true;
@@ -1185,6 +1200,7 @@
         if (!btn) return;
         var parsed = Number(btn.getAttribute("data-sparse-window"));
         if (!VALID_WINDOWS[parsed]) return;
+        chartZoomRange = null;
         currentWindowHours = parsed;
         syncDetailUrl();
         renderCurveTabState();
@@ -1218,6 +1234,7 @@
 
     if (el.tabStrategy) {
       el.tabStrategy.addEventListener("click", function () {
+        chartZoomRange = null;
         currentCurveTab = "strategy";
         syncDetailUrl();
         rerenderFromLatest({ updateChart: true, forceChart: true });
@@ -1226,6 +1243,7 @@
     }
     if (el.tabBalance) {
       el.tabBalance.addEventListener("click", function () {
+        chartZoomRange = null;
         currentCurveTab = "balance";
         syncDetailUrl();
         rerenderFromLatest({ updateChart: true, forceChart: true });
@@ -1238,6 +1256,7 @@
         if (!btn) return;
         var parsed = Number(btn.getAttribute("data-window-hours"));
         if (!Number.isFinite(parsed) || parsed <= 0) return;
+        chartZoomRange = null;
         currentWindowHours = parsed;
         syncDetailUrl();
         renderCurveTabState();

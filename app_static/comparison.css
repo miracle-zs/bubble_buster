@@ -361,7 +361,7 @@
   border: 1px solid var(--border);
   border-radius: var(--radius);
   background: var(--surface);
-  overflow: hidden;
+  overflow: clip;
 }
 
 .metrics-panel::after {
@@ -405,6 +405,13 @@
   width: 100%;
   overflow-x: auto;
   background: var(--surface-inset);
+  container-type: inline-size;
+}
+
+@container (inline-size < 780px) {
+  .comparison-table.is-empty thead {
+    display: none;
+  }
 }
 
 .comparison-table {
@@ -501,6 +508,10 @@
 
 .sort-btn:hover {
   color: var(--text);
+}
+
+.sort-btn:focus-visible {
+  outline-offset: -2px;
 }
 
 .sort-indicator::after {
@@ -615,6 +626,12 @@
   }
   .footnote span {
     display: block;
+  }
+}
+
+@media (max-width: 480px) {
+  .summary-grid {
+    grid-template-columns: 1fr;
   }
 }
 
