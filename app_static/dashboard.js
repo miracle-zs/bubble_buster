@@ -1,4 +1,4 @@
-/* Bubble Buster — Account Detail Dashboard controller */
+/* Bubble Buster — Account Detail Dashboard controller (Obsidian Desk Terminal) */
 (function () {
   "use strict";
 
@@ -7,7 +7,7 @@
     if (!ops) return;
 
     var cfg = ops.readPageConfig("page-config");
-    var REFRESH_SEC = Number(cfg.refreshSec) || 5;
+    var REFRESH_SEC = Number(cfg.refreshSec) || 15;
     var ECHARTS_SRC = String(cfg.echartsSrc || "");
     var accountId = String(cfg.accountId || "");
     var accountMode = String(cfg.accountMode || "full").toLowerCase();
@@ -33,6 +33,8 @@
 
     var equityChart = null;
     var chartResizeObs = null;
+    var coreTimer = null;
+    var curveTimer = null;
     var VALID_WINDOWS = { 1: true, 24: true, 168: true, 720: true, 8760: true };
     var VALID_ACTIVITIES = { runs: "activity-runs", events: "activity-events", cashflow: "activity-cashflow" };
     var initialQuery = ops.readQueryParams();
@@ -53,6 +55,7 @@
     var detailsLoaded = false;
     var detailsInFlight = false;
     var detailsRefreshPending = false;
+    var logsLoadedOnce = false;
     var manualRefreshPendingCount = 0;
     var cachedPositions = [];
     var cachedEvents = [];
@@ -88,6 +91,7 @@
       lastRunStatus: document.getElementById("lastRunStatus"),
       lastRunMetric: document.getElementById("lastRunMetric"),
       curveTitle: document.getElementById("curveTitle"),
+      curveTabGroup: document.getElementById("curveTabGroup"),
       tabStrategy: document.getElementById("tabStrategy"),
       tabBalance: document.getElementById("tabBalance"),
       windowRow: document.getElementById("windowRow"),
@@ -106,12 +110,14 @@
       riskThreshold: document.getElementById("riskThreshold"),
       riskDescription: document.getElementById("riskDescription"),
       riskMeterLabel: document.getElementById("riskMeterLabel"),
+      riskMeterTrack: document.getElementById("riskMeterTrack"),
       riskMeterFill: document.getElementById("riskMeterFill"),
       riskMeterLimit: document.getElementById("riskMeterLimit"),
       drawdownStats: document.getElementById("drawdownStats"),
       positionsCount: document.getElementById("positionsCount"),
       positionSortSelect: document.getElementById("positionSortSelect"),
       runsTab: document.getElementById("tab-runs"),
+      eventsTab: document.getElementById("tab-events"),
       runsCount: document.getElementById("runsCount"),
       eventsCount: document.getElementById("eventsCount"),
       cashflowCount: document.getElementById("cashflowCount"),
@@ -127,6 +133,7 @@
       eventFilterCount: document.getElementById("eventFilterCount"),
       cashflowTable: document.getElementById("cashflowTable"),
       cashflowBody: document.getElementById("cashflowBody"),
+      diagnosticsPanel: document.getElementById("diagnosticsPanel"),
       unpricedTable: document.getElementById("unpricedTable"),
       unpricedBody: document.getElementById("unpricedBody"),
       logTail: document.getElementById("logTail"),
@@ -355,7 +362,9 @@
         if (el.summaryRail) el.summaryRail.classList.add("is-readonly-rail");
         if (el.riskPanel) el.riskPanel.hidden = true;
         if (el.readonlyStatsPanel) el.readonlyStatsPanel.hidden = false;
+        if (el.curveTabGroup) el.curveTabGroup.hidden = true;
         if (el.tabStrategy) el.tabStrategy.hidden = true;
+        if (el.runsTab) el.runsTab.hidden = true;
       } else {
         setText(el.walletLabel, "策略权益 (USDT)");
         setText(el.walletHelp, "扣除窗口内出入金影响");
@@ -426,17 +435,20 @@
 
     function fetchDashboard(apiUrl, options, callback) {
       var opts = options || {};
-      var lite = !!opts.lite;
-      var curvePoints = curvePointsForWindow(currentWindowHours);
-      if (!lite && currentWindowHours >= 24) {
-        curvePoints = Math.max(curvePoints, 1200);
+      var kind = opts.kind || "full";
+      var q = ["_=" + encodeURIComponent(String(Date.now()))];
+      if (kind === "curve" || kind === "full") {
+        var curvePoints = curvePointsForWindow(currentWindowHours);
+        if (!opts.lite && currentWindowHours >= 24) {
+          curvePoints = Math.max(curvePoints, 1200);
+        }
+        q.push("window_hours=" + encodeURIComponent(String(currentWindowHours)));
+        q.push("curve_points=" + encodeURIComponent(String(curvePoints)));
       }
-      var q = [
-        "_=" + encodeURIComponent(String(Date.now())),
-        "window_hours=" + encodeURIComponent(String(currentWindowHours)),
-        "curve_points=" + encodeURIComponent(String(curvePoints)),
-        "log_lines=" + encodeURIComponent(lite ? "0" : "80")
-      ];
+      if (kind === "details" || kind === "full") {
+        var logLines = opts.includeLogs ? 80 : 0;
+        q.push("log_lines=" + encodeURIComponent(String(logLines)));
+      }
       if (opts.curveType === "strategy" || opts.curveType === "balance" || opts.curveType === "both") {
         q.push("curve_type=" + encodeURIComponent(opts.curveType));
       }
@@ -447,39 +459,19 @@
         try { fetchControllers[reqKey].superseded = true; fetchControllers[reqKey].controller.abort(); } catch (e) {}
       }
       var controller = (typeof AbortController !== "undefined") ? new AbortController() : null;
-      var reqState = { controller: controller, timedOut: false, superseded: false };
+      var reqState = { controller: controller, superseded: false };
       if (controller) fetchControllers[reqKey] = reqState;
 
-      var timeoutMs = opts.timeout || 15000;
-      var timeoutTimer = setTimeout(function () {
-        reqState.timedOut = true;
-        if (controller) {
-          try { controller.abort(); } catch (e) {}
-        }
-      }, timeoutMs);
-
-      fetch(targetUrl, {
-        method: "GET",
-        cache: "no-store",
-        signal: controller ? controller.signal : undefined,
-        headers: { Accept: "application/json" }
+      ops.fetchJsonWithTimeout(targetUrl, {
+        signal: controller ? controller.signal : null,
+        timeoutMs: opts.timeout || 15000
       })
-        .then(function (res) {
-          clearTimeout(timeoutTimer);
-          if (fetchControllers[reqKey] === reqState) delete fetchControllers[reqKey];
-          if (!res.ok) throw new Error("HTTP " + res.status);
-          return res.json();
-        })
         .then(function (data) {
+          if (fetchControllers[reqKey] === reqState) delete fetchControllers[reqKey];
           callback(null, data);
         })
         .catch(function (err) {
-          clearTimeout(timeoutTimer);
           if (fetchControllers[reqKey] === reqState) delete fetchControllers[reqKey];
-          if (reqState.timedOut) {
-            callback(new Error("请求超时（" + Math.round(timeoutMs / 1000) + "s）"));
-            return;
-          }
           if (reqState.superseded || (err && err.name === "AbortError")) {
             callback(null, null, true);
             return;
@@ -576,12 +568,7 @@
     function updateFreshnessDisplay(data) {
       var ts = latestUnderlyingTimestamp(data);
       var freshness = ops.evaluateDataFreshness(ts, { warnSec: 180, staleSec: 900 });
-      if (el.freshnessText) el.freshnessText.textContent = freshness.badgeText;
-      if (el.freshnessPill) {
-        var cls = freshness.state === "live" ? "is-live" : (freshness.state === "warn" ? "is-warn" : (freshness.state === "stale" || freshness.state === "offline" ? "is-stale" : ""));
-        el.freshnessPill.className = "ops-freshness" + (cls ? " " + cls : "");
-        el.freshnessPill.title = freshness.detailText;
-      }
+      ops.applyFreshnessPill(el.freshnessPill, el.freshnessText, freshness);
       if (el.updatedAt) {
         el.updatedAt.textContent = ts ? fmtMetaTime(ts) : "--";
       }
@@ -593,6 +580,22 @@
       if (!el.chartEmpty) return;
       el.chartEmpty.textContent = message || "暂无曲线";
       el.chartEmpty.hidden = false;
+    }
+
+    function attachChartResizeObserver() {
+      if (!el.equityChart) return;
+      if (typeof window.ResizeObserver !== "undefined" && !chartResizeObs) {
+        chartResizeObs = new ResizeObserver(function (entries) {
+          if (!equityChart) return;
+          for (var rIdx = 0; rIdx < entries.length; rIdx += 1) {
+            if (entries[rIdx].contentRect && entries[rIdx].contentRect.width > 0) {
+              equityChart.resize();
+              break;
+            }
+          }
+        });
+        chartResizeObs.observe(el.equityChart);
+      }
     }
 
     function renderEquityChart(curve, forceRebuild) {
@@ -623,20 +626,7 @@
           var end = batch && Number.isFinite(Number(batch.end)) ? Number(batch.end) : 100;
           el.chartResetZoomBtn.hidden = !(start > 0.5 || end < 99.5);
         });
-        if (typeof window.ResizeObserver !== "undefined") {
-          chartResizeObs = new ResizeObserver(function (entries) {
-            if (!equityChart) return;
-            for (var rIdx = 0; rIdx < entries.length; rIdx += 1) {
-              if (entries[rIdx].contentRect && entries[rIdx].contentRect.width > 0) {
-                equityChart.resize();
-                break;
-              }
-            }
-          });
-          chartResizeObs.observe(el.equityChart);
-        } else {
-          window.addEventListener("resize", function () { if (equityChart) equityChart.resize(); });
-        }
+        attachChartResizeObserver();
       }
 
       if (!raw.length) {
@@ -693,7 +683,7 @@
             backgroundColor: theme.surface,
             padding: [2, 6],
             borderRadius: 3,
-            fontSize: 11,
+            fontSize: 12,
             formatter: "周期起点 " + ops.fmtUsdt(baseEq, 2)
           }
         });
@@ -708,7 +698,7 @@
             borderWidth: 1,
             padding: [2, 6],
             borderRadius: 3,
-            fontSize: 11,
+            fontSize: 12,
             formatter: "组合止损 -" + ops.fmtNum(lossPct, 2) + "% (" + ops.fmtUsdt(stopEq, 2) + ")"
           }
         });
@@ -723,7 +713,7 @@
 
       equityChart.setOption({
         animation: false,
-        grid: { left: 66, right: 24, top: 20, bottom: showSlider ? 66 : 36 },
+        grid: { left: 66, right: 24, top: 20, bottom: showSlider ? 68 : 36 },
         tooltip: {
           trigger: "axis",
           axisPointer: { type: "line", lineStyle: { color: theme.borderStrong } },
@@ -745,13 +735,13 @@
         dataZoom: showSlider ? [{
           type: "slider",
           xAxisIndex: 0,
-          height: 20,
+          height: 22,
           bottom: 8,
           borderColor: theme.border,
           backgroundColor: theme.surfaceInset,
           fillerColor: theme.zoomFill,
           handleStyle: { color: theme.accent, borderColor: theme.accent },
-          textStyle: { color: theme.muted, fontSize: 11 }
+          textStyle: { color: theme.muted, fontSize: 12 }
         }] : [],
         xAxis: {
           type: "time",
@@ -781,7 +771,7 @@
             type: "line",
             showSymbol: seriesData.length <= 2,
             symbolSize: 7,
-            smooth: 0.1,
+            smooth: false,
             data: seriesData,
             itemStyle: { color: lineColor },
             lineStyle: { width: 2.2, color: lineColor },
@@ -915,84 +905,22 @@
         return;
       }
 
-      if (!portfolioStopEnabled) {
-        setSummaryMetric(el.stopDistance, "未启用", "warn");
-        if (el.riskState) el.riskState.className = "risk-state warn";
-        setText(el.riskState, "组合止损未启用");
-        setText(el.riskDescription, "账户周期收益与回撤仍会持续计算，但当前账户不会按组合阈值触发整体平仓。");
-        setText(el.riskMeterLabel, "未启用");
-        if (el.riskMeterFill) {
-          el.riskMeterFill.style.setProperty("--meter-scale", "0");
-          el.riskMeterFill.className = "risk-meter-fill warn";
-        }
-        return;
-      }
-
-      if (!stop || !stop.status) {
-        setSummaryMetric(el.stopDistance, "状态待同步", "warn");
-        if (el.riskState) el.riskState.className = "risk-state warn";
-        setText(el.riskState, "等待后端止损状态");
-        setText(el.riskDescription, "后端尚未写入本账户周期组合止损状态；页面不会仅凭权益曲线判定已经触发。");
-        setText(el.riskMeterLabel, "待同步");
-        if (el.riskMeterFill) {
-          el.riskMeterFill.style.setProperty("--meter-scale", "0");
-          el.riskMeterFill.className = "risk-meter-fill warn";
-        }
-        return;
-      }
-
-      var distance = ops.toNum(stop.distance_pct);
-      var configuredLossPct = ops.toNum(stop.loss_pct);
-      if (configuredLossPct === null || configuredLossPct <= 0) configuredLossPct = portfolioStopPct;
-
-      var riskCls = "ok";
-      var distanceText = distance === null ? "--" : ops.fmtNum(distance, 2) + "%";
-      var stateText = "风险正常";
-      var description = currentReturn === null
-        ? "后端正在监控本账户周期组合止损。"
-        : "当前周期收益 " + ops.fmtSigned(currentReturn, 2) + "%，距离 -" + ops.fmtNum(configuredLossPct, 2) + "% 止损阈值仍有 " + ops.fmtNum(distance, 2) + " 个百分点。";
-
-      if (stopStatus === "TRIGGERED_COMPLETE") {
-        riskCls = "bad";
-        distanceText = "已完成";
-        stateText = "组合止损已完成";
-        description = "后端已完成本账户周期组合止损，当前受管持仓为 0。";
-      } else if (stopStatus === "CLOSING") {
-        riskCls = "bad";
-        distanceText = "执行中";
-        stateText = "组合止损执行中";
-        description = stop.state_inconsistent
-          ? "后端已记录平仓完成，但本地仍有 " + txt(stop.open_positions) + " 个受管持仓，正在等待对账。"
-          : "后端已触发组合止损，正在处理剩余 " + txt(stop.open_positions) + " 个受管持仓。";
-      } else if (stopStatus === "THRESHOLD_REACHED") {
-        riskCls = "bad";
-        distanceText = distance === null ? "已到阈值" : "已超出 " + ops.fmtNum(Math.abs(distance), 2) + "%";
-        stateText = "已到组合止损阈值";
-        description = "最新权益已达到止损阈值，等待策略管理器确认并执行。";
-      } else if (stopStatus === "MONITORING" && distance !== null) {
-        riskCls = distance <= 1 ? "warn" : "ok";
-        stateText = distance <= 1 ? "接近组合止损" : "风险正常";
-      } else {
-        riskCls = "warn";
-        distanceText = "状态待同步";
-        stateText = "等待后端止损状态";
-        description = "后端组合止损基准尚未就绪；页面不会仅凭权益曲线判定已经触发。";
-      }
-
-      setSummaryMetric(el.stopDistance, distanceText, riskCls);
-      if (el.riskState) el.riskState.className = "risk-state " + riskCls;
-      setText(el.riskState, stateText);
-      setText(el.riskDescription, description);
-
-      var usedPct = stopStatus === "TRIGGERED_COMPLETE" || stopStatus === "CLOSING" || stopStatus === "THRESHOLD_REACHED"
-        ? 100
-        : (currentReturn !== null && currentReturn < 0
-          ? Math.min(100, (Math.abs(currentReturn) / configuredLossPct) * 100)
-          : 0);
-      setText(el.riskMeterLabel, usedPct <= 0 ? "未消耗" : ops.fmtNum(usedPct, 0) + "%");
+      var state = ops.evaluatePortfolioStopState(stop, metrics, {
+        enabled: portfolioStopEnabled,
+        fallbackPct: portfolioStopPct
+      });
+      setSummaryMetric(el.stopDistance, state.distanceText, state.tone);
+      if (el.riskState) el.riskState.className = "risk-state " + state.tone;
+      setText(el.riskState, state.stateText);
+      setText(el.riskDescription, state.description);
+      setText(el.riskMeterLabel, state.meterText);
       if (el.riskMeterFill) {
-        el.riskMeterFill.style.setProperty("--meter-scale", (usedPct / 100).toFixed(4));
-        el.riskMeterFill.className = "risk-meter-fill " + riskCls;
+        el.riskMeterFill.style.setProperty("--meter-scale", (state.consumedPct / 100).toFixed(4));
+        el.riskMeterFill.className = "risk-meter-fill " + state.tone;
+      }
+      if (el.riskMeterTrack) {
+        el.riskMeterTrack.setAttribute("aria-valuenow", String(Math.round(state.consumedPct)));
+        el.riskMeterTrack.setAttribute("aria-valuetext", state.stateText + "，" + state.meterText);
       }
     }
 
@@ -1069,7 +997,7 @@
     function refreshCore(options) {
       var opts = options || {};
       var trackManual = !!opts.manual;
-      fetchDashboard(api + "/core", { lite: !!opts.lite }, function (err, d, aborted) {
+      fetchDashboard(api + "/core", { kind: "core" }, function (err, d, aborted) {
         if (trackManual) finishManualRefreshSlot();
         if (aborted) return;
         if (err) {
@@ -1092,7 +1020,7 @@
           svcStatus = svc.running ? "RUNNING" : (svc.error ? "ERROR (" + svc.error + ")" : "STOPPED");
         }
 
-        setText(el.meta, "Binance Futures · 北京时间 UTC+8 · 余额来源 " + txt(wallet.source));
+        setText(el.meta, "UTC+8 · 余额来源 " + txt(wallet.source));
         if (accountMode !== "readonly") {
           setText(el.nextEntry, fmtAxisTime(d.next_entry_local));
         }
@@ -1109,7 +1037,7 @@
           }
         }
 
-        // Do NOT rebuild ECharts during the 5s core poll; chart updates only via refreshCurveFast or tab/window change.
+        // Do NOT rebuild ECharts during the core poll; chart updates only via refreshCurveFast or tab/window change.
         rerenderFromLatest({ updateChart: false });
 
         var currentOpenCount = ops.toNum(summary.open_positions);
@@ -1122,7 +1050,7 @@
     function refreshCurveFast(options) {
       var opts = options || {};
       var trackManual = !!opts.manual;
-      fetchDashboard(api + "/curve", { lite: true, curveType: currentCurveTab }, function (err, d, aborted) {
+      fetchDashboard(api + "/curve", { kind: "curve", lite: true, curveType: currentCurveTab }, function (err, d, aborted) {
         if (trackManual) finishManualRefreshSlot();
         if (aborted) return;
         if (err) {
@@ -1242,7 +1170,7 @@
       }, 6, cachedEvents.length ? "无匹配筛选条件的订单事件" : "暂无订单事件");
     }
 
-    function renderDetails(d) {
+    function renderDetails(d, includedLogs) {
       cachedPositions = d.open_positions || [];
       var runs = d.runs || [];
       cachedEvents = d.events || [];
@@ -1255,8 +1183,8 @@
       setText(el.cashflowCount, String(cashflows.length));
       setText(el.unpricedCount, String(unpriced.length));
 
-      if (accountMode === "readonly" && el.runsTab && runs.length === 0) {
-        el.runsTab.hidden = true;
+      if (accountMode === "readonly" && el.runsTab) {
+        el.runsTab.hidden = runs.length === 0;
       }
 
       renderPositionsTable();
@@ -1303,9 +1231,10 @@
         );
       }, 6, "暂无待核对平仓记录");
 
-      if (el.logTail) {
+      if (includedLogs && el.logTail) {
         var logLines = Array.isArray(d.log_tail) ? d.log_tail : [];
         el.logTail.textContent = logLines.join("\n") || "暂无日志";
+        logsLoadedOnce = true;
       }
       fullLoadedOnce = true;
     }
@@ -1313,6 +1242,9 @@
     function refreshDetails(options) {
       var opts = options || {};
       var trackManual = !!opts.manual;
+      var includeLogs = opts.includeLogs !== undefined
+        ? !!opts.includeLogs
+        : !!(el.diagnosticsPanel && el.diagnosticsPanel.open);
       if (detailsInFlight && !opts.force) {
         detailsRefreshPending = true;
         if (trackManual) finishManualRefreshSlot();
@@ -1320,7 +1252,7 @@
       }
       detailsInFlight = true;
       detailsRefreshPending = false;
-      fetchDashboard(api + "/details", { lite: false }, function (err, d, aborted) {
+      fetchDashboard(api + "/details", { kind: "details", includeLogs: includeLogs }, function (err, d, aborted) {
         detailsInFlight = false;
         if (trackManual) finishManualRefreshSlot();
         if (aborted) return;
@@ -1333,7 +1265,7 @@
           return;
         }
         setDetailError("details", "");
-        renderDetails(d || {});
+        renderDetails(d || {}, includeLogs);
         detailsLoaded = true;
         if (detailsRefreshPending) refreshDetails();
       });
@@ -1345,12 +1277,8 @@
         var panel = el.positionsBody.closest(".positions-panel");
         if (panel) targets.push(panel);
       }
-      if (el.logTail && el.logTail.closest) {
-        var logPanel = el.logTail.closest(".diagnostics-panel");
-        if (logPanel) targets.push(logPanel);
-      }
 
-      setTimeout(function () { if (!detailsLoaded) refreshDetails(); }, isMobile ? 1800 : 1200);
+      setTimeout(function () { if (!detailsLoaded) refreshDetails(); }, isMobile ? 1600 : 900);
       if (!targets.length || !window.IntersectionObserver) return;
 
       var loaded = false;
@@ -1379,8 +1307,12 @@
     function setDetailRefreshBusy(busy) {
       if (!el.detailRefreshBtn) return;
       el.detailRefreshBtn.disabled = !!busy;
-      el.detailRefreshBtn.textContent = busy ? "刷新中..." : "刷新 ↻";
+      var lbl = el.detailRefreshBtn.querySelector(".btn-label");
+      if (lbl) lbl.textContent = busy ? "刷新中..." : "刷新";
+      else el.detailRefreshBtn.textContent = busy ? "刷新中..." : "刷新";
     }
+
+    var activateActivityTab = null;
 
     function setupActivityTabs() {
       var tablist = document.querySelector(".activity-tabs");
@@ -1409,6 +1341,7 @@
         if (persist) syncDetailUrl();
         if (shouldFocus) tab.focus();
       }
+      activateActivityTab = activateTab;
 
       var initialTargetId = VALID_ACTIVITIES[currentActivityKey];
       var initialTab = initialTargetId ? tablist.querySelector('[data-activity-target="' + initialTargetId + '"]') : null;
@@ -1448,17 +1381,41 @@
     function triggerManualRefresh() {
       manualRefreshPendingCount = 3;
       setDetailRefreshBusy(true);
-      refreshCore({ lite: false, manual: true });
+      refreshCore({ manual: true });
       refreshCurveFast({ manual: true, forceChart: true });
       refreshDetails({ manual: true, force: true });
+    }
+
+    function focusEventSearch() {
+      if (el.eventsTab && activateActivityTab) {
+        activateActivityTab(el.eventsTab, false, true);
+      }
+      if (el.eventSearchInput) {
+        el.eventSearchInput.focus();
+        el.eventSearchInput.select();
+      }
     }
 
     applyAccountContext();
     setupActivityTabs();
     renderCurveTabState();
 
+    ops.bindKeyboardShortcuts({
+      onRefresh: triggerManualRefresh,
+      onSearch: focusEventSearch
+    });
+
     if (el.detailRetryBtn) el.detailRetryBtn.addEventListener("click", triggerManualRefresh);
     if (el.detailRefreshBtn) el.detailRefreshBtn.addEventListener("click", triggerManualRefresh);
+
+    if (el.diagnosticsPanel) {
+      el.diagnosticsPanel.addEventListener("toggle", function () {
+        if (el.diagnosticsPanel.open && !logsLoadedOnce) {
+          if (el.logTail) el.logTail.textContent = "日志加载中...";
+          refreshDetails({ force: true, includeLogs: true });
+        }
+      });
+    }
 
     if (el.chartResetZoomBtn) {
       el.chartResetZoomBtn.addEventListener("click", function () {
@@ -1529,32 +1486,54 @@
       });
     }
 
+    function startPolling() {
+      if (!coreTimer) {
+        coreTimer = setInterval(function () {
+          if (document.hidden) return;
+          refreshTick += 1;
+          if (isMobile) {
+            var fullEvery = 3;
+            refreshCore();
+            if (fullLoadedOnce && (refreshTick % fullEvery) === 0) refreshDetails();
+            return;
+          }
+          refreshCore();
+          if (fullLoadedOnce && (refreshTick % 2) === 0) refreshDetails();
+        }, Math.max(2000, REFRESH_SEC * 1000));
+      }
+      if (!curveTimer) {
+        curveTimer = setInterval(function () {
+          if (!document.hidden) refreshCurveFast();
+        }, Math.max(60000, REFRESH_SEC * 1000));
+      }
+    }
+
+    function stopPolling(disposeChart) {
+      if (coreTimer) { clearInterval(coreTimer); coreTimer = null; }
+      if (curveTimer) { clearInterval(curveTimer); curveTimer = null; }
+      if (disposeChart) {
+        if (chartResizeObs) {
+          try { chartResizeObs.disconnect(); } catch (e) {}
+          chartResizeObs = null;
+        }
+        if (equityChart) {
+          try { equityChart.dispose(); } catch (e) {}
+          equityChart = null;
+          lastChartSignature = "";
+        }
+      }
+    }
+
     refreshCurveFast({ forceChart: true });
-    refreshCore({ lite: false });
+    refreshCore();
     ensureEcharts();
     setupDetailsLazyLoad();
-
-    var coreTimer = setInterval(function () {
-      if (document.hidden) return;
-      refreshTick += 1;
-      if (isMobile) {
-        var fullEvery = 3;
-        refreshCore({ lite: (refreshTick % fullEvery) !== 0 });
-        if (fullLoadedOnce && (refreshTick % fullEvery) === 0) refreshDetails();
-        return;
-      }
-      refreshCore({ lite: false });
-      if (fullLoadedOnce && (refreshTick % 2) === 0) refreshDetails();
-    }, Math.max(2000, REFRESH_SEC * 1000));
-
-    var curveTimer = setInterval(function () {
-      if (!document.hidden) refreshCurveFast();
-    }, Math.max(60000, REFRESH_SEC * 1000));
+    startPolling();
 
     document.addEventListener("visibilitychange", function () {
       if (!document.hidden) {
         refreshCurveFast();
-        refreshCore({ lite: false });
+        refreshCore();
         if (fullLoadedOnce) refreshDetails();
       }
     });
@@ -1562,16 +1541,18 @@
     window.addEventListener("online", function () { updateFreshnessDisplay(latestData); });
     window.addEventListener("offline", function () { updateFreshnessDisplay(latestData); });
 
-    window.addEventListener("pagehide", function () {
-      clearInterval(coreTimer);
-      clearInterval(curveTimer);
-      if (chartResizeObs) {
-        try { chartResizeObs.disconnect(); } catch (e) {}
-        chartResizeObs = null;
-      }
-      if (equityChart) {
-        try { equityChart.dispose(); } catch (e) {}
-        equityChart = null;
+    window.addEventListener("pagehide", function (event) {
+      stopPolling(!(event && event.persisted));
+    });
+
+    window.addEventListener("pageshow", function (event) {
+      if (event && event.persisted) {
+        startPolling();
+        attachChartResizeObserver();
+        if (equityChart) equityChart.resize();
+        else if (latestData) renderEquityChart(activeCurve(latestData), true);
+        refreshCurveFast();
+        refreshCore();
       }
     });
   });

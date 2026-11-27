@@ -2106,7 +2106,8 @@ class DashboardServerTest(unittest.TestCase):
         self.assertIn('"portfolioStopEnabled": true', html)
         self.assertIn('"portfolioStopPct": 3.5', html)
         self.assertIn("data && data.portfolio_loss_cut", dashboard_js)
-        self.assertIn('stopStatus === "TRIGGERED_COMPLETE"', dashboard_js)
+        self.assertIn("ops.evaluatePortfolioStopState(", dashboard_js)
+        self.assertIn('status === "TRIGGERED_COMPLETE"', ops_js)
         self.assertIn("if (afterIndex < 0) return null;", ops_js)
         self.assertIn("TP 9% / 减仓50% / 浮亏砍仓ON", html)
         self.assertNotIn("Bubble Buster Runtime Console", html)
@@ -2245,7 +2246,7 @@ class DashboardServerTest(unittest.TestCase):
         self.assertIn('var summaryFastApi = summaryApi + "/fast";', overview_js)
         self.assertIn('var summaryDetailsApi = summaryApi + "/details";', overview_js)
         self.assertIn("portfolioStopStates[aid] = r.portfolio_loss_cut || null", overview_js)
-        self.assertIn('status === "TRIGGERED_COMPLETE"', overview_js)
+        self.assertIn("ops.evaluatePortfolioStopState(", overview_js)
 
     def test_render_overview_throttles_refresh_and_uses_lightweight_curve_points(self) -> None:
         html = render_accounts_overview_html(refresh_sec=5)

@@ -99,6 +99,7 @@ portfolio_take_profit_enabled = true
         with TestClient(app) as client:
             fast = client.get("/api/accounts/summary/fast")
             self.assertEqual(fast.status_code, 200)
+            self.assertEqual(fast.headers.get("cache-control"), "no-store")
             fast_rows = fast.json()["accounts"]
             self.assertEqual({row["account_id"] for row in fast_rows}, {"55", "acc01", "acc02"})
             self.assertNotIn("tasks", fast_rows[0])
@@ -123,7 +124,7 @@ portfolio_take_profit_enabled = true
             self.assertEqual(ops_css.headers.get("x-content-type-options"), "nosniff")
             self.assertEqual(ops_css.headers.get("x-frame-options"), "SAMEORIGIN")
             self.assertEqual(ops_css.headers.get("referrer-policy"), "same-origin")
-            self.assertIn("Primer Quiet Ops", ops_css.text)
+            self.assertIn("Obsidian Desk", ops_css.text)
 
             ops_js = client.get("/static/ops.js", headers={"Accept-Encoding": "gzip"})
             self.assertEqual(ops_js.status_code, 200)
@@ -132,6 +133,7 @@ portfolio_take_profit_enabled = true
             self.assertIn("updateQueryParams", ops_js.text)
             self.assertIn("splitStrategyParts", ops_js.text)
             self.assertIn("formatStrategyHighlights", ops_js.text)
+            self.assertIn("evaluatePortfolioStopState", ops_js.text)
 
             favicon_ico = client.get("/favicon.ico")
             self.assertEqual(favicon_ico.status_code, 200)
@@ -198,7 +200,14 @@ portfolio_take_profit_enabled = true
             self.assertIn("<h1>多账户权益走势同轴对比</h1>", comparison_page.text)
             self.assertIn(f"../../static/vendor/echarts.min.js?v={echarts_v}", comparison_page.text)
             self.assertIn('id="comparison-metrics-table"', comparison_page.text)
+            self.assertIn('id="page-config" type="application/json"', comparison_page.text)
+            self.assertIn('"id": "acc01"', comparison_page.text)
+            self.assertIn('aria-sort="descending"', comparison_page.text)
+            self.assertNotIn("aria-sort-dir", comparison_page.text)
             self.assertIn("策略事件不叠加到主图", comparison_page.text)
+
+            missing_account = client.get("/account/nonexistent_acc/")
+            self.assertEqual(missing_account.status_code, 404)
 
             comparison_js = client.get("/static/comparison.js")
             self.assertEqual(comparison_js.status_code, 200)

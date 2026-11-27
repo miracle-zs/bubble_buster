@@ -4,7 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <meta name="color-scheme" content="dark" />
-  <meta name="theme-color" content="#0d1117" />
+  <meta name="theme-color" content="#080a0f" />
   <title>账户权益对比 · Bubble Buster</title>
   <link rel="icon" type="image/svg+xml" href="../../static/favicon.svg" />
   <link rel="stylesheet" href="../../static/ops.css" />
@@ -15,6 +15,7 @@
   <header class="ops-topbar">
     <div class="ops-topbar-inner">
       <a id="ops-nav-brand" class="ops-brand" href="../../"><span class="ops-brand-mark" aria-hidden="true"></span>Bubble Buster</a>
+      <span class="ops-venue-chip">Binance USDT-M</span>
       <div class="ops-nav-wrap">
         <nav class="ops-nav" aria-label="主导航">
           <ul class="ops-nav-list">
@@ -33,26 +34,29 @@
       <div>
         <div class="hero-title-row">
           <h1>多账户权益走势同轴对比</h1>
-          <div id="freshness-pill" class="ops-freshness is-warn" role="status" aria-live="polite">
+          <div id="freshness-pill" class="ops-freshness is-warn">
             <span class="ops-freshness-dot" aria-hidden="true"></span>
             <span id="status-text">正在读取快照</span>
           </div>
         </div>
-        <p class="hero-copy">基于统一时间轴与归一化基准（起点设为 0%），横向评估不同实盘策略的表现差异。</p>
+        <p class="hero-copy">统一时间轴归一化基准（起点 0%），按 R 手动刷新。</p>
       </div>
       <div class="controls" aria-label="图表筛选">
-        <div id="range-controls" class="control-group" role="group" aria-label="时间范围">
-          <button class="control" data-range="24" type="button" aria-pressed="false">24 小时</button>
-          <button class="control" data-range="72" type="button" aria-pressed="false">3 天</button>
-          <button class="control" data-range="168" type="button" aria-pressed="false">7 天</button>
-          <button class="control" data-range="720" type="button" aria-pressed="false">30 天</button>
-          <button class="control active" data-range="all" type="button" aria-pressed="true">上线以来</button>
+        <div id="range-controls" class="control-group ops-segmented" role="group" aria-label="时间范围">
+          <button class="control ops-seg-btn" data-range="24" type="button" aria-pressed="false">24 小时</button>
+          <button class="control ops-seg-btn" data-range="72" type="button" aria-pressed="false">3 天</button>
+          <button class="control ops-seg-btn" data-range="168" type="button" aria-pressed="false">7 天</button>
+          <button class="control ops-seg-btn" data-range="720" type="button" aria-pressed="false">30 天</button>
+          <button class="control ops-seg-btn active" data-range="all" type="button" aria-pressed="true">上线以来</button>
         </div>
-        <div id="mode-controls" class="control-group" role="group" aria-label="图表模式">
-          <button class="control active" data-mode="relative" type="button" aria-pressed="true">相对变化</button>
-          <button class="control" data-mode="absolute" type="button" aria-pressed="false">账户权益</button>
+        <div id="mode-controls" class="control-group ops-segmented" role="group" aria-label="图表模式">
+          <button class="control ops-seg-btn active" data-mode="relative" type="button" aria-pressed="true">相对变化</button>
+          <button class="control ops-seg-btn" data-mode="absolute" type="button" aria-pressed="false">账户权益</button>
         </div>
-        <button id="refresh-button" class="control refresh" type="button">刷新 ↻</button>
+        <button id="refresh-button" class="ops-btn control refresh" type="button" aria-label="手动刷新账户权益对比">
+          <svg class="ops-icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M13.5 8a5.5 5.5 0 1 1-1.4-3.7"/><path d="M13.5 2.5v3h-3"/></svg>
+          <span class="btn-label">刷新</span>
+        </button>
       </div>
     </section>
 
@@ -69,7 +73,7 @@
       <div class="chart-head">
         <div>
           <h2 id="chart-title" class="chart-title">相对权益变化（%）</h2>
-          <p id="chart-subtitle" class="chart-subtitle">组合止盈上线后的首个有效快照 = 0%；策略事件不叠加到主图。</p>
+          <p id="chart-subtitle" class="chart-subtitle">组合止盈上线后首个有效快照 = 0%；策略事件不叠加到主图。</p>
         </div>
         <div class="chart-head-right">
           <button id="reset-zoom-button" class="ops-btn" type="button" hidden>重置缩放</button>
@@ -88,18 +92,19 @@
       <div class="metrics-panel-head">
         <div>
           <h2 id="metrics-table-title" class="metrics-panel-title">区间指标与策略差异对比</h2>
-          <p class="metrics-panel-sub">点击列头可排序；指标随上方时间范围同步更新。</p>
+          <p class="metrics-panel-sub">点击列头排序，指标随时间范围同步。</p>
         </div>
       </div>
+      <div id="metrics-sort-status" class="sr-only" role="status" aria-live="polite"></div>
       <div class="table-wrap" tabindex="0" role="region" aria-labelledby="metrics-table-title">
         <table id="comparison-metrics-table" class="comparison-table">
           <caption class="sr-only">各账户区间收益、当前权益、最大回撤与策略差异对比表</caption>
           <thead>
             <tr>
-              <th scope="col"><button class="sort-btn" type="button" data-sort-key="account_id">账户</button></th>
-              <th scope="col" class="numeric"><button class="sort-btn" type="button" data-sort-key="change_pct" aria-sort-dir="desc">区间收益率</button></th>
-              <th scope="col" class="numeric"><button class="sort-btn" type="button" data-sort-key="latest_equity">当前权益 (USDT)</button></th>
-              <th scope="col" class="numeric"><button class="sort-btn" type="button" data-sort-key="max_drawdown_pct">区间最大回撤</button></th>
+              <th scope="col"><button class="sort-btn" type="button" data-sort-key="account_id">账户<span class="sort-indicator" aria-hidden="true"></span></button></th>
+              <th scope="col" class="numeric" aria-sort="descending"><button class="sort-btn" type="button" data-sort-key="change_pct">区间收益率<span class="sort-indicator" aria-hidden="true"></span></button></th>
+              <th scope="col" class="numeric"><button class="sort-btn" type="button" data-sort-key="latest_equity">当前权益 (USDT)<span class="sort-indicator" aria-hidden="true"></span></button></th>
+              <th scope="col" class="numeric"><button class="sort-btn" type="button" data-sort-key="max_drawdown_pct">区间最大回撤<span class="sort-indicator" aria-hidden="true"></span></button></th>
               <th scope="col" class="numeric">区间低点 / 高点</th>
               <th scope="col">策略差异</th>
             </tr>
@@ -117,6 +122,7 @@
     </div>
   </main>
 
+  <script id="page-config" type="application/json">__PAGE_CONFIG_JSON__</script>
   <script defer src="../../static/vendor/echarts.min.js"></script>
   <script defer src="../../static/ops.js"></script>
   <script defer src="../../static/comparison.js"></script>

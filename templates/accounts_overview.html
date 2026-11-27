@@ -4,7 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <meta name="color-scheme" content="dark" />
-  <meta name="theme-color" content="#0d1117" />
+  <meta name="theme-color" content="#080a0f" />
   <title>Bubble Buster 账户总览</title>
   <link rel="icon" type="image/svg+xml" href="static/favicon.svg" />
   <link rel="stylesheet" href="static/ops.css" />
@@ -15,6 +15,7 @@
   <header class="ops-topbar">
     <div class="ops-topbar-inner">
       <a id="ops-nav-brand" class="ops-brand" href="./"><span class="ops-brand-mark" aria-hidden="true"></span>Bubble Buster</a>
+      <span class="ops-venue-chip">Binance USDT-M</span>
       <div class="ops-nav-wrap">
         <nav class="ops-nav" aria-label="主导航">
           <ul class="ops-nav-list">
@@ -34,17 +35,20 @@
         <div class="command-brand-copy">
           <h1 class="title">Bubble Buster 账户总览</h1>
           <div class="sub">
-            <span>账户、开仓进度与风险状态</span>
-            <span id="overview-freshness-pill" class="ops-freshness" role="status" aria-live="polite">
+            <span id="overview-freshness-pill" class="ops-freshness">
               <span class="ops-freshness-dot" aria-hidden="true"></span>
               <span id="overview-freshness-text">同步中</span>
             </span>
+            <span class="command-hotkey-hint" aria-hidden="true">按 R 刷新</span>
           </div>
         </div>
-        <button id="overview-refresh-btn" class="section-toggle" type="button" aria-label="手动刷新账户总览">刷新 ↻</button>
+        <button id="overview-refresh-btn" class="ops-btn section-toggle" type="button" aria-label="手动刷新账户总览">
+          <svg class="ops-icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M13.5 8a5.5 5.5 0 1 1-1.4-3.7"/><path d="M13.5 2.5v3h-3"/></svg>
+          <span class="btn-label">刷新</span>
+        </button>
       </div>
       <div class="command-item">
-        <span class="command-label">服务</span>
+        <span class="command-label">调度服务</span>
         <strong id="service-state" class="command-value status-warn"><span class="status-dot" aria-hidden="true"></span>检测中</strong>
       </div>
       <div class="command-item">
@@ -55,7 +59,7 @@
         <span class="command-label">任务异常</span>
         <span class="command-anomaly-badge">
           <strong id="overview-anomaly-count" class="command-value status-ok">0</strong>
-          <span class="command-anomaly-cue" aria-hidden="true">查看 ↓</span>
+          <span class="command-anomaly-cue" aria-hidden="true">查看</span>
         </span>
       </button>
       <div class="command-item command-secondary">
@@ -72,7 +76,7 @@
         <span id="fleet-incident-pill" class="ops-incident-pill">风险关注</span>
         <span id="fleet-incident-text" class="ops-incident-text"></span>
       </div>
-      <button id="fleet-incident-jump" class="ops-btn" type="button" hidden>查看异常明细 ↓</button>
+      <button id="fleet-incident-jump" class="ops-btn" type="button" hidden>查看异常明细</button>
     </section>
 
     <div id="overview-alert" class="ops-alert" role="alert" hidden>
@@ -88,12 +92,15 @@
       <div class="entry-progress-heading">
         <div class="entry-progress-heading-copy">
           <h2 id="entry-progress-heading" class="section-title">今日开单进度 <span class="entry-progress-strategy-badge">先阳后阴 · 信号独立开仓</span></h2>
-          <p class="entry-progress-heading-note">首笔等待 1h 阴线信号；第二笔在出现阳线后等待下一根阴线信号独立开仓。启用收盘前入场时，信号可在收盘前触发。</p>
+          <details class="entry-rule-hint">
+            <summary>入场规则说明</summary>
+            <p class="entry-progress-heading-note">首笔等待 1h 阴线信号；第二笔在出现阳线后等待下一根阴线信号独立开仓。启用收盘前入场时，信号可在收盘前触发。</p>
+          </details>
         </div>
         <div class="section-heading-actions">
-          <div id="entry-progress-updated" class="entry-progress-updated">数据更新时间 --</div>
-          <span class="entry-progress-zone">北京时间 UTC+8</span>
-          <button id="entry-progress-toggle" class="section-toggle" type="button" aria-expanded="false">查看账号明细</button>
+          <div id="entry-progress-updated" class="entry-progress-updated">更新 --</div>
+          <span class="entry-progress-zone">UTC+8</span>
+          <button id="entry-progress-toggle" class="ops-btn section-toggle" type="button" aria-expanded="false">查看账号明细</button>
         </div>
       </div>
       <div class="entry-progress-shell">
@@ -104,14 +111,14 @@
     <section id="task-panel" class="task-panel" tabindex="-1" aria-labelledby="task-panel-heading">
       <div class="task-panel-head">
         <div>
-          <h2 id="task-panel-heading" class="section-title">异常与任务（优先处理）</h2>
+          <h2 id="task-panel-heading" class="section-title">异常与任务</h2>
         </div>
         <div class="task-panel-meta">
-          <div id="task-updated-at" class="task-updated">数据更新时间 --</div>
-          <div class="task-filter-bar" role="group" aria-label="任务筛选">
-            <button id="task-filter-anomaly" class="task-filter-chip active" type="button" aria-pressed="true">仅异常</button>
-            <button id="task-filter-all" class="task-filter-chip" type="button" aria-pressed="false">全部</button>
-            <button id="task-filter-symbols" class="task-filter-chip" type="button" aria-pressed="false">仅有交易对明细</button>
+          <div id="task-updated-at" class="task-updated">更新 --</div>
+          <div class="task-filter-bar ops-segmented" role="group" aria-label="任务筛选">
+            <button id="task-filter-anomaly" class="ops-seg-btn task-filter-chip active" type="button" aria-pressed="true">仅异常</button>
+            <button id="task-filter-all" class="ops-seg-btn task-filter-chip" type="button" aria-pressed="false">全部</button>
+            <button id="task-filter-symbols" class="ops-seg-btn task-filter-chip" type="button" aria-pressed="false">含交易对明细</button>
           </div>
         </div>
       </div>

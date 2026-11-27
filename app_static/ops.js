@@ -1,9 +1,11 @@
-/* Bubble Buster — Shared Primer Quiet Ops utilities, domain calculations & navigation */
+/* Bubble Buster — Shared Obsidian Desk utilities, domain calculations & navigation */
 (function (global) {
   "use strict";
 
   var SHANGHAI_TZ = "Asia/Shanghai";
   var SHANGHAI_OFFSET_MS = 8 * 60 * 60 * 1000;
+  var chartThemeCache = null;
+  var dateFormatterCache = {};
 
   function escapeHtml(value) {
     return String(value == null ? "" : value)
@@ -69,56 +71,65 @@
     return !!(global.matchMedia && global.matchMedia("(prefers-reduced-motion: reduce)").matches);
   }
 
-  function readCssVar(name, fallback) {
-    try {
-      var val = global.getComputedStyle(document.documentElement).getPropertyValue(name).trim();
-      return val || fallback;
-    } catch (e) {
-      return fallback;
-    }
+  function invalidateChartThemeCache() {
+    chartThemeCache = null;
   }
 
-  function getChartTheme() {
-    return {
-      bg: readCssVar("--bg", "#0d1117"),
-      surface: readCssVar("--surface", "#161b22"),
-      surfaceSubtle: readCssVar("--surface-subtle", "#1c2128"),
-      surfaceInset: readCssVar("--surface-inset", "#0d1117"),
-      border: readCssVar("--border", "#30363d"),
-      borderStrong: readCssVar("--border-strong", "#484f58"),
-      text: readCssVar("--text", "#f0f6fc"),
-      textSecondary: readCssVar("--text-secondary", "#c9d1d9"),
-      muted: readCssVar("--muted", "#919ba6"),
-      accent: readCssVar("--accent", "#58a6ff"),
-      ok: readCssVar("--ok", "#3fb950"),
-      okText: readCssVar("--ok-text", "#56d364"),
-      warn: readCssVar("--warn", "#d29922"),
-      warnText: readCssVar("--warn-text", "#e3b341"),
-      bad: readCssVar("--bad", "#f85149"),
-      badText: readCssVar("--bad-text", "#ff7b72"),
-      readonly: readCssVar("--readonly", "#bc8cff"),
-      splitLine: readCssVar("--chart-split-line", "rgba(48, 54, 61, 0.65)"),
-      splitLineSubtle: readCssVar("--chart-split-line-subtle", "rgba(48, 54, 61, 0.55)"),
-      zoomFill: readCssVar("--chart-zoom-fill", "rgba(88, 166, 255, 0.16)"),
-      zoomArea: readCssVar("--chart-zoom-area", "rgba(88, 166, 255, 0.08)"),
-      areaOk: readCssVar("--chart-area-ok", "rgba(63, 185, 80, 0.16)"),
-      areaBad: readCssVar("--chart-area-bad", "rgba(248, 81, 73, 0.16)"),
-      areaFade: readCssVar("--chart-area-fade", "rgba(13, 17, 23, 0)"),
+  function getChartTheme(forceRefresh) {
+    if (chartThemeCache && !forceRefresh) return chartThemeCache;
+    var styles = null;
+    try {
+      if (global.getComputedStyle && typeof document !== "undefined" && document.documentElement) {
+        styles = global.getComputedStyle(document.documentElement);
+      }
+    } catch (e) {
+      styles = null;
+    }
+    function readVar(name, fallback) {
+      if (!styles) return fallback;
+      var val = styles.getPropertyValue(name).trim();
+      return val || fallback;
+    }
+    chartThemeCache = {
+      bg: readVar("--bg", "#080a0f"),
+      surface: readVar("--surface", "#10141c"),
+      surfaceSubtle: readVar("--surface-subtle", "#131822"),
+      surfaceInset: readVar("--surface-inset", "#0b0e14"),
+      border: readVar("--border", "#222a38"),
+      borderStrong: readVar("--border-strong", "#344054"),
+      text: readVar("--text", "#f3f6fb"),
+      textSecondary: readVar("--text-secondary", "#c2ccd9"),
+      muted: readVar("--muted", "#8b99ad"),
+      accent: readVar("--accent", "#38bdf8"),
+      ok: readVar("--ok", "#10b981"),
+      okText: readVar("--ok-text", "#34d399"),
+      warn: readVar("--warn", "#f59e0b"),
+      warnText: readVar("--warn-text", "#fbbf24"),
+      bad: readVar("--bad", "#f43f5e"),
+      badText: readVar("--bad-text", "#fb7185"),
+      readonly: readVar("--readonly", "#a78bfa"),
+      splitLine: readVar("--chart-split-line", "rgba(34, 42, 56, 0.85)"),
+      splitLineSubtle: readVar("--chart-split-line-subtle", "rgba(34, 42, 56, 0.65)"),
+      zoomFill: readVar("--chart-zoom-fill", "rgba(56, 189, 248, 0.16)"),
+      zoomArea: readVar("--chart-zoom-area", "rgba(56, 189, 248, 0.08)"),
+      areaOk: readVar("--chart-area-ok", "rgba(16, 185, 129, 0.17)"),
+      areaBad: readVar("--chart-area-bad", "rgba(244, 63, 94, 0.17)"),
+      areaFade: readVar("--chart-area-fade", "rgba(8, 10, 15, 0)"),
       series: [
-        readCssVar("--series-1", "#58a6ff"),
-        readCssVar("--series-2", "#f0883e"),
-        readCssVar("--series-3", "#3fb950"),
-        readCssVar("--series-4", "#e3b341"),
-        readCssVar("--series-5", "#39c5cf"),
-        readCssVar("--series-6", "#f778ba")
+        readVar("--series-1", "#38bdf8"),
+        readVar("--series-2", "#f59e0b"),
+        readVar("--series-3", "#10b981"),
+        readVar("--series-4", "#fb7185"),
+        readVar("--series-5", "#2dd4bf"),
+        readVar("--series-6", "#c084fc")
       ]
     };
+    return chartThemeCache;
   }
 
   function formatStrategyDisplay(part) {
     var text = String(part || "").trim();
     if (!text) return "";
-    // Insert clean spacing around compound clauses like 组合止盈2.5%回撤15%减仓50%
     return text
       .replace(/(组合止盈|组合止损|盈利|回撤|减仓|止盈|止损)(\d)/g, "$1 $2")
       .replace(/(%)(回撤|减仓|清仓)/g, "$1 · $2")
@@ -244,6 +255,24 @@
     return Number.isFinite(ms) ? ms : NaN;
   }
 
+  function getCachedDateFormatter(tz, withYear, withSeconds, dateOnly) {
+    var key = tz + "|" + (withYear ? "1" : "0") + "|" + (withSeconds ? "1" : "0") + "|" + (dateOnly ? "1" : "0");
+    if (Object.prototype.hasOwnProperty.call(dateFormatterCache, key)) {
+      return dateFormatterCache[key];
+    }
+    try {
+      var intlOpts = dateOnly
+        ? { timeZone: tz, year: "numeric", month: "2-digit", day: "2-digit" }
+        : { timeZone: tz, month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", hour12: false };
+      if (!dateOnly && withYear) intlOpts.year = "numeric";
+      if (!dateOnly && withSeconds) intlOpts.second = "2-digit";
+      dateFormatterCache[key] = new Intl.DateTimeFormat("zh-CN", intlOpts);
+    } catch (e) {
+      dateFormatterCache[key] = null;
+    }
+    return dateFormatterCache[key];
+  }
+
   function formatBeijingTime(value, options) {
     if (value === null || value === undefined || value === "") return "--";
     var opts = options || {};
@@ -252,30 +281,18 @@
       var raw = String(value);
       return raw.replace("T", " ").slice(0, opts.withSeconds ? 19 : 16);
     }
-    var date = new Date(ms);
     var tz = opts.timeZone || SHANGHAI_TZ;
-    try {
-      var intlOpts = {
-        timeZone: tz,
-        month: "2-digit",
-        day: "2-digit",
-        hour: "2-digit",
-        minute: "2-digit",
-        hour12: false
-      };
-      if (opts.withYear) intlOpts.year = "numeric";
-      if (opts.withSeconds) intlOpts.second = "2-digit";
-      if (opts.dateOnly) {
-        intlOpts = { timeZone: tz, year: "numeric", month: "2-digit", day: "2-digit" };
-      }
-      return new Intl.DateTimeFormat("zh-CN", intlOpts).format(date).replace(/\//g, "-");
-    } catch (e) {
-      var local = new Date(ms + SHANGHAI_OFFSET_MS).toISOString().replace("T", " ");
-      if (opts.dateOnly) return local.slice(0, 10);
-      var start = opts.withYear ? 0 : 5;
-      var end = opts.withSeconds ? 19 : 16;
-      return local.slice(start, end);
+    var formatter = getCachedDateFormatter(tz, !!opts.withYear, !!opts.withSeconds, !!opts.dateOnly);
+    if (formatter) {
+      try {
+        return formatter.format(new Date(ms)).replace(/\//g, "-");
+      } catch (e) {}
     }
+    var local = new Date(ms + SHANGHAI_OFFSET_MS).toISOString().replace("T", " ");
+    if (opts.dateOnly) return local.slice(0, 10);
+    var start = opts.withYear ? 0 : 5;
+    var end = opts.withSeconds ? 19 : 16;
+    return local.slice(start, end);
   }
 
   function evaluateDataFreshness(latestValue, options) {
@@ -319,6 +336,51 @@
       badgeText: "实时 · " + ageText,
       detailText: "最新数据截至 " + stamp
     };
+  }
+
+  function freshnessClassForState(state) {
+    if (state === "live") return "is-live";
+    if (state === "warn") return "is-warn";
+    if (state === "stale" || state === "offline") return "is-stale";
+    return "";
+  }
+
+  function ensureLiveAnnouncer() {
+    if (typeof document === "undefined" || !document.body) return null;
+    var node = document.getElementById("ops-live-announcer");
+    if (!node) {
+      node = document.createElement("div");
+      node.id = "ops-live-announcer";
+      node.className = "sr-only";
+      node.setAttribute("role", "status");
+      node.setAttribute("aria-live", "polite");
+      node.setAttribute("aria-atomic", "true");
+      document.body.appendChild(node);
+    }
+    return node;
+  }
+
+  function announceStatus(message) {
+    var node = ensureLiveAnnouncer();
+    if (!node || !message) return;
+    node.textContent = "";
+    node.textContent = String(message);
+  }
+
+  function applyFreshnessPill(pillEl, textEl, freshness) {
+    if (!freshness) return;
+    if (textEl) textEl.textContent = freshness.badgeText;
+    if (pillEl) {
+      var prevState = pillEl.getAttribute("data-freshness-state") || "";
+      var cls = freshnessClassForState(freshness.state);
+      pillEl.className = "ops-freshness" + (cls ? " " + cls : "");
+      pillEl.title = freshness.detailText || "";
+      pillEl.setAttribute("data-freshness-state", freshness.state || "");
+      // Only announce meaningful state transitions (not ticking seconds)
+      if (prevState && prevState !== freshness.state && (freshness.state === "stale" || freshness.state === "offline" || freshness.state === "live")) {
+        announceStatus("数据同步状态：" + freshness.badgeText);
+      }
+    }
   }
 
   function cycleStartMs(referenceMs, stopHour, stopMinute) {
@@ -443,6 +505,105 @@
     };
   }
 
+  function evaluatePortfolioStopState(stop, metrics, options) {
+    var opts = options || {};
+    var enabled = !!opts.enabled;
+    var fallbackPct = Number.isFinite(Number(opts.fallbackPct)) && Number(opts.fallbackPct) > 0 ? Number(opts.fallbackPct) : 3.5;
+    var configuredLossPct = stop && toNum(stop.loss_pct) > 0 ? toNum(stop.loss_pct) : fallbackPct;
+
+    if (!enabled) {
+      return {
+        tone: "warn",
+        stateText: "组合止损未启用",
+        distanceText: "未启用",
+        meterText: "未启用",
+        consumedPct: 0,
+        configuredLossPct: configuredLossPct,
+        description: "账户周期收益与回撤仍会持续计算，但当前账户不会按组合阈值触发整体平仓。"
+      };
+    }
+
+    if (!stop || !stop.status) {
+      return {
+        tone: "warn",
+        stateText: "等待后端止损状态",
+        distanceText: "待同步",
+        meterText: "待同步",
+        consumedPct: 0,
+        configuredLossPct: configuredLossPct,
+        description: "后端尚未写入本账户周期组合止损状态；页面不会仅凭权益曲线判定已经触发。"
+      };
+    }
+
+    var status = String(stop.status || "").toUpperCase();
+    var distance = toNum(stop.distance_pct);
+    var backendReturn = toNum(stop.current_return_pct);
+    var currentReturn = backendReturn !== null ? backendReturn : (metrics ? toNum(metrics.currentReturnPct) : null);
+    var consumedPct = currentReturn !== null && currentReturn < 0
+      ? Math.min(100, (Math.abs(currentReturn) / configuredLossPct) * 100)
+      : 0;
+
+    if (status === "TRIGGERED_COMPLETE") {
+      return {
+        tone: "bad",
+        stateText: "组合止损已完成",
+        distanceText: "已完成",
+        meterText: "已止损 100%",
+        consumedPct: 100,
+        configuredLossPct: configuredLossPct,
+        description: "后端已完成本账户周期组合止损，当前受管持仓为 0。"
+      };
+    }
+    if (status === "CLOSING") {
+      var openPos = stop.open_positions == null ? "--" : String(stop.open_positions);
+      return {
+        tone: "bad",
+        stateText: "组合止损执行中",
+        distanceText: "执行中",
+        meterText: stop.state_inconsistent ? "等待对账 100%" : "平仓中 100%",
+        consumedPct: 100,
+        configuredLossPct: configuredLossPct,
+        description: stop.state_inconsistent
+          ? "后端已记录平仓完成，但本地仍有 " + openPos + " 个受管持仓，正在等待对账。"
+          : "后端已触发组合止损，正在处理剩余 " + openPos + " 个受管持仓。"
+      };
+    }
+    if (status === "THRESHOLD_REACHED") {
+      return {
+        tone: "bad",
+        stateText: "已到止损阈值",
+        distanceText: distance !== null ? "已超出 " + fmtNum(Math.abs(distance), 2) + "%" : "已到阈值",
+        meterText: "已达阈值 100%",
+        consumedPct: 100,
+        configuredLossPct: configuredLossPct,
+        description: "最新权益已达到止损阈值，等待策略管理器确认并执行。"
+      };
+    }
+    if (status === "MONITORING" && distance !== null) {
+      var nearStop = distance <= 1;
+      return {
+        tone: nearStop ? "warn" : "ok",
+        stateText: nearStop ? "接近组合止损" : "风险正常",
+        distanceText: fmtNum(distance, 2) + "%",
+        meterText: consumedPct <= 0 ? "未消耗" : "已耗 " + fmtNum(consumedPct, 0) + "%",
+        consumedPct: consumedPct,
+        configuredLossPct: configuredLossPct,
+        description: currentReturn === null
+          ? "后端正在监控本账户周期组合止损。"
+          : "当前周期收益 " + fmtSigned(currentReturn, 2) + "%，距离 -" + fmtNum(configuredLossPct, 2) + "% 止损阈值仍有 " + fmtNum(distance, 2) + " 个百分点。"
+      };
+    }
+    return {
+      tone: "warn",
+      stateText: "等待后端止损状态",
+      distanceText: "待同步",
+      meterText: "待同步",
+      consumedPct: 0,
+      configuredLossPct: configuredLossPct,
+      description: "后端组合止损基准尚未就绪；页面不会仅凭权益曲线判定已经触发。"
+    };
+  }
+
   function classifyReturnTone(returnPct, stopPct, stopStatus) {
     var n = toNum(returnPct);
     var st = String(stopStatus || "").toUpperCase();
@@ -482,6 +643,49 @@
       if (val) pairs[tokens[i].key] = val;
     }
     return pairs;
+  }
+
+  function fetchJsonWithTimeout(url, options) {
+    var opts = options || {};
+    var timeoutMs = Number(opts.timeoutMs) || 15000;
+    var externalSignal = opts.signal || null;
+    var controller = typeof AbortController !== "undefined" ? new AbortController() : null;
+    var timedOut = false;
+    var timer = null;
+
+    if (controller && externalSignal) {
+      if (externalSignal.aborted) {
+        try { controller.abort(); } catch (e) {}
+      } else {
+        externalSignal.addEventListener("abort", function () {
+          try { controller.abort(); } catch (e) {}
+        }, { once: true });
+      }
+    }
+
+    if (controller && timeoutMs > 0) {
+      timer = setTimeout(function () {
+        timedOut = true;
+        try { controller.abort(); } catch (e) {}
+      }, timeoutMs);
+    }
+
+    return fetch(url, {
+      method: "GET",
+      cache: "no-store",
+      signal: controller ? controller.signal : externalSignal || undefined,
+      headers: { Accept: "application/json" }
+    }).then(function (res) {
+      if (timer) clearTimeout(timer);
+      if (!res.ok) throw new Error("HTTP " + res.status);
+      return res.json();
+    }, function (err) {
+      if (timer) clearTimeout(timer);
+      if (timedOut) {
+        throw new Error("请求超时（" + Math.round(timeoutMs / 1000) + "s）");
+      }
+      throw err;
+    });
   }
 
   function patchHtmlIfChanged(node, html) {
@@ -611,6 +815,28 @@
     }
   }
 
+  function isEditableTarget(target) {
+    if (!target || !target.tagName) return false;
+    var tag = target.tagName.toUpperCase();
+    return tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT" || target.isContentEditable;
+  }
+
+  function bindKeyboardShortcuts(handlers) {
+    if (typeof document === "undefined") return;
+    var cfg = handlers || {};
+    document.addEventListener("keydown", function (evt) {
+      if (evt.metaKey || evt.ctrlKey || evt.altKey) return;
+      if (isEditableTarget(evt.target)) return;
+      if (evt.key === "r" && typeof cfg.onRefresh === "function") {
+        evt.preventDefault();
+        cfg.onRefresh();
+      } else if (evt.key === "/" && typeof cfg.onSearch === "function") {
+        evt.preventDefault();
+        cfg.onSearch();
+      }
+    });
+  }
+
   function readQueryParams() {
     var out = {};
     if (!global.location || !global.location.search) return out;
@@ -653,6 +879,7 @@
     fmtWithUnit: fmtWithUnit,
     prefersReducedMotion: prefersReducedMotion,
     getChartTheme: getChartTheme,
+    invalidateChartThemeCache: invalidateChartThemeCache,
     formatStrategyDisplay: formatStrategyDisplay,
     splitStrategyParts: splitStrategyParts,
     formatStrategyTags: formatStrategyTags,
@@ -660,17 +887,23 @@
     parseTimestampMs: parseTimestampMs,
     formatBeijingTime: formatBeijingTime,
     evaluateDataFreshness: evaluateDataFreshness,
+    freshnessClassForState: freshnessClassForState,
+    announceStatus: announceStatus,
+    applyFreshnessPill: applyFreshnessPill,
     cycleStartMs: cycleStartMs,
     computeCycleRiskMetrics: computeCycleRiskMetrics,
+    evaluatePortfolioStopState: evaluatePortfolioStopState,
     classifyReturnTone: classifyReturnTone,
     classifyDrawdownTone: classifyDrawdownTone,
     parseSummaryPairs: parseSummaryPairs,
+    fetchJsonWithTimeout: fetchJsonWithTimeout,
     patchHtmlIfChanged: patchHtmlIfChanged,
     readPageConfig: readPageConfig,
     resolveBasePrefix: resolveBasePrefix,
     readQueryParams: readQueryParams,
     updateQueryParams: updateQueryParams,
     initTopNav: initTopNav,
-    renderNavAccounts: renderNavAccounts
+    renderNavAccounts: renderNavAccounts,
+    bindKeyboardShortcuts: bindKeyboardShortcuts
   };
 })(typeof window !== "undefined" ? window : globalThis);

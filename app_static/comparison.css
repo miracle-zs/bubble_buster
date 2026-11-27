@@ -1,10 +1,10 @@
-/* Bubble Buster — Account Equity Comparison page styles */
+/* Bubble Buster — Account Equity Comparison (Obsidian Desk Terminal) */
 .hero {
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;
-  align-items: end;
+  align-items: center;
   gap: 16px;
-  padding: 14px 16px;
+  padding: 13px 16px;
   border: 1px solid var(--border);
   border-radius: var(--radius);
   background: var(--surface);
@@ -24,15 +24,15 @@
   font-size: var(--text-lg);
   font-weight: 700;
   line-height: 1.25;
-  letter-spacing: -0.01em;
+  letter-spacing: -0.02em;
 }
 
 .hero-copy {
   max-width: 760px;
-  margin: 6px 0 0;
+  margin: 5px 0 0;
   color: var(--muted);
   font-size: var(--text-sm);
-  line-height: 1.5;
+  line-height: 1.45;
 }
 
 .controls {
@@ -41,64 +41,6 @@
   justify-content: flex-end;
   align-items: center;
   gap: 8px;
-}
-
-.control-group {
-  display: inline-flex;
-  flex-wrap: wrap;
-  gap: 2px;
-  padding: 2px;
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-  background: var(--surface-inset);
-}
-
-.control {
-  appearance: none;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  min-height: var(--target-size);
-  min-width: 44px;
-  border: 1px solid transparent;
-  border-radius: var(--radius-sm);
-  padding: 5px 10px;
-  color: var(--text-secondary);
-  background: transparent;
-  cursor: pointer;
-  font-size: var(--text-xs);
-  font-weight: 600;
-  white-space: nowrap;
-  transition: color 120ms ease, background-color 120ms ease, border-color 120ms ease;
-}
-
-.control:hover {
-  color: var(--text);
-  background: var(--surface-hover);
-}
-
-.control.active {
-  color: var(--text);
-  background: var(--accent-bg);
-  border-color: var(--accent-border);
-}
-
-.control.refresh {
-  border: 1px solid var(--border);
-  color: var(--text-secondary);
-  background: var(--surface-subtle);
-  border-radius: var(--radius);
-}
-
-.control.refresh:hover {
-  color: var(--text);
-  border-color: var(--accent);
-  background: var(--surface-hover);
-}
-
-.control:disabled {
-  opacity: 0.65;
-  cursor: progress;
 }
 
 .comparison-alert {
@@ -123,6 +65,11 @@
   border: 1px solid var(--border);
   border-radius: var(--radius);
   background: var(--surface);
+  transition: border-color 140ms ease;
+}
+
+.summary-card:hover {
+  border-color: var(--border-strong);
 }
 
 .summary-card::before {
@@ -140,7 +87,7 @@
   align-items: center;
   justify-content: space-between;
   gap: 10px;
-  margin-bottom: 8px;
+  margin-bottom: 6px;
 }
 
 .account-label {
@@ -157,17 +104,18 @@
 }
 
 .account-label:hover {
-  color: var(--accent);
+  color: var(--accent-text);
   text-decoration: underline;
 }
 
 .account-jump {
   color: var(--muted);
-  font-size: var(--text-xs);
+  display: inline-flex;
+  align-items: center;
 }
 
 .account-label:hover .account-jump {
-  color: var(--accent);
+  color: var(--accent-text);
 }
 
 .account-dot {
@@ -192,6 +140,7 @@
   font-size: var(--text-xl);
   font-weight: 700;
   line-height: 1.15;
+  letter-spacing: -0.02em;
 }
 
 .summary-change.is-positive {
@@ -215,11 +164,16 @@
   align-content: flex-start;
   gap: 5px;
   margin-top: 8px;
-  min-height: 50px;
+  min-height: 30px;
 }
 
 .summary-strategy:empty {
   display: none;
+}
+
+.metrics-strategy-tags {
+  min-height: 0;
+  margin-top: 0;
 }
 
 .summary-strategy-tag {
@@ -233,7 +187,7 @@
   justify-content: space-between;
   gap: 10px;
   margin-top: auto;
-  padding-top: 10px;
+  padding-top: 9px;
   border-top: 1px solid var(--border-subtle);
   color: var(--muted);
   font-size: var(--text-xs);
@@ -270,6 +224,7 @@
   color: var(--text);
   font-size: var(--text-md);
   font-weight: 700;
+  letter-spacing: -0.015em;
 }
 
 .chart-subtitle {
@@ -336,7 +291,7 @@
   border: 1px solid var(--border);
   border-radius: var(--radius);
   color: var(--text-secondary);
-  background: var(--surface-subtle);
+  background: var(--surface-elevated);
   cursor: pointer;
   font-size: var(--text-xs);
   font-weight: 700;
@@ -396,7 +351,7 @@
 
 /* Quantitative Comparison Matrix */
 .metrics-panel {
-  margin-top: 12px;
+  margin-top: 14px;
   border: 1px solid var(--border);
   border-radius: var(--radius);
   background: var(--surface);
@@ -411,7 +366,7 @@
   gap: 8px 14px;
   padding: 12px 16px;
   border-bottom: 1px solid var(--border);
-  background: var(--surface-subtle);
+  background: var(--surface-elevated);
 }
 
 .metrics-panel-title {
@@ -419,6 +374,7 @@
   color: var(--text);
   font-size: var(--text-md);
   font-weight: 700;
+  letter-spacing: -0.015em;
 }
 
 .metrics-panel-sub {
@@ -431,7 +387,6 @@
   width: 100%;
   overflow-x: auto;
   background: var(--surface-inset);
-  container-type: inline-size;
 }
 
 .comparison-table {
@@ -472,6 +427,10 @@
   font-weight: 700;
 }
 
+.comparison-table thead th:has(> .sort-btn) {
+  padding: 0;
+}
+
 .comparison-table tbody th {
   position: sticky;
   inset-inline-start: 0;
@@ -503,12 +462,12 @@
   appearance: none;
   display: inline-flex;
   align-items: center;
-  gap: 4px;
-  min-height: 28px;
-  padding: 2px 4px;
-  margin: -2px -4px;
+  justify-content: flex-start;
+  gap: 5px;
+  width: 100%;
+  min-height: var(--target-size);
+  padding: 8px 12px;
   border: 0;
-  border-radius: var(--radius-sm);
   background: transparent;
   color: inherit;
   font: inherit;
@@ -516,18 +475,33 @@
   cursor: pointer;
 }
 
+.comparison-table th.numeric .sort-btn {
+  justify-content: flex-end;
+}
+
 .sort-btn:hover {
   color: var(--text);
 }
 
-.sort-btn[aria-sort-dir="desc"]::after {
-  content: "↓";
+.sort-indicator::after {
+  content: "";
   color: var(--accent);
 }
 
-.sort-btn[aria-sort-dir="asc"]::after {
+.comparison-table th[aria-sort="descending"] .sort-btn {
+  color: var(--text);
+}
+
+.comparison-table th[aria-sort="ascending"] .sort-btn {
+  color: var(--text);
+}
+
+.comparison-table th[aria-sort="descending"] .sort-indicator::after {
+  content: "↓";
+}
+
+.comparison-table th[aria-sort="ascending"] .sort-indicator::after {
   content: "↑";
-  color: var(--accent);
 }
 
 .table-empty-cell {
@@ -568,9 +542,6 @@
 @media (max-width: 640px) {
   .hero {
     padding: 12px;
-  }
-  .control {
-    min-height: max(40px, var(--target-size));
   }
   .legend-button {
     min-height: max(40px, var(--target-size));

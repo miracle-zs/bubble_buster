@@ -3699,17 +3699,8 @@ def _render_dashboard_template(
     }
     replacements = {
         "__REFRESH_SEC__": str(safe_refresh),
-        "__ECHARTS_SRC__": safe_echarts_src,
         "__STATIC_BASE__": static_base,
         "__PAGE_CONFIG_JSON__": _inline_script_json(page_config),
-        "__ACCOUNT_ID_JSON__": _inline_script_json(account_id),
-        "__ACCOUNT_MODE_JSON__": _inline_script_json(account_mode),
-        "__STRATEGY_NOTE_JSON__": _inline_script_json(strategy_note),
-        "__NAV_ACCOUNTS_JSON__": _inline_script_json(nav_accounts or []),
-        "__PORTFOLIO_STOP_ENABLED__": "true" if portfolio_loss_cut_enabled else "false",
-        "__PORTFOLIO_STOP_PCT__": f"{safe_stop_pct:g}",
-        "__PORTFOLIO_STOP_HOUR__": str(safe_stop_hour),
-        "__PORTFOLIO_STOP_MINUTE__": str(safe_stop_minute),
     }
     pattern = re.compile("|".join(re.escape(key) for key in replacements))
     rendered = pattern.sub(lambda m: replacements[m.group(0)], get_dashboard_html())
@@ -3784,14 +3775,8 @@ def render_accounts_overview_html(
         "portfolioStopMinute": safe_stop_minute,
     }
     replacements = {
-        "__REFRESH_SEC__": str(safe_refresh),
         "__ENTRY_TIME__": f"{safe_entry_hour:02d}:{safe_entry_minute:02d}",
         "__PAGE_CONFIG_JSON__": _inline_script_json(page_config),
-        "__NAV_ACCOUNTS_JSON__": _inline_script_json(nav_accounts or []),
-        "__PORTFOLIO_STOP_ENABLED__": "true" if stop_enabled else "false",
-        "__PORTFOLIO_STOP_PCT__": f"{safe_stop_pct:g}",
-        "__PORTFOLIO_STOP_HOUR__": str(safe_stop_hour),
-        "__PORTFOLIO_STOP_MINUTE__": str(safe_stop_minute),
         "__PORTFOLIO_STOP_LABEL__": stop_label,
         "__PORTFOLIO_STOP_CLASS__": stop_class,
     }
@@ -3800,10 +3785,15 @@ def render_accounts_overview_html(
     return version_static_urls(rendered)
 
 
-def render_accounts_comparison_html(static_dir: Optional[Path] = None) -> str:
+def render_accounts_comparison_html(
+    static_dir: Optional[Path] = None,
+    nav_accounts: Optional[List[Dict[str, str]]] = None,
+) -> str:
     base_dir = (static_dir or (Path(__file__).resolve().parent / "app_static")).resolve()
     raw = load_template("account-comparison.html", base_dir=base_dir)
-    return version_static_urls(raw, static_dir=base_dir)
+    page_config = {"navAccounts": nav_accounts or []}
+    rendered = raw.replace("__PAGE_CONFIG_JSON__", _inline_script_json(page_config))
+    return version_static_urls(rendered, static_dir=base_dir)
 
 
 _CURVE_PAYLOAD_KEYS = {

@@ -1,14 +1,20 @@
-/* Bubble Buster — Account Detail Dashboard page styles */
+/* Bubble Buster — Account Detail Dashboard (Obsidian Desk Terminal) */
 /* Account header & strategy strip */
 .account-command-bar {
   min-height: 68px;
   display: grid;
   grid-template-columns: minmax(320px, 1.55fr) repeat(3, minmax(150px, 0.65fr));
   align-items: stretch;
+  gap: 1px;
   border: 1px solid var(--border);
   border-radius: var(--radius) var(--radius) 0 0;
-  background: var(--surface);
+  background: var(--border-subtle);
   overflow: hidden;
+}
+
+.account-command-main,
+.command-cell {
+  background: var(--surface);
 }
 
 .account-command-main {
@@ -36,6 +42,7 @@
   font-size: var(--text-lg);
   font-weight: 700;
   line-height: 1.2;
+  letter-spacing: -0.02em;
 }
 
 .mode-badge {
@@ -46,7 +53,7 @@
   border: 1px solid var(--border);
   border-radius: var(--radius-sm);
   color: var(--text-secondary);
-  background: var(--surface-subtle);
+  background: var(--surface-elevated);
   font-size: var(--text-xs);
   font-weight: 700;
 }
@@ -73,7 +80,6 @@
 .command-cell {
   min-width: 0;
   padding: 10px 14px;
-  border-left: 1px solid var(--border-subtle);
   display: flex;
   flex-direction: column;
   justify-content: center;
@@ -107,7 +113,7 @@
   border: 1px solid var(--border);
   border-top: 0;
   border-radius: 0 0 var(--radius) var(--radius);
-  background: var(--surface-subtle);
+  background: var(--surface-elevated);
 }
 
 .strategy-strip-label {
@@ -135,18 +141,20 @@
 
 .refresh-note {
   color: var(--muted);
+  font-family: var(--font-mono);
   font-size: var(--text-xs);
   white-space: nowrap;
 }
 
-/* KPI summary rail */
+/* KPI summary rail (1px grid gap eliminates :nth-child border bugs when metrics hide) */
 .summary-rail {
   display: grid;
   grid-template-columns: 1.3fr repeat(3, minmax(0, 1fr)) 0.78fr 0.95fr;
+  gap: 1px;
   margin-top: 12px;
   border: 1px solid var(--border);
   border-radius: var(--radius);
-  background: var(--surface);
+  background: var(--border-subtle);
   overflow: hidden;
 }
 
@@ -156,17 +164,13 @@
 
 .summary-metric {
   min-width: 0;
-  min-height: 92px;
-  padding: 14px 16px;
-  border-left: 1px solid var(--border-subtle);
+  min-height: 90px;
+  padding: 13px 16px;
+  background: var(--surface);
   display: flex;
   flex-direction: column;
   justify-content: center;
-  gap: 6px;
-}
-
-.summary-metric:first-child {
-  border-left: 0;
+  gap: 5px;
 }
 
 .summary-metric[hidden] {
@@ -174,7 +178,7 @@
 }
 
 .summary-metric.primary {
-  background: var(--surface-subtle);
+  background: var(--surface-elevated);
 }
 
 .summary-label {
@@ -190,6 +194,7 @@
   font-size: var(--text-lg);
   line-height: 1.15;
   font-weight: 700;
+  letter-spacing: -0.02em;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -234,7 +239,7 @@
   gap: 10px 12px;
   padding: 10px 14px;
   border-bottom: 1px solid var(--border);
-  background: var(--surface-subtle);
+  background: var(--surface-elevated);
 }
 
 .surface-heading {
@@ -247,12 +252,51 @@
   font-size: var(--text-md);
   font-weight: 700;
   line-height: 1.25;
+  letter-spacing: -0.015em;
 }
 
 .surface-subtitle {
   margin-top: 3px;
   color: var(--muted);
   font-size: var(--text-xs);
+}
+
+.table-note-hint {
+  margin-top: 2px;
+  color: var(--muted);
+  font-size: var(--text-xs);
+}
+
+.table-note-hint summary {
+  display: inline-flex;
+  align-items: center;
+  min-height: 24px;
+  color: var(--muted);
+  cursor: pointer;
+  list-style: none;
+}
+
+.table-note-hint summary::-webkit-details-marker {
+  display: none;
+}
+
+.table-note-hint summary:hover {
+  color: var(--text-secondary);
+}
+
+.table-note-hint summary::before {
+  content: "+ ";
+  color: var(--accent);
+}
+
+.table-note-hint[open] summary::before {
+  content: "− ";
+}
+
+.table-note-hint p {
+  margin: 4px 0 0;
+  max-width: 680px;
+  line-height: 1.45;
 }
 
 .surface-head-tools {
@@ -272,7 +316,7 @@
   border: 1px solid var(--border);
   border-radius: var(--radius-pill);
   color: var(--text-secondary);
-  background: var(--surface);
+  background: var(--surface-inset);
   font-family: var(--font-mono);
   font-variant-numeric: tabular-nums;
   font-size: var(--text-xs);
@@ -287,48 +331,8 @@
   gap: 8px 10px;
 }
 
-.tab-row,
-.window-row {
-  display: flex;
-  align-items: center;
-  gap: 4px;
-  flex-wrap: wrap;
-}
-
-.tab-btn {
-  appearance: none;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  min-height: var(--target-size);
-  min-width: 40px;
-  padding: 4px 10px;
-  border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
-  color: var(--text-secondary);
-  background: var(--surface);
-  font-size: var(--text-xs);
-  font-weight: 600;
-  cursor: pointer;
-  white-space: nowrap;
-  transition: color 120ms ease, border-color 120ms ease, background-color 120ms ease;
-}
-
-.tab-btn:hover {
-  color: var(--text);
-  border-color: var(--border-strong);
-  background: var(--surface-hover);
-}
-
-.tab-btn.active {
-  color: var(--text);
-  border-color: var(--accent-border);
-  background: var(--accent-bg);
-}
-
-.tab-btn:disabled {
-  opacity: 0.65;
-  cursor: progress;
+.tab-row[hidden] {
+  display: none;
 }
 
 .chart-stage {
@@ -512,17 +516,19 @@
 .risk-facts {
   display: grid;
   grid-template-columns: 1fr 1fr;
+  gap: 1px;
   margin-top: 18px;
-  border-top: 1px solid var(--border-subtle);
-  border-left: 1px solid var(--border-subtle);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  background: var(--border-subtle);
+  overflow: hidden;
 }
 
 .risk-fact {
   min-width: 0;
-  min-height: 66px;
+  min-height: 64px;
   padding: 10px 12px;
-  border-right: 1px solid var(--border-subtle);
-  border-bottom: 1px solid var(--border-subtle);
+  background: var(--surface-inset);
 }
 
 .risk-fact-label {
@@ -599,7 +605,7 @@
 
 /* Tables */
 .section-block {
-  margin-top: 12px;
+  margin-top: 14px;
 }
 
 .table-wrap {
@@ -913,7 +919,10 @@
 }
 
 .row-details summary {
-  color: var(--accent);
+  display: inline-flex;
+  align-items: center;
+  min-height: 28px;
+  color: var(--accent-text);
   font-size: var(--text-xs);
   cursor: pointer;
   list-style: none;
@@ -946,7 +955,7 @@
 
 /* Diagnostics */
 .diagnostics-panel {
-  margin-top: 12px;
+  margin-top: 14px;
   border: 1px solid var(--border);
   border-radius: var(--radius);
   background: var(--surface);
@@ -961,7 +970,7 @@
   gap: 12px;
   padding: 10px 14px;
   color: var(--text-secondary);
-  background: var(--surface-subtle);
+  background: var(--surface-elevated);
   font-size: var(--text-sm);
   font-weight: 700;
   cursor: pointer;
@@ -997,15 +1006,14 @@
 .diagnostics-grid {
   display: grid;
   grid-template-columns: minmax(0, 1.15fr) minmax(0, 0.85fr);
+  gap: 1px;
   border-top: 1px solid var(--border);
+  background: var(--border);
 }
 
 .diagnostic-block {
   min-width: 0;
-}
-
-.diagnostic-block + .diagnostic-block {
-  border-left: 1px solid var(--border);
+  background: var(--surface);
 }
 
 .diagnostic-title {
@@ -1038,13 +1046,6 @@
   .summary-rail.is-readonly-rail {
     grid-template-columns: repeat(3, minmax(0, 1fr));
   }
-  .summary-metric:nth-child(4) {
-    border-left: 0;
-    border-top: 1px solid var(--border-subtle);
-  }
-  .summary-metric:nth-child(n+5) {
-    border-top: 1px solid var(--border-subtle);
-  }
   .analytics-grid {
     grid-template-columns: 1fr;
   }
@@ -1059,15 +1060,9 @@
   }
   .account-command-main {
     grid-column: 1 / -1;
-    border-bottom: 1px solid var(--border-subtle);
-  }
-  .command-cell:nth-child(2) {
-    border-left: 0;
   }
   .command-cell:nth-child(4) {
     grid-column: 1 / -1;
-    border-left: 0;
-    border-top: 1px solid var(--border-subtle);
   }
   .strategy-strip {
     align-items: flex-start;
@@ -1084,13 +1079,6 @@
   }
   .summary-metric {
     min-height: 82px;
-    border-top: 1px solid var(--border-subtle);
-  }
-  .summary-metric:nth-child(odd) {
-    border-left: 0;
-  }
-  .summary-metric:nth-child(-n+2) {
-    border-top: 0;
   }
   .surface-head {
     align-items: flex-start;
@@ -1108,10 +1096,6 @@
   }
   .diagnostics-grid {
     grid-template-columns: 1fr;
-  }
-  .diagnostic-block + .diagnostic-block {
-    border-left: 0;
-    border-top: 1px solid var(--border);
   }
 }
 
@@ -1137,9 +1121,6 @@
   }
   .summary-metric.primary .summary-value {
     font-size: var(--text-lg);
-  }
-  .tab-btn {
-    min-height: max(40px, var(--target-size));
   }
   .chart-toolbar {
     align-items: flex-start;

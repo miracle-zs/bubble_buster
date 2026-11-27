@@ -28,5 +28,30 @@ const parsed = ops.parseSummaryPairs('reason=failed error=Binance API Error 0: S
 assert.equal(parsed.reason, 'failed');
 assert.equal(parsed.error, 'Binance API Error 0: Service unavailable');
 assert.deepEqual(ops.parseSummaryPairs('opened=12 failed=0 skipped=0'), {{ opened: '12', failed: '0', skipped: '0' }});
+
+// Shared portfolio stop evaluator (single source of truth for overview + detail)
+const disabledState = ops.evaluatePortfolioStopState(null, null, {{ enabled: false, fallbackPct: 3.5 }});
+assert.equal(disabledState.tone, 'warn');
+assert.equal(disabledState.distanceText, '未启用');
+
+const okState = ops.evaluatePortfolioStopState({{ status: 'MONITORING', distance_pct: 2.8, current_return_pct: -0.7, loss_pct: 3.5 }}, null, {{ enabled: true, fallbackPct: 3.5 }});
+assert.equal(okState.tone, 'ok');
+assert.equal(okState.stateText, '风险正常');
+assert.equal(okState.consumedPct, 20);
+
+const nearState = ops.evaluatePortfolioStopState({{ status: 'MONITORING', distance_pct: 0.6, current_return_pct: -2.9, loss_pct: 3.5 }}, null, {{ enabled: true, fallbackPct: 3.5 }});
+assert.equal(nearState.tone, 'warn');
+assert.equal(nearState.stateText, '接近组合止损');
+
+const triggeredState = ops.evaluatePortfolioStopState({{ status: 'TRIGGERED_COMPLETE', distance_pct: -0.2, current_return_pct: -3.7, loss_pct: 3.5 }}, null, {{ enabled: true, fallbackPct: 3.5 }});
+assert.equal(triggeredState.tone, 'bad');
+assert.equal(triggeredState.consumedPct, 100);
+assert.equal(triggeredState.distanceText, '已完成');
+
+// Cached theme and date formatting
+const theme1 = ops.getChartTheme();
+const theme2 = ops.getChartTheme();
+assert.strictEqual(theme1, theme2);
+assert.equal(ops.formatBeijingTime('2026-10-09T00:01:40Z', {{ withYear: true, withSeconds: true }}), '2026-10-09 08:01:40');
 """
         subprocess.run(["node", "-e", script], check=True, capture_output=True, text=True)

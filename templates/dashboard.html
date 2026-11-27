@@ -4,7 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <meta name="color-scheme" content="dark" />
-  <meta name="theme-color" content="#0d1117" />
+  <meta name="theme-color" content="#080a0f" />
   <title>Bubble Buster Console</title>
   <link rel="icon" type="image/svg+xml" href="__STATIC_BASE__/favicon.svg" />
   <link rel="stylesheet" href="__STATIC_BASE__/ops.css" />
@@ -15,6 +15,7 @@
   <header class="ops-topbar">
     <div class="ops-topbar-inner">
       <a id="ops-nav-brand" class="ops-brand" href="/"><span class="ops-brand-mark" aria-hidden="true"></span>Bubble Buster</a>
+      <span class="ops-venue-chip">Binance USDT-M</span>
       <div class="ops-nav-wrap">
         <nav class="ops-nav" aria-label="主导航">
           <ul class="ops-nav-list">
@@ -35,7 +36,7 @@
           <div class="account-title-row">
             <h1 class="account-title" id="accountTitle">账户详情</h1>
             <span class="mode-badge" id="accountMode">加载中</span>
-            <span id="detailFreshnessPill" class="ops-freshness" role="status" aria-live="polite">
+            <span id="detailFreshnessPill" class="ops-freshness">
               <span class="ops-freshness-dot" aria-hidden="true"></span>
               <span id="detailFreshnessText">同步中</span>
             </span>
@@ -61,8 +62,11 @@
       <span class="strategy-strip-label">策略配置</span>
       <div class="strategy-tags" id="strategyTags"><span class="strategy-chip">未配置策略说明</span></div>
       <div class="strategy-strip-meta">
-        <span class="refresh-note">自动刷新 <span id="refresh">__REFRESH_SEC__</span>s · 页面只读</span>
-        <button id="detailRefreshBtn" class="ops-btn" type="button" aria-label="手动刷新账户详情">刷新 ↻</button>
+        <span class="refresh-note">自动刷新 <span id="refresh">__REFRESH_SEC__</span>s · 只读 · R 刷新</span>
+        <button id="detailRefreshBtn" class="ops-btn" type="button" aria-label="手动刷新账户详情">
+          <svg class="ops-icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M13.5 8a5.5 5.5 0 1 1-1.4-3.7"/><path d="M13.5 2.5v3h-3"/></svg>
+          <span class="btn-label">刷新</span>
+        </button>
       </div>
     </section>
 
@@ -115,16 +119,16 @@
           </div>
           <div class="chart-toolbar">
             <button class="ops-btn" id="chartResetZoomBtn" type="button" hidden>重置缩放</button>
-            <div class="tab-row" role="group" aria-label="权益口径">
-              <button class="tab-btn active" id="tabStrategy" type="button" aria-pressed="true">策略权益</button>
-              <button class="tab-btn" id="tabBalance" type="button" aria-pressed="false">账户权益</button>
+            <div class="tab-row ops-segmented" id="curveTabGroup" role="group" aria-label="权益口径">
+              <button class="ops-seg-btn tab-btn active" id="tabStrategy" type="button" aria-pressed="true">策略权益</button>
+              <button class="ops-seg-btn tab-btn" id="tabBalance" type="button" aria-pressed="false">账户权益</button>
             </div>
-            <div class="window-row" id="windowRow" role="group" aria-label="曲线时间范围">
-              <button class="tab-btn" data-window-hours="1" type="button" aria-pressed="false">1H</button>
-              <button class="tab-btn active" data-window-hours="24" type="button" aria-pressed="true">1D</button>
-              <button class="tab-btn" data-window-hours="168" type="button" aria-pressed="false">1W</button>
-              <button class="tab-btn" data-window-hours="720" type="button" aria-pressed="false">1M</button>
-              <button class="tab-btn" data-window-hours="8760" type="button" aria-pressed="false">1Y</button>
+            <div class="window-row ops-segmented" id="windowRow" role="group" aria-label="曲线时间范围">
+              <button class="ops-seg-btn tab-btn" data-window-hours="1" type="button" aria-pressed="false">1H</button>
+              <button class="ops-seg-btn tab-btn active" data-window-hours="24" type="button" aria-pressed="true">1D</button>
+              <button class="ops-seg-btn tab-btn" data-window-hours="168" type="button" aria-pressed="false">1W</button>
+              <button class="ops-seg-btn tab-btn" data-window-hours="720" type="button" aria-pressed="false">1M</button>
+              <button class="ops-seg-btn tab-btn" data-window-hours="8760" type="button" aria-pressed="false">1Y</button>
             </div>
           </div>
         </header>
@@ -132,9 +136,9 @@
           <div class="chart-sparse-hint" id="chartSparseHint" hidden>
             <span>当前窗口仅 1 个快照点，切换更长周期查看走势</span>
             <div class="chart-sparse-actions">
-              <button class="tab-btn" type="button" data-sparse-window="168">切换 1W</button>
-              <button class="tab-btn" type="button" data-sparse-window="720">切换 1M</button>
-              <button class="tab-btn" type="button" data-sparse-window="8760">切换 1Y</button>
+              <button class="ops-btn" type="button" data-sparse-window="168">切换 1W</button>
+              <button class="ops-btn" type="button" data-sparse-window="720">切换 1M</button>
+              <button class="ops-btn" type="button" data-sparse-window="8760">切换 1Y</button>
             </div>
           </div>
           <div class="chart-canvas" id="equityChart" role="img" aria-label="账户权益曲线"></div>
@@ -160,7 +164,7 @@
           <p class="risk-description" id="riskDescription">正在根据账户周期权益曲线计算风险距离。</p>
           <div class="risk-meter">
             <div class="risk-meter-head"><span>已消耗止损空间</span><strong id="riskMeterLabel">--</strong></div>
-            <div class="risk-meter-track"><span class="risk-meter-fill" id="riskMeterFill"></span></div>
+            <div class="risk-meter-track" id="riskMeterTrack" role="progressbar" aria-label="已消耗组合止损空间" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"><span class="risk-meter-fill" id="riskMeterFill"></span></div>
             <div class="risk-meter-scale"><span>周期起点</span><span id="riskMeterLimit">止损 -3.5%</span></div>
           </div>
           <div class="risk-facts" id="drawdownStats"></div>
@@ -188,7 +192,10 @@
       <header class="surface-head">
         <div class="surface-heading">
           <h2 class="surface-title" id="positionsHeading">当前持仓</h2>
-          <div class="surface-subtitle">当前剩余名义金额优先基于实时标记价计算，缺失时按入场价预估；保留当前剩余数量用于对账（非原始开仓数量）</div>
+          <details class="table-note-hint">
+            <summary>口径说明</summary>
+            <p class="surface-subtitle">当前剩余名义金额优先基于实时标记价计算，缺失时按入场价预估；保留当前剩余数量用于对账（非原始开仓数量）</p>
+          </details>
         </div>
         <div class="surface-head-tools">
           <label class="sr-only" for="positionSortSelect">持仓排序</label>
@@ -224,7 +231,7 @@
       <header class="surface-head">
         <div class="surface-heading">
           <h2 class="surface-title" id="activityHeading">账户活动</h2>
-          <div class="surface-subtitle">运行调度、委托成交与资金流水（统一按北京时间 UTC+8 展示）</div>
+          <div class="surface-subtitle">调度、委托成交与资金流水（UTC+8）</div>
         </div>
       </header>
       <div class="activity-tabs" role="tablist" aria-label="账户活动分类">
@@ -244,7 +251,7 @@
       <div class="activity-view" id="activity-events" role="tabpanel" aria-labelledby="tab-events" hidden>
         <search class="table-filter-bar" aria-label="筛选订单事件">
           <label class="sr-only" for="eventSearchInput">按交易对筛选</label>
-          <input id="eventSearchInput" class="table-search-input" type="search" placeholder="筛选交易对（如 BTCUSDT）" />
+          <input id="eventSearchInput" class="table-search-input" type="search" placeholder="筛选交易对（按 / 快速聚焦）" />
           <label class="sr-only" for="eventStatusSelect">按状态筛选</label>
           <select id="eventStatusSelect" class="table-filter-select" aria-label="按订单状态筛选">
             <option value="ALL">全部状态</option>
@@ -275,8 +282,8 @@
       </div>
     </section>
 
-    <details class="diagnostics-panel">
-      <summary><span>诊断信息 <span class="diagnostics-intro">仅在核对异常时展开</span></span><span class="surface-count" id="unpricedCount">0</span></summary>
+    <details id="diagnosticsPanel" class="diagnostics-panel">
+      <summary><span>诊断信息 <span class="diagnostics-intro">展开后按需加载策略日志</span></span><span class="surface-count" id="unpricedCount">0</span></summary>
       <div class="diagnostics-grid">
         <section class="diagnostic-block">
           <h2 class="diagnostic-title" id="unpricedHeading">待核对平仓</h2>
@@ -290,7 +297,7 @@
         </section>
         <section class="diagnostic-block">
           <h2 class="diagnostic-title" id="logTailHeading">策略日志尾部</h2>
-          <pre class="log mono" id="logTail" role="region" aria-labelledby="logTailHeading" tabindex="0">日志按需加载...</pre>
+          <pre class="log mono" id="logTail" role="region" aria-labelledby="logTailHeading" tabindex="0">展开后按需加载日志...</pre>
         </section>
       </div>
     </details>

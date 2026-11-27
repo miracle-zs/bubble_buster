@@ -423,8 +423,8 @@ def _ensure_local_echarts_asset() -> str:
             return "/static/vendor/echarts.min.js"
         except OSError:
             continue
-    # Fallback to CDN if local asset unavailable.
-    return "https://cdn.jsdelivr.net/npm/echarts@5/dist/echarts.min.js"
+    # Keep local self-hosted path consistent with strict script-src 'self' CSP.
+    return "/static/vendor/echarts.min.js"
 
 
 def _build_service_state(enabled: bool = False) -> dict:
@@ -663,12 +663,23 @@ def create_app(config_path: Optional[str] = None) -> FastAPI:
         if "text/html" in content_type:
             response.headers.setdefault("Content-Security-Policy", csp_header)
             response.headers["Cache-Control"] = "no-cache"
+        elif request.url.path.startswith("/api/") or request.url.path == "/healthz":
+            response.headers["Cache-Control"] = "no-store"
         elif request.url.path.startswith("/static/") and response.status_code in {200, 304}:
             if request.query_params.get("v"):
                 response.headers["Cache-Control"] = "public, max-age=31536000, immutable"
             else:
                 response.headers["Cache-Control"] = "public, max-age=604800, stale-while-revalidate=86400"
         return response
+
+    def _build_nav_accounts(ctx: DashboardRuntimeContext) -> list[dict[str, str]]:
+        return sorted(
+            (
+                {"id": aid, "mode": ctx.provider.account_modes.get(aid, "full")}
+                for aid in ctx.provider.overview_account_ids
+            ),
+            key=lambda item: (1 if str(item["mode"]).lower() == "readonly" else 0, item["id"]),
+        )
 
     @app.get("/favicon.ico", include_in_schema=False)
     def favicon():
@@ -684,13 +695,6 @@ def create_app(config_path: Optional[str] = None) -> FastAPI:
     @app.get("/", response_class=HTMLResponse)
     def overview_page(request: Request):
         ctx: DashboardRuntimeContext = request.app.state.ctx
-        nav_accounts = sorted(
-            (
-                {"id": aid, "mode": ctx.provider.account_modes.get(aid, "full")}
-                for aid in ctx.provider.overview_account_ids
-            ),
-            key=lambda item: (1 if str(item["mode"]).lower() == "readonly" else 0, item["id"]),
-        )
         return HTMLResponse(
             render_accounts_overview_html(
                 ctx.refresh_sec,
@@ -700,16 +704,22 @@ def create_app(config_path: Optional[str] = None) -> FastAPI:
                 portfolio_loss_cut_pct=ctx.portfolio_loss_cut_pct,
                 portfolio_loss_cut_hour=ctx.portfolio_loss_cut_hour,
                 portfolio_loss_cut_minute=ctx.portfolio_loss_cut_minute,
-                nav_accounts=nav_accounts,
+                nav_accounts=_build_nav_accounts(ctx),
             )
         )
 
     @app.get("/accounts/comparison/", response_class=HTMLResponse)
-    def accounts_comparison_page():
+    def accounts_comparison_page(request: Request):
         comparison_page = static_root / "account-comparison.html"
         if not comparison_page.exists():
             raise HTTPException(status_code=404, detail="accounts comparison page not found")
-        return HTMLResponse(render_accounts_comparison_html(static_dir=static_root))
+        ctx: DashboardRuntimeContext = request.app.state.ctx
+        return HTMLResponse(
+            render_accounts_comparison_html(
+                static_dir=static_root,
+                nav_accounts=_build_nav_accounts(ctx),
+            )
+        )
 
     @app.get("/account/{account_id}/", response_class=HTMLResponse)
     def account_detail_page(
@@ -717,13 +727,9 @@ def create_app(config_path: Optional[str] = None) -> FastAPI:
         account_id: str,
     ):
         ctx: DashboardRuntimeContext = request.app.state.ctx
-        nav_accounts = sorted(
-            (
-                {"id": aid, "mode": ctx.provider.account_modes.get(aid, "full")}
-                for aid in ctx.provider.overview_account_ids
-            ),
-            key=lambda item: (1 if str(item["mode"]).lower() == "readonly" else 0, item["id"]),
-        )
+        known_accounts = set(ctx.provider.overview_account_ids or [])
+        if known_accounts and account_id not in known_accounts:
+            raise HTTPException(status_code=404, detail=f"Account not found: {account_id}")
         return HTMLResponse(
             render_account_dashboard_html(
                 ctx.refresh_sec,
@@ -735,7 +741,7 @@ def create_app(config_path: Optional[str] = None) -> FastAPI:
                 portfolio_loss_cut_pct=ctx.portfolio_loss_cut_pct,
                 portfolio_loss_cut_hour=ctx.portfolio_loss_cut_hour,
                 portfolio_loss_cut_minute=ctx.portfolio_loss_cut_minute,
-                nav_accounts=nav_accounts,
+                nav_accounts=_build_nav_accounts(ctx),
             )
         )
 

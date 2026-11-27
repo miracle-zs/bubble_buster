@@ -1,4 +1,4 @@
-/* Bubble Buster — Account Equity Comparison page controller */
+/* Bubble Buster — Account Equity Comparison controller (Obsidian Desk Terminal) */
 (function () {
   "use strict";
 
@@ -12,6 +12,20 @@
       { type: "dotted", swatchClass: "is-dotted" },
       { type: [8, 3, 2, 3], swatchClass: "is-dashdot" }
     ];
+
+    var SORT_LABELS = {
+      account_id: "账户",
+      change_pct: "区间收益率",
+      latest_equity: "当前权益",
+      max_drawdown_pct: "区间最大回撤"
+    };
+
+    var collator = typeof Intl !== "undefined" && Intl.Collator
+      ? new Intl.Collator(undefined, { numeric: true, sensitivity: "base" })
+      : null;
+
+    var pageConfig = ops.readPageConfig("page-config");
+    var initialNavAccounts = Array.isArray(pageConfig.navAccounts) ? pageConfig.navAccounts : [];
 
     var chart = null;
     var resizeObserver = null;
@@ -32,13 +46,22 @@
     var activeAbortController = null;
     var activeRequestToken = 0;
     var lastLoadedAt = 0;
-    var navAccountsHydrated = false;
+    var navAccountsHydrated = initialNavAccounts.length > 0;
     var strategyNotesByAccount = {};
+    var lastMetricsContentSig = "";
     var pathPrefix = ops.resolveBasePrefix();
 
-    ops.initTopNav({ basePrefix: pathPrefix, activePage: "comparison" });
+    ops.initTopNav({
+      basePrefix: pathPrefix,
+      activePage: "comparison",
+      accounts: initialNavAccounts
+    });
 
     function el(id) { return document.getElementById(id); }
+
+    function compareText(a, b) {
+      return collator ? collator.compare(a, b) : String(a).localeCompare(String(b));
+    }
 
     function colorFor(accountId, index) {
       var theme = ops.getChartTheme();
@@ -107,11 +130,7 @@
     }
 
     function loadNavAccounts() {
-      fetch(pathPrefix + "/api/accounts/summary/fast?_=" + Date.now(), { cache: "no-store" })
-        .then(function (response) {
-          if (!response.ok) return null;
-          return response.json();
-        })
+      ops.fetchJsonWithTimeout(pathPrefix + "/api/accounts/summary/fast?_=" + Date.now(), { timeoutMs: 12000 })
         .then(function (data) {
           if (!data || !Array.isArray(data.accounts) || !data.accounts.length) return;
           navAccountsHydrated = true;
@@ -127,7 +146,7 @@
           ops.renderNavAccounts(data.accounts);
           if (notesChanged && payload) {
             renderSummary();
-            renderMetricsTable();
+            renderMetricsTable(false);
           }
         })
         .catch(function () {});
@@ -140,6 +159,7 @@
       var allNotes = rows.map(function (row) {
         return strategyNotesByAccount[row.account_id] || "";
       }).filter(Boolean);
+      var arrowIcon = '<svg class="ops-icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 11L11 5"/><path d="M6.5 5H11v4.5"/></svg>';
       var html = rows.map(function (row, index) {
         var color = colorFor(row.account_id, index);
         var change = row.change_pct;
@@ -149,12 +169,12 @@
         var note = strategyNotesByAccount[row.account_id] || "";
         var strategyHtml = note ? ops.formatStrategyHighlights(note, allNotes, 2, "summary-strategy-tag") : "";
         return '<article class="summary-card" style="--account-color:' + color + '">'
-          + '<div class="summary-head"><a class="account-label" href="' + detailHref + '" aria-label="查看 ' + ops.escapeHtml(row.account_id) + ' 账户详情"><i class="account-dot" aria-hidden="true"></i><span>' + ops.escapeHtml(row.account_id) + '</span><span class="account-jump" aria-hidden="true">↗</span></a><span class="summary-status">' + status + '</span></div>'
+          + '<div class="summary-head"><a class="account-label" href="' + detailHref + '" aria-label="查看 ' + ops.escapeHtml(row.account_id) + ' 账户详情"><i class="account-dot" aria-hidden="true"></i><span>' + ops.escapeHtml(row.account_id) + '</span><span class="account-jump" aria-hidden="true">' + arrowIcon + '</span></a><span class="summary-status">' + status + '</span></div>'
           + '<div class="summary-change ' + changeClass + '">' + ops.fmtPct(change) + '</div>'
           + '<div class="summary-equity">当前权益 ' + (row.latest_equity == null ? "--" : ops.fmtUsdt(row.latest_equity, 2) + " USDT") + '</div>'
-          + (strategyHtml ? '<div class="summary-strategy">' + strategyHtml + '</div>' : '')
+          + (strategyHtml ? '<div class="summary-strategy">' + strategyHtml + '</div>' : "")
           + '<div class="summary-range"><span>区间低点 <strong>' + ops.fmtPct(row.min_change_pct) + '</strong></span><span>高点 <strong>' + ops.fmtPct(row.max_change_pct) + '</strong></span></div>'
-          + '</article>';
+          + "</article>";
       }).join("");
       ops.patchHtmlIfChanged(target, html);
     }
@@ -167,20 +187,63 @@
         var color = colorFor(row.account_id, index);
         var pat = patternFor(row.account_id, index);
         return '<button class="legend-button' + (muted ? " is-muted" : "") + '" data-account="' + ops.escapeHtml(row.account_id) + '" aria-pressed="' + (!muted) + '" style="--account-color:' + color + '" type="button">'
-          + '<i class="legend-swatch ' + pat.swatchClass + '" aria-hidden="true"></i><span>' + ops.escapeHtml(row.account_id) + '</span><span class="legend-value">' + ops.fmtPct(row.change_pct) + '</span></button>';
+          + '<i class="legend-swatch ' + pat.swatchClass + '" aria-hidden="true"></i><span>' + ops.escapeHtml(row.account_id) + '</span><span class="legend-value">' + ops.fmtPct(row.change_pct) + "</span></button>";
       }).join("");
       ops.patchHtmlIfChanged(legendEl, html);
     }
 
-    function renderMetricsTable() {
+    function syncSortHeaderAria() {
+      var sortButtons = document.querySelectorAll("#comparison-metrics-table [data-sort-key]");
+      Array.prototype.forEach.call(sortButtons, function (btn) {
+        var th = btn.closest ? btn.closest("th") : btn.parentElement;
+        if (!th) return;
+        var key = btn.getAttribute("data-sort-key");
+        if (key === sortState.key) {
+          th.setAttribute("aria-sort", sortState.dir === "asc" ? "ascending" : "descending");
+        } else {
+          th.removeAttribute("aria-sort");
+        }
+      });
+    }
+
+    function reorderExistingRows(tbody, orderedAccountIds) {
+      var rowMap = {};
+      var currentRows = tbody.querySelectorAll("tr[data-account-row]");
+      if (currentRows.length !== orderedAccountIds.length) return false;
+      for (var i = 0; i < currentRows.length; i += 1) {
+        rowMap[currentRows[i].getAttribute("data-account-row")] = currentRows[i];
+      }
+      var orderedNodes = [];
+      for (var j = 0; j < orderedAccountIds.length; j += 1) {
+        var tr = rowMap[orderedAccountIds[j]];
+        if (!tr) return false;
+        orderedNodes.push(tr);
+      }
+      var useMoveBefore = typeof tbody.moveBefore === "function";
+      for (var k = 0; k < orderedNodes.length; k += 1) {
+        if (useMoveBefore) {
+          try {
+            tbody.moveBefore(orderedNodes[k], null);
+            continue;
+          } catch (e) {}
+        }
+        tbody.appendChild(orderedNodes[k]);
+      }
+      return true;
+    }
+
+    function renderMetricsTable(announceSort) {
       var tbody = el("comparison-metrics-body");
       var table = el("comparison-metrics-table");
       if (!tbody) return;
       var rows = seriesRows().slice();
       var allNotes = rows.map(function (r) { return strategyNotesByAccount[r.account_id] || ""; }).filter(Boolean);
 
+      syncSortHeaderAria();
+
       if (!rows.length) {
         if (table) table.classList.add("is-empty");
+        lastMetricsContentSig = "";
         ops.patchHtmlIfChanged(tbody, '<tr><td colspan="6" class="table-empty-cell">当前窗口暂无账户对比数据</td></tr>');
         return;
       }
@@ -202,26 +265,36 @@
       var dirMult = sortState.dir === "asc" ? 1 : -1;
       enriched.sort(function (a, b) {
         var k = sortState.key;
-        if (k === "account_id") return a.account_id.localeCompare(b.account_id) * dirMult;
+        if (k === "account_id") return compareText(a.account_id, b.account_id) * dirMult;
         var va = a[k];
         var vb = b[k];
-        if (va === null && vb === null) return a.account_id.localeCompare(b.account_id);
+        if (va === null && vb === null) return compareText(a.account_id, b.account_id);
         if (va === null) return 1;
         if (vb === null) return -1;
-        if (va === vb) return a.account_id.localeCompare(b.account_id);
+        if (va === vb) return compareText(a.account_id, b.account_id);
         return (va - vb) * dirMult;
       });
 
-      var sortButtons = document.querySelectorAll("#comparison-metrics-table [data-sort-key]");
-      Array.prototype.forEach.call(sortButtons, function (btn) {
-        var key = btn.getAttribute("data-sort-key");
-        if (key === sortState.key) {
-          btn.setAttribute("aria-sort-dir", sortState.dir);
-        } else {
-          btn.removeAttribute("aria-sort-dir");
-        }
-      });
+      var contentSig = rows.map(function (r) {
+        return String(r.account_id || "") + ":" + String(r.change_pct) + ":" + String(r.latest_equity)
+          + ":" + String(r.min_change_pct) + ":" + String(r.max_change_pct)
+          + ":" + String(strategyNotesByAccount[r.account_id] || "");
+      }).join("|");
 
+      var orderedIds = enriched.map(function (item) { return item.account_id; });
+      if (contentSig === lastMetricsContentSig && reorderExistingRows(tbody, orderedIds)) {
+        if (announceSort) {
+          var statusEl = el("metrics-sort-status");
+          if (statusEl) {
+            var label = SORT_LABELS[sortState.key] || sortState.key;
+            var dirText = sortState.dir === "asc" ? "升序" : "降序";
+            statusEl.textContent = "已按" + label + dirText + "排列，共 " + enriched.length + " 个账户";
+          }
+        }
+        return;
+      }
+
+      lastMetricsContentSig = contentSig;
       var html = enriched.map(function (item) {
         var row = item.row;
         var color = colorFor(row.account_id, item.index);
@@ -232,21 +305,41 @@
         var strategyHtml = note
           ? ops.formatStrategyHighlights(note, allNotes, 2, "summary-strategy-tag")
           : '<span class="strategy-tag strategy-tag-empty">未配置</span>';
-        return "<tr>"
+        return '<tr data-account-row="' + ops.escapeHtml(item.account_id) + '">'
           + '<th scope="row"><a class="account-label" style="--account-color:' + color + '" href="' + detailHref + '"><i class="account-dot" aria-hidden="true"></i>' + ops.escapeHtml(row.account_id) + "</a></th>"
           + '<td class="numeric ' + changeCls + '">' + ops.escapeHtml(ops.fmtPct(item.change_pct)) + "</td>"
           + '<td class="numeric">' + (item.latest_equity === null ? "--" : ops.escapeHtml(ops.fmtUsdt(item.latest_equity, 2))) + "</td>"
           + '<td class="numeric ' + ddCls + '">' + (item.max_drawdown_pct === null ? "--" : ops.escapeHtml(ops.fmtSigned(item.max_drawdown_pct, 2) + "%")) + "</td>"
           + '<td class="numeric">' + ops.escapeHtml(ops.fmtPct(item.min_change_pct) + " / " + ops.fmtPct(item.max_change_pct)) + "</td>"
-          + '<td class="strategy-col"><div class="summary-strategy" style="min-height:0;margin-top:0">' + strategyHtml + "</div></td>"
+          + '<td class="strategy-col"><div class="summary-strategy metrics-strategy-tags">' + strategyHtml + "</div></td>"
           + "</tr>";
       }).join("");
-      ops.patchHtmlIfChanged(tbody, html);
+      tbody.__bbLastHtml = html;
+      tbody.innerHTML = html;
+
+      if (announceSort) {
+        var statusNode = el("metrics-sort-status");
+        if (statusNode) {
+          var sortLabel = SORT_LABELS[sortState.key] || sortState.key;
+          var sortDirText = sortState.dir === "asc" ? "升序" : "降序";
+          statusNode.textContent = "已按" + sortLabel + sortDirText + "排列，共 " + enriched.length + " 个账户";
+        }
+      }
     }
 
     function updateZoomResetVisibility(show) {
       var btn = el("reset-zoom-button");
       if (btn) btn.hidden = !show;
+    }
+
+    function attachChartResizeObserver() {
+      var chartContainer = el("equity-chart");
+      if (typeof ResizeObserver !== "undefined" && chartContainer && !resizeObserver) {
+        resizeObserver = new ResizeObserver(function () {
+          if (chart) chart.resize();
+        });
+        resizeObserver.observe(chartContainer);
+      }
     }
 
     function renderChart() {
@@ -273,9 +366,9 @@
       el("chart-title").textContent = mode === "relative" ? "相对权益变化（%）" : "账户权益（USDT）";
       el("chart-subtitle").textContent = mode === "relative"
         ? (range === "all"
-            ? "组合止盈上线后的首个有效快照 = 0%；策略事件不叠加到主图，避免跨账户时间差造成视觉干扰。"
-            : "以所选时间区间（" + rangeLabel() + "）首个快照归一化（0%）；策略事件不叠加到主图。")
-        : "显示账户权益快照；策略事件不叠加到主图。";
+            ? "组合止盈上线后首个有效快照 = 0%；策略事件不叠加到主图。"
+            : "所选时间区间（" + rangeLabel() + "）首快照归一化 0%；策略事件不叠加到主图。")
+        : "账户权益快照走势；策略事件不叠加到主图。";
 
       if (!activeRows.length) return;
 
@@ -295,6 +388,7 @@
           var end = batch && Number.isFinite(Number(batch.end)) ? Number(batch.end) : 100;
           updateZoomResetVisibility(start > 0.5 || end < 99.5);
         });
+        attachChartResizeObserver();
       }
 
       var theme = ops.getChartTheme();
@@ -347,7 +441,7 @@
       var reduceMotion = ops.prefersReducedMotion();
       chart.setOption({
         animation: !reduceMotion,
-        animationDuration: reduceMotion ? 0 : 320,
+        animationDuration: reduceMotion ? 0 : 280,
         animationEasing: "cubicOut",
         backgroundColor: "transparent",
         grid: { top: 32, right: 36, bottom: showSlider ? 78 : 48, left: 68 },
@@ -364,7 +458,7 @@
             lineStyle: { color: theme.borderStrong, width: 1 },
             areaStyle: { color: theme.zoomArea }
           },
-          textStyle: { color: theme.muted, fontSize: 11 }
+          textStyle: { color: theme.muted, fontSize: 12 }
         }] : [],
         tooltip: {
           trigger: "axis",
@@ -438,7 +532,7 @@
       renderSummary();
       renderLegend();
       renderChart();
-      renderMetricsTable();
+      renderMetricsTable(false);
       renderMeta();
     }
 
@@ -466,8 +560,7 @@
       }
       var latest = rows.map(function (row) { return row.latest_at_utc; }).filter(Boolean).sort().slice(-1)[0];
       var freshness = ops.evaluateDataFreshness(latest, { warnSec: 1800, staleSec: 7200 });
-      var cls = freshness.state === "live" ? "is-live" : (freshness.state === "warn" ? "is-warn" : (freshness.state === "stale" || freshness.state === "offline" ? "is-stale" : ""));
-      setFreshnessPill(freshness.badgeText, cls);
+      ops.applyFreshnessPill(el("freshness-pill"), el("status-text"), freshness);
     }
 
     function syncComparisonUrl() {
@@ -485,7 +578,9 @@
       var btn = el("refresh-button");
       if (!btn) return;
       btn.disabled = !!busy;
-      btn.textContent = busy ? "刷新中..." : "刷新 ↻";
+      var lbl = btn.querySelector(".btn-label");
+      if (lbl) lbl.textContent = busy ? "刷新中..." : "刷新";
+      else btn.textContent = busy ? "刷新中..." : "刷新";
     }
 
     function load() {
@@ -499,14 +594,13 @@
       setFreshnessPill("正在读取快照", "is-warn");
       setNotice("");
       var query = range === "all" ? "all_time=true" : "window_hours=" + encodeURIComponent(range);
-      fetch(pathPrefix + "/api/accounts/equity-comparison?" + query + "&curve_points=600&include_events=false&_=" + Date.now(), {
-        cache: "no-store",
-        signal: activeAbortController ? activeAbortController.signal : undefined
-      })
-        .then(function (response) {
-          if (!response.ok) throw new Error("HTTP " + response.status);
-          return response.json();
-        })
+      ops.fetchJsonWithTimeout(
+        pathPrefix + "/api/accounts/equity-comparison?" + query + "&curve_points=600&include_events=false&_=" + Date.now(),
+        {
+          signal: activeAbortController ? activeAbortController.signal : null,
+          timeoutMs: 15000
+        }
+      )
         .then(function (nextPayload) {
           if (requestToken !== activeRequestToken) return;
           lastLoadedAt = Date.now();
@@ -530,6 +624,8 @@
 
     setActiveControl("range-controls", "range", range);
     setActiveControl("mode-controls", "mode", mode);
+
+    ops.bindKeyboardShortcuts({ onRefresh: load });
 
     Array.prototype.forEach.call(document.querySelectorAll("[data-range]"), function (button) {
       button.addEventListener("click", function () {
@@ -600,7 +696,7 @@
           sortState.key = key;
           sortState.dir = key === "account_id" ? "asc" : "desc";
         }
-        renderMetricsTable();
+        renderMetricsTable(true);
       });
     }
 
@@ -613,17 +709,10 @@
     window.addEventListener("online", updateFreshnessStatus);
     window.addEventListener("offline", updateFreshnessStatus);
 
-    var chartContainer = el("equity-chart");
-    if (typeof ResizeObserver !== "undefined" && chartContainer) {
-      resizeObserver = new ResizeObserver(function () {
-        if (chart) chart.resize();
-      });
-      resizeObserver.observe(chartContainer);
-    } else {
-      window.addEventListener("resize", function () { if (chart) chart.resize(); });
-    }
+    attachChartResizeObserver();
 
-    window.addEventListener("pagehide", function () {
+    window.addEventListener("pagehide", function (event) {
+      if (event && event.persisted) return;
       if (resizeObserver) {
         try { resizeObserver.disconnect(); } catch (e) {}
         resizeObserver = null;
@@ -631,6 +720,15 @@
       if (chart) {
         try { chart.dispose(); } catch (e) {}
         chart = null;
+      }
+    });
+
+    window.addEventListener("pageshow", function (event) {
+      if (event && event.persisted) {
+        attachChartResizeObserver();
+        if (chart) chart.resize();
+        else if (payload) renderChart();
+        if ((Date.now() - lastLoadedAt) >= 30000) load();
       }
     });
 

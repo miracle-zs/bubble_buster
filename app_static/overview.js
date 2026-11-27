@@ -1,4 +1,4 @@
-/* Bubble Buster — Accounts Overview controller */
+/* Bubble Buster — Accounts Overview controller (Obsidian Desk Terminal) */
 (function () {
   "use strict";
 
@@ -47,23 +47,26 @@
     var curveErrors = {};
     var curveInFlight = {};
     var curveRenderData = {};
+    var curveRenderSig = {};
     var curveObserver = null;
     var accountModes = {};
     var portfolioStopStates = {};
     var summaryRows = [];
-    var latestSummaryPayload = null;
     var initialQuery = ops.readQueryParams();
     var validTaskFilters = { all: true, anomaly: true, symbols: true };
     var taskFilter = validTaskFilters[initialQuery.task_filter] ? initialQuery.task_filter : "anomaly";
     var entryDetailsUserOverride = null;
     var nextEntryCheckRaw = "";
     var countdownTimer = null;
+    var summaryTimer = null;
+    var healthTimer = null;
     var curveTtlMs = Math.max(60000, refreshSec * 3000);
     var summaryRequestInFlight = false;
     var summaryDetailsRequestInFlight = false;
     var detailsHydratedOnce = false;
     var lastDetailsFetchAt = 0;
     var detailsRetryTimer = null;
+    var commandBarRafId = 0;
 
     function escapeHtml(text) {
       return ops.escapeHtml(text);
@@ -218,9 +221,8 @@
       if (incidentJumpBtn) incidentJumpBtn.hidden = anomalies === 0;
     }
 
-    function renderCommandBar(payload) {
-      if (payload) latestSummaryPayload = payload;
-      var latestMs = latestUnderlyingTimestamp(summaryRows, latestSummaryPayload);
+    function renderCommandBar() {
+      var latestMs = latestUnderlyingTimestamp(summaryRows);
       var freshness = ops.evaluateDataFreshness(latestMs, { warnSec: 180, staleSec: 900 });
 
       if (overviewUpdatedAt) {
@@ -228,12 +230,7 @@
           ? ops.formatBeijingTime(latestMs, { withYear: freshness.ageSec >= 86400, withSeconds: freshness.ageSec < 3600 })
           : "--";
       }
-      if (overviewFreshnessText) overviewFreshnessText.textContent = freshness.badgeText;
-      if (overviewFreshnessPill) {
-        var fCls = freshness.state === "live" ? "is-live" : (freshness.state === "warn" ? "is-warn" : (freshness.state === "stale" || freshness.state === "offline" ? "is-stale" : ""));
-        overviewFreshnessPill.className = "ops-freshness" + (fCls ? " " + fCls : "");
-        overviewFreshnessPill.title = freshness.detailText;
-      }
+      ops.applyFreshnessPill(overviewFreshnessPill, overviewFreshnessText, freshness);
 
       if (overviewAnomalyCount) {
         var count = anomalyTaskCount(summaryRows);
@@ -263,16 +260,24 @@
       renderFleetIncidentBanner(freshness);
     }
 
+    function scheduleCommandBarRender() {
+      if (commandBarRafId) return;
+      var schedule = window.requestAnimationFrame || function (fn) { return setTimeout(fn, 16); };
+      commandBarRafId = schedule(function () {
+        commandBarRafId = 0;
+        renderCommandBar();
+      });
+    }
+
     var healthAbortController = null;
     function fetchHealth() {
       if (!serviceState || document.hidden) return;
       if (healthAbortController) healthAbortController.abort();
-      healthAbortController = new AbortController();
-      fetch(healthApi + "?_=" + Date.now(), { signal: healthAbortController.signal, cache: "no-store" })
-        .then(function (res) {
-          if (!res.ok) throw new Error("status " + res.status);
-          return res.json();
-        })
+      healthAbortController = typeof AbortController !== "undefined" ? new AbortController() : null;
+      ops.fetchJsonWithTimeout(healthApi + "?_=" + Date.now(), {
+        signal: healthAbortController ? healthAbortController.signal : null,
+        timeoutMs: 10000
+      })
         .then(function (payload) {
           var running = !!payload.service_running;
           var enabled = !!payload.service_enabled;
@@ -280,7 +285,7 @@
           serviceState.innerHTML = '<span class="status-dot" aria-hidden="true"></span>'
             + (running ? "运行中" : (enabled ? "已停止" : "未启用"));
           serviceState.className = "command-value " + (running ? "status-ok" : (enabled ? "status-bad" : "status-warn"));
-          renderCommandBar();
+          scheduleCommandBarRender();
         })
         .catch(function (err) {
           if (err && err.name === "AbortError") return;
@@ -297,18 +302,32 @@
       var tasks = (row && row.tasks) || {};
       var keys = Object.keys(tasks);
       var best = "";
+      var bestMs = -Infinity;
       for (var i = 0; i < keys.length; i += 1) {
         var val = taskTimeValue(tasks[keys[i]]);
-        if (val && (!best || val > best)) best = val;
+        if (!val) continue;
+        var ms = ops.parseTimestampMs(val);
+        if (Number.isFinite(ms)) {
+          if (ms > bestMs) { bestMs = ms; best = val; }
+        } else if (!best || val > best) {
+          best = val;
+        }
       }
       return best;
     }
 
     function latestTaskTime(rows) {
       var best = "";
+      var bestMs = -Infinity;
       for (var i = 0; i < rows.length; i += 1) {
         var val = latestTaskTimeForAccount(rows[i]);
-        if (val && (!best || val > best)) best = val;
+        if (!val) continue;
+        var ms = ops.parseTimestampMs(val);
+        if (Number.isFinite(ms)) {
+          if (ms > bestMs) { bestMs = ms; best = val; }
+        } else if (!best || val > best) {
+          best = val;
+        }
       }
       return best;
     }
@@ -444,14 +463,14 @@
       var cls = taskStatusCls(status);
       var timeText = String(t.time_local || "") || "--";
       var metaText = taskMetaLabel(taskKey);
-      return '<div class="task-row">'
+      return '<div class="task-row" role="row">'
         + '<div class="task-row-main">'
-        + '<div class="task-name-wrap"><span class="task-name">' + escapeHtml(name) + "</span>"
+        + '<div class="task-name-wrap" role="cell"><span class="task-name">' + escapeHtml(name) + "</span>"
         + (metaText ? '<span class="task-task-tag">' + escapeHtml(metaText) + "</span>" : "")
         + "</div>"
-        + '<span class="task-meta"><span class="task-badge ' + cls + '">' + escapeHtml(statusText) + "</span></span>"
-        + '<span class="task-time">' + escapeHtml(timeText) + "</span>"
-        + '<span class="task-result">' + taskResultHtml(accountId, taskKey, t) + "</span>"
+        + '<span class="task-meta" role="cell"><span class="task-badge ' + cls + '">' + escapeHtml(statusText) + "</span></span>"
+        + '<span class="task-time" role="cell">' + escapeHtml(timeText) + "</span>"
+        + '<span class="task-result" role="cell">' + taskResultHtml(accountId, taskKey, t) + "</span>"
         + "</div>"
         + "</div>";
     }
@@ -464,24 +483,24 @@
         var stats = row && row.trade_stats;
         if (stats) {
           var profitFactor = fmt(stats.profit_factor, 2);
-          return '<div class="task-row">'
+          return '<div class="task-row" role="row">'
             + '<div class="task-row-main">'
-            + '<div class="task-name-wrap"><span class="task-name">近 30 日交易统计</span>'
+            + '<div class="task-name-wrap" role="cell"><span class="task-name">近 30 日交易统计</span>'
             + '<span class="task-task-tag">只读监控</span></div>'
-            + '<span class="task-meta"><span class="task-badge status-ok">只读</span></span>'
-            + '<span class="task-time">' + escapeHtml(ops.formatBeijingTime(stats.last_updated_utc, { withYear: true })) + "</span>"
-            + '<div class="task-result-lines">'
+            + '<span class="task-meta" role="cell"><span class="task-badge status-ok">只读</span></span>'
+            + '<span class="task-time" role="cell">' + escapeHtml(ops.formatBeijingTime(stats.last_updated_utc, { withYear: true })) + "</span>"
+            + '<div class="task-result-lines" role="cell">'
             + '<div class="task-stat-line">净盈亏 ' + ops.fmtSignedUsdt(stats.net_realized_pnl != null ? stats.net_realized_pnl : stats.total_realized_pnl, 2) + " USDT · 胜率 " + fmt(stats.win_rate_pct, 1) + "% · 盈亏比 " + profitFactor + "</div>"
             + '<div class="task-stat-line">胜 ' + fmt(stats.win_count, 0) + " / 负 " + fmt(stats.loss_count, 0) + " · 平均盈利 " + ops.fmtUsdt(stats.avg_win, 2) + " · 平均亏损 " + ops.fmtUsdt(stats.avg_loss, 2) + "</div>"
             + "</div></div></div>";
         }
-        return '<div class="task-row">'
+        return '<div class="task-row" role="row">'
           + '<div class="task-row-main">'
-          + '<div class="task-name-wrap"><span class="task-name">账户监控</span>'
+          + '<div class="task-name-wrap" role="cell"><span class="task-name">账户监控</span>'
           + '<span class="task-task-tag">只读监控</span></div>'
-          + '<span class="task-meta"><span class="task-badge status-warn">只读</span></span>'
-          + '<span class="task-time">--</span>'
-          + '<div class="task-result-lines"><div class="task-stat-line">暂无近 30 日交易统计数据</div></div>'
+          + '<span class="task-meta" role="cell"><span class="task-badge status-warn">只读</span></span>'
+          + '<span class="task-time" role="cell">--</span>'
+          + '<div class="task-result-lines" role="cell"><div class="task-stat-line">暂无近 30 日交易统计数据</div></div>'
           + "</div></div>";
       }
       if (mode === "full") rows.push({ key: "entry", name: "每日开仓", task: tasks.entry });
@@ -718,7 +737,7 @@
         nextEntryCheckRaw = "";
         syncCountdownTimer();
         ops.patchHtmlIfChanged(entryProgressBoard, '<div class="entry-progress-empty">暂无完整策略账号</div>');
-        if (entryProgressUpdated) entryProgressUpdated.textContent = "数据更新时间 --";
+        if (entryProgressUpdated) entryProgressUpdated.textContent = "更新 --";
         if (entryProgressToggle) entryProgressToggle.hidden = true;
         return;
       }
@@ -760,7 +779,6 @@
         || waitingTotal > 0
         || failedTotal > 0
         || !timeline.groups.length;
-      // Default expanded when hasIssues is true, but ALWAYS let operator collapse/expand!
       var showDetails = entryDetailsUserOverride === null ? hasIssues : entryDetailsUserOverride;
       if (entryProgressToggle) {
         entryProgressToggle.hidden = false;
@@ -787,7 +805,7 @@
         + '<div class="entry-progress-overview-primary">'
         + '<div class="entry-progress-hero-row"><div><span class="entry-progress-hero-label">开仓动作</span><strong>' + entryActionTotal + "<small> / " + targetTotal + '</small></strong></div><span class="entry-progress-hero-percent">' + overallPct + "%</span></div>"
         + '<div class="entry-progress-hero-caption">首笔 ' + initialActionTotal + " · 二次 " + scaleInActionTotal + " · 持仓记录 " + positionTotal + " · " + completedAccounts + " / " + accountRows.length + " 个账号完成</div>"
-        + '<div class="entry-progress-summary-meter" role="img" aria-label="' + entryActionTotal + " 个入场动作已完成，共 " + targetTotal + " 个；" + waitingTotal + " 个等待信号，" + failedTotal + ' 个异常">'
+        + '<div class="entry-progress-summary-meter" role="progressbar" aria-label="今日总体入场动作进度" aria-valuenow="' + overallPct + '" aria-valuemin="0" aria-valuemax="100">'
         + '<span class="summary-meter-initial" style="width:' + initialMeterPct.toFixed(2) + '%"></span>'
         + '<span class="summary-meter-scale-in" style="width:' + scaleInMeterPct.toFixed(2) + '%"></span>'
         + '<span class="summary-meter-waiting" style="width:' + pendingMeterPct.toFixed(2) + '%"></span>'
@@ -802,7 +820,7 @@
         + '<div class="entry-progress-next-action"><span class="entry-progress-next-label">下一检查</span><strong>' + escapeHtml(nextCheckLabel) + '</strong><span class="entry-progress-next-state"><i class="entry-progress-next-pulse" aria-hidden="true"></i>' + escapeHtml(nextActionLabel) + ' · <span id="entry-progress-countdown">--</span></span></div>'
         + "</div>";
 
-      html += '<div class="entry-progress-timeline"><div class="entry-progress-timeline-head"><div class="entry-progress-timeline-title"><strong>共同入场窗口</strong><span>' + escapeHtml(timelineCaption) + '</span></div><div class="entry-progress-timeline-legend"><span class="entry-progress-phase-legend is-initial"><i aria-hidden="true"></i>首笔入场</span><span class="entry-progress-phase-legend is-scale-in"><i aria-hidden="true"></i>二次入场</span><span class="entry-progress-phase-legend is-wait-bullish"><i aria-hidden="true"></i>等待阳线</span><span class="entry-progress-phase-legend is-wait-bearish"><i aria-hidden="true"></i>阳线已确认 · 等阴线</span><span class="entry-progress-zone">北京时间 UTC+8</span></div></div><div class="entry-progress-timeline-track">';
+      html += '<div class="entry-progress-timeline"><div class="entry-progress-timeline-head"><div class="entry-progress-timeline-title"><strong>共同入场窗口</strong><span>' + escapeHtml(timelineCaption) + '</span></div><div class="entry-progress-timeline-legend"><span class="entry-progress-phase-legend is-initial"><i aria-hidden="true"></i>首笔入场</span><span class="entry-progress-phase-legend is-scale-in"><i aria-hidden="true"></i>二次入场</span><span class="entry-progress-phase-legend is-wait-bullish"><i aria-hidden="true"></i>等待阳线</span><span class="entry-progress-phase-legend is-wait-bearish"><i aria-hidden="true"></i>阳后等阴线</span></div></div><div class="entry-progress-timeline-track">';
       if (timeline.groups.length) {
         for (var k = 0; k < timeline.groups.length; k += 1) {
           var group = timeline.groups[k];
@@ -820,8 +838,8 @@
         html += '<div class="entry-progress-timeline-event entry-progress-timeline-next is-next"><div class="entry-progress-timeline-event-top"><span class="entry-progress-timeline-event-state">下一检查</span><time>' + escapeHtml(nextCheckLabel) + "</time></div><span>待检查 " + waitingTotal + " 个信号</span></div>";
       }
       html += "</div></div>"
-        + '<div class="entry-progress-details' + (showDetails ? "" : " is-collapsed") + '">'
-        + '<div class="entry-progress-header"><span>账号与进度</span><span>当前判断</span><span>等待信号</span><span>下一动作</span></div>';
+        + '<div class="entry-progress-details' + (showDetails ? "" : " is-collapsed") + '" role="table" aria-label="各账号今日开单明细">'
+        + '<div class="entry-progress-header" role="row"><span role="columnheader">账号与进度</span><span role="columnheader">当前判断</span><span role="columnheader">等待信号</span><span role="columnheader">下一动作</span></div>';
 
       for (var n = 0; n < accountRows.length; n += 1) {
         var account = accountRows[n] || {};
@@ -829,11 +847,11 @@
         var rawAid = String(account.account_id || "");
         var aid = escapeHtml(rawAid);
         if (!accProgress || accProgress.is_today === false) {
-          html += '<div class="entry-progress-row">'
-            + '<div class="entry-progress-account progress-account-cell"><div class="entry-progress-account-head"><strong>' + aid + '</strong><span class="entry-progress-account-status status-warn">未开始</span></div><span class="entry-progress-account-meta">今日尚未执行</span><div class="entry-progress-progress-line"><strong>0</strong><span>/ 0 入场动作</span><em>0%</em></div><div class="entry-progress-meter" role="progressbar" aria-label="' + escapeHtml(rawAid + " 入场动作进度") + '" aria-valuenow="0" aria-valuemin="0" aria-valuemax="100"></div></div>'
-            + '<div class="entry-progress-phase"><span class="entry-progress-phase-label phase-initial">未开始</span><span class="entry-progress-phase-note">等待今日榜单</span></div>'
-            + '<div class="entry-progress-waiting-cell"><div class="entry-progress-waiting-list"><div class="entry-progress-waiting-empty">等待今日榜单</div></div></div>'
-            + '<div class="entry-progress-next-cell"><strong>--</strong><span>尚未开始</span></div></div>';
+          html += '<div class="entry-progress-row" role="row">'
+            + '<div class="entry-progress-account progress-account-cell" role="cell"><div class="entry-progress-account-head"><strong>' + aid + '</strong><span class="entry-progress-account-status status-warn">未开始</span></div><span class="entry-progress-account-meta">今日尚未执行</span><div class="entry-progress-progress-line"><strong>0</strong><span>/ 0 入场动作</span><em>0%</em></div><div class="entry-progress-meter" role="progressbar" aria-label="' + escapeHtml(rawAid + " 入场动作进度") + '" aria-valuenow="0" aria-valuemin="0" aria-valuemax="100"></div></div>'
+            + '<div class="entry-progress-phase" role="cell"><span class="entry-progress-phase-label phase-initial">未开始</span><span class="entry-progress-phase-note">等待今日榜单</span></div>'
+            + '<div class="entry-progress-waiting-cell" role="cell"><div class="entry-progress-waiting-list"><div class="entry-progress-waiting-empty">等待今日榜单</div></div></div>'
+            + '<div class="entry-progress-next-cell" role="cell"><strong>--</strong><span>尚未开始</span></div></div>';
           continue;
         }
         var target = Math.max(0, Number(accProgress.entry_action_target_count == null ? accProgress.target_count : accProgress.entry_action_target_count));
@@ -866,16 +884,16 @@
         var progressNoteClass = failed ? "bad" : (waiting ? "warn" : "ok");
         var accountStatusText = waiting ? "等待中" : st.text;
         var accountMeta = "启动 " + compactLocalTime(accProgress.started_at_local) + " · " + entryProgressWindow(accProgress);
-        html += '<div class="entry-progress-row">'
-          + '<div class="entry-progress-account progress-account-cell"><div class="entry-progress-account-head"><strong>' + aid + '</strong><span class="entry-progress-account-status ' + st.cls + '">' + escapeHtml(accountStatusText) + '</span></div><span class="entry-progress-account-meta">' + escapeHtml(accountMeta) + '</span><div class="entry-progress-progress-line"><strong>' + opened + "</strong><span>/ " + target + " 入场动作</span><em>" + Math.round(openedPct) + '%</em></div><div class="entry-progress-meter" role="progressbar" aria-label="' + escapeHtml(rawAid + " 入场动作进度") + '" aria-valuenow="' + Math.round(openedPct) + '" aria-valuemin="0" aria-valuemax="100"><span class="entry-progress-meter-initial" style="width:' + initialPct.toFixed(2) + '%"></span><span class="entry-progress-meter-scale-in" style="width:' + scaleInPct.toFixed(2) + '%"></span><span class="entry-progress-meter-waiting" style="width:' + waitingPct.toFixed(2) + '%"></span><span class="entry-progress-meter-failed" style="width:' + failedPct.toFixed(2) + '%"></span><span class="entry-progress-meter-skipped" style="width:' + skippedPct.toFixed(2) + '%"></span></div><div class="entry-progress-progress-foot"><span>入场动作</span><span class="' + progressNoteClass + '">' + escapeHtml(progressNoteParts.join(" · ")) + "</span></div></div>"
-          + '<div class="entry-progress-phase" aria-label="' + escapeHtml(st.text) + '"><span class="entry-progress-phase-label ' + phase.cls + " phase-" + escapeHtml(phase.variant || "unknown") + '">' + escapeHtml(phase.label) + '</span><span class="entry-progress-phase-note">' + escapeHtml(phase.note) + "</span></div>"
-          + '<div class="entry-progress-waiting-cell">' + waitingHtml + "</div>"
-          + '<div class="entry-progress-next-cell' + (waiting ? " is-waiting" : "") + '"><span class="entry-progress-next-cell-label">下一检查</span><strong>' + escapeHtml(nextText) + "</strong><span>" + escapeHtml(nextNote) + "</span></div></div>";
+        html += '<div class="entry-progress-row" role="row">'
+          + '<div class="entry-progress-account progress-account-cell" role="cell"><div class="entry-progress-account-head"><strong>' + aid + '</strong><span class="entry-progress-account-status ' + st.cls + '">' + escapeHtml(accountStatusText) + '</span></div><span class="entry-progress-account-meta">' + escapeHtml(accountMeta) + '</span><div class="entry-progress-progress-line"><strong>' + opened + "</strong><span>/ " + target + " 入场动作</span><em>" + Math.round(openedPct) + '%</em></div><div class="entry-progress-meter" role="progressbar" aria-label="' + escapeHtml(rawAid + " 入场动作进度") + '" aria-valuenow="' + Math.round(openedPct) + '" aria-valuemin="0" aria-valuemax="100"><span class="entry-progress-meter-initial" style="width:' + initialPct.toFixed(2) + '%"></span><span class="entry-progress-meter-scale-in" style="width:' + scaleInPct.toFixed(2) + '%"></span><span class="entry-progress-meter-waiting" style="width:' + waitingPct.toFixed(2) + '%"></span><span class="entry-progress-meter-failed" style="width:' + failedPct.toFixed(2) + '%"></span><span class="entry-progress-meter-skipped" style="width:' + skippedPct.toFixed(2) + '%"></span></div><div class="entry-progress-progress-foot"><span>入场动作</span><span class="' + progressNoteClass + '">' + escapeHtml(progressNoteParts.join(" · ")) + "</span></div></div>"
+          + '<div class="entry-progress-phase" role="cell" aria-label="' + escapeHtml(st.text) + '"><span class="entry-progress-phase-label ' + phase.cls + " phase-" + escapeHtml(phase.variant || "unknown") + '">' + escapeHtml(phase.label) + '</span><span class="entry-progress-phase-note">' + escapeHtml(phase.note) + "</span></div>"
+          + '<div class="entry-progress-waiting-cell" role="cell">' + waitingHtml + "</div>"
+          + '<div class="entry-progress-next-cell' + (waiting ? " is-waiting" : "") + '" role="cell"><span class="entry-progress-next-cell-label">下一检查</span><strong>' + escapeHtml(nextText) + "</strong><span>" + escapeHtml(nextNote) + "</span></div></div>";
       }
       html += "</div>";
       ops.patchHtmlIfChanged(entryProgressBoard, html);
       updateEntryProgressCountdown();
-      if (entryProgressUpdated) entryProgressUpdated.textContent = "数据更新时间 " + (latest || "--");
+      if (entryProgressUpdated) entryProgressUpdated.textContent = "更新 " + (latest || "--");
     }
 
     function createObserver() {
@@ -931,7 +949,6 @@
         return height - ((value - min) / span) * height;
       }
 
-      // Map X coordinates by real timestamps when available so sparse data never fakes uniform ramps.
       var times = pts.map(function (p) { return p && Number.isFinite(p.ms) ? p.ms : NaN; });
       var validTimes = times.filter(Number.isFinite);
       var useTimeAxis = validTimes.length === values.length && validTimes.length >= 2;
@@ -954,6 +971,8 @@
         renderedPoints.push({
           x: x,
           y: y,
+          xPct: (x / width) * 100,
+          yPct: (y / height) * 100,
           ratio: ratio,
           val: values[j],
           equity: pts[j] ? pts[j].equity : null,
@@ -980,81 +999,33 @@
     function renderPortfolioStopState(aid, stop, metrics) {
       var meterLabel = accountElement("stop-meter-label", aid);
       var meter = accountElement("stop-meter-fill", aid);
-      var configuredLossPct = stop && ops.toNum(stop.loss_pct) > 0 ? ops.toNum(stop.loss_pct) : portfolioStopPct;
+      var meterTrack = accountElement("stop-meter-track", aid);
+      var state = ops.evaluatePortfolioStopState(stop, metrics, {
+        enabled: portfolioStopEnabled,
+        fallbackPct: portfolioStopPct
+      });
 
       if (metrics) {
-        var ddTone = ops.classifyDrawdownTone(metrics.currentDrawdownPct, configuredLossPct);
+        var ddTone = ops.classifyDrawdownTone(metrics.currentDrawdownPct, state.configuredLossPct);
         setAccountMetric("current-drawdown", aid, fmt(metrics.currentDrawdownPct, 2) + "%", ddTone ? "status-" + ddTone : "");
       } else {
         setAccountMetric("current-drawdown", aid, "--", "");
       }
 
-      if (!portfolioStopEnabled) {
-        setAccountMetric("stop-distance", aid, "未启用", "status-warn");
-        setAccountMetric("risk-state", aid, "组合止损未启用", "status-warn");
-        if (meterLabel) { meterLabel.textContent = "未启用"; meterLabel.className = "stop-meter-label status-warn"; }
-        if (meter) { meter.style.setProperty("--meter-scale", "0"); meter.className = "stop-meter-fill status-warn"; }
-        return;
-      }
-      if (!stop || !stop.status) {
-        setAccountMetric("stop-distance", aid, "待同步", "status-warn");
-        setAccountMetric("risk-state", aid, "等待后端止损状态", "status-warn");
-        if (meterLabel) { meterLabel.textContent = "待同步"; meterLabel.className = "stop-meter-label status-warn"; }
-        if (meter) { meter.style.setProperty("--meter-scale", "0"); meter.className = "stop-meter-fill status-warn"; }
-        return;
-      }
-
-      var status = String(stop.status || "").toUpperCase();
-      var distance = ops.toNum(stop.distance_pct);
-      var backendReturn = ops.toNum(stop.current_return_pct);
-      var currentReturn = backendReturn !== null ? backendReturn : (metrics ? metrics.currentReturnPct : null);
-      var riskCls = "status-ok";
-      var riskText = "风险正常";
-      var stopDistanceText = distance !== null ? fmt(distance, 2) + "%" : "--";
-      // Unified consumed stop-loss budget (0% safe -> 100% triggered), matching Detail page!
-      var consumedPct = currentReturn !== null && currentReturn < 0
-        ? Math.min(100, (Math.abs(currentReturn) / configuredLossPct) * 100)
-        : 0;
-      var meterText = consumedPct <= 0 ? "未消耗" : "已耗 " + fmt(consumedPct, 0) + "%";
-
-      if (status === "TRIGGERED_COMPLETE") {
-        riskCls = "status-bad";
-        riskText = "组合止损已完成";
-        stopDistanceText = "已完成";
-        meterText = "已止损 100%";
-        consumedPct = 100;
-      } else if (status === "CLOSING") {
-        riskCls = "status-bad";
-        riskText = "组合止损执行中";
-        stopDistanceText = "执行中";
-        meterText = stop.state_inconsistent ? "等待对账 100%" : "平仓中 100%";
-        consumedPct = 100;
-      } else if (status === "THRESHOLD_REACHED") {
-        riskCls = "status-bad";
-        riskText = "已到止损阈值";
-        stopDistanceText = distance !== null ? "已超出 " + fmt(Math.abs(distance), 2) + "%" : "已到阈值";
-        meterText = "已达阈值 100%";
-        consumedPct = 100;
-      } else if (status === "MONITORING" && distance !== null) {
-        riskCls = distance <= 1 ? "status-warn" : "status-ok";
-        riskText = distance <= 1 ? "接近组合止损" : "风险正常";
-      } else {
-        riskCls = "status-warn";
-        riskText = "等待后端止损状态";
-        stopDistanceText = "待同步";
-        meterText = "待同步";
-        consumedPct = 0;
-      }
-
-      setAccountMetric("stop-distance", aid, stopDistanceText, riskCls);
-      setAccountMetric("risk-state", aid, riskText, riskCls);
+      var riskCls = "status-" + state.tone;
+      setAccountMetric("stop-distance", aid, state.distanceText, riskCls);
+      setAccountMetric("risk-state", aid, state.stateText, riskCls);
       if (meterLabel) {
-        meterLabel.textContent = meterText;
+        meterLabel.textContent = state.meterText;
         meterLabel.className = "stop-meter-label " + riskCls;
       }
       if (meter) {
-        meter.style.setProperty("--meter-scale", (consumedPct / 100).toFixed(4));
+        meter.style.setProperty("--meter-scale", (state.consumedPct / 100).toFixed(4));
         meter.className = "stop-meter-fill " + riskCls;
+      }
+      if (meterTrack) {
+        meterTrack.setAttribute("aria-valuenow", String(Math.round(state.consumedPct)));
+        meterTrack.setAttribute("aria-valuetext", state.stateText + "，" + state.meterText);
       }
     }
 
@@ -1070,8 +1041,12 @@
       var backendReturn = stop ? ops.toNum(stop.current_return_pct) : null;
 
       if (errMsg && !cached) {
-        box.className = "spark-box";
-        box.innerHTML = '<div class="spark-empty is-error"><span>曲线加载失败</span><button class="ops-btn" type="button" data-retry-curve="' + escapeHtml(aid) + '">重试</button></div>';
+        var errSig = "err:" + errMsg;
+        if (curveRenderSig[aid] !== errSig) {
+          curveRenderSig[aid] = errSig;
+          box.className = "spark-box";
+          box.innerHTML = '<div class="spark-empty is-error"><span>曲线加载失败</span><button class="ops-btn" type="button" data-retry-curve="' + escapeHtml(aid) + '">重试</button></div>';
+        }
         if (mode !== "readonly") renderPortfolioStopState(aid, stop, null);
         return;
       }
@@ -1087,8 +1062,12 @@
         : null;
 
       if (!metrics) {
-        box.className = "spark-box";
-        box.innerHTML = '<div class="spark-empty">' + (curveInFlight[aid] ? "加载中..." : "暂无曲线") + "</div>";
+        var emptySig = "empty:" + (curveInFlight[aid] ? "1" : "0");
+        if (curveRenderSig[aid] !== emptySig) {
+          curveRenderSig[aid] = emptySig;
+          box.className = "spark-box";
+          box.innerHTML = '<div class="spark-empty">' + (curveInFlight[aid] ? "加载中..." : "暂无曲线") + "</div>";
+        }
         if (mode !== "readonly" && backendReturn !== null) {
           var tone = ops.classifyReturnTone(backendReturn, portfolioStopPct, stop && stop.status);
           var backendCls = tone === "ok" ? "spark-up" : (tone === "bad" ? "spark-down" : "spark-flat");
@@ -1105,26 +1084,35 @@
       var tone2 = ops.classifyReturnTone(changePct, portfolioStopPct, stop && stop.status);
       var deltaCls = tone2 === "ok" ? "spark-up" : (tone2 === "bad" ? "spark-down" : "spark-flat");
       var width = mode === "readonly" ? 300 : 320;
-      var height = mode === "readonly" ? 50 : 126;
+      var height = mode === "readonly" ? 50 : 98;
       var includeStop = mode !== "readonly" && portfolioStopEnabled;
       var geometry = chartGeometry(metrics, width, height, includeStop, metrics.configuredLossPct);
       curveRenderData[aid] = geometry.renderedPoints;
 
       var signedReturn = (changePct >= 0 ? "+" : "") + fmt(changePct, 2) + "%";
-      var svgLabel = aid + " 本账户周期权益曲线，当前变化 " + signedReturn + "，回撤 " + fmt(metrics.currentDrawdownPct, 2) + "%";
-      var lastPt = geometry.renderedPoints[geometry.renderedPoints.length - 1];
+      var nextSig = deltaCls + "|" + signedReturn + "|" + geometry.points + "|" + (includeStop ? geometry.stopY.toFixed(1) : "0");
+      if (curveRenderSig[aid] !== nextSig) {
+        curveRenderSig[aid] = nextSig;
+        var svgLabel = aid + " 本账户周期权益曲线，当前变化 " + signedReturn + "，回撤 " + fmt(metrics.currentDrawdownPct, 2) + "%";
+        var lastPt = geometry.renderedPoints[geometry.renderedPoints.length - 1];
+        var endDotHtml = lastPt
+          ? '<span class="spark-end-dot" aria-hidden="true" style="left:' + lastPt.xPct.toFixed(2) + "%;top:" + lastPt.yPct.toFixed(2) + '%"></span>'
+          : "";
 
-      box.className = "spark-box " + deltaCls;
-      box.innerHTML = ''
-        + '<svg class="spark-svg" viewBox="0 0 ' + width + " " + height + '" preserveAspectRatio="none" role="img" aria-label="' + escapeHtml(svgLabel) + '">'
-        + "<title>" + escapeHtml(svgLabel) + "</title>"
-        + '<line class="spark-zero-line" x1="0" x2="' + width + '" y1="' + geometry.zeroY.toFixed(2) + '" y2="' + geometry.zeroY.toFixed(2) + '"></line>'
-        + (includeStop ? '<line class="spark-stop-line" x1="0" x2="' + width + '" y1="' + geometry.stopY.toFixed(2) + '" y2="' + geometry.stopY.toFixed(2) + '"></line>' : "")
-        + '<polygon class="spark-area" points="' + geometry.areaPoints + '"></polygon>'
-        + '<polyline class="spark-path" points="' + geometry.points + '"></polyline>'
-        + (lastPt ? '<circle class="spark-point-dot" cx="' + lastPt.x.toFixed(2) + '" cy="' + lastPt.y.toFixed(2) + '" r="3"></circle>' : "")
-        + "</svg>"
-        + '<div class="spark-hover-tip" hidden></div>';
+        box.className = "spark-box " + deltaCls;
+        box.innerHTML = ''
+          + '<svg class="spark-svg" viewBox="0 0 ' + width + " " + height + '" preserveAspectRatio="none" role="img" aria-label="' + escapeHtml(svgLabel) + '">'
+          + "<title>" + escapeHtml(svgLabel) + "</title>"
+          + '<line class="spark-zero-line" x1="0" x2="' + width + '" y1="' + geometry.zeroY.toFixed(2) + '" y2="' + geometry.zeroY.toFixed(2) + '"></line>'
+          + (includeStop ? '<line class="spark-stop-line" x1="0" x2="' + width + '" y1="' + geometry.stopY.toFixed(2) + '" y2="' + geometry.stopY.toFixed(2) + '"></line>' : "")
+          + '<polygon class="spark-area" points="' + geometry.areaPoints + '"></polygon>'
+          + '<polyline class="spark-path" points="' + geometry.points + '"></polyline>'
+          + "</svg>"
+          + endDotHtml
+          + '<span class="spark-crosshair" aria-hidden="true" hidden></span>'
+          + '<span class="spark-active-dot" aria-hidden="true" hidden></span>'
+          + '<div class="spark-hover-tip" hidden></div>';
+      }
 
       setAccountMetric("spark-delta", aid, signedReturn, deltaCls);
       if (mode === "readonly") return;
@@ -1150,13 +1138,12 @@
       if (curveAbortControllers[aid]) {
         try { curveAbortControllers[aid].abort(); } catch (e) {}
       }
-      var controller = new AbortController();
-      curveAbortControllers[aid] = controller;
-      fetch(url, { signal: controller.signal, cache: "no-store" })
-        .then(function (res) {
-          if (!res.ok) throw new Error("HTTP " + res.status);
-          return res.json();
-        })
+      var controller = typeof AbortController !== "undefined" ? new AbortController() : null;
+      if (controller) curveAbortControllers[aid] = controller;
+      ops.fetchJsonWithTimeout(url, {
+        signal: controller ? controller.signal : null,
+        timeoutMs: 15000
+      })
         .then(function (payload) {
           curveInFlight[aid] = false;
           curveErrors[aid] = "";
@@ -1179,7 +1166,7 @@
             ts: Date.now()
           };
           renderCurve(aid);
-          renderCommandBar();
+          scheduleCommandBarRender();
         })
         .catch(function (err) {
           curveInFlight[aid] = false;
@@ -1218,11 +1205,11 @@
     function computeVenueState(aid, row) {
       var stopped = isAccountStopped(aid, row);
       var worst = worstAccountTaskStatus(row);
-      if (stopped) return { cls: "status-bad", label: "Binance Futures · 组合止损已触发" };
-      if (worst === "FAILED") return { cls: "status-bad", label: "Binance Futures · 存在失败任务" };
-      if (worst === "PARTIAL") return { cls: "status-warn", label: "Binance Futures · 部分任务异常" };
-      if (worst === "SUCCESS" || worst === "RUNNING") return { cls: "status-ok", label: "Binance Futures · 运行正常" };
-      return { cls: "status-warn", label: "Binance Futures · 状态待同步" };
+      if (stopped) return { cls: "status-bad", label: "组合止损已触发" };
+      if (worst === "FAILED") return { cls: "status-bad", label: "存在失败任务" };
+      if (worst === "PARTIAL") return { cls: "status-warn", label: "部分任务异常" };
+      if (worst === "SUCCESS" || worst === "RUNNING") return { cls: "status-ok", label: "运行正常" };
+      return { cls: "status-warn", label: "状态待同步" };
     }
 
     function patchExistingCards(rows) {
@@ -1254,11 +1241,10 @@
           if (pfEl) pfEl.textContent = stats.profit_factor != null ? fmt(stats.profit_factor, 2) : "--";
         } else {
           var venueInfo = computeVenueState(aid, r);
-          var venueEl = card.querySelector(".venue-state");
-          if (venueEl) {
-            venueEl.className = "venue-state " + venueInfo.cls;
-            venueEl.setAttribute("title", venueInfo.label);
-            venueEl.setAttribute("aria-label", venueInfo.label);
+          var aidLink = card.querySelector(".aid-link");
+          if (aidLink) {
+            aidLink.className = "aid-link " + venueInfo.cls;
+            aidLink.setAttribute("title", aid + " · " + venueInfo.label);
           }
           var openEl = card.querySelector("[data-field='open-positions']");
           if (openEl) openEl.textContent = fmt(r.open_positions, 0);
@@ -1272,12 +1258,6 @@
           if (highlightsEl && highlightsEl.getAttribute("data-note") !== noteKey) {
             highlightsEl.innerHTML = ops.formatStrategyHighlights(r.strategy_note, allNotes, 2, "strategy-tag");
             highlightsEl.setAttribute("data-note", noteKey);
-          }
-          var stopThresholdEl = card.querySelector("[data-field='stop-threshold-label']");
-          if (stopThresholdEl) {
-            stopThresholdEl.textContent = portfolioStopEnabled
-              ? ("止损阈值 -" + fmt(r.portfolio_loss_cut ? r.portfolio_loss_cut.loss_pct : portfolioStopPct, 2) + "%")
-              : "组合止损未启用";
           }
         }
       }
@@ -1307,7 +1287,10 @@
       }
 
       if (curveObserver) curveObserver.disconnect();
+      curveRenderSig = {};
       var allManagedNotes = managedStrategyNotes(rows);
+      var arrowIcon = '<svg class="ops-icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 11L11 5"/><path d="M6.5 5H11v4.5"/></svg>';
+
       for (var j = 0; j < rows.length; j += 1) {
         var row = rows[j] || {};
         var rowMode = String(row.mode || "full").toLowerCase();
@@ -1325,7 +1308,7 @@
           var profitFactorText = stats.profit_factor != null ? fmt(stats.profit_factor, 2) : "--";
           var pnlCls = netPnl !== null ? (netPnl >= 0 ? "status-ok" : "status-bad") : "";
           readonlyHtml += '<article class="readonly-strip" id="account-card-' + safeAid + '" data-account-id="' + safeAid + '">'
-            + '<div class="readonly-identity"><div><span class="readonly-id">' + safeAid + '</span><span class="readonly-badge">只读监控</span></div><div class="readonly-source">Binance Futures</div></div>'
+            + '<div class="readonly-identity"><a class="readonly-id-link" href="' + base + '">' + safeAid + '<span class="readonly-badge">只读监控</span></a></div>'
             + '<div class="readonly-metric"><span class="metric-label">余额 (USDT)</span><strong class="metric-value" data-field="wallet-balance">' + ops.fmtUsdt(row.wallet_balance_usdt, 2) + "</strong></div>"
             + '<div class="readonly-metric"><span class="metric-label">近30日净盈亏</span><strong class="metric-value pnl-value ' + pnlCls + '" data-field="readonly-pnl">' + pnlText + "</strong></div>"
             + '<div class="readonly-metric"><span class="metric-label">胜率</span><strong class="metric-value" data-field="readonly-win-rate">' + winRateText + "</strong></div>"
@@ -1333,8 +1316,8 @@
             + '<div class="readonly-metric readonly-secondary"><span class="metric-label">盈亏比</span><strong class="metric-value" data-field="readonly-pf">' + profitFactorText + "</strong></div>"
             + '<div class="readonly-chart"><div>'
             + '<div class="spark-box" data-account-id="' + safeAid + '"><div class="spark-empty">加载中...</div></div>'
-            + '</div><div class="readonly-chart-meta"><span class="metric-label" title="按账户周期首条权益快照计算，含浮盈亏，不等同已实现净盈亏">本周期权益变化</span><strong class="metric-value spark-delta" data-account-id="' + safeAid + '">--</strong></div></div>'
-            + '<div class="readonly-action"><a class="detail-link" href="' + base + '" aria-label="查看 ' + safeAid + ' 余额曲线与交易统计">余额曲线 / 交易统计</a></div>'
+            + '</div><div class="readonly-chart-meta"><span class="metric-label" title="按账户周期首条权益快照计算，含浮盈亏">本周期变化</span><strong class="metric-value spark-delta" data-account-id="' + safeAid + '">--</strong></div></div>'
+            + '<div class="readonly-action"><a class="detail-link" href="' + base + '" aria-label="查看 ' + safeAid + ' 余额曲线与交易统计">详情 ' + arrowIcon + "</a></div>"
             + "</article>";
         } else {
           var venueInfo = computeVenueState(rowAid, row);
@@ -1342,13 +1325,14 @@
           var noteAttr = escapeHtml(String(row.strategy_note || ""));
           var highlightsHtml = ops.formatStrategyHighlights(row.strategy_note, allManagedNotes, 2, "strategy-tag");
           managedHtml += '<article class="account-card" id="account-card-' + safeAid + '" data-account-id="' + safeAid + '">'
-            + '<header class="account-card-head"><span class="aid">' + safeAid + '</span><div class="account-head-actions">'
+            + '<header class="account-card-head">'
+            + '<a class="aid-link ' + venueInfo.cls + '" href="' + base + '" title="' + safeAid + ' · ' + escapeHtml(venueInfo.label) + '"><span class="venue-dot" aria-hidden="true"></span>' + safeAid + '</a>'
+            + '<div class="account-head-actions">'
             + '<div class="strategy-popover-wrap"><button class="strategy-trigger" type="button" aria-expanded="false" aria-controls="' + popoverId + '" aria-label="' + safeAid + ' 策略配置">策略</button>'
-            + '<div id="' + popoverId + '" class="strategy-popover" hidden aria-label="' + safeAid + ' 策略配置">'
+            + '<div id="' + popoverId + '" class="strategy-popover" hidden role="region" aria-label="' + safeAid + ' 策略配置">'
             + '<div class="strategy-popover-head"><div class="strategy-popover-meta"><strong class="strategy-popover-title">策略配置</strong><span class="strategy-popover-subtitle">' + safeAid + '</span></div><button class="strategy-popover-close" type="button" aria-label="关闭策略说明">×</button></div>'
             + '<div class="strategy-popover-tags" data-note="' + noteAttr + '">' + ops.formatStrategyTags(row.strategy_note, "strategy-tag") + "</div></div></div>"
-            + '<span class="venue-state ' + venueInfo.cls + '" title="' + escapeHtml(venueInfo.label) + '" aria-label="' + escapeHtml(venueInfo.label) + '">Binance Futures<span class="status-dot" aria-hidden="true"></span></span>'
-            + '<a class="detail-link" href="' + base + '" aria-label="查看 ' + safeAid + ' 账户详情">详情</a></div></header>'
+            + '<a class="detail-link" href="' + base + '" aria-label="查看 ' + safeAid + ' 账户详情">详情 ' + arrowIcon + "</a></div></header>"
             + '<div class="account-card-body">'
             + (highlightsHtml ? '<div class="card-strategy-highlights" data-field="strategy-highlights" data-note="' + noteAttr + '">' + highlightsHtml + "</div>" : "")
             + '<div class="account-primary">'
@@ -1356,15 +1340,13 @@
             + '<div class="metric"><span class="metric-label">' + String(portfolioStopHour).padStart(2, "0") + ":" + String(portfolioStopMinute).padStart(2, "0") + ' 以来收益</span><strong class="metric-value return-value spark-delta" data-account-id="' + safeAid + '">--</strong></div>'
             + "</div>"
             + '<div class="account-secondary">'
-            + '<div class="metric"><span class="metric-label">当前持仓数</span><strong class="metric-value" data-field="open-positions">' + fmt(row.open_positions, 0) + "</strong></div>"
-            + '<div class="metric"><span class="metric-label">距高点回撤</span><strong class="metric-value current-drawdown" data-account-id="' + safeAid + '">--</strong></div>'
+            + '<div class="metric"><span class="metric-label">当前持仓</span><strong class="metric-value" data-field="open-positions">' + fmt(row.open_positions, 0) + "</strong></div>"
+            + '<div class="metric"><span class="metric-label">高点回撤</span><strong class="metric-value current-drawdown" data-account-id="' + safeAid + '">--</strong></div>'
             + '<div class="metric"><span class="metric-label">距组合止损</span><strong class="metric-value stop-distance" data-account-id="' + safeAid + '">--</strong></div>'
             + "</div>"
-            + '<div class="risk-summary"><span>账户周期风险</span><strong class="risk-state" data-account-id="' + safeAid + '">计算中</strong></div>'
             + '<div class="spark-block">'
-            + '<div class="spark-title"><span class="label">本账户周期权益曲线</span><span class="label" data-field="stop-threshold-label">' + (portfolioStopEnabled ? ("止损阈值 -" + fmt(row.portfolio_loss_cut ? row.portfolio_loss_cut.loss_pct : portfolioStopPct, 2) + "%") : "组合止损未启用") + "</span></div>"
             + '<div class="spark-box" data-account-id="' + safeAid + '"><div class="spark-empty">加载中...</div></div>'
-            + '<div class="stop-meter"><span>已耗止损</span><span class="stop-meter-track"><span class="stop-meter-fill" data-account-id="' + safeAid + '"></span></span><span class="stop-meter-label" data-account-id="' + safeAid + '">计算中</span></div>'
+            + '<div class="stop-meter"><strong class="risk-state" data-account-id="' + safeAid + '">计算中</strong><span class="stop-meter-track" role="progressbar" aria-label="' + safeAid + ' 组合止损预算消耗" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"><span class="stop-meter-fill" data-account-id="' + safeAid + '"></span></span><span class="stop-meter-label" data-account-id="' + safeAid + '">--</span></div>'
             + "</div></div>"
             + "</article>";
         }
@@ -1379,7 +1361,7 @@
     function renderTaskBoardHeader(rows) {
       if (!taskUpdatedAt) return;
       var latest = latestTaskTime(rows || []);
-      taskUpdatedAt.textContent = "数据更新时间 " + (latest || "--");
+      taskUpdatedAt.textContent = "更新 " + (latest || "--");
       ["all", "anomaly", "symbols"].forEach(function (key) {
         var btn = document.getElementById("task-filter-" + key);
         if (!btn) return;
@@ -1421,12 +1403,12 @@
           + "</div>"
           + '<span class="task-last-run ' + taskStatusCls(headerStatus) + '">' + escapeHtml(taskStatusText(headerStatus)) + "</span>"
           + "</div>"
-          + '<div class="task-table">'
-          + '<div class="task-head">'
-          + '<span class="task-col-h">任务</span>'
-          + '<span class="task-col-h">状态</span>'
-          + '<span class="task-col-h">时间</span>'
-          + '<span class="task-col-h">结果</span>'
+          + '<div class="task-table" role="table" aria-label="' + safeAid + ' 任务执行记录">'
+          + '<div class="task-head" role="row">'
+          + '<span class="task-col-h" role="columnheader">任务</span>'
+          + '<span class="task-col-h" role="columnheader">状态</span>'
+          + '<span class="task-col-h" role="columnheader">时间</span>'
+          + '<span class="task-col-h" role="columnheader">结果</span>'
           + "</div>"
           + taskRowsForAccount(r)
           + "</div>"
@@ -1485,7 +1467,7 @@
         if (Object.prototype.hasOwnProperty.call(rowDetail, "tasks")) row.tasks = rowDetail.tasks;
         if (Object.prototype.hasOwnProperty.call(rowDetail, "entry_progress")) row.entry_progress = rowDetail.entry_progress;
       }
-      renderCommandBar(payload);
+      scheduleCommandBarRender();
       patchExistingCards(summaryRows);
       renderEntryProgress();
       renderTaskBoard();
@@ -1501,12 +1483,11 @@
       }
       summaryDetailsRequestInFlight = true;
       lastDetailsFetchAt = Date.now();
-      summaryDetailsAbortController = new AbortController();
-      fetch(summaryDetailsApi + "?_=" + Date.now(), { signal: summaryDetailsAbortController.signal, cache: "no-store" })
-        .then(function (res) {
-          if (!res.ok) throw new Error("HTTP " + res.status);
-          return res.json();
-        })
+      summaryDetailsAbortController = typeof AbortController !== "undefined" ? new AbortController() : null;
+      ops.fetchJsonWithTimeout(summaryDetailsApi + "?_=" + Date.now(), {
+        signal: summaryDetailsAbortController ? summaryDetailsAbortController.signal : null,
+        timeoutMs: 15000
+      })
         .then(function (payload) {
           summaryDetailsRequestInFlight = false;
           detailsHydratedOnce = true;
@@ -1523,7 +1504,9 @@
     function setOverviewRefreshBusy(busy) {
       if (!overviewRefreshBtn) return;
       overviewRefreshBtn.disabled = !!busy;
-      overviewRefreshBtn.textContent = busy ? "刷新中..." : "刷新 ↻";
+      var label = overviewRefreshBtn.querySelector(".btn-label");
+      if (label) label.textContent = busy ? "刷新中..." : "刷新";
+      else overviewRefreshBtn.textContent = busy ? "刷新中..." : "刷新";
     }
 
     var summaryAbortController = null;
@@ -1535,20 +1518,19 @@
         try { summaryAbortController.abort(); } catch (e) {}
       }
       summaryRequestInFlight = true;
-      setOverviewRefreshBusy(true);
-      summaryAbortController = new AbortController();
-      fetch(summaryFastApi + "?_=" + Date.now(), { signal: summaryAbortController.signal, cache: "no-store" })
-        .then(function (res) {
-          if (!res.ok) throw new Error("HTTP " + res.status);
-          return res.json();
-        })
+      if (force) setOverviewRefreshBusy(true);
+      summaryAbortController = typeof AbortController !== "undefined" ? new AbortController() : null;
+      ops.fetchJsonWithTimeout(summaryFastApi + "?_=" + Date.now(), {
+        signal: summaryAbortController ? summaryAbortController.signal : null,
+        timeoutMs: 15000
+      })
         .then(function (payload) {
           summaryRequestInFlight = false;
-          setOverviewRefreshBusy(false);
+          if (force) setOverviewRefreshBusy(false);
           setOverviewError("summary", "");
           summaryRows = mergeFastRows(payload.accounts || []);
           ops.renderNavAccounts(summaryRows);
-          renderCommandBar(payload);
+          scheduleCommandBarRender();
           renderCards();
           renderEntryProgress();
           renderTaskBoard();
@@ -1558,7 +1540,7 @@
         })
         .catch(function (err) {
           summaryRequestInFlight = false;
-          setOverviewRefreshBusy(false);
+          if (force) setOverviewRefreshBusy(false);
           if (err && err.name === "AbortError") return;
           setOverviewError("summary", "账户总览刷新失败：" + (err && err.message ? err.message : "网络异常") + "，页面可能不是最新数据");
         });
@@ -1568,6 +1550,7 @@
       lastDetailsFetchAt = 0;
       curveCache = {};
       curveErrors = {};
+      curveRenderSig = {};
       fetchSummary({ force: true });
       fetchHealth();
     }
@@ -1579,6 +1562,22 @@
         var reduce = ops.prefersReducedMotion();
         panel.scrollIntoView({ behavior: reduce ? "auto" : "smooth", block: "start" });
         try { panel.focus({ preventScroll: true }); } catch (e) {}
+      }
+    }
+
+    function clampPopoverToViewport(pop) {
+      if (!pop) return;
+      pop.style.setProperty("--popover-shift-x", "0px");
+      var rect = pop.getBoundingClientRect();
+      var margin = 12;
+      var shift = 0;
+      if (rect.left < margin) {
+        shift = margin - rect.left;
+      } else if (rect.right > window.innerWidth - margin) {
+        shift = (window.innerWidth - margin) - rect.right;
+      }
+      if (shift !== 0) {
+        pop.style.setProperty("--popover-shift-x", Math.round(shift) + "px");
       }
     }
 
@@ -1596,10 +1595,64 @@
           if (restoreFocus && !focusTarget) focusTarget = button;
         }
         var pop = wraps[i].querySelector(".strategy-popover");
-        if (pop) pop.hidden = true;
+        if (pop) {
+          pop.hidden = true;
+          pop.style.setProperty("--popover-shift-x", "0px");
+        }
       }
       if (restoreFocus && focusTarget && focusTarget.focus) {
         focusTarget.focus();
+      }
+    }
+
+    var hoverState = { box: null, rect: null, rafId: 0, clientX: 0 };
+
+    function renderSparkHover() {
+      hoverState.rafId = 0;
+      var box = hoverState.box;
+      if (!box) return;
+      var aid = box.getAttribute("data-account-id");
+      var pts = aid ? curveRenderData[aid] : null;
+      var tip = box.querySelector(".spark-hover-tip");
+      var crosshair = box.querySelector(".spark-crosshair");
+      var activeDot = box.querySelector(".spark-active-dot");
+      if (!pts || !pts.length || !tip) return;
+      var rect = hoverState.rect || box.getBoundingClientRect();
+      if (!rect.width) return;
+      var ratio = Math.max(0, Math.min(1, (hoverState.clientX - rect.left) / rect.width));
+      var nearest = pts[0];
+      var bestDist = Infinity;
+      for (var i = 0; i < pts.length; i += 1) {
+        var d = Math.abs(pts[i].ratio - ratio);
+        if (d < bestDist) { bestDist = d; nearest = pts[i]; }
+      }
+      var timePart = nearest.t ? ops.formatBeijingTime(nearest.t) + " · " : "";
+      var eqPart = nearest.equity != null ? ops.fmtUsdt(nearest.equity, 2) + " · " : "";
+      tip.textContent = timePart + eqPart + ops.fmtPct(nearest.val);
+      tip.classList.toggle("is-right", nearest.xPct < 48);
+      tip.hidden = false;
+      if (crosshair) {
+        crosshair.style.left = nearest.xPct.toFixed(2) + "%";
+        crosshair.hidden = false;
+      }
+      if (activeDot) {
+        activeDot.style.left = nearest.xPct.toFixed(2) + "%";
+        activeDot.style.top = nearest.yPct.toFixed(2) + "%";
+        activeDot.hidden = false;
+      }
+    }
+
+    function clearSparkHover(box) {
+      if (!box) return;
+      var tip = box.querySelector(".spark-hover-tip");
+      var crosshair = box.querySelector(".spark-crosshair");
+      var activeDot = box.querySelector(".spark-active-dot");
+      if (tip) tip.hidden = true;
+      if (crosshair) crosshair.hidden = true;
+      if (activeDot) activeDot.hidden = true;
+      if (hoverState.box === box) {
+        hoverState.box = null;
+        hoverState.rect = null;
       }
     }
 
@@ -1628,41 +1681,41 @@
         closeStrategyPopovers(wrap, false);
         wrap.classList.toggle("is-open", shouldOpen);
         if (card) card.classList.toggle("has-open-popover", shouldOpen);
-        if (pop) pop.hidden = !shouldOpen;
+        if (pop) {
+          pop.hidden = !shouldOpen;
+          if (shouldOpen) clampPopoverToViewport(pop);
+        }
         trigger.setAttribute("aria-expanded", shouldOpen ? "true" : "false");
       });
 
-      // Lightweight hover readout on SVG sparklines
       cards.addEventListener("pointermove", function (event) {
+        if (event.pointerType === "touch") return;
         var box = event.target && event.target.closest ? event.target.closest(".spark-box") : null;
         if (!box) return;
-        var aid = box.getAttribute("data-account-id");
-        var pts = aid ? curveRenderData[aid] : null;
-        var tip = box.querySelector(".spark-hover-tip");
-        if (!pts || !pts.length || !tip) return;
-        var rect = box.getBoundingClientRect();
-        if (!rect.width) return;
-        var ratio = Math.max(0, Math.min(1, (event.clientX - rect.left) / rect.width));
-        var nearest = pts[0];
-        var bestDist = Infinity;
-        for (var i = 0; i < pts.length; i += 1) {
-          var d = Math.abs(pts[i].ratio - ratio);
-          if (d < bestDist) { bestDist = d; nearest = pts[i]; }
+        if (hoverState.box !== box) {
+          if (hoverState.box) clearSparkHover(hoverState.box);
+          hoverState.box = box;
+          hoverState.rect = box.getBoundingClientRect();
         }
-        var timePart = nearest.t ? ops.formatBeijingTime(nearest.t) + " · " : "";
-        var eqPart = nearest.equity != null ? ops.fmtUsdt(nearest.equity, 2) + " USDT · " : "";
-        tip.textContent = timePart + eqPart + ops.fmtPct(nearest.val);
-        tip.hidden = false;
+        hoverState.clientX = event.clientX;
+        if (!hoverState.rafId) {
+          hoverState.rafId = (window.requestAnimationFrame || function (fn) { return setTimeout(fn, 16); })(renderSparkHover);
+        }
       });
 
       cards.addEventListener("pointerout", function (event) {
         var box = event.target && event.target.closest ? event.target.closest(".spark-box") : null;
         if (!box) return;
         if (event.relatedTarget && box.contains(event.relatedTarget)) return;
-        var tip = box.querySelector(".spark-hover-tip");
-        if (tip) tip.hidden = true;
+        clearSparkHover(box);
       });
     }
+
+    window.addEventListener("resize", function () {
+      hoverState.rect = null;
+      var openPop = cards && cards.querySelector(".strategy-popover-wrap.is-open .strategy-popover");
+      if (openPop) clampPopoverToViewport(openPop);
+    }, { passive: true });
 
     document.addEventListener("click", function (event) {
       if (event.target && event.target.closest && event.target.closest(".strategy-popover-wrap")) return;
@@ -1677,6 +1730,8 @@
         closeStrategyPopovers(null, true);
       }
     });
+
+    ops.bindKeyboardShortcuts({ onRefresh: triggerOverviewRefresh });
 
     if (overviewRetryBtn) overviewRetryBtn.addEventListener("click", triggerOverviewRefresh);
     if (overviewRefreshBtn) overviewRefreshBtn.addEventListener("click", triggerOverviewRefresh);
@@ -1700,13 +1755,30 @@
       });
     }
 
-    window.toggleTaskFilter = toggleTaskFilter;
+    function startPolling() {
+      if (!summaryTimer) {
+        summaryTimer = setInterval(function () { fetchSummary(); }, refreshSec * 1000);
+      }
+      if (!healthTimer) {
+        healthTimer = setInterval(fetchHealth, Math.max(30, refreshSec * 2) * 1000);
+      }
+      syncCountdownTimer();
+    }
+
+    function stopPolling() {
+      if (summaryTimer) { clearInterval(summaryTimer); summaryTimer = null; }
+      if (healthTimer) { clearInterval(healthTimer); healthTimer = null; }
+      if (countdownTimer) { clearInterval(countdownTimer); countdownTimer = null; }
+      if (detailsRetryTimer) { clearTimeout(detailsRetryTimer); detailsRetryTimer = null; }
+      if (curveObserver) {
+        try { curveObserver.disconnect(); } catch (e) {}
+        curveObserver = null;
+      }
+    }
 
     fetchSummary();
     fetchHealth();
-
-    var summaryTimer = setInterval(function () { fetchSummary(); }, refreshSec * 1000);
-    var healthTimer = setInterval(fetchHealth, Math.max(30, refreshSec * 2) * 1000);
+    startPolling();
 
     document.addEventListener("visibilitychange", function () {
       if (!document.hidden) {
@@ -1716,16 +1788,18 @@
       }
     });
 
-    window.addEventListener("online", function () { renderCommandBar(); });
-    window.addEventListener("offline", function () { renderCommandBar(); });
+    window.addEventListener("online", function () { scheduleCommandBarRender(); });
+    window.addEventListener("offline", function () { scheduleCommandBarRender(); });
 
     window.addEventListener("pagehide", function () {
-      clearInterval(summaryTimer);
-      clearInterval(healthTimer);
-      if (countdownTimer) clearInterval(countdownTimer);
-      if (curveObserver) {
-        try { curveObserver.disconnect(); } catch (e) {}
-        curveObserver = null;
+      stopPolling();
+    });
+
+    window.addEventListener("pageshow", function (event) {
+      if (event && event.persisted) {
+        startPolling();
+        fetchSummary();
+        fetchHealth();
       }
     });
   });

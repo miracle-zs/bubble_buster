@@ -1,102 +1,107 @@
-/* Bubble Buster — Primer Quiet Ops shared design system, tokens & navigation */
+/* Bubble Buster — Obsidian Desk Quantitative Terminal design system, tokens & shared controls */
 :root {
   color-scheme: dark;
 
-  /* Surfaces (Primer dark neutrals — flat precision, no glows or scanlines) */
-  --bg: #0d1117;
-  --surface: #161b22;
-  --surface-subtle: #1c2128;
-  --surface-inset: #0d1117;
-  --surface-hover: #21262d;
+  /* Surfaces (Obsidian Desk — deep slate-graphite hierarchy with clear tonal steps) */
+  --bg: #080a0f;
+  --surface: #10141c;
+  --surface-elevated: #151b26;
+  --surface-subtle: #131822;
+  --surface-inset: #0b0e14;
+  --surface-hover: #1a2230;
 
-  /* Borders */
-  --border: #30363d;
-  --border-subtle: #21262d;
-  --border-strong: #484f58;
+  /* Hairline Borders */
+  --border: #222a38;
+  --border-subtle: #181f2b;
+  --border-strong: #344054;
 
-  /* Typography colors (all >= 4.5:1 WCAG AA on --bg, --surface, and --surface-subtle) */
-  --text: #f0f6fc;
-  --text-secondary: #c9d1d9;
-  --muted: #919ba6;
+  /* Typography Ink (all >= 4.5:1 WCAG AA on --bg, --surface, and --surface-subtle) */
+  --text: #f3f6fb;
+  --text-secondary: #c2ccd9;
+  --muted: #8b99ad;
 
-  /* Brand accent & semantic status (semantic colors strictly reserved for state) */
-  --accent: #58a6ff;
-  --accent-bg: rgba(88, 166, 255, 0.14);
-  --accent-border: rgba(88, 166, 255, 0.45);
+  /* Desk Brand & Telemetry Accent */
+  --brand-gold: #f5b942;
+  --accent: #38bdf8;
+  --accent-text: #7dd3fc;
+  --accent-bg: rgba(56, 189, 248, 0.12);
+  --accent-border: rgba(56, 189, 248, 0.38);
 
-  --ok: #3fb950;
-  --ok-text: #56d364;
-  --ok-bg: rgba(63, 185, 80, 0.14);
-  --ok-border: rgba(63, 185, 80, 0.42);
+  /* Trading PnL & Risk Semantics */
+  --ok: #10b981;
+  --ok-text: #34d399;
+  --ok-bg: rgba(16, 185, 129, 0.13);
+  --ok-border: rgba(16, 185, 129, 0.38);
 
-  --warn: #d29922;
-  --warn-text: #e3b341;
-  --warn-bg: rgba(210, 153, 34, 0.15);
-  --warn-border: rgba(210, 153, 34, 0.45);
+  --warn: #f59e0b;
+  --warn-text: #fbbf24;
+  --warn-bg: rgba(245, 158, 11, 0.14);
+  --warn-border: rgba(245, 158, 11, 0.42);
 
-  --bad: #f85149;
-  --bad-text: #ff7b72;
-  --bad-bg: rgba(248, 81, 73, 0.14);
-  --bad-border: rgba(248, 81, 73, 0.45);
+  --bad: #f43f5e;
+  --bad-text: #fb7185;
+  --bad-bg: rgba(244, 63, 94, 0.14);
+  --bad-border: rgba(244, 63, 94, 0.42);
 
-  --readonly: #bc8cff;
-  --readonly-text: #d2a8ff;
-  --readonly-bg: rgba(188, 140, 255, 0.12);
-  --readonly-border: rgba(188, 140, 255, 0.42);
+  /* Readonly monitoring violet (strictly reserved for readonly accounts) */
+  --readonly: #a78bfa;
+  --readonly-text: #c4b5fd;
+  --readonly-bg: rgba(167, 139, 250, 0.12);
+  --readonly-border: rgba(167, 139, 250, 0.38);
 
-  /* Entry phase palette (4 visually distinct cues — no duplicate pairs) */
-  --phase-initial: #58a6ff;
-  --phase-scale-in: #bc8cff;
-  --phase-scale-in-text: #d2a8ff;
-  --phase-scale-in-bg: rgba(188, 140, 255, 0.14);
-  --phase-scale-in-border: rgba(188, 140, 255, 0.45);
-  --phase-wait-bullish: #e3b341;
-  --phase-wait-bearish: #39c5cf;
-  --phase-wait-bearish-bg: rgba(57, 197, 207, 0.14);
-  --phase-wait-bearish-border: rgba(57, 197, 207, 0.45);
+  /* Entry phase palette (4 visually distinct hues — decoupled from --readonly violet) */
+  --phase-initial: #38bdf8;
+  --phase-scale-in: #2dd4bf;
+  --phase-scale-in-text: #5eead4;
+  --phase-scale-in-bg: rgba(45, 212, 191, 0.13);
+  --phase-scale-in-border: rgba(45, 212, 191, 0.4);
+  --phase-wait-bullish: #f59e0b;
+  --phase-wait-bearish: #fb923c;
+  --phase-wait-bearish-bg: rgba(251, 146, 60, 0.14);
+  --phase-wait-bearish-border: rgba(251, 146, 60, 0.42);
 
-  /* Comparison series palette (read programmatically via BBOps.getChartTheme()) */
-  --series-1: #58a6ff;
-  --series-2: #f0883e;
-  --series-3: #3fb950;
-  --series-4: #e3b341;
-  --series-5: #39c5cf;
-  --series-6: #f778ba;
+  /* Comparison series palette (read via cached BBOps.getChartTheme()) */
+  --series-1: #38bdf8;
+  --series-2: #f59e0b;
+  --series-3: #10b981;
+  --series-4: #fb7185;
+  --series-5: #2dd4bf;
+  --series-6: #c084fc;
 
   /* Chart helpers */
   --spark: var(--ok);
-  --spark-fill: rgba(63, 185, 80, 0.12);
-  --spark-down-fill: rgba(248, 81, 73, 0.12);
-  --spark-flat-fill: rgba(88, 166, 255, 0.12);
-  --spark-stop: rgba(248, 81, 73, 0.72);
-  --surface-tooltip: rgba(13, 17, 23, 0.92);
-  --chart-split-line: rgba(48, 54, 61, 0.65);
-  --chart-split-line-subtle: rgba(48, 54, 61, 0.55);
-  --chart-zoom-fill: rgba(88, 166, 255, 0.16);
-  --chart-zoom-area: rgba(88, 166, 255, 0.08);
-  --chart-area-ok: rgba(63, 185, 80, 0.16);
-  --chart-area-bad: rgba(248, 81, 73, 0.16);
-  --chart-area-fade: rgba(13, 17, 23, 0);
-  --table-stripe: rgba(28, 33, 40, 0.38);
+  --spark-fill: rgba(16, 185, 129, 0.13);
+  --spark-down-fill: rgba(244, 63, 94, 0.13);
+  --spark-flat-fill: rgba(56, 189, 248, 0.12);
+  --spark-stop: rgba(244, 63, 94, 0.72);
+  --surface-tooltip: rgba(11, 14, 20, 0.94);
+  --chart-split-line: rgba(34, 42, 56, 0.85);
+  --chart-split-line-subtle: rgba(34, 42, 56, 0.65);
+  --chart-zoom-fill: rgba(56, 189, 248, 0.16);
+  --chart-zoom-area: rgba(56, 189, 248, 0.08);
+  --chart-area-ok: rgba(16, 185, 129, 0.17);
+  --chart-area-bad: rgba(244, 63, 94, 0.17);
+  --chart-area-fade: rgba(8, 10, 15, 0);
+  --table-stripe: rgba(21, 27, 38, 0.42);
 
   /* Geometry, elevation & adaptive target sizing */
   --radius-sm: 4px;
   --radius: 6px;
   --radius-pill: 999px;
-  --shadow-overlay: 0 12px 32px rgba(1, 4, 9, 0.65);
+  --shadow-overlay: 0 14px 36px rgba(2, 4, 10, 0.72), 0 2px 8px rgba(2, 4, 10, 0.5);
   --target-size: 32px;
   --topbar-height: 48px;
 
-  /* Unified Typography Scale (12px / 0.75rem hard minimum floor) */
-  --font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", "SF Pro Text", "PingFang SC", "Noto Sans SC", sans-serif;
-  --font-mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Monaco, Consolas, monospace;
+  /* Typography Scale (clear >= 1.21x hierarchy steps, 12px floor) */
+  --font-sans: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", "PingFang SC", "Noto Sans SC", sans-serif;
+  --font-mono: ui-monospace, SFMono-Regular, "SF Mono", "JetBrains Mono", Menlo, Monaco, Consolas, monospace;
 
-  --text-xs: 0.75rem;     /* 12px — badges, metadata, table headers, helper captions */
+  --text-xs: 0.75rem;     /* 12px — badges, metadata, table headers */
   --text-sm: 0.8125rem;   /* 13px — dense table cells, controls, logs */
-  --text-base: 0.875rem;  /* 14px — body copy, descriptions, primary cells */
-  --text-md: 1rem;        /* 16px — section titles, card headings */
-  --text-lg: 1.25rem;     /* 20px — page titles, primary KPIs */
-  --text-xl: 1.5rem;      /* 24px — hero equity metric */
+  --text-base: 0.875rem;  /* 14px — body copy */
+  --text-md: 1.0625rem;   /* 17px — section titles, card headings */
+  --text-lg: 1.375rem;    /* 22px — page titles, primary KPIs */
+  --text-xl: 1.625rem;    /* 26px — hero equity figures */
 
   --container-max: 1680px;
 }
@@ -129,6 +134,7 @@ body {
   font-size: var(--text-base);
   line-height: 1.5;
   letter-spacing: 0;
+  caret-color: var(--accent);
   overflow-wrap: break-word;
   -webkit-font-smoothing: antialiased;
 }
@@ -140,7 +146,7 @@ h3 {
 }
 
 ::selection {
-  background: rgba(88, 166, 255, 0.32);
+  background: rgba(56, 189, 248, 0.3);
   color: var(--text);
 }
 
@@ -154,6 +160,7 @@ select {
 
 a {
   color: inherit;
+  text-underline-offset: 3px;
 }
 
 button,
@@ -187,7 +194,7 @@ summary {
   padding: 8px 14px;
   border: 1px solid var(--accent);
   border-radius: var(--radius);
-  background: var(--surface);
+  background: var(--surface-elevated);
   color: var(--text);
   font-size: var(--text-sm);
   font-weight: 700;
@@ -221,12 +228,21 @@ summary {
   color: var(--bad-text);
 }
 
+/* Inline SVG Icon helper */
+.ops-icon {
+  display: inline-block;
+  width: 14px;
+  height: 14px;
+  flex-shrink: 0;
+  vertical-align: -2px;
+}
+
 /* Shared page container */
 .ops-shell {
   width: 100%;
   max-width: var(--container-max);
   margin: 0 auto;
-  padding: 12px 16px 32px;
+  padding: 14px 16px 36px;
 }
 
 /* Shared Cross-Account Top Navigation Bar */
@@ -234,7 +250,8 @@ summary {
   position: sticky;
   top: 0;
   z-index: 40;
-  background: var(--surface);
+  background: rgba(16, 20, 28, 0.92);
+  backdrop-filter: blur(10px);
   border-bottom: 1px solid var(--border);
 }
 
@@ -258,6 +275,7 @@ summary {
   color: var(--text);
   font-size: var(--text-base);
   font-weight: 700;
+  letter-spacing: -0.015em;
   text-decoration: none;
   white-space: nowrap;
 }
@@ -266,8 +284,22 @@ summary {
   display: inline-block;
   width: 8px;
   height: 8px;
-  border-radius: 50%;
-  background: var(--accent);
+  border-radius: 2px;
+  transform: rotate(45deg);
+  background: var(--brand-gold);
+}
+
+.ops-venue-chip {
+  flex: 0 0 auto;
+  padding: 2px 7px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--surface-inset);
+  color: var(--muted);
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  font-weight: 600;
+  white-space: nowrap;
 }
 
 .ops-nav-wrap {
@@ -300,7 +332,7 @@ summary {
   bottom: 0;
   width: 28px;
   pointer-events: none;
-  background: linear-gradient(to right, rgba(22, 27, 34, 0), var(--surface));
+  background: linear-gradient(to right, rgba(16, 20, 28, 0), var(--surface));
   opacity: 0;
   transition: opacity 150ms ease;
 }
@@ -396,7 +428,7 @@ summary {
   background: var(--readonly);
 }
 
-/* Shared Button Primitive */
+/* Unified Button Primitive */
 .ops-btn {
   appearance: none;
   display: inline-flex;
@@ -404,10 +436,11 @@ summary {
   justify-content: center;
   gap: 6px;
   min-height: var(--target-size);
-  padding: 5px 10px;
+  min-width: 44px;
+  padding: 5px 11px;
   border: 1px solid var(--border);
   border-radius: var(--radius);
-  background: var(--surface-subtle);
+  background: var(--surface-elevated);
   color: var(--text-secondary);
   font-size: var(--text-xs);
   font-weight: 600;
@@ -433,6 +466,77 @@ summary {
   border-color: var(--accent-border);
   background: var(--accent-bg);
 }
+
+/* Unified Segmented Control Primitive */
+.ops-segmented {
+  display: inline-flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 2px;
+  padding: 2px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface-inset);
+}
+
+.ops-seg-btn {
+  appearance: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: calc(var(--target-size) - 4px);
+  min-width: 42px;
+  padding: 4px 10px;
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text-secondary);
+  font-size: var(--text-xs);
+  font-weight: 600;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: color 120ms ease, background-color 120ms ease, border-color 120ms ease;
+}
+
+.ops-seg-btn:hover {
+  color: var(--text);
+  background: var(--surface-hover);
+}
+
+.ops-seg-btn.active,
+.ops-seg-btn[aria-pressed="true"] {
+  color: var(--text);
+  border-color: var(--accent-border);
+  background: var(--accent-bg);
+}
+
+.ops-seg-btn:disabled {
+  opacity: 0.65;
+  cursor: progress;
+}
+
+/* Unified Status Badge Primitive */
+.ops-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 22px;
+  padding: 2px 8px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-pill);
+  background: var(--surface-subtle);
+  color: var(--text-secondary);
+  font-size: var(--text-xs);
+  font-weight: 700;
+  line-height: 1.3;
+  white-space: nowrap;
+}
+
+.ops-badge.is-ok { border-color: var(--ok-border); background: var(--ok-bg); color: var(--ok-text); }
+.ops-badge.is-warn { border-color: var(--warn-border); background: var(--warn-bg); color: var(--warn-text); }
+.ops-badge.is-bad { border-color: var(--bad-border); background: var(--bad-bg); color: var(--bad-text); }
+.ops-badge.is-readonly { border-color: var(--readonly-border); background: var(--readonly-bg); color: var(--readonly-text); }
+.ops-badge.is-accent { border-color: var(--accent-border); background: var(--accent-bg); color: var(--accent-text); }
 
 /* Shared Strategy Tag Primitive */
 .strategy-tag,
@@ -481,7 +585,7 @@ summary {
   padding-left: 0;
 }
 
-/* Shared Alert & Incident Banners (used by all 3 pages) */
+/* Shared Alert & Incident Banners */
 .ops-alert {
   display: flex;
   align-items: center;
@@ -585,8 +689,10 @@ summary {
   padding: 2px 8px;
   border: 1px solid var(--border);
   border-radius: var(--radius-pill);
-  background: var(--surface-subtle);
+  background: var(--surface-inset);
   color: var(--text-secondary);
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
   font-size: var(--text-xs);
   font-weight: 600;
   white-space: nowrap;
@@ -652,6 +758,9 @@ summary {
     padding: 0 10px;
     gap: 8px;
   }
+  .ops-venue-chip {
+    display: none;
+  }
   .ops-brand {
     font-size: var(--text-sm);
   }
@@ -659,7 +768,8 @@ summary {
     min-height: max(40px, var(--target-size));
     padding: 6px 8px;
   }
-  .ops-btn {
+  .ops-btn,
+  .ops-seg-btn {
     min-height: max(40px, var(--target-size));
   }
 }
@@ -684,12 +794,14 @@ summary {
   .ops-incident-banner,
   .ops-freshness,
   .ops-btn.is-active,
-  .ops-btn.active {
+  .ops-btn.active,
+  .ops-seg-btn.active {
     border-color: CanvasText;
     forced-color-adjust: auto;
   }
   .ops-btn.is-active,
-  .ops-btn.active {
+  .ops-btn.active,
+  .ops-seg-btn.active {
     outline: 2px solid Highlight;
   }
 }
