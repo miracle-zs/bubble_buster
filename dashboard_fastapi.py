@@ -25,6 +25,7 @@ from dashboard_server import (
     DashboardDataProvider,
     _strip_curve_payload,
     render_account_dashboard_html,
+    render_accounts_comparison_html,
     render_accounts_overview_html,
 )
 from infra.binance_futures_client import BinanceFuturesClient
@@ -632,6 +633,20 @@ def create_app(config_path: Optional[str] = None) -> FastAPI:
     app.add_middleware(GZipMiddleware, minimum_size=1024)
     app.mount("/static", StaticFiles(directory=str(static_root)), name="static")
 
+    csp_header = (
+        "default-src 'self'; "
+        "script-src 'self'; "
+        "style-src 'self' 'unsafe-inline'; "
+        "style-src-elem 'self'; "
+        "img-src 'self' data:; "
+        "font-src 'self'; "
+        "connect-src 'self'; "
+        "object-src 'none'; "
+        "base-uri 'self'; "
+        "frame-ancestors 'self'; "
+        "form-action 'none'"
+    )
+
     @app.middleware("http")
     async def enforce_read_only_dashboard(request: Request, call_next):
         if request.method.upper() not in {"GET", "HEAD", "OPTIONS"}:
@@ -644,8 +659,15 @@ def create_app(config_path: Optional[str] = None) -> FastAPI:
         response.headers.setdefault("X-Content-Type-Options", "nosniff")
         response.headers.setdefault("X-Frame-Options", "SAMEORIGIN")
         response.headers.setdefault("Referrer-Policy", "same-origin")
-        if request.url.path.startswith("/static/") and response.status_code in {200, 304}:
-            response.headers["Cache-Control"] = "public, max-age=604800, stale-while-revalidate=86400"
+        content_type = (response.headers.get("content-type") or "").lower()
+        if "text/html" in content_type:
+            response.headers.setdefault("Content-Security-Policy", csp_header)
+            response.headers["Cache-Control"] = "no-cache"
+        elif request.url.path.startswith("/static/") and response.status_code in {200, 304}:
+            if request.query_params.get("v"):
+                response.headers["Cache-Control"] = "public, max-age=31536000, immutable"
+            else:
+                response.headers["Cache-Control"] = "public, max-age=604800, stale-while-revalidate=86400"
         return response
 
     @app.get("/favicon.ico", include_in_schema=False)
@@ -682,12 +704,12 @@ def create_app(config_path: Optional[str] = None) -> FastAPI:
             )
         )
 
-    @app.get("/accounts/comparison/")
+    @app.get("/accounts/comparison/", response_class=HTMLResponse)
     def accounts_comparison_page():
         comparison_page = static_root / "account-comparison.html"
         if not comparison_page.exists():
             raise HTTPException(status_code=404, detail="accounts comparison page not found")
-        return FileResponse(comparison_page, media_type="text/html")
+        return HTMLResponse(render_accounts_comparison_html(static_dir=static_root))
 
     @app.get("/account/{account_id}/", response_class=HTMLResponse)
     def account_detail_page(

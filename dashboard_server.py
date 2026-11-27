@@ -10,6 +10,7 @@ import re
 import threading
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 from zoneinfo import ZoneInfo
 
@@ -20,7 +21,7 @@ from core.wallet_snapshot_rollup import (
     upsert_wallet_snapshot_rollups,
 )
 from core.task_status import format_task_status, task_status_template
-from web.template_loader import load_template
+from web.template_loader import load_template, version_static_path, version_static_urls
 
 LOGGER = logging.getLogger(__name__)
 
@@ -3679,22 +3680,40 @@ def _render_dashboard_template(
     nav_accounts: Optional[List[Dict[str, str]]] = None,
 ) -> str:
     safe_stop_pct = min(100.0, max(0.001, float(portfolio_loss_cut_pct)))
+    safe_stop_hour = int(portfolio_loss_cut_hour) % 24
+    safe_stop_minute = int(portfolio_loss_cut_minute) % 60
+    safe_refresh = max(2, refresh_sec)
+    safe_echarts_src = version_static_path(echarts_src or "/static/vendor/echarts.min.js")
     static_base = "../../static" if account_id else "static"
+    page_config = {
+        "refreshSec": safe_refresh,
+        "echartsSrc": safe_echarts_src,
+        "accountId": account_id,
+        "accountMode": account_mode,
+        "strategyNote": strategy_note,
+        "navAccounts": nav_accounts or [],
+        "portfolioStopEnabled": bool(portfolio_loss_cut_enabled),
+        "portfolioStopPct": safe_stop_pct,
+        "portfolioStopHour": safe_stop_hour,
+        "portfolioStopMinute": safe_stop_minute,
+    }
     replacements = {
-        "__REFRESH_SEC__": str(max(2, refresh_sec)),
-        "__ECHARTS_SRC__": echarts_src or "https://cdn.jsdelivr.net/npm/echarts@5/dist/echarts.min.js",
+        "__REFRESH_SEC__": str(safe_refresh),
+        "__ECHARTS_SRC__": safe_echarts_src,
         "__STATIC_BASE__": static_base,
+        "__PAGE_CONFIG_JSON__": _inline_script_json(page_config),
         "__ACCOUNT_ID_JSON__": _inline_script_json(account_id),
         "__ACCOUNT_MODE_JSON__": _inline_script_json(account_mode),
         "__STRATEGY_NOTE_JSON__": _inline_script_json(strategy_note),
         "__NAV_ACCOUNTS_JSON__": _inline_script_json(nav_accounts or []),
         "__PORTFOLIO_STOP_ENABLED__": "true" if portfolio_loss_cut_enabled else "false",
         "__PORTFOLIO_STOP_PCT__": f"{safe_stop_pct:g}",
-        "__PORTFOLIO_STOP_HOUR__": str(int(portfolio_loss_cut_hour) % 24),
-        "__PORTFOLIO_STOP_MINUTE__": str(int(portfolio_loss_cut_minute) % 60),
+        "__PORTFOLIO_STOP_HOUR__": str(safe_stop_hour),
+        "__PORTFOLIO_STOP_MINUTE__": str(safe_stop_minute),
     }
     pattern = re.compile("|".join(re.escape(key) for key in replacements))
-    return pattern.sub(lambda m: replacements[m.group(0)], get_dashboard_html())
+    rendered = pattern.sub(lambda m: replacements[m.group(0)], get_dashboard_html())
+    return version_static_urls(rendered)
 
 
 def render_dashboard_html(
@@ -3751,12 +3770,23 @@ def render_accounts_overview_html(
     safe_stop_pct = min(100.0, max(0.001, float(portfolio_loss_cut_pct)))
     safe_stop_hour = int(portfolio_loss_cut_hour) % 24
     safe_stop_minute = int(portfolio_loss_cut_minute) % 60
+    safe_refresh = max(15, refresh_sec)
     stop_enabled = bool(portfolio_loss_cut_enabled)
     stop_label = f"-{safe_stop_pct:g}% 已启用" if stop_enabled else "未启用"
     stop_class = "" if stop_enabled else "is-disabled"
+    page_config = {
+        "refreshSec": safe_refresh,
+        "entryTime": f"{safe_entry_hour:02d}:{safe_entry_minute:02d}",
+        "navAccounts": nav_accounts or [],
+        "portfolioStopEnabled": stop_enabled,
+        "portfolioStopPct": safe_stop_pct,
+        "portfolioStopHour": safe_stop_hour,
+        "portfolioStopMinute": safe_stop_minute,
+    }
     replacements = {
-        "__REFRESH_SEC__": str(max(15, refresh_sec)),
+        "__REFRESH_SEC__": str(safe_refresh),
         "__ENTRY_TIME__": f"{safe_entry_hour:02d}:{safe_entry_minute:02d}",
+        "__PAGE_CONFIG_JSON__": _inline_script_json(page_config),
         "__NAV_ACCOUNTS_JSON__": _inline_script_json(nav_accounts or []),
         "__PORTFOLIO_STOP_ENABLED__": "true" if stop_enabled else "false",
         "__PORTFOLIO_STOP_PCT__": f"{safe_stop_pct:g}",
@@ -3766,7 +3796,14 @@ def render_accounts_overview_html(
         "__PORTFOLIO_STOP_CLASS__": stop_class,
     }
     pattern = re.compile("|".join(re.escape(key) for key in replacements))
-    return pattern.sub(lambda m: replacements[m.group(0)], get_accounts_overview_html())
+    rendered = pattern.sub(lambda m: replacements[m.group(0)], get_accounts_overview_html())
+    return version_static_urls(rendered)
+
+
+def render_accounts_comparison_html(static_dir: Optional[Path] = None) -> str:
+    base_dir = (static_dir or (Path(__file__).resolve().parent / "app_static")).resolve()
+    raw = load_template("account-comparison.html", base_dir=base_dir)
+    return version_static_urls(raw, static_dir=base_dir)
 
 
 _CURVE_PAYLOAD_KEYS = {

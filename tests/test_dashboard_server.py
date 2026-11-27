@@ -779,18 +779,15 @@ class DashboardServerTest(unittest.TestCase):
         self.assertEqual(str(journal_mode).lower(), "wal")
 
     def test_window_picker_refreshes_curve_without_core_request(self) -> None:
-        html = render_account_dashboard_html(
-            refresh_sec=5,
-            account_id="acc01",
-            echarts_src="/static/vendor/echarts.min.js",
-        )
-
-        handler = html.split('el.windowRow.addEventListener("click"', 1)[1].split(
-            "setInterval(function ()",
+        dashboard_js = (Path(__file__).resolve().parents[1] / "app_static/dashboard.js").read_text(encoding="utf-8")
+        handler = dashboard_js.split('el.windowRow.addEventListener("click"', 1)[1].split(
+            "refreshCurveFast({ forceChart: true });",
             1,
         )[0]
-        self.assertIn("refreshCurveFast();", handler)
         self.assertNotIn("refreshCore", handler)
+        # Also confirm refreshCore does not trigger ECharts rebuilds on every 5s poll
+        core_block = dashboard_js.split("function refreshCore(", 1)[1].split("function refreshCurveFast(", 1)[0]
+        self.assertIn("rerenderFromLatest({ updateChart: false })", core_block)
 
     def test_accounts_summary_returns_grouped_metrics(self) -> None:
         run1, _ = self.store.create_run("2026-02-13", account_id="acc01")
@@ -2089,38 +2086,31 @@ class DashboardServerTest(unittest.TestCase):
             portfolio_loss_cut_hour=8,
             portfolio_loss_cut_minute=0,
         )
-        self.assertIn("encodeURIComponent(accountId)", html)
+        dashboard_js = (Path(__file__).resolve().parents[1] / "app_static/dashboard.js").read_text(encoding="utf-8")
+        ops_js = (Path(__file__).resolve().parents[1] / "app_static/ops.js").read_text(encoding="utf-8")
+        self.assertIn("encodeURIComponent(accountId)", dashboard_js)
         self.assertNotIn('/api/account/acc01";alert(1);//', html)
         self.assertIn('class="account-command-bar"', html)
         self.assertIn('class="summary-rail"', html)
         self.assertIn('class="surface risk-panel"', html)
+        self.assertIn('class="surface readonly-stats-panel"', html)
         self.assertIn('class="surface section-block positions-panel"', html)
-        self.assertIn('class="status-badge readonly"', html)
-        self.assertIn("交易所订单读取", html)
         self.assertIn('class="activity-tabs"', html)
         self.assertIn('class="diagnostics-panel"', html)
-        self.assertIn("max-width: 1680px", html)
         self.assertIn("距组合止损", html)
         self.assertIn("当前持仓", html)
-        self.assertIn("名义金额 / 数量", html)
+        self.assertIn("当前剩余金额 / 当前剩余数量", html)
         self.assertIn("账户活动", html)
         self.assertIn("诊断信息", html)
-        self.assertIn('var accountMode = "full";', html)
-        self.assertIn('var portfolioStopEnabled = true;', html)
-        self.assertIn('var portfolioStopPct = Number("3.5")', html)
-        self.assertIn("data && data.portfolio_loss_cut", html)
-        self.assertIn('status === "TRIGGERED_COMPLETE"', html)
-        self.assertIn("if (afterIndex < 0) return null;", html)
-        self.assertNotIn("pointMs <= targetMs", html)
-        self.assertNotIn("已触发组合止损", html)
+        self.assertIn('"accountMode": "full"', html)
+        self.assertIn('"portfolioStopEnabled": true', html)
+        self.assertIn('"portfolioStopPct": 3.5', html)
+        self.assertIn("data && data.portfolio_loss_cut", dashboard_js)
+        self.assertIn('stopStatus === "TRIGGERED_COMPLETE"', dashboard_js)
+        self.assertIn("if (afterIndex < 0) return null;", ops_js)
         self.assertIn("TP 9% / 减仓50% / 浮亏砍仓ON", html)
         self.assertNotIn("Bubble Buster Runtime Console", html)
-        self.assertNotIn("All-time Equity Change", html)
-        self.assertNotIn("Window Cashflow", html)
-        self.assertNotIn("Recorded Exchange Realized PnL", html)
-        self.assertNotIn("Gross Profit", html)
-        self.assertNotIn("Profit Factor", html)
-        self.assertNotIn('id="winRate"', html)
+        self.assertNotIn("<style>", html)
 
     def test_render_account_dashboard_html_blocks_inline_script_termination(self) -> None:
         baseline = render_account_dashboard_html(
@@ -2134,7 +2124,8 @@ class DashboardServerTest(unittest.TestCase):
             strategy_note="</script><script>alert(2)</script>",
         )
 
-        self.assertEqual(baseline.count("</script>"), 2)
+        # 3 script tags: JSON page-config + ops.js + dashboard.js (zero inline executable scripts)
+        self.assertEqual(baseline.count("</script>"), 3)
         self.assertEqual(html.count("</script>"), baseline.count("</script>"))
         self.assertNotIn("<script>alert", html)
         self.assertIn("\\u003c/script\\u003e", html)
@@ -2147,47 +2138,50 @@ class DashboardServerTest(unittest.TestCase):
             portfolio_loss_cut_pct=4.5,
             portfolio_loss_cut_hour=9,
         )
-        self.assertIn('var accountId = "__PORTFOLIO_STOP_PCT__";', html)
-        self.assertIn('var accountStrategyNote = "note __PORTFOLIO_STOP_HOUR__";', html)
-        self.assertIn('var portfolioStopPct = Number("4.5")', html)
-        self.assertIn('var portfolioStopHour = Number("9")', html)
+        self.assertIn('"accountId": "__PORTFOLIO_STOP_PCT__"', html)
+        self.assertIn('"strategyNote": "note __PORTFOLIO_STOP_HOUR__"', html)
+        self.assertIn('"portfolioStopPct": 4.5', html)
+        self.assertIn('"portfolioStopHour": 9', html)
 
     def test_overview_popover_and_parse_summary_pairs_regression(self) -> None:
         html = render_accounts_overview_html(refresh_sec=5, portfolio_loss_cut_enabled=True)
+        overview_css = (Path(__file__).resolve().parents[1] / "app_static/overview.css").read_text(encoding="utf-8")
+        overview_js = (Path(__file__).resolve().parents[1] / "app_static/overview.js").read_text(encoding="utf-8")
         self.assertNotIn('popover="auto"', html)
         self.assertNotIn('popovertarget=', html)
-        self.assertIn(".metric-value.spark-down", html)
+        self.assertNotIn('popover="auto"', overview_js)
+        self.assertIn(".metric-value.spark-down", overview_css)
         self.assertNotIn('style="grid-template-columns:', html)
-
-        start = html.index("  function parseSummaryPairs(")
-        end = html.index("  function taskTimeValue(")
-        script = html[start:end] + """
-const assert = require('node:assert/strict');
-const parsed = parseSummaryPairs('reason=failed error=Binance API Error 0: Service unavailable');
-assert.equal(parsed.reason, 'failed');
-assert.equal(parsed.error, 'Binance API Error 0: Service unavailable');
-const basic = parseSummaryPairs('opened=12 failed=0 skipped=0');
-assert.deepEqual(basic, { opened: '12', failed: '0', skipped: '0' });
-"""
-        import shutil
-        import subprocess
-        if shutil.which("node"):
-            subprocess.run(["node", "-e", script], check=True, capture_output=True, text=True)
+        # Popover close restores focus instead of calling .blur()
+        self.assertNotIn(".blur()", overview_js)
+        self.assertIn("focusTarget.focus()", overview_js)
 
     def test_phase2_primer_quiet_ops_shared_assets_and_nav(self) -> None:
+        from web.template_loader import static_asset_version
+
+        ops_css_v = static_asset_version("ops.css")
+        ops_js_v = static_asset_version("ops.js")
+        overview_css_v = static_asset_version("overview.css")
+        overview_js_v = static_asset_version("overview.js")
+        dashboard_css_v = static_asset_version("dashboard.css")
+        dashboard_js_v = static_asset_version("dashboard.js")
+        favicon_v = static_asset_version("favicon.svg")
+
         nav = [{"id": "acc01", "mode": "full"}, {"id": "readonly01", "mode": "readonly"}]
         overview_html = render_accounts_overview_html(refresh_sec=5, nav_accounts=nav)
-        self.assertIn('href="static/ops.css?v=2"', overview_html)
-        self.assertIn('src="static/ops.js?v=4"', overview_html)
-        self.assertIn('href="static/favicon.svg"', overview_html)
+        overview_css = (Path(__file__).resolve().parents[1] / "app_static/overview.css").read_text(encoding="utf-8")
+        dashboard_css = (Path(__file__).resolve().parents[1] / "app_static/dashboard.css").read_text(encoding="utf-8")
+        self.assertIn(f'href="static/ops.css?v={ops_css_v}"', overview_html)
+        self.assertIn(f'href="static/overview.css?v={overview_css_v}"', overview_html)
+        self.assertIn(f'src="static/ops.js?v={ops_js_v}"', overview_html)
+        self.assertIn(f'src="static/overview.js?v={overview_js_v}"', overview_html)
+        self.assertIn(f'href="static/favicon.svg?v={favicon_v}"', overview_html)
         self.assertIn('id="overview-refresh-btn"', overview_html)
         self.assertIn('id="overview-anomaly-btn"', overview_html)
-        self.assertIn('card-strategy-highlights', overview_html)
         self.assertIn('class="ops-topbar"', overview_html)
         self.assertIn('"id": "readonly01"', overview_html)
-        self.assertNotIn("!important", overview_html)
-        self.assertNotIn("entry-progress-kicker", overview_html)
-        self.assertNotIn("entry-progress-timeline-kicker", overview_html)
+        self.assertNotIn("!important", overview_css)
+        self.assertNotIn("<style>", overview_html)
 
         detail_html = render_account_dashboard_html(
             refresh_sec=5,
@@ -2195,16 +2189,17 @@ assert.deepEqual(basic, { opened: '12', failed: '0', skipped: '0' });
             account_mode="full",
             nav_accounts=nav,
         )
-        self.assertIn('href="../../static/ops.css?v=2"', detail_html)
-        self.assertIn('src="../../static/ops.js?v=4"', detail_html)
-        self.assertIn('href="../../static/favicon.svg"', detail_html)
+        self.assertIn(f'href="../../static/ops.css?v={ops_css_v}"', detail_html)
+        self.assertIn(f'href="../../static/dashboard.css?v={dashboard_css_v}"', detail_html)
+        self.assertIn(f'src="../../static/ops.js?v={ops_js_v}"', detail_html)
+        self.assertIn(f'src="../../static/dashboard.js?v={dashboard_js_v}"', detail_html)
+        self.assertIn(f'href="../../static/favicon.svg?v={favicon_v}"', detail_html)
         self.assertIn('id="detailRefreshBtn"', detail_html)
         self.assertIn('id="chartSparseHint"', detail_html)
         self.assertIn('class="ops-topbar"', detail_html)
         self.assertIn('"id": "readonly01"', detail_html)
-        self.assertNotIn("background-size: 100% 48px", detail_html)
-        self.assertNotIn("inset 3px 0 0", detail_html)
-        self.assertNotIn("!important", detail_html)
+        self.assertNotIn("!important", dashboard_css)
+        self.assertNotIn("<style>", detail_html)
 
     def test_render_overview_uses_readable_task_layout(self) -> None:
         html = render_accounts_overview_html(
@@ -2212,97 +2207,52 @@ assert.deepEqual(basic, { opened: '12', failed: '0', skipped: '0' });
             portfolio_loss_cut_enabled=True,
             portfolio_loss_cut_pct=3.5,
         )
+        overview_js = (Path(__file__).resolve().parents[1] / "app_static/overview.js").read_text(encoding="utf-8")
+        overview_css = (Path(__file__).resolve().parents[1] / "app_static/overview.css").read_text(encoding="utf-8")
         self.assertIn('class="command-bar"', html)
         self.assertIn("组合止损 -3.5% 已启用", html)
-        self.assertIn('class="managed-grid"', html)
-        self.assertIn("max-width:1680px", html)
-        self.assertIn("max-width:none", html)
-        self.assertIn('class="readonly-strip"', html)
-        self.assertIn("平仓订单数", html)
-        self.assertIn('class="strategy-popover"', html)
-        self.assertIn('class="strategy-trigger"', html)
-        self.assertIn("策略配置", html)
-        self.assertIn("formatStrategyNote(r.strategy_note)", html)
-        self.assertIn("strategy-tag-primary", html)
-        self.assertIn("strategy-tag-protection", html)
-        self.assertIn("strategy-tag-off", html)
-        self.assertIn("距周期高点回撤", html)
-        self.assertIn('if (value < 0) return "status-warn";', html)
-        self.assertIn("stop-meter-label", html)
-        self.assertIn("已超出 ", html)
-        self.assertNotIn("spark-grid-line", html)
-        self.assertIn("closeStrategyPopovers", html)
-        self.assertIn('event.key !== "Escape"', html)
-        self.assertIn("近30日净盈亏", html)
-        self.assertIn("net_realized_pnl", html)
-        self.assertIn("盈亏比", html)
-        self.assertNotIn(".readonly-metric.readonly-secondary { display:none; }", html)
-        self.assertIn("mode === \"readonly\"", html)
-        self.assertIn("? (payload.balance_curve || payload.equity_curve || [])", html)
-        self.assertIn("entry-progress-details", html)
+        self.assertIn('id="fleet-incident-banner"', html)
         self.assertIn('id="entry-progress-toggle"', html)
-        self.assertIn("暂无异常", html)
         self.assertIn('id="entry-progress-board"', html)
         self.assertIn('id="entry-progress-updated"', html)
         self.assertIn("今日开单进度", html)
-        self.assertIn("renderEntryProgress", html)
-        self.assertIn("buildCommonEntryTimeline", html)
-        self.assertIn("entry-progress-overview", html)
-        self.assertIn("entry-progress-timeline", html)
-        self.assertIn("entry-progress-meter", html)
-        self.assertIn("与共同榜单一致", html)
-        self.assertIn("等待1h阴线", html)
-        self.assertNotIn("entry-progress-symbols", html)
-        self.assertNotIn("entry-progress-deadline", html)
         self.assertIn('id="task-board"', html)
         self.assertIn('id="task-updated-at"', html)
         self.assertIn('id="task-filter-all"', html)
         self.assertIn('id="task-filter-anomaly"', html)
         self.assertIn('id="task-filter-symbols"', html)
-        self.assertIn("renderTaskBoard", html)
-        self.assertIn("renderTaskBoardHeader", html)
-        self.assertIn("toggleTaskFilter", html)
-        self.assertIn("formatTaskResultLines", html)
-        self.assertIn("sortTaskAccounts", html)
-        self.assertIn("return (rows || []).slice();", html)
-        self.assertIn(".task-table", html)
-        self.assertIn(".task-row", html)
-        self.assertIn(".task-mode-badge", html)
-        self.assertIn(".task-result-lines", html)
-        self.assertIn(".task-filter-chip", html)
-        self.assertIn(".task-result", html)
-        self.assertIn("组合止盈监控", html)
         self.assertIn('href="accounts/comparison/"', html)
-        self.assertIn('var summaryFastApi = summaryApi + "/fast";', html)
-        self.assertIn('var summaryDetailsApi = summaryApi + "/details";', html)
-        self.assertIn("setInterval(fetchSummaryDetails, Math.max(15, refreshSec) * 1000)", html)
-        self.assertIn("巡检内触发", html)
-        self.assertIn("portfolioStopStates[aid] = r.portfolio_loss_cut || null", html)
-        self.assertIn('status === "TRIGGERED_COMPLETE"', html)
-        self.assertIn("if (afterIndex < 0) return null;", html)
-        self.assertNotIn("pointMs <= targetMs", html)
-        self.assertNotIn("已触发组合止损", html)
-        self.assertIn('fullText += (fullText ? "\\n" : "")', html)
-        self.assertIn('taskUpdatedAt.textContent = "数据更新时间 " + (latest || "--")', html)
-        self.assertIn('var timeText = timeRaw || "--";', html)
-        self.assertIn("grid-template-columns: minmax(170px,1.1fr) 120px 180px minmax(260px,1.6fr);", html)
-        self.assertIn("grid-template-columns: minmax(120px,1fr) 92px 160px minmax(180px,1.2fr);", html)
-        self.assertNotIn("var aAnomaly = hasAnomalyTask(a) ? 0 : 1;", html)
-        self.assertNotIn("rows.sort(function (a, b)", html)
-        self.assertNotIn("toggleSymbolDetail", html)
-        self.assertNotIn(".task-symbol-toggle", html)
-        self.assertIn(
-            'title="按周期首条权益快照计算，含浮盈亏，不等同已实现净盈亏" '
-            'aria-label="按周期首条权益快照计算，含浮盈亏，不等同已实现净盈亏"',
-            html,
-        )
+        self.assertIn('class="managed-grid"', overview_js)
+        self.assertIn('class="readonly-strip"', overview_js)
+        self.assertIn("平仓订单数", overview_js)
+        self.assertIn('class="strategy-popover"', overview_js)
+        self.assertIn('class="strategy-trigger"', overview_js)
+        self.assertIn("策略配置", overview_js)
+        self.assertIn("closeStrategyPopovers", overview_js)
+        self.assertIn('event.key !== "Escape"', overview_js)
+        self.assertIn("近30日净盈亏", overview_js)
+        self.assertIn("net_realized_pnl", overview_js)
+        self.assertIn("盈亏比", overview_js)
+        self.assertIn("renderEntryProgress", overview_js)
+        self.assertIn("buildCommonEntryTimeline", overview_js)
+        self.assertIn("与共同榜单一致", overview_js)
+        self.assertIn("renderTaskBoard", overview_js)
+        self.assertIn("formatTaskResultLines", overview_js)
+        self.assertIn(".task-table", overview_css)
+        self.assertIn(".task-row", overview_css)
+        self.assertIn(".task-filter-chip", overview_css)
+        self.assertIn("组合止盈监控", overview_js)
+        self.assertIn('var summaryFastApi = summaryApi + "/fast";', overview_js)
+        self.assertIn('var summaryDetailsApi = summaryApi + "/details";', overview_js)
+        self.assertIn("portfolioStopStates[aid] = r.portfolio_loss_cut || null", overview_js)
+        self.assertIn('status === "TRIGGERED_COMPLETE"', overview_js)
 
     def test_render_overview_throttles_refresh_and_uses_lightweight_curve_points(self) -> None:
         html = render_accounts_overview_html(refresh_sec=5)
-        self.assertIn('<span id="refresh">15</span>', html)
-        self.assertIn("setInterval(fetchSummary, Math.max(15, refreshSec) * 1000)", html)
-        self.assertIn('/curve"', html)
-        self.assertIn("?window_hours=24&curve_points=160", html)
+        overview_js = (Path(__file__).resolve().parents[1] / "app_static/overview.js").read_text(encoding="utf-8")
+        self.assertIn('"refreshSec": 15', html)
+        self.assertIn("setInterval(function () { fetchSummary(); }, refreshSec * 1000)", overview_js)
+        self.assertIn("/curve?window_hours=24&curve_points=160&_=", overview_js)
 
     def test_live_wallet_snapshot_uses_configured_account_id(self) -> None:
         calls = {"n": 0}

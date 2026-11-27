@@ -1,8 +1,8 @@
-/* Bubble Buster — Primer Quiet Ops shared design system & top navigation */
+/* Bubble Buster — Primer Quiet Ops shared design system, tokens & navigation */
 :root {
   color-scheme: dark;
 
-  /* Surfaces (Primer dark neutrals — no radial glows, scanlines, or heavy drop shadows) */
+  /* Surfaces (Primer dark neutrals — flat precision, no glows or scanlines) */
   --bg: #0d1117;
   --surface: #161b22;
   --surface-subtle: #1c2128;
@@ -44,24 +44,48 @@
   --readonly-bg: rgba(188, 140, 255, 0.12);
   --readonly-border: rgba(188, 140, 255, 0.42);
 
-  /* Comparison series palette (distinct from --readonly purple) */
+  /* Entry phase palette (4 visually distinct cues — no duplicate pairs) */
+  --phase-initial: #58a6ff;
+  --phase-scale-in: #bc8cff;
+  --phase-scale-in-text: #d2a8ff;
+  --phase-scale-in-bg: rgba(188, 140, 255, 0.14);
+  --phase-scale-in-border: rgba(188, 140, 255, 0.45);
+  --phase-wait-bullish: #e3b341;
+  --phase-wait-bearish: #39c5cf;
+  --phase-wait-bearish-bg: rgba(57, 197, 207, 0.14);
+  --phase-wait-bearish-border: rgba(57, 197, 207, 0.45);
+
+  /* Comparison series palette (read programmatically via BBOps.getChartTheme()) */
   --series-1: #58a6ff;
   --series-2: #f0883e;
   --series-3: #3fb950;
   --series-4: #e3b341;
+  --series-5: #39c5cf;
+  --series-6: #f778ba;
 
-  /* Legacy aliases for smooth compatibility */
-  --panel: var(--surface);
-  --line: var(--border);
-  --good: var(--ok);
+  /* Chart helpers */
   --spark: var(--ok);
   --spark-fill: rgba(63, 185, 80, 0.12);
+  --spark-down-fill: rgba(248, 81, 73, 0.12);
+  --spark-flat-fill: rgba(88, 166, 255, 0.12);
+  --spark-stop: rgba(248, 81, 73, 0.72);
+  --surface-tooltip: rgba(13, 17, 23, 0.92);
+  --chart-split-line: rgba(48, 54, 61, 0.65);
+  --chart-split-line-subtle: rgba(48, 54, 61, 0.55);
+  --chart-zoom-fill: rgba(88, 166, 255, 0.16);
+  --chart-zoom-area: rgba(88, 166, 255, 0.08);
+  --chart-area-ok: rgba(63, 185, 80, 0.16);
+  --chart-area-bad: rgba(248, 81, 73, 0.16);
+  --chart-area-fade: rgba(13, 17, 23, 0);
+  --table-stripe: rgba(28, 33, 40, 0.38);
 
-  /* Geometry & elevation */
+  /* Geometry, elevation & adaptive target sizing */
   --radius-sm: 4px;
   --radius: 6px;
   --radius-pill: 999px;
   --shadow-overlay: 0 12px 32px rgba(1, 4, 9, 0.65);
+  --target-size: 32px;
+  --topbar-height: 48px;
 
   /* Unified Typography Scale (12px / 0.75rem hard minimum floor) */
   --font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", "SF Pro Text", "PingFang SC", "Noto Sans SC", sans-serif;
@@ -77,6 +101,12 @@
   --container-max: 1680px;
 }
 
+@media (pointer: coarse) {
+  :root {
+    --target-size: 44px;
+  }
+}
+
 *,
 *::before,
 *::after {
@@ -87,6 +117,7 @@ html {
   min-height: 100%;
   background: var(--bg);
   color: var(--text);
+  scroll-padding-top: calc(var(--topbar-height) + 12px);
 }
 
 body {
@@ -98,7 +129,14 @@ body {
   font-size: var(--text-base);
   line-height: 1.5;
   letter-spacing: 0;
+  overflow-wrap: break-word;
   -webkit-font-smoothing: antialiased;
+}
+
+h1,
+h2,
+h3 {
+  text-wrap: balance;
 }
 
 ::selection {
@@ -108,7 +146,9 @@ body {
 
 button,
 a,
-summary {
+summary,
+input,
+select {
   font: inherit;
 }
 
@@ -121,7 +161,7 @@ summary {
   -webkit-tap-highlight-color: transparent;
 }
 
-:where(a, button, summary, [tabindex="0"]):focus-visible {
+:where(a, button, summary, input, select, [tabindex]):focus-visible {
   outline: 2px solid var(--accent);
   outline-offset: 2px;
 }
@@ -136,6 +176,28 @@ summary {
   padding: 0 !important;
   border: 0 !important;
   white-space: nowrap !important;
+}
+
+/* Skip to main content link */
+.ops-skip-link {
+  position: fixed;
+  top: 8px;
+  left: 8px;
+  z-index: 100;
+  padding: 8px 14px;
+  border: 1px solid var(--accent);
+  border-radius: var(--radius);
+  background: var(--surface);
+  color: var(--text);
+  font-size: var(--text-sm);
+  font-weight: 700;
+  text-decoration: none;
+  box-shadow: var(--shadow-overlay);
+  transform: translateY(-160%);
+}
+
+.ops-skip-link:focus-visible {
+  transform: translateY(0);
 }
 
 .mono,
@@ -159,6 +221,14 @@ summary {
   color: var(--bad-text);
 }
 
+/* Shared page container */
+.ops-shell {
+  width: 100%;
+  max-width: var(--container-max);
+  margin: 0 auto;
+  padding: 12px 16px 32px;
+}
+
 /* Shared Cross-Account Top Navigation Bar */
 .ops-topbar {
   position: sticky;
@@ -173,7 +243,7 @@ summary {
   max-width: var(--container-max);
   margin: 0 auto;
   padding: 0 16px;
-  min-height: 48px;
+  min-height: var(--topbar-height);
   display: flex;
   align-items: center;
   gap: 12px;
@@ -184,7 +254,7 @@ summary {
   display: inline-flex;
   align-items: center;
   gap: 8px;
-  min-height: 36px;
+  min-height: var(--target-size);
   color: var(--text);
   font-size: var(--text-base);
   font-weight: 700;
@@ -200,8 +270,14 @@ summary {
   background: var(--accent);
 }
 
-.ops-nav {
+.ops-nav-wrap {
+  position: relative;
   flex: 1 1 auto;
+  min-width: 0;
+}
+
+.ops-nav {
+  width: 100%;
   min-width: 0;
   display: flex;
   align-items: center;
@@ -209,10 +285,28 @@ summary {
   overflow-x: auto;
   scrollbar-width: none;
   scroll-snap-type: x proximity;
+  padding: 2px 0;
 }
 
 .ops-nav::-webkit-scrollbar {
   display: none;
+}
+
+.ops-nav-wrap::after {
+  content: "";
+  position: absolute;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  width: 28px;
+  pointer-events: none;
+  background: linear-gradient(to right, rgba(22, 27, 34, 0), var(--surface));
+  opacity: 0;
+  transition: opacity 150ms ease;
+}
+
+.ops-nav-wrap.has-overflow-right::after {
+  opacity: 1;
 }
 
 .ops-nav-list {
@@ -238,7 +332,7 @@ summary {
   display: inline-flex;
   align-items: center;
   gap: 6px;
-  min-height: 36px;
+  min-height: max(36px, var(--target-size));
   padding: 6px 10px;
   border: 1px solid transparent;
   border-radius: var(--radius);
@@ -248,7 +342,7 @@ summary {
   text-decoration: none;
   white-space: nowrap;
   scroll-snap-align: start;
-  transition: color 120ms ease, background 120ms ease, border-color 120ms ease;
+  transition: color 120ms ease, background-color 120ms ease, border-color 120ms ease;
 }
 
 .ops-nav-link:hover {
@@ -302,16 +396,98 @@ summary {
   background: var(--readonly);
 }
 
-.ops-nav-account.is-loss-cut .ops-nav-dot {
-  background: var(--warn-text);
+/* Shared Button Primitive */
+.ops-btn {
+  appearance: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  min-height: var(--target-size);
+  padding: 5px 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface-subtle);
+  color: var(--text-secondary);
+  font-size: var(--text-xs);
+  font-weight: 600;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: color 120ms ease, background-color 120ms ease, border-color 120ms ease;
 }
 
-/* Shared Alert Banner */
+.ops-btn:hover {
+  color: var(--text);
+  border-color: var(--border-strong);
+  background: var(--surface-hover);
+}
+
+.ops-btn:disabled {
+  opacity: 0.65;
+  cursor: progress;
+}
+
+.ops-btn.is-active,
+.ops-btn.active {
+  color: var(--text);
+  border-color: var(--accent-border);
+  background: var(--accent-bg);
+}
+
+/* Shared Strategy Tag Primitive */
+.strategy-tag,
+.strategy-chip,
+.summary-strategy-tag {
+  display: inline-flex;
+  align-items: center;
+  min-height: 24px;
+  padding: 2px 8px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--surface-subtle);
+  color: var(--text-secondary);
+  font-size: var(--text-xs);
+  font-weight: 600;
+  line-height: 1.3;
+  white-space: nowrap;
+}
+
+.strategy-tag-primary,
+.strategy-chip.primary,
+.summary-strategy-tag.primary {
+  border-color: var(--accent-border);
+  background: var(--accent-bg);
+  color: var(--text);
+}
+
+.strategy-tag-protection {
+  border-color: var(--border);
+  background: var(--surface-subtle);
+  color: var(--text-secondary);
+}
+
+.strategy-tag-off,
+.strategy-chip.off,
+.summary-strategy-tag.off {
+  border-color: var(--bad-border);
+  background: var(--bad-bg);
+  color: var(--bad-text);
+}
+
+.strategy-tag-empty {
+  border-color: transparent;
+  background: transparent;
+  color: var(--muted);
+  padding-left: 0;
+}
+
+/* Shared Alert & Incident Banners (used by all 3 pages) */
 .ops-alert {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 12px;
+  flex-wrap: wrap;
+  gap: 10px 12px;
   margin-top: 12px;
   padding: 10px 14px;
   border: 1px solid var(--bad-border);
@@ -322,8 +498,125 @@ summary {
   line-height: 1.45;
 }
 
+.ops-alert.is-warn {
+  border-color: var(--warn-border);
+  background: var(--warn-bg);
+  color: var(--warn-text);
+}
+
 .ops-alert[hidden] {
   display: none;
+}
+
+.ops-alert-copy {
+  min-width: 0;
+  flex: 1 1 240px;
+}
+
+.ops-alert-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+}
+
+/* Conditional Fleet Incident / Staleness Banner */
+.ops-incident-banner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 10px 14px;
+  margin-top: 12px;
+  padding: 10px 14px;
+  border: 1px solid var(--bad-border);
+  border-radius: var(--radius);
+  background: var(--bad-bg);
+  color: var(--text);
+  font-size: var(--text-sm);
+}
+
+.ops-incident-banner.is-warn {
+  border-color: var(--warn-border);
+  background: var(--warn-bg);
+}
+
+.ops-incident-banner[hidden] {
+  display: none;
+}
+
+.ops-incident-main {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px 12px;
+  min-width: 0;
+}
+
+.ops-incident-pill {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 8px;
+  border: 1px solid var(--bad-border);
+  border-radius: var(--radius-pill);
+  background: var(--surface);
+  color: var(--bad-text);
+  font-size: var(--text-xs);
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+.ops-incident-banner.is-warn .ops-incident-pill {
+  border-color: var(--warn-border);
+  color: var(--warn-text);
+}
+
+.ops-incident-text {
+  color: var(--text);
+  font-size: var(--text-sm);
+  line-height: 1.4;
+}
+
+/* Shared Freshness Pill */
+.ops-freshness {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 2px 8px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-pill);
+  background: var(--surface-subtle);
+  color: var(--text-secondary);
+  font-size: var(--text-xs);
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.ops-freshness.is-live {
+  border-color: var(--ok-border);
+  background: var(--ok-bg);
+  color: var(--ok-text);
+}
+
+.ops-freshness.is-warn {
+  border-color: var(--warn-border);
+  background: var(--warn-bg);
+  color: var(--warn-text);
+}
+
+.ops-freshness.is-stale,
+.ops-freshness.is-offline {
+  border-color: var(--bad-border);
+  background: var(--bad-bg);
+  color: var(--bad-text);
+}
+
+.ops-freshness-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: currentColor;
+  flex-shrink: 0;
 }
 
 /* Shared Scrollbars */
@@ -352,6 +645,9 @@ summary {
 }
 
 @media (max-width: 760px) {
+  .ops-shell {
+    padding: 10px 10px 24px;
+  }
   .ops-topbar-inner {
     padding: 0 10px;
     gap: 8px;
@@ -360,27 +656,20 @@ summary {
     font-size: var(--text-sm);
   }
   .ops-nav-link {
-    min-height: 36px;
+    min-height: max(40px, var(--target-size));
     padding: 6px 8px;
   }
-}
-
-@media (pointer: coarse) {
-  .ops-nav-link {
-    min-height: 44px;
+  .ops-btn {
+    min-height: max(40px, var(--target-size));
   }
 }
 
 @media (prefers-reduced-motion: reduce) {
-  *,
-  *::before,
-  *::after {
-    scroll-behavior: auto !important;
-    animation-duration: 0.001ms !important;
-    animation-iteration-count: 1 !important;
+  html {
+    scroll-behavior: auto;
   }
-  .ops-nav-link {
-    transition: none !important;
+  .ops-skip-link {
+    transition: none;
   }
 }
 
@@ -391,7 +680,16 @@ summary {
   .ops-nav-link[aria-current="page"]::after {
     border-bottom-color: Highlight;
   }
-  .ops-alert {
+  .ops-alert,
+  .ops-incident-banner,
+  .ops-freshness,
+  .ops-btn.is-active,
+  .ops-btn.active {
     border-color: CanvasText;
+    forced-color-adjust: auto;
+  }
+  .ops-btn.is-active,
+  .ops-btn.active {
+    outline: 2px solid Highlight;
   }
 }
