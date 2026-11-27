@@ -209,7 +209,10 @@
       var cycleText = String(portfolioStopHour).padStart(2, "0") + ":" + String(portfolioStopMinute).padStart(2, "0");
       if (accountMode === "readonly") {
         setText(el.walletLabel, "账户余额 (USDT)");
-        setText(el.walletHelp, "含未实现盈亏 · 只读监控");
+        if (el.walletHelp) {
+          el.walletHelp.textContent = "含未实现盈亏";
+          el.walletHelp.hidden = false;
+        }
         setText(el.nextEntryLabel, "监控模式");
         setText(el.nextEntry, "只读（无自动交易）");
         setText(el.cycleReturnLabel, "窗口收益");
@@ -229,10 +232,13 @@
         if (el.runsTab) el.runsTab.hidden = true;
       } else {
         setText(el.walletLabel, "策略权益 (USDT)");
-        setText(el.walletHelp, "扣除窗口内出入金影响");
+        if (el.walletHelp) {
+          el.walletHelp.textContent = "";
+          el.walletHelp.hidden = true;
+        }
         setText(el.nextEntryLabel, "下次开单");
         setText(el.cycleReturnLabel, cycleText + " 以来收益");
-        setText(el.cycleReturnHelp, "按账户周期计算（北京时间 UTC+8）");
+        setText(el.cycleReturnHelp, "UTC+8 周期");
         setText(el.stopDistanceHelp, portfolioStopEnabled ? "距离 -" + portfolioStopPct + "% 止损阈值" : "组合止损未启用");
         setText(el.riskCycleStart, "每日 " + cycleText + " 切换账户周期 · 北京时间 UTC+8");
         if (el.riskThreshold) {

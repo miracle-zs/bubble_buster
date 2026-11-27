@@ -795,27 +795,6 @@
 
 /* .entry-progress-strategy-badge inherits unified badge styles from ops.css */
 
-.entry-rule-hint {
-  color: var(--muted);
-  font-size: var(--text-xs);
-}
-
-.entry-rule-hint summary {
-  color: var(--muted);
-}
-
-.entry-rule-hint summary:hover {
-  color: var(--text-secondary);
-}
-
-.entry-progress-heading-note {
-  max-width: 760px;
-  margin: 4px 0 0;
-  color: var(--text-secondary);
-  font-size: var(--text-xs);
-  line-height: 1.5;
-}
-
 .entry-progress-shell { background: var(--surface); }
 
 .entry-progress-overview {
@@ -1006,38 +985,6 @@
 
 .entry-progress-timeline-title strong { color: var(--text); font-size: var(--text-sm); font-weight: 700; }
 .entry-progress-timeline-title > span:last-child { color: var(--muted); font-size: var(--text-xs); }
-
-.entry-progress-timeline-legend {
-  display: flex;
-  align-items: center;
-  justify-content: flex-end;
-  flex-wrap: wrap;
-  gap: 6px 12px;
-  color: var(--muted);
-  font-size: var(--text-xs);
-}
-
-.entry-progress-phase-legend {
-  display: inline-flex;
-  align-items: center;
-  gap: 5px;
-  color: var(--text-secondary);
-  font-size: var(--text-xs);
-  font-weight: 600;
-  white-space: nowrap;
-}
-
-.entry-progress-phase-legend i {
-  display: inline-block;
-  width: 7px;
-  height: 7px;
-  border-radius: 50%;
-}
-
-.entry-progress-phase-legend.is-initial i { background: var(--phase-initial); }
-.entry-progress-phase-legend.is-scale-in i { background: var(--phase-scale-in); border-radius: 2px; }
-.entry-progress-phase-legend.is-wait-bullish i { background: transparent; border: 2px solid var(--phase-wait-bullish); }
-.entry-progress-phase-legend.is-wait-bearish i { background: var(--phase-wait-bearish); }
 
 .entry-progress-timeline-track {
   display: grid;
@@ -1480,7 +1427,6 @@
   .entry-progress-next-action { padding: 10px 12px; }
   .entry-progress-next-action { display: flex; min-height: 76px; }
   .entry-progress-timeline { padding: 12px; }
-  .entry-progress-timeline-legend { justify-content: flex-start; }
   .entry-progress-timeline-track { display: flex; }
   .entry-progress-timeline-event { flex: 0 0 184px; }
   .entry-progress-header { display: none; }

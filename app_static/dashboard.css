@@ -909,13 +909,6 @@
   content: "收起";
 }
 
-.diagnostics-intro {
-  color: var(--muted);
-  font-size: var(--text-xs);
-  font-weight: 500;
-  margin-left: 6px;
-}
-
 .diagnostics-grid {
   display: grid;
   grid-template-columns: minmax(0, 1.15fr) minmax(0, 0.85fr);

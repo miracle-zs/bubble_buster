@@ -708,7 +708,7 @@ summary {
 }
 
 /* Shared Disclosure Primitive (details > summary +/- toggle) */
-:is(.ops-disclosure, .table-note-hint, .row-details, .entry-rule-hint, .task-error-details) summary {
+:is(.ops-disclosure, .table-note-hint, .row-details, .task-error-details) summary {
   display: inline-flex;
   align-items: center;
   gap: 4px;
@@ -717,16 +717,16 @@ summary {
   list-style: none;
 }
 
-:is(.ops-disclosure, .table-note-hint, .row-details, .entry-rule-hint, .task-error-details) summary::-webkit-details-marker {
+:is(.ops-disclosure, .table-note-hint, .row-details, .task-error-details) summary::-webkit-details-marker {
   display: none;
 }
 
-:is(.ops-disclosure, .table-note-hint, .row-details, .entry-rule-hint, .task-error-details) summary::before {
+:is(.ops-disclosure, .table-note-hint, .row-details, .task-error-details) summary::before {
   content: "+ ";
   color: var(--accent);
 }
 
-:is(.ops-disclosure, .table-note-hint, .row-details, .entry-rule-hint, .task-error-details)[open] summary::before {
+:is(.ops-disclosure, .table-note-hint, .row-details, .task-error-details)[open] summary::before {
   content: "− ";
 }
 

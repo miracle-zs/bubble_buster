@@ -184,13 +184,16 @@
       ops.applyFreshnessPill(overviewFreshnessPill, overviewFreshnessText, freshness);
 
       if (overviewAnomalyCount) {
+        var anomalyCue = document.getElementById("overview-anomaly-cue");
         if (!summaryHydratedOnce) {
           overviewAnomalyCount.textContent = "--";
           overviewAnomalyCount.className = "command-value";
+          if (anomalyCue) anomalyCue.hidden = true;
         } else {
           var count = anomalyTaskCount(summaryRows);
           overviewAnomalyCount.textContent = String(count);
           overviewAnomalyCount.className = "command-value" + (count > 0 ? " status-bad" : "");
+          if (anomalyCue) anomalyCue.hidden = count === 0;
         }
       }
 
@@ -367,14 +370,7 @@
       syncCountdownTimer();
 
       var timeline = buildCommonEntryTimeline(todayRows);
-      var allNotStarted = todayRows.length === 0 && waitingTotal === 0 && failedTotal === 0;
-      var hasIssues = !allNotStarted && (
-        todayRows.length !== accountRows.length
-        || completedAccounts !== accountRows.length
-        || waitingTotal > 0
-        || failedTotal > 0
-        || !timeline.groups.length
-      );
+      var hasIssues = failedTotal > 0;
       var showDetails = entryDetailsUserOverride === null ? hasIssues : entryDetailsUserOverride;
       if (entryProgressToggle) {
         entryProgressToggle.hidden = false;
@@ -416,7 +412,7 @@
         + '<div class="entry-progress-next-action"><span class="entry-progress-next-label">下一检查</span><strong>' + escapeHtml(nextCheckLabel) + '</strong><span class="entry-progress-next-state"><i class="entry-progress-next-pulse" aria-hidden="true"></i>' + escapeHtml(nextActionLabel) + ' · <span id="entry-progress-countdown">--</span></span></div>'
         + "</div>";
 
-      html += '<div class="entry-progress-timeline"><div class="entry-progress-timeline-head"><div class="entry-progress-timeline-title"><strong>共同入场窗口</strong><span>' + escapeHtml(timelineCaption) + '</span></div><div class="entry-progress-timeline-legend"><span class="entry-progress-phase-legend is-initial"><i aria-hidden="true"></i>首笔入场</span><span class="entry-progress-phase-legend is-scale-in"><i aria-hidden="true"></i>二次入场</span><span class="entry-progress-phase-legend is-wait-bullish"><i aria-hidden="true"></i>等待阳线</span><span class="entry-progress-phase-legend is-wait-bearish"><i aria-hidden="true"></i>阳后等阴线</span></div></div><div class="entry-progress-timeline-track">';
+      html += '<div class="entry-progress-timeline"><div class="entry-progress-timeline-head"><div class="entry-progress-timeline-title"><strong>共同入场窗口</strong><span>' + escapeHtml(timelineCaption) + '</span></div></div><div class="entry-progress-timeline-track">';
       if (timeline.groups.length) {
         for (var k = 0; k < timeline.groups.length; k += 1) {
           var group = timeline.groups[k];
@@ -430,7 +426,7 @@
       } else {
         html += '<div class="entry-progress-detail warn">各账号榜单存在差异或尚未开始，见下方账号明细</div>';
       }
-      if (nextCheckRaw) {
+      if (waitingTotal > 0 && nextCheckRaw) {
         html += '<div class="entry-progress-timeline-event entry-progress-timeline-next is-next"><div class="entry-progress-timeline-event-top"><span class="entry-progress-timeline-event-state">下一检查</span><time>' + escapeHtml(nextCheckLabel) + "</time></div><span>待检查 " + waitingTotal + " 个信号</span></div>";
       }
       html += "</div></div>"

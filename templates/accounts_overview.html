@@ -42,7 +42,7 @@ __OPS_TOPBAR__
         <span class="command-label">任务异常</span>
         <span class="command-anomaly-badge">
           <strong id="overview-anomaly-count" class="command-value">--</strong>
-          <span class="command-anomaly-cue" aria-hidden="true">查看</span>
+          <span id="overview-anomaly-cue" class="command-anomaly-cue" aria-hidden="true" hidden>查看</span>
         </span>
       </button>
       <div class="command-item command-secondary">
@@ -74,11 +74,7 @@ __OPS_TOPBAR__
     <section class="entry-progress-panel" aria-labelledby="entry-progress-heading">
       <div class="entry-progress-heading">
         <div class="entry-progress-heading-copy">
-          <h2 id="entry-progress-heading" class="section-title">今日开单进度 <span class="entry-progress-strategy-badge ops-term tip-below" tabindex="0" data-tip="首笔等待 1h 阴线确认；第二笔需先出阳线后再等下一根阴线独立开仓">先阳后阴 · 信号独立开仓</span></h2>
-          <details class="entry-rule-hint">
-            <summary>入场规则说明</summary>
-            <p class="entry-progress-heading-note">首笔等待 1h 阴线信号；第二笔在出现阳线后等待下一根阴线信号独立开仓。启用收盘前入场时，信号可在收盘前触发。</p>
-          </details>
+          <h2 id="entry-progress-heading" class="section-title">今日开单进度 <span class="entry-progress-strategy-badge ops-term tip-below" tabindex="0" data-tip="首笔等待 1h 阴线确认；第二笔先出阳线后再等下一根阴线独立开仓（启用收盘前入场时可在收盘前触发）">先阳后阴 · 信号独立开仓</span></h2>
         </div>
         <div class="section-heading-actions">
           <div id="entry-progress-updated" class="entry-progress-updated">更新 --</div>
