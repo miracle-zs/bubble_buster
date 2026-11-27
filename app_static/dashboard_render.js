@@ -260,7 +260,7 @@
 
   function cashflowRowHtml(c, timeZone) {
     var amount = ops.toNum(c.amount);
-    var amountClass = amount === null ? "" : (amount > 0 ? "ok" : (amount < 0 ? "bad" : "warn"));
+    var amountClass = amount === null ? "" : (amount > 0 ? "ok" : (amount < 0 ? "bad" : ""));
     return (
       "<tr>"
       + '<th scope="row" class="numeric">' + escapeHtml(fmtAxisTime(c.event_time_utc, timeZone)) + "</th>"
@@ -339,7 +339,7 @@
     var yAxisCfg = {
       type: "value",
       scale: true,
-      axisLabel: { color: theme.muted, fontSize: 12, formatter: function (value) { return fmtAdaptive(value); } },
+      axisLabel: { color: theme.muted, fontSize: 12, fontFamily: theme.fontMono, formatter: function (value) { return fmtAdaptive(value); } },
       axisLine: { show: false },
       splitLine: { lineStyle: { color: theme.splitLine, type: "dashed" } }
     };
@@ -369,10 +369,11 @@
       tooltip: {
         trigger: "axis",
         axisPointer: { type: "line", lineStyle: { color: theme.borderStrong } },
-        backgroundColor: theme.surface,
-        borderColor: theme.border,
+        backgroundColor: theme.surfaceTooltip,
+        borderColor: theme.borderStrong,
         borderWidth: 1,
-        textStyle: { color: theme.text, fontSize: 12 },
+        extraCssText: "box-shadow: " + theme.shadowOverlay + "; font-variant-numeric: tabular-nums;",
+        textStyle: { color: theme.text, fontSize: 12, fontFamily: theme.fontMono },
         formatter: function (items) {
           if (!items || !items.length) return "";
           var v = items[0].value || [];
@@ -404,6 +405,7 @@
           alignMinLabel: "left",
           alignMaxLabel: "right",
           fontSize: 12,
+          fontFamily: theme.fontMono,
           margin: 10,
           formatter: function (value) { return fmtAxisTime(value, timeZone); }
         },

@@ -179,7 +179,7 @@
       if (overviewAnomalyCount) {
         var count = anomalyTaskCount(summaryRows);
         overviewAnomalyCount.textContent = String(count);
-        overviewAnomalyCount.className = "command-value " + (count > 0 ? "status-bad" : "status-ok");
+        overviewAnomalyCount.className = "command-value" + (count > 0 ? " status-bad" : "");
       }
 
       var stopCmd = document.getElementById("portfolio-stop-command");
@@ -228,7 +228,7 @@
           serviceHealthState = { enabled: enabled, running: running, loaded: true };
           serviceState.innerHTML = '<span class="status-dot" aria-hidden="true"></span>'
             + (running ? "运行中" : (enabled ? "已停止" : "未启用"));
-          serviceState.className = "command-value " + (running ? "status-ok" : (enabled ? "status-bad" : "status-warn"));
+          serviceState.className = "command-value" + (running ? " status-ok" : (enabled ? " status-bad" : ""));
           scheduleCommandBarRender();
         })
         .catch(function (err) {
@@ -352,7 +352,7 @@
       var nextCheckLabel = nextCheckRaw ? compactLocalTime(nextCheckRaw) : "--";
       var nextActionLabel = waitingTotal > 0 ? "等待信号检查" : (completedAccounts === accountRows.length ? "今日已完成" : "等待状态同步");
       var overallPct = targetTotal > 0 ? Math.round(Math.min(100, (entryActionTotal / targetTotal) * 100)) : 0;
-      var anomalyStatClass = failedTotal > 0 ? "bad" : "clear";
+      var anomalyStatClass = failedTotal > 0 ? "bad" : "neutral";
       var anomalyStatNote = failedTotal > 0 ? "需要处理" : "当前无异常";
       var timelineCaption = timeline.groups.length
         ? timeline.groups.length + " 个共同窗口 · " + timeline.commonActionCount + " 个共同入场动作"
@@ -412,7 +412,7 @@
         if (!accProgress || accProgress.is_today === false) {
           html += '<div class="entry-progress-row" role="row">'
             + '<div class="entry-progress-account progress-account-cell" role="cell"><div class="entry-progress-account-head"><strong>' + aid + '</strong><span class="entry-progress-account-status status-warn">未开始</span></div><span class="entry-progress-account-meta">今日尚未执行</span><div class="entry-progress-progress-line"><strong>0</strong><span>/ 0 入场动作</span><em>0%</em></div><div class="entry-progress-meter" role="progressbar" aria-label="' + escapeHtml(rawAid + " 入场动作进度") + '" aria-valuenow="0" aria-valuemin="0" aria-valuemax="100"></div></div>'
-            + '<div class="entry-progress-phase" role="cell"><span class="entry-progress-phase-label phase-initial">未开始</span><span class="entry-progress-phase-note">等待今日榜单</span></div>'
+            + '<div class="entry-progress-phase" role="cell"><span class="entry-progress-phase-label neutral">未开始</span><span class="entry-progress-phase-note">等待今日榜单</span></div>'
             + '<div class="entry-progress-waiting-cell" role="cell"><div class="entry-progress-waiting-list"><div class="entry-progress-waiting-empty">等待今日榜单</div></div></div>'
             + '<div class="entry-progress-next-cell" role="cell"><strong>--</strong><span>尚未开始</span></div></div>';
           continue;
@@ -577,7 +577,7 @@
       }
 
       var changePct = mode !== "readonly" && backendReturn !== null ? backendReturn : metrics.currentReturnPct;
-      var tone2 = ops.classifyReturnTone(changePct, portfolioStopPct, stop && stop.status);
+      var tone2 = ops.classifyReturnTone(changePct, mode === "readonly" ? null : portfolioStopPct, stop && stop.status);
       var deltaCls = tone2 === "ok" ? "spark-up" : (tone2 === "bad" ? "spark-down" : "spark-flat");
       var signedReturn = (changePct >= 0 ? "+" : "") + fmt(changePct, 2) + "%";
 
@@ -905,7 +905,7 @@
             + '<div class="account-card-body">'
             + (highlightsHtml ? '<div class="card-strategy-highlights" data-field="strategy-highlights" data-note="' + noteAttr + '">' + highlightsHtml + "</div>" : "")
             + '<div class="account-primary">'
-            + '<div class="metric"><span class="metric-label">账户权益（USDT）</span><strong class="metric-value" data-field="wallet-balance">' + ops.fmtUsdt(row.wallet_balance_usdt, 2) + "</strong></div>"
+            + '<div class="metric"><span class="metric-label">策略权益 (USDT)</span><strong class="metric-value" data-field="wallet-balance">' + ops.fmtUsdt(row.wallet_balance_usdt, 2) + "</strong></div>"
             + '<div class="metric"><span class="metric-label">' + String(portfolioStopHour).padStart(2, "0") + ":" + String(portfolioStopMinute).padStart(2, "0") + ' 以来收益</span><strong class="metric-value return-value spark-delta" data-account-id="' + safeAid + '">--</strong></div>'
             + "</div>"
             + '<div class="account-secondary">'
@@ -959,7 +959,7 @@
         var safeAid = escapeHtml(aid);
         var mode = String(r.mode || "full").toLowerCase();
         var modeLabel = mode === "full" ? "完整策略" : (mode === "loss_cut_only" ? "止损保护" : "只读监控");
-        var modeBadgeClass = "task-mode-badge" + (mode === "readonly" ? " mode-readonly" : "");
+        var modeBadgeClass = "task-mode-badge" + (mode === "readonly" ? " mode-readonly" : (mode === "loss_cut_only" ? " mode-loss-cut" : ""));
         var isAnomaly = hasAnomalyTask(r);
         var headerStatus = mode === "readonly" ? "READONLY" : worstAccountTaskStatus(r);
         var accountCls = isAnomaly ? "task-account-card task-account-anomaly" : "task-account-card";

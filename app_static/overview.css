@@ -489,7 +489,7 @@
   border-color: var(--accent-border);
 }
 
-.spark-box.spark-up { --spark: var(--ok); --spark-fill: var(--spark-fill); }
+.spark-box.spark-up { --spark: var(--ok); --spark-fill: var(--ok-bg); }
 .spark-box.spark-down { --spark: var(--bad); --spark-fill: var(--spark-down-fill); }
 .spark-box.spark-flat { --spark: var(--accent); --spark-fill: var(--spark-flat-fill); }
 
@@ -755,6 +755,7 @@
 .entry-progress-zone {
   color: var(--muted);
   font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
   font-size: var(--text-xs);
   white-space: nowrap;
 }
@@ -933,7 +934,7 @@
 .entry-progress-stat-note { color: var(--muted); font-size: var(--text-xs); }
 .entry-progress-stat.warn strong { color: var(--warn-text); }
 .entry-progress-stat.bad strong { color: var(--bad-text); }
-.entry-progress-stat.clear strong { color: var(--ok-text); }
+.entry-progress-stat.clear strong { color: var(--text); }
 .entry-progress-stat.neutral strong { color: var(--text); }
 
 .entry-progress-next-action {
@@ -960,8 +961,14 @@
   gap: 6px;
   margin-top: 4px;
   color: var(--text-secondary);
+  font-variant-numeric: tabular-nums;
   font-size: var(--text-xs);
   line-height: 1.35;
+}
+
+#entry-progress-countdown {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
 }
 
 .entry-progress-next-pulse {
@@ -1232,6 +1239,8 @@
 .entry-progress-phase-label.phase-complete::before { background: var(--ok); }
 .entry-progress-phase-label.bad { color: var(--bad-text); }
 .entry-progress-phase-label.bad::before { background: var(--bad); }
+.entry-progress-phase-label.neutral { color: var(--text-secondary); }
+.entry-progress-phase-label.neutral::before { background: var(--muted); }
 .entry-progress-phase-label.phase-confirming::before { background: var(--muted); }
 .entry-progress-phase-note { color: var(--muted); font-size: var(--text-xs); line-height: 1.45; }
 
@@ -1245,7 +1254,7 @@
   max-width: 100%;
   padding: 6px 8px;
   border: 1px solid var(--warn-border);
-  border-radius: var(--radius);
+  border-radius: var(--radius-sm);
   background: var(--warn-bg);
 }
 
@@ -1304,7 +1313,7 @@
 .task-account-card.task-account-anomaly { background: var(--surface); }
 .task-account-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-bottom: 10px; }
 .task-account-title { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; }
-.task-account-id { color: var(--text); font-family: var(--font-mono); font-size: var(--text-md); font-weight: 700; }
+.task-account-id { color: var(--text); font-family: var(--font-mono); font-variant-numeric: tabular-nums; font-size: var(--text-md); font-weight: 700; }
 
 /* .task-mode-badge, .task-feature-badge, .task-last-run inherit unified badge styles from ops.css */
 
@@ -1333,6 +1342,7 @@
 .task-stat-line,
 .task-symbol-line {
   font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
   font-size: var(--text-xs);
   line-height: 1.45;
   word-break: break-word;

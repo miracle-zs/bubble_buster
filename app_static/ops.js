@@ -93,10 +93,14 @@
     chartThemeCache = {
       bg: readVar("--bg", "#080a0f"),
       surface: readVar("--surface", "#10141c"),
+      surfaceElevated: readVar("--surface-elevated", "#151b26"),
       surfaceSubtle: readVar("--surface-subtle", "#131822"),
       surfaceInset: readVar("--surface-inset", "#0b0e14"),
+      surfaceTooltip: readVar("--surface-tooltip", "rgba(11, 14, 20, 0.94)"),
       border: readVar("--border", "#222a38"),
       borderStrong: readVar("--border-strong", "#344054"),
+      shadowOverlay: readVar("--shadow-overlay", "0 14px 36px rgba(2, 4, 10, 0.72), 0 2px 8px rgba(2, 4, 10, 0.5)"),
+      fontMono: readVar("--font-mono", 'ui-monospace, SFMono-Regular, "SF Mono", "JetBrains Mono", Menlo, Monaco, Consolas, monospace'),
       text: readVar("--text", "#f3f6fb"),
       textSecondary: readVar("--text-secondary", "#c2ccd9"),
       muted: readVar("--muted", "#8b99ad"),
@@ -121,7 +125,7 @@
         readVar("--series-3", "#10b981"),
         readVar("--series-4", "#fb7185"),
         readVar("--series-5", "#2dd4bf"),
-        readVar("--series-6", "#c084fc")
+        readVar("--series-6", "#a3e635")
       ]
     };
     return chartThemeCache;
@@ -644,7 +648,15 @@
     if (st === "TRIGGERED_COMPLETE" || st === "CLOSING" || st === "THRESHOLD_REACHED") return "bad";
     if (n === null) return "";
     if (n > 0) return "ok";
-    if (n < 0) return "bad";
+    if (n < 0) {
+      var limit = Number(stopPct);
+      if (Number.isFinite(limit) && limit > 0) {
+        if (n <= -(limit * 0.7)) return "bad";
+        if (n <= -(limit * 0.35)) return "warn";
+        return "";
+      }
+      return "bad";
+    }
     return "";
   }
 
@@ -653,7 +665,7 @@
     var limit = Number.isFinite(Number(stopPct)) && Number(stopPct) > 0 ? Number(stopPct) : 3.5;
     if (n === null) return "";
     if (n <= -(limit * 0.7)) return "bad";
-    if (n < 0) return "warn";
+    if (n <= -(limit * 0.35)) return "warn";
     return "ok";
   }
 

@@ -32,8 +32,9 @@
 
   function taskStatusCls(status) {
     var s = String(status || "UNKNOWN").toUpperCase();
+    if (s === "READONLY") return "is-readonly";
     if (s === "SUCCESS" || s === "RUNNING") return "status-ok";
-    if (s === "PARTIAL" || s === "SKIPPED" || s === "UNKNOWN" || s === "READONLY") return "status-warn";
+    if (s === "PARTIAL" || s === "SKIPPED" || s === "UNKNOWN") return "status-warn";
     return "status-bad";
   }
 
@@ -265,7 +266,7 @@
           + '<div class="task-row-main">'
           + '<div class="task-name-wrap" role="cell"><span class="task-name">近 30 日交易统计</span>'
           + '<span class="task-task-tag">只读监控</span></div>'
-          + '<span class="task-meta" role="cell"><span class="task-badge status-ok">只读</span></span>'
+          + '<span class="task-meta" role="cell"><span class="task-badge is-readonly">只读</span></span>'
           + '<span class="task-time" role="cell">' + escapeHtml(ops.formatBeijingTime(stats.last_updated_utc, { withYear: true })) + "</span>"
           + '<div class="task-result-lines" role="cell">'
           + '<div class="task-stat-line">净盈亏 ' + ops.fmtSignedUsdt(stats.net_realized_pnl != null ? stats.net_realized_pnl : stats.total_realized_pnl, 2) + " USDT · 胜率 " + fmt(stats.win_rate_pct, 1) + "% · 盈亏比 " + profitFactor + "</div>"
@@ -276,7 +277,7 @@
         + '<div class="task-row-main">'
         + '<div class="task-name-wrap" role="cell"><span class="task-name">账户监控</span>'
         + '<span class="task-task-tag">只读监控</span></div>'
-        + '<span class="task-meta" role="cell"><span class="task-badge status-warn">只读</span></span>'
+        + '<span class="task-meta" role="cell"><span class="task-badge is-readonly">只读</span></span>'
         + '<span class="task-time" role="cell">--</span>'
         + '<div class="task-result-lines" role="cell"><div class="task-stat-line">暂无近 30 日交易统计数据</div></div>'
         + "</div></div>";

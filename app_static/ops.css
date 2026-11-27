@@ -66,7 +66,7 @@
   --series-3: #10b981;
   --series-4: #fb7185;
   --series-5: #2dd4bf;
-  --series-6: #c084fc;
+  --series-6: #a3e635;
 
   /* Chart helpers */
   --spark: var(--ok);
@@ -594,7 +594,7 @@ summary {
   color: var(--ok-text);
 }
 
-:is(.ops-badge, .status-badge, .order-state, .task-badge, .task-last-run, .entry-progress-account-status, .mode-badge):is(.is-warn, .warn, .status-warn, .mode-loss-cut),
+:is(.ops-badge, .status-badge, .order-state, .task-badge, .task-last-run, .entry-progress-account-status, .mode-badge, .task-mode-badge):is(.is-warn, .warn, .status-warn, .mode-loss-cut),
 .entry-progress-account-status {
   border-color: var(--warn-border);
   background: var(--warn-bg);
@@ -607,7 +607,7 @@ summary {
   color: var(--bad-text);
 }
 
-:is(.ops-badge, .status-badge, .mode-badge, .task-mode-badge):is(.is-readonly, .readonly, .mode-readonly),
+:is(.ops-badge, .status-badge, .task-badge, .task-last-run, .mode-badge, .task-mode-badge):is(.is-readonly, .readonly, .mode-readonly),
 .readonly-badge {
   border-color: var(--readonly-border);
   background: var(--readonly-bg);

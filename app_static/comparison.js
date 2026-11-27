@@ -47,6 +47,12 @@
     var activeRequestToken = 0;
     var lastLoadedAt = 0;
     var navAccountsHydrated = initialNavAccounts.length > 0;
+    var accountModesById = {};
+    initialNavAccounts.forEach(function (acc) {
+      var aid = String((acc && (acc.id || acc.account_id)) || "").trim();
+      var modeVal = String((acc && acc.mode) || "").trim().toLowerCase();
+      if (aid && modeVal) accountModesById[aid] = modeVal;
+    });
     var strategyNotesByAccount = {};
     var lastMetricsContentSig = "";
     var pathPrefix = ops.resolveBasePrefix();
@@ -63,8 +69,13 @@
       return collator ? collator.compare(a, b) : String(a).localeCompare(String(b));
     }
 
+    function isReadonlyAccount(accountId) {
+      return accountModesById[String(accountId || "")] === "readonly";
+    }
+
     function colorFor(accountId, index) {
       var theme = ops.getChartTheme();
+      if (isReadonlyAccount(accountId)) return theme.readonly;
       var namedIndex = { acc01: 0, acc02: 1, acc03: 2, acc04: 3 };
       var slot = Object.prototype.hasOwnProperty.call(namedIndex, accountId) ? namedIndex[accountId] : index;
       return theme.series[slot % theme.series.length];
@@ -136,7 +147,9 @@
           navAccountsHydrated = true;
           var notesChanged = false;
           data.accounts.forEach(function (acc) {
-            var aid = String((acc && acc.account_id) || "").trim();
+            var aid = String((acc && (acc.account_id || acc.id)) || "").trim();
+            var modeVal = String((acc && acc.mode) || "").trim().toLowerCase();
+            if (aid && modeVal) accountModesById[aid] = modeVal;
             var note = String((acc && acc.strategy_note) || "").trim();
             if (aid && note && strategyNotesByAccount[aid] !== note) {
               strategyNotesByAccount[aid] = note;
@@ -162,11 +175,12 @@
       var arrowIcon = '<svg class="ops-icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 11L11 5"/><path d="M6.5 5H11v4.5"/></svg>';
       var html = rows.map(function (row, index) {
         var color = colorFor(row.account_id, index);
+        var isReadonly = isReadonlyAccount(row.account_id);
         var change = row.change_pct;
         var changeClass = change == null ? "" : (Number(change) >= 0 ? "is-positive" : "is-negative");
         var status = "暂无数据";
         if (row.status === "OK") {
-          var rowFreshness = ops.evaluateDataFreshness(row.latest_at_utc, { warnSec: 1800, staleSec: 7200 });
+          var rowFreshness = ops.evaluateDataFreshness(row.latest_at_utc, { warnSec: 180, staleSec: 900 });
           if (rowFreshness.state === "live") status = "实时快照";
           else if (rowFreshness.state === "warn") status = "延迟快照";
           else if (rowFreshness.state === "offline") status = "离线";
@@ -175,7 +189,7 @@
         var detailHref = pathPrefix + "/account/" + encodeURIComponent(row.account_id) + "/";
         var note = strategyNotesByAccount[row.account_id] || "";
         var strategyHtml = note ? ops.formatStrategyHighlights(note, allNotes, 2, "summary-strategy-tag") : "";
-        return '<article class="summary-card" style="--account-color:' + color + '">'
+        return '<article class="summary-card' + (isReadonly ? " is-readonly" : "") + '" style="--account-color:' + color + '">'
           + '<div class="summary-head"><a class="account-label" href="' + detailHref + '" aria-label="查看 ' + ops.escapeHtml(row.account_id) + ' 账户详情"><i class="account-dot" aria-hidden="true"></i><span>' + ops.escapeHtml(row.account_id) + '</span><span class="account-jump" aria-hidden="true">' + arrowIcon + '</span></a><span class="summary-status">' + status + '</span></div>'
           + '<div class="summary-change ' + changeClass + '">' + ops.fmtPct(change) + '</div>'
           + '<div class="summary-equity">当前权益 ' + (row.latest_equity == null ? "--" : ops.fmtUsdt(row.latest_equity, 2) + " USDT") + '</div>'
@@ -191,9 +205,10 @@
       if (!legendEl) return;
       var html = seriesRows().map(function (row, index) {
         var muted = visible[row.account_id] === false;
+        var isReadonly = isReadonlyAccount(row.account_id);
         var color = colorFor(row.account_id, index);
         var pat = patternFor(row.account_id, index);
-        return '<button class="legend-button' + (muted ? " is-muted" : "") + '" data-account="' + ops.escapeHtml(row.account_id) + '" aria-pressed="' + (!muted) + '" style="--account-color:' + color + '" type="button">'
+        return '<button class="legend-button' + (muted ? " is-muted" : "") + (isReadonly ? " is-readonly" : "") + '" data-account="' + ops.escapeHtml(row.account_id) + '" aria-pressed="' + (!muted) + '" style="--account-color:' + color + '" type="button">'
           + '<i class="legend-swatch ' + pat.swatchClass + '" aria-hidden="true"></i><span>' + ops.escapeHtml(row.account_id) + '</span><span class="legend-value">' + ops.fmtPct(row.change_pct) + "</span></button>";
       }).join("");
       ops.patchHtmlIfChanged(legendEl, html);
@@ -304,6 +319,7 @@
       lastMetricsContentSig = contentSig;
       var html = enriched.map(function (item) {
         var row = item.row;
+        var isReadonly = isReadonlyAccount(row.account_id);
         var color = colorFor(row.account_id, item.index);
         var detailHref = pathPrefix + "/account/" + encodeURIComponent(row.account_id) + "/";
         var changeCls = item.change_pct === null ? "" : (item.change_pct >= 0 ? "ok" : "bad");
@@ -312,7 +328,7 @@
         var strategyHtml = note
           ? ops.formatStrategyHighlights(note, allNotes, 2, "summary-strategy-tag")
           : '<span class="strategy-tag strategy-tag-empty">未配置</span>';
-        return '<tr data-account-row="' + ops.escapeHtml(item.account_id) + '">'
+        return '<tr data-account-row="' + ops.escapeHtml(item.account_id) + '"' + (isReadonly ? ' class="is-readonly"' : "") + '>'
           + '<th scope="row"><a class="account-label" style="--account-color:' + color + '" href="' + detailHref + '"><i class="account-dot" aria-hidden="true"></i>' + ops.escapeHtml(row.account_id) + "</a></th>"
           + '<td class="numeric ' + changeCls + '">' + ops.escapeHtml(ops.fmtPct(item.change_pct)) + "</td>"
           + '<td class="numeric">' + (item.latest_equity === null ? "--" : ops.escapeHtml(ops.fmtUsdt(item.latest_equity, 2))) + "</td>"
@@ -432,12 +448,13 @@
               position: "insideEndTop",
               distance: [6, 6],
               color: theme.textSecondary,
-              backgroundColor: "rgba(16, 20, 28, 0.84)",
+              backgroundColor: theme.surfaceTooltip,
               borderColor: theme.border,
               borderWidth: 1,
               borderRadius: 4,
               padding: [3, 7],
               fontSize: 12,
+              fontFamily: theme.fontMono,
               formatter: range === "all" ? "0% 基准 · 上线后首快照" : "0% 区间基准"
             },
             data: mode === "relative" ? [{ yAxis: 0 }] : []
@@ -470,10 +487,11 @@
         tooltip: {
           trigger: "axis",
           axisPointer: { type: "line", lineStyle: { color: theme.borderStrong } },
-          backgroundColor: theme.surface,
-          borderColor: theme.border,
+          backgroundColor: theme.surfaceTooltip,
+          borderColor: theme.borderStrong,
           borderWidth: 1,
-          textStyle: { color: theme.text, fontSize: 12 },
+          extraCssText: "box-shadow: " + theme.shadowOverlay + "; font-variant-numeric: tabular-nums;",
+          textStyle: { color: theme.text, fontSize: 12, fontFamily: theme.fontMono },
           formatter: function (items) {
             if (!items || !items.length) return "";
             var html = '<div style="margin-bottom:6px;color:' + theme.muted + '">' + ops.escapeHtml(formatLocalTime(items[0].axisValue, true)) + "</div>";
@@ -497,6 +515,7 @@
           axisLabel: {
             color: theme.muted,
             fontSize: 12,
+            fontFamily: theme.fontMono,
             hideOverlap: true,
             alignMinLabel: "left",
             alignMaxLabel: "right",
@@ -512,8 +531,9 @@
           axisLabel: {
             color: theme.muted,
             fontSize: 12,
+            fontFamily: theme.fontMono,
             formatter: function (value) {
-              return mode === "relative" ? (value >= 0 ? "+" : "") + Number(value).toFixed(1) + "%" : Number(value).toFixed(0);
+              return mode === "relative" ? (value >= 0 ? "+" : "") + Number(value).toFixed(1) + "%" : ops.fmtUsdt(value, 0);
             }
           },
           splitLine: { lineStyle: { color: theme.splitLine, type: "dashed" } }
@@ -575,7 +595,7 @@
         return;
       }
       var latest = rows.map(function (row) { return row.latest_at_utc; }).filter(Boolean).sort().slice(-1)[0];
-      var freshness = ops.evaluateDataFreshness(latest, { warnSec: 1800, staleSec: 7200 });
+      var freshness = ops.evaluateDataFreshness(latest, { warnSec: 180, staleSec: 900 });
       ops.applyFreshnessPill(el("freshness-pill"), el("status-text"), freshness);
     }
 

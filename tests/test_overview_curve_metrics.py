@@ -64,9 +64,19 @@ assert.equal(ops.formatWalletSource('DB'), '本地快照');
 assert.equal(ops.formatWalletSource('API'), '交易所实时');
 assert.equal(ops.formatWalletSource(''), '--');
 
+// Tone classifiers: managed small dip stays neutral/ok while readonly negative is bad
+assert.equal(ops.classifyReturnTone(-0.1, 3.5, 'MONITORING'), '');
+assert.equal(ops.classifyReturnTone(-1.5, 3.5, 'MONITORING'), 'warn');
+assert.equal(ops.classifyReturnTone(-2.6, 3.5, 'MONITORING'), 'bad');
+assert.equal(ops.classifyReturnTone(-0.1, null, ''), 'bad');
+assert.equal(ops.classifyDrawdownTone(-0.2, 3.5), 'ok');
+assert.equal(ops.classifyDrawdownTone(-1.4, 3.5), 'warn');
+assert.equal(ops.classifyDrawdownTone(-2.6, 3.5), 'bad');
+
 // Pure overview_render.js module tests
 require({str((Path(__file__).resolve().parents[1] / "app_static/overview_render.js").resolve())!r});
 const ov = globalThis.BBOverviewRender;
+assert.equal(ov.taskStatusCls('READONLY'), 'is-readonly');
 assert.equal(ov.worstAccountTaskStatus({{ tasks: {{ entry: {{ status: 'SUCCESS' }}, manage: {{ status: 'FAILED' }} }} }}), 'FAILED');
 assert.equal(ov.anomalyTaskCount([{{ tasks: {{ a: {{ status: 'FAILED' }}, b: {{ status: 'PARTIAL' }}, c: {{ status: 'SUCCESS' }} }} }}]), 2);
 const parsedTask = ov.formatTaskResultLines('entry', {{ summary: 'opened=3 failed=1 skipped=2 failed_symbols=BTCUSDT,ETHUSDT' }});
@@ -97,5 +107,7 @@ const opt = dr.buildEquityChartOption({{
 assert.equal(opt.yAxis.min, 272);
 assert.equal(opt.yAxis.max, 289);
 assert.equal(opt.dataZoom.length, 0);
+assert.equal(opt.xAxis.axisLabel.fontFamily, ops.getChartTheme().fontMono);
+assert.ok(!dr.cashflowRowHtml({{ amount: 0, income_type: 'FUNDING_FEE', asset: 'USDT', symbol: 'BTCUSDT', id: 1, event_time_utc: '2026-10-09T00:00:00Z' }}, 'Asia/Shanghai').includes('numeric warn'));
 """
         subprocess.run(["node", "-e", script], check=True, capture_output=True, text=True)

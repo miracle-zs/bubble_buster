@@ -524,7 +524,7 @@
       var effectiveReturn = seriesData.length <= 1 && backendReturn !== null
         ? backendReturn
         : (firstEq > 0 ? ((lastEqVal - firstEq) / firstEq) * 100 : 0);
-      var tone = ops.classifyReturnTone(effectiveReturn, portfolioStopPct, stopStatus);
+      var tone = ops.classifyReturnTone(effectiveReturn, accountMode === "readonly" ? null : portfolioStopPct, stopStatus);
       var isNegative = tone === "bad";
       var lineColor = isNegative ? theme.bad : theme.ok;
       var areaTop = isNegative ? theme.areaBad : theme.areaOk;
@@ -543,7 +543,7 @@
             color: theme.muted,
             backgroundColor: theme.surface,
             padding: [2, 6],
-            borderRadius: 3,
+            borderRadius: 4,
             fontSize: 12,
             formatter: "周期起点 " + ops.fmtUsdt(baseEq, 2)
           }
@@ -558,7 +558,7 @@
             borderColor: theme.bad,
             borderWidth: 1,
             padding: [2, 6],
-            borderRadius: 3,
+            borderRadius: 4,
             fontSize: 12,
             formatter: "组合止损 -" + ops.fmtNum(lossPct, 2) + "% (" + ops.fmtUsdt(stopEq, 2) + ")"
           }
@@ -674,7 +674,7 @@
       var currentDrawdown = ops.toNum(metrics.currentDrawdownPct);
       var stopStatus = stop ? String(stop.status || "").toUpperCase() : "";
 
-      var returnCls = ops.classifyReturnTone(currentReturn, portfolioStopPct, stopStatus);
+      var returnCls = ops.classifyReturnTone(currentReturn, accountMode === "readonly" ? null : portfolioStopPct, stopStatus);
       var drawdownCls = ops.classifyDrawdownTone(currentDrawdown, portfolioStopPct);
 
       setSummaryMetric(el.cycleReturn, currentReturn === null ? "--" : ops.fmtSigned(currentReturn, 2) + "%", returnCls);
@@ -794,8 +794,8 @@
         var svcLabel = svcStatus === "RUNNING" ? "运行中" : (svcStatus === "DISABLED" ? "未启用" : (svcStatus === "STOPPED" ? "已停止" : "异常"));
         setText(el.serviceState, svcLabel);
         if (el.serviceState) {
-          var svcClass = svcStatus.indexOf("RUNNING") >= 0 ? "ok" : (svcStatus.indexOf("ERROR") >= 0 ? "bad" : "warn");
-          el.serviceState.className = "command-cell-value " + svcClass;
+          var svcClass = svcStatus.indexOf("RUNNING") >= 0 ? "ok" : (svcStatus.indexOf("ERROR") >= 0 || svcStatus === "STOPPED" ? "bad" : "");
+          el.serviceState.className = "command-cell-value" + (svcClass ? " " + svcClass : "");
         }
         if (accountMode !== "readonly") {
           setText(el.lastRunStatus, statusLabel(summary.last_run_status));

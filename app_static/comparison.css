@@ -61,7 +61,6 @@
   flex-direction: column;
   min-width: 0;
   padding: 12px 14px;
-  overflow: hidden;
   border: 1px solid var(--border);
   border-radius: var(--radius);
   background: var(--surface);
@@ -72,14 +71,17 @@
   border-color: var(--border-strong);
 }
 
-.summary-card::before {
-  position: absolute;
-  top: 0;
-  right: 0;
-  left: 0;
-  height: 2px;
-  background: var(--account-color, var(--accent));
-  content: "";
+.summary-card.is-readonly {
+  border-color: var(--readonly-border);
+}
+
+.summary-card.is-readonly .account-label,
+.comparison-table tr.is-readonly .account-label {
+  color: var(--readonly-text);
+}
+
+.legend-button.is-readonly {
+  border-color: var(--readonly-border);
 }
 
 .summary-head {
@@ -155,7 +157,7 @@
   color: var(--text-secondary);
   font-family: var(--font-mono);
   font-variant-numeric: tabular-nums;
-  font-size: var(--text-xs);
+  font-size: var(--text-base);
 }
 
 .summary-strategy {
@@ -337,8 +339,15 @@
 }
 
 .legend-swatch.is-dashdot {
-  border-top-style: double;
-  border-top-width: 3px;
+  height: 2.5px;
+  border-top: 0;
+  background: repeating-linear-gradient(
+    to right,
+    var(--account-color) 0 7px,
+    transparent 7px 9px,
+    var(--account-color) 9px 11px,
+    transparent 11px 14px
+  );
 }
 
 .legend-value {
@@ -433,6 +442,8 @@
 .comparison-table th.numeric,
 .comparison-table td.numeric {
   text-align: right;
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
 }
 
 .comparison-table thead th {

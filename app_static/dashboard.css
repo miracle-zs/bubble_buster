@@ -572,6 +572,11 @@
   white-space: nowrap;
 }
 
+.positions-table th,
+.positions-table td {
+  vertical-align: middle;
+}
+
 .detail-table th.numeric,
 .detail-table td.numeric {
   text-align: right;
