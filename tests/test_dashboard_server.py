@@ -2253,7 +2253,9 @@ class DashboardServerTest(unittest.TestCase):
         overview_js = (Path(__file__).resolve().parents[1] / "app_static/overview.js").read_text(encoding="utf-8")
         self.assertIn('"refreshSec": 15', html)
         self.assertIn("setInterval(function () { fetchSummary(); }, refreshSec * 1000)", overview_js)
+        self.assertIn("/api/accounts/curves", overview_js)
         self.assertIn("/curve?window_hours=24&curve_points=160&_=", overview_js)
+        self.assertIn('event.key === "ArrowLeft"', overview_js)
 
     def test_live_wallet_snapshot_uses_configured_account_id(self) -> None:
         calls = {"n": 0}

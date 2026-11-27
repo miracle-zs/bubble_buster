@@ -3709,7 +3709,7 @@ def _render_dashboard_template(
 
 def render_dashboard_html(
     refresh_sec: int,
-    echarts_src: str = "https://cdn.jsdelivr.net/npm/echarts@5/dist/echarts.min.js",
+    echarts_src: str = "/static/vendor/echarts.min.js",
 ) -> str:
     return _render_dashboard_template(refresh_sec, echarts_src)
 
@@ -3717,7 +3717,7 @@ def render_dashboard_html(
 def render_account_dashboard_html(
     refresh_sec: int,
     account_id: str,
-    echarts_src: str = "https://cdn.jsdelivr.net/npm/echarts@5/dist/echarts.min.js",
+    echarts_src: str = "/static/vendor/echarts.min.js",
     account_mode: str = "full",
     strategy_note: str = "",
     portfolio_loss_cut_enabled: bool = False,

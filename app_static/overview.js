@@ -12,6 +12,7 @@
     var summaryApi = pathPrefix + "/api/accounts/summary";
     var summaryFastApi = summaryApi + "/fast";
     var summaryDetailsApi = summaryApi + "/details";
+    var curvesBatchApi = pathPrefix + "/api/accounts/curves";
     var healthApi = pathPrefix + "/healthz";
     var portfolioStopEnabled = !!cfg.portfolioStopEnabled;
     var portfolioStopPct = Number(cfg.portfolioStopPct) || 3.5;
@@ -1100,8 +1101,11 @@
           : "";
 
         box.className = "spark-box " + deltaCls;
+        box.setAttribute("tabindex", "0");
+        box.setAttribute("role", "group");
+        box.setAttribute("aria-label", svgLabel + "，使用左右方向键查看时间点");
         box.innerHTML = ''
-          + '<svg class="spark-svg" viewBox="0 0 ' + width + " " + height + '" preserveAspectRatio="none" role="img" aria-label="' + escapeHtml(svgLabel) + '">'
+          + '<svg class="spark-svg" viewBox="0 0 ' + width + " " + height + '" preserveAspectRatio="none" aria-hidden="true">'
           + "<title>" + escapeHtml(svgLabel) + "</title>"
           + '<line class="spark-zero-line" x1="0" x2="' + width + '" y1="' + geometry.zeroY.toFixed(2) + '" y2="' + geometry.zeroY.toFixed(2) + '"></line>'
           + (includeStop ? '<line class="spark-stop-line" x1="0" x2="' + width + '" y1="' + geometry.stopY.toFixed(2) + '" y2="' + geometry.stopY.toFixed(2) + '"></line>' : "")
@@ -1119,7 +1123,82 @@
       renderPortfolioStopState(aid, stop, metrics);
     }
 
+    function storeCurvePayload(aid, payload) {
+      if (!aid || !payload || typeof payload !== "object") return;
+      var mode = String(accountModes[aid] || "full").toLowerCase();
+      var curve = mode === "readonly"
+        ? (payload.balance_curve || payload.equity_curve || [])
+        : (payload.balance_curve || payload.equity_curve || []);
+      var points = [];
+      for (var i = 0; i < curve.length; i += 1) {
+        var p = curve[i] || {};
+        var n = Number(p.equity);
+        if (Number.isFinite(n)) points.push({ t: p.t || "", equity: n });
+      }
+      if (payload.portfolio_loss_cut) portfolioStopStates[aid] = payload.portfolio_loss_cut;
+      curveCache[aid] = {
+        points: points.slice(-160),
+        walletAsOfUtc: (payload.wallet && payload.wallet.as_of_utc) || "",
+        cycleBaseline: payload.balance_curve_cycle_baseline || null,
+        portfolioLossCut: payload.portfolio_loss_cut || portfolioStopStates[aid] || null,
+        ts: Date.now()
+      };
+      curveErrors[aid] = "";
+    }
+
     var curveAbortControllers = {};
+    var batchCurvesAbortController = null;
+    var batchCurvesInFlight = false;
+
+    function fetchCurvesBatch(accountIds, force) {
+      var ids = (accountIds || []).filter(Boolean);
+      if (!ids.length) return;
+      if (batchCurvesInFlight && !force) return;
+      var now = Date.now();
+      for (var i = 0; i < ids.length; i += 1) {
+        curveInFlight[ids[i]] = true;
+        curveErrors[ids[i]] = "";
+      }
+      batchCurvesInFlight = true;
+      if (batchCurvesAbortController) {
+        try { batchCurvesAbortController.abort(); } catch (e) {}
+      }
+      batchCurvesAbortController = typeof AbortController !== "undefined" ? new AbortController() : null;
+      var url = curvesBatchApi
+        + "?window_hours=24&curve_points=160&accounts=" + encodeURIComponent(ids.join(","))
+        + "&_=" + now;
+      ops.fetchJsonWithTimeout(url, {
+        signal: batchCurvesAbortController ? batchCurvesAbortController.signal : null,
+        timeoutMs: 15000
+      })
+        .then(function (data) {
+          batchCurvesInFlight = false;
+          var curvesMap = (data && data.curves) || {};
+          for (var j = 0; j < ids.length; j += 1) {
+            var aid = ids[j];
+            curveInFlight[aid] = false;
+            if (Object.prototype.hasOwnProperty.call(curvesMap, aid) && curvesMap[aid]) {
+              storeCurvePayload(aid, curvesMap[aid]);
+              renderCurve(aid);
+            } else {
+              fetchCurve(aid, true);
+            }
+          }
+          scheduleCommandBarRender();
+        })
+        .catch(function (err) {
+          batchCurvesInFlight = false;
+          if (err && err.name === "AbortError") {
+            for (var a = 0; a < ids.length; a += 1) curveInFlight[ids[a]] = false;
+            return;
+          }
+          for (var k = 0; k < ids.length; k += 1) {
+            curveInFlight[ids[k]] = false;
+            fetchCurve(ids[k], true);
+          }
+        });
+    }
+
     function fetchCurve(aid, force) {
       if (!aid) return;
       var now = Date.now();
@@ -1146,25 +1225,7 @@
       })
         .then(function (payload) {
           curveInFlight[aid] = false;
-          curveErrors[aid] = "";
-          var mode = String(accountModes[aid] || "full").toLowerCase();
-          var curve = mode === "readonly"
-            ? (payload.balance_curve || payload.equity_curve || [])
-            : (payload.balance_curve || []);
-          var points = [];
-          for (var i = 0; i < curve.length; i += 1) {
-            var p = curve[i] || {};
-            var n = Number(p.equity);
-            if (Number.isFinite(n)) points.push({ t: p.t || "", equity: n });
-          }
-          if (payload.portfolio_loss_cut) portfolioStopStates[aid] = payload.portfolio_loss_cut;
-          curveCache[aid] = {
-            points: points.slice(-160),
-            walletAsOfUtc: (payload.wallet && payload.wallet.as_of_utc) || "",
-            cycleBaseline: payload.balance_curve_cycle_baseline || null,
-            portfolioLossCut: payload.portfolio_loss_cut || portfolioStopStates[aid] || null,
-            ts: Date.now()
-          };
+          storeCurvePayload(aid, payload);
           renderCurve(aid);
           scheduleCommandBarRender();
         })
@@ -1177,17 +1238,31 @@
     }
 
     function primeCurveLoad() {
-      createObserver();
       var nodes = document.querySelectorAll(".spark-box");
+      var staleIds = [];
       for (var i = 0; i < nodes.length; i += 1) {
         var node = nodes[i];
         var aid = node.getAttribute("data-account-id") || "";
         renderCurve(aid);
         var cached = curveCache[aid];
         var fresh = !!(cached && cached.ts && (Date.now() - cached.ts) < curveTtlMs);
-        if (!aid || fresh) continue;
-        if (curveObserver) curveObserver.observe(node);
-        else fetchCurve(aid);
+        if (!aid || fresh || curveInFlight[aid]) continue;
+        if (staleIds.indexOf(aid) < 0) staleIds.push(aid);
+      }
+      if (staleIds.length > 1) {
+        fetchCurvesBatch(staleIds, false);
+      } else if (staleIds.length === 1) {
+        createObserver();
+        if (curveObserver && nodes.length) {
+          for (var j = 0; j < nodes.length; j += 1) {
+            if (nodes[j].getAttribute("data-account-id") === staleIds[0]) {
+              curveObserver.observe(nodes[j]);
+              break;
+            }
+          }
+        } else {
+          fetchCurve(staleIds[0]);
+        }
       }
     }
 
@@ -1313,7 +1388,7 @@
             + '<div class="readonly-metric"><span class="metric-label">近30日净盈亏</span><strong class="metric-value pnl-value ' + pnlCls + '" data-field="readonly-pnl">' + pnlText + "</strong></div>"
             + '<div class="readonly-metric"><span class="metric-label">胜率</span><strong class="metric-value" data-field="readonly-win-rate">' + winRateText + "</strong></div>"
             + '<div class="readonly-metric readonly-secondary"><span class="metric-label">平仓订单数</span><strong class="metric-value" data-field="readonly-trades">' + tradeCountText + "</strong></div>"
-            + '<div class="readonly-metric readonly-secondary"><span class="metric-label">盈亏比</span><strong class="metric-value" data-field="readonly-pf">' + profitFactorText + "</strong></div>"
+            + '<div class="readonly-metric readonly-secondary"><span class="metric-label"><span class="ops-term" tabindex="0" data-tip="平均单笔盈利金额 / 平均单笔亏损金额">盈亏比</span></span><strong class="metric-value" data-field="readonly-pf">' + profitFactorText + "</strong></div>"
             + '<div class="readonly-chart"><div>'
             + '<div class="spark-box" data-account-id="' + safeAid + '"><div class="spark-empty">加载中...</div></div>'
             + '</div><div class="readonly-chart-meta"><span class="metric-label" title="按账户周期首条权益快照计算，含浮盈亏">本周期变化</span><strong class="metric-value spark-delta" data-account-id="' + safeAid + '">--</strong></div></div>'
@@ -1341,8 +1416,8 @@
             + "</div>"
             + '<div class="account-secondary">'
             + '<div class="metric"><span class="metric-label">当前持仓</span><strong class="metric-value" data-field="open-positions">' + fmt(row.open_positions, 0) + "</strong></div>"
-            + '<div class="metric"><span class="metric-label">高点回撤</span><strong class="metric-value current-drawdown" data-account-id="' + safeAid + '">--</strong></div>'
-            + '<div class="metric"><span class="metric-label">距组合止损</span><strong class="metric-value stop-distance" data-account-id="' + safeAid + '">--</strong></div>'
+            + '<div class="metric"><span class="metric-label"><span class="ops-term" tabindex="0" data-tip="当前权益相对本账户周期最高点的回落幅度">高点回撤</span></span><strong class="metric-value current-drawdown" data-account-id="' + safeAid + '">--</strong></div>'
+            + '<div class="metric"><span class="metric-label"><span class="ops-term" tabindex="0" data-tip="当前周期收益距离触发全账户组合止损还剩的百分点">距组合止损</span></span><strong class="metric-value stop-distance" data-account-id="' + safeAid + '">--</strong></div>'
             + "</div>"
             + '<div class="spark-block">'
             + '<div class="spark-box" data-account-id="' + safeAid + '"><div class="spark-empty">加载中...</div></div>'
@@ -1551,6 +1626,10 @@
       curveCache = {};
       curveErrors = {};
       curveRenderSig = {};
+      batchCurvesInFlight = false;
+      if (batchCurvesAbortController) {
+        try { batchCurvesAbortController.abort(); } catch (e) {}
+      }
       fetchSummary({ force: true });
       fetchHealth();
     }
@@ -1607,28 +1686,18 @@
 
     var hoverState = { box: null, rect: null, rafId: 0, clientX: 0 };
 
-    function renderSparkHover() {
-      hoverState.rafId = 0;
-      var box = hoverState.box;
-      if (!box) return;
-      var aid = box.getAttribute("data-account-id");
-      var pts = aid ? curveRenderData[aid] : null;
+    function showSparkPoint(box, pts, index, announce) {
+      if (!box || !pts || !pts.length) return;
+      var clampedIdx = Math.max(0, Math.min(pts.length - 1, index));
+      var nearest = pts[clampedIdx];
       var tip = box.querySelector(".spark-hover-tip");
       var crosshair = box.querySelector(".spark-crosshair");
       var activeDot = box.querySelector(".spark-active-dot");
-      if (!pts || !pts.length || !tip) return;
-      var rect = hoverState.rect || box.getBoundingClientRect();
-      if (!rect.width) return;
-      var ratio = Math.max(0, Math.min(1, (hoverState.clientX - rect.left) / rect.width));
-      var nearest = pts[0];
-      var bestDist = Infinity;
-      for (var i = 0; i < pts.length; i += 1) {
-        var d = Math.abs(pts[i].ratio - ratio);
-        if (d < bestDist) { bestDist = d; nearest = pts[i]; }
-      }
+      if (!tip || !nearest) return;
       var timePart = nearest.t ? ops.formatBeijingTime(nearest.t) + " · " : "";
       var eqPart = nearest.equity != null ? ops.fmtUsdt(nearest.equity, 2) + " · " : "";
-      tip.textContent = timePart + eqPart + ops.fmtPct(nearest.val);
+      var text = timePart + eqPart + ops.fmtPct(nearest.val);
+      tip.textContent = text;
       tip.classList.toggle("is-right", nearest.xPct < 48);
       tip.hidden = false;
       if (crosshair) {
@@ -1640,6 +1709,30 @@
         activeDot.style.top = nearest.yPct.toFixed(2) + "%";
         activeDot.hidden = false;
       }
+      box.setAttribute("data-active-index", String(clampedIdx));
+      if (announce) {
+        var aid = box.getAttribute("data-account-id") || "";
+        ops.announceStatus(aid + " " + text + "（第 " + (clampedIdx + 1) + "/" + pts.length + " 点）");
+      }
+    }
+
+    function renderSparkHover() {
+      hoverState.rafId = 0;
+      var box = hoverState.box;
+      if (!box) return;
+      var aid = box.getAttribute("data-account-id");
+      var pts = aid ? curveRenderData[aid] : null;
+      if (!pts || !pts.length) return;
+      var rect = hoverState.rect || box.getBoundingClientRect();
+      if (!rect.width) return;
+      var ratio = Math.max(0, Math.min(1, (hoverState.clientX - rect.left) / rect.width));
+      var bestIdx = 0;
+      var bestDist = Infinity;
+      for (var i = 0; i < pts.length; i += 1) {
+        var d = Math.abs(pts[i].ratio - ratio);
+        if (d < bestDist) { bestDist = d; bestIdx = i; }
+      }
+      showSparkPoint(box, pts, bestIdx, false);
     }
 
     function clearSparkHover(box) {
@@ -1650,6 +1743,7 @@
       if (tip) tip.hidden = true;
       if (crosshair) crosshair.hidden = true;
       if (activeDot) activeDot.hidden = true;
+      box.removeAttribute("data-active-index");
       if (hoverState.box === box) {
         hoverState.box = null;
         hoverState.rect = null;
@@ -1708,6 +1802,36 @@
         if (!box) return;
         if (event.relatedTarget && box.contains(event.relatedTarget)) return;
         clearSparkHover(box);
+      });
+
+      cards.addEventListener("keydown", function (event) {
+        var box = event.target && event.target.closest ? event.target.closest(".spark-box") : null;
+        if (!box) return;
+        var aid = box.getAttribute("data-account-id");
+        var pts = aid ? curveRenderData[aid] : null;
+        if (!pts || !pts.length) return;
+        var currentRaw = box.getAttribute("data-active-index");
+        var currentIdx = currentRaw !== null && currentRaw !== "" ? Number(currentRaw) : (pts.length - 1);
+        if (event.key === "ArrowLeft") {
+          event.preventDefault();
+          showSparkPoint(box, pts, currentIdx - 1, true);
+        } else if (event.key === "ArrowRight") {
+          event.preventDefault();
+          showSparkPoint(box, pts, currentIdx + 1, true);
+        } else if (event.key === "Home") {
+          event.preventDefault();
+          showSparkPoint(box, pts, 0, true);
+        } else if (event.key === "End") {
+          event.preventDefault();
+          showSparkPoint(box, pts, pts.length - 1, true);
+        } else if (event.key === "Escape") {
+          clearSparkHover(box);
+        }
+      });
+
+      cards.addEventListener("focusout", function (event) {
+        var box = event.target && event.target.closest ? event.target.closest(".spark-box") : null;
+        if (box) clearSparkHover(box);
       });
     }
 

@@ -821,6 +821,15 @@
     return tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT" || target.isContentEditable;
   }
 
+  function navigateToElementHref(linkEl) {
+    if (!linkEl) return false;
+    var href = linkEl.getAttribute("href");
+    if (!href) return false;
+    if (linkEl.getAttribute("aria-current") === "page") return true;
+    global.location.assign(href);
+    return true;
+  }
+
   function bindKeyboardShortcuts(handlers) {
     if (typeof document === "undefined") return;
     var cfg = handlers || {};
@@ -833,6 +842,18 @@
       } else if (evt.key === "/" && typeof cfg.onSearch === "function") {
         evt.preventDefault();
         cfg.onSearch();
+      } else if (evt.key === "0") {
+        var overviewLink = document.getElementById("ops-nav-overview");
+        if (navigateToElementHref(overviewLink)) evt.preventDefault();
+      } else if (evt.key === "c") {
+        var comparisonLink = document.getElementById("ops-nav-comparison");
+        if (navigateToElementHref(comparisonLink)) evt.preventDefault();
+      } else if (/^[1-9]$/.test(evt.key)) {
+        var idx = Number(evt.key) - 1;
+        var accountLinks = document.querySelectorAll("#ops-nav-accounts a.ops-nav-account");
+        if (accountLinks && accountLinks[idx] && navigateToElementHref(accountLinks[idx])) {
+          evt.preventDefault();
+        }
       }
     });
   }

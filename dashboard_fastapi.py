@@ -877,6 +877,95 @@ def create_app(config_path: Optional[str] = None) -> FastAPI:
         except Exception as exc:  # noqa: BLE001
             raise HTTPException(status_code=500, detail=f"account core failed: {exc}") from exc
 
+    def _build_account_curve_payload(
+        ctx: DashboardRuntimeContext,
+        account_id: str,
+        *,
+        window_hours: Optional[float],
+        curve_points: Optional[int],
+        curve_type: Optional[Literal["strategy", "balance", "both"]],
+    ) -> dict:
+        include_strategy_curve = curve_type in (None, "strategy", "both")
+        include_balance_curve = curve_type in (None, "balance", "both")
+        payload = ctx.provider.cached_snapshot(
+            log_lines=0,
+            window_hours=window_hours,
+            curve_points=curve_points,
+            account_id=account_id,
+            include_details=False,
+            include_log=False,
+            include_curves=True,
+            include_strategy_curve=include_strategy_curve,
+            include_balance_curve=include_balance_curve,
+            include_trade_stats=False,
+        )
+        if (
+            ctx.provider.account_modes.get(account_id, "full") == "readonly"
+            and curve_type in (None, "balance", "both")
+        ):
+            balance_curve = payload.get("balance_curve") or []
+            if balance_curve:
+                try:
+                    latest_at = datetime.fromisoformat(
+                        str(balance_curve[-1].get("t") or "")
+                    )
+                    if latest_at.tzinfo is None:
+                        latest_at = latest_at.replace(tzinfo=timezone.utc)
+                    latest_local = latest_at.astimezone(ctx.provider.local_tz)
+                    cycle_start_local = latest_local.replace(
+                        hour=ctx.portfolio_loss_cut_hour,
+                        minute=ctx.portfolio_loss_cut_minute,
+                        second=0,
+                        microsecond=0,
+                    )
+                    if latest_local < cycle_start_local:
+                        cycle_start_local -= timedelta(days=1)
+                    payload["balance_curve_cycle_baseline"] = (
+                        ctx.provider.get_wallet_snapshot_at_or_after(
+                            account_id,
+                            cycle_start_local.astimezone(timezone.utc).isoformat(),
+                        )
+                    )
+                except ValueError:
+                    payload["balance_curve_cycle_baseline"] = None
+        payload["account_id"] = account_id
+        payload["curve_type"] = curve_type or "both"
+        return payload
+
+    @app.get("/api/accounts/curves")
+    def accounts_curves_batch(
+        request: Request,
+        window_hours: Optional[float] = Query(default=24.0, gt=0.0, le=8784.0),
+        curve_points: Optional[int] = Query(default=160, ge=100, le=5000),
+        accounts: Optional[str] = Query(default=None),
+    ):
+        ctx: DashboardRuntimeContext = request.app.state.ctx
+        try:
+            configured = [
+                aid
+                for aid in (ctx.provider.overview_account_ids or [])
+                if str(ctx.provider.account_modes.get(aid, "full")).lower() != "loss_cut_only"
+            ]
+            if accounts:
+                requested = [x.strip() for x in accounts.split(",") if x.strip()]
+                known = set(ctx.provider.overview_account_ids or [])
+                target_ids = [aid for aid in requested if not known or aid in known]
+            else:
+                target_ids = configured
+            curves = {
+                aid: _build_account_curve_payload(
+                    ctx,
+                    aid,
+                    window_hours=window_hours,
+                    curve_points=curve_points,
+                    curve_type="balance",
+                )
+                for aid in target_ids
+            }
+            return JSONResponse({"curves": curves})
+        except Exception as exc:  # noqa: BLE001
+            raise HTTPException(status_code=500, detail=f"accounts curves batch failed: {exc}") from exc
+
     @app.get("/api/account/{account_id}/curve")
     def account_curve(
         request: Request,
@@ -887,51 +976,13 @@ def create_app(config_path: Optional[str] = None) -> FastAPI:
     ):
         ctx: DashboardRuntimeContext = request.app.state.ctx
         try:
-            include_strategy_curve = curve_type in (None, "strategy", "both")
-            include_balance_curve = curve_type in (None, "balance", "both")
-            payload = ctx.provider.cached_snapshot(
-                log_lines=0,
+            payload = _build_account_curve_payload(
+                ctx,
+                account_id,
                 window_hours=window_hours,
                 curve_points=curve_points,
-                account_id=account_id,
-                include_details=False,
-                include_log=False,
-                include_curves=True,
-                include_strategy_curve=include_strategy_curve,
-                include_balance_curve=include_balance_curve,
-                include_trade_stats=False,
+                curve_type=curve_type,
             )
-            if (
-                ctx.provider.account_modes.get(account_id, "full") == "readonly"
-                and curve_type in (None, "balance", "both")
-            ):
-                balance_curve = payload.get("balance_curve") or []
-                if balance_curve:
-                    try:
-                        latest_at = datetime.fromisoformat(
-                            str(balance_curve[-1].get("t") or "")
-                        )
-                        if latest_at.tzinfo is None:
-                            latest_at = latest_at.replace(tzinfo=timezone.utc)
-                        latest_local = latest_at.astimezone(ctx.provider.local_tz)
-                        cycle_start_local = latest_local.replace(
-                            hour=ctx.portfolio_loss_cut_hour,
-                            minute=ctx.portfolio_loss_cut_minute,
-                            second=0,
-                            microsecond=0,
-                        )
-                        if latest_local < cycle_start_local:
-                            cycle_start_local -= timedelta(days=1)
-                        payload["balance_curve_cycle_baseline"] = (
-                            ctx.provider.get_wallet_snapshot_at_or_after(
-                                account_id,
-                                cycle_start_local.astimezone(timezone.utc).isoformat(),
-                            )
-                        )
-                    except ValueError:
-                        payload["balance_curve_cycle_baseline"] = None
-            payload["account_id"] = account_id
-            payload["curve_type"] = curve_type or "both"
             return JSONResponse(payload)
         except Exception as exc:  # noqa: BLE001
             raise HTTPException(status_code=500, detail=f"account curve failed: {exc}") from exc

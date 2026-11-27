@@ -391,6 +391,7 @@ portfolio_take_profit_enabled = true
 
             curve = client.get("/api/account/acc01/curve")
             self.assertEqual(curve.status_code, 200)
+            self.assertEqual(curve.headers.get("cache-control"), "no-store")
             curve_payload = curve.json()
             self.assertNotIn("config_path", curve_payload)
             self.assertNotIn("db_path", curve_payload)
@@ -399,6 +400,13 @@ portfolio_take_profit_enabled = true
             self.assertIn("balance_curve", curve_payload)
             self.assertTrue(isinstance(curve_payload.get("balance_curve"), list))
             self.assertGreater(len(curve_payload.get("balance_curve") or []), 0)
+
+            batch_curves = client.get("/api/accounts/curves?window_hours=24&curve_points=160")
+            self.assertEqual(batch_curves.status_code, 200)
+            self.assertEqual(batch_curves.headers.get("cache-control"), "no-store")
+            batch_payload = batch_curves.json()["curves"]
+            self.assertEqual(set(batch_payload), {"acc01", "acc02"})
+            self.assertGreater(len(batch_payload["acc01"].get("balance_curve") or []), 0)
 
             comparison = client.get("/api/accounts/equity-comparison?all_time=true")
             self.assertEqual(comparison.status_code, 200)
