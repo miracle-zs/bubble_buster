@@ -3677,10 +3677,6 @@ def get_accounts_overview_html() -> str:
     return load_template("accounts_overview.html")
 
 
-DASHBOARD_HTML = get_dashboard_html()
-ACCOUNTS_OVERVIEW_HTML = get_accounts_overview_html()
-
-
 def _render_dashboard_template(
     refresh_sec: int,
     echarts_src: str,

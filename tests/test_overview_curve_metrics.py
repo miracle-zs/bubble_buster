@@ -109,6 +109,37 @@ assert.equal(dr.fmtAdaptive(123.456), '123.46');
 assert.equal(dr.fmtAdaptive(0.00123456), '0.00123456');
 assert.equal(dr.summarizeRunMessage('All symbols already have open strategy positions'), '目标交易对均已有策略持仓（已跳过）');
 assert.equal(dr.summarizeRunMessage('opened=10,failed=0,planned=2'), '开仓 10 · 失败 0 · 计划 2');
+assert.deepEqual(ops.parseSummaryPairs('opened=10,failed=0,planned=2'), {{ opened: '10', failed: '0', planned: '2' }});
+const epView = ov.buildEntryProgressHtml([{{
+  account_id: 'acc01',
+  mode: 'full',
+  entry_progress: {{
+    is_today: true,
+    status: 'IN_PROGRESS',
+    target_count: 10,
+    opened_count: 4,
+    entry_action_target_count: 10,
+    entry_action_completed_count: 4,
+    entry_action_initial_count: 3,
+    entry_action_scale_in_count: 1,
+    entry_action_failed_count: 1,
+    entry_action_skipped_count: 1,
+    entry_action_pending_count: 4,
+    waiting_count: 4,
+    next_check_local: '2026-09-05 09:00:00',
+    updated_at_local: '2026-09-05 08:30:00'
+  }}
+}}], {{ entryDetailsUserOverride: null }});
+assert.equal(epView.waitingTotal, 4);
+assert.equal(epView.showDetails, true);
+assert.ok(epView.html.includes('entry-progress-summary-meter'));
+assert.ok(epView.html.includes('entry-progress-meter-initial'));
+assert.ok(epView.html.includes('entry-progress-meter-skipped'));
+assert.ok(!epView.html.includes('summary-meter-'));
+const tbHtml = ov.buildTaskBoardHtml([{{ account_id: 'acc01', mode: 'full', tasks: {{ entry: {{ status: 'FAILED' }} }} }}], 'anomaly');
+assert.ok(tbHtml.includes('class="task-account-card"'));
+assert.ok(!tbHtml.includes('task-account-anomaly'));
+assert.ok(ov.buildTaskBoardHtml([], 'anomaly').includes('暂无异常'));
 assert.equal(dr.liveOrderLabel('ACTIVE'), '挂单中');
 const runMarkup = dr.runRowHtml({{ id: 42, trade_day_utc: '2026-09-05', status: 'SUCCESS', started_at_utc: '2026-09-05T08:00:00Z', message: 'opened=1' }}, 'Asia/Shanghai');
 assert.ok(runMarkup.includes('data-detail-key="42_2026-09-05_2026-09-05T08:00:00Z"'));

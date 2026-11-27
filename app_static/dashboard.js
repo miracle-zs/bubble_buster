@@ -49,11 +49,9 @@
     var currentActivityKey = VALID_ACTIVITIES[initialQuery.activity] ? initialQuery.activity : defaultActivityKey;
 
     var displayTimeZone = "Asia/Shanghai";
-    var riskSnapshot = null;
     var latestData = null;
     var lastChartSignature = "";
     var refreshTick = 0;
-    var fullLoadedOnce = false;
     var detailsLoaded = false;
     var detailsInFlight = false;
     var detailsRefreshPending = false;
@@ -114,7 +112,6 @@
       riskDescription: document.getElementById("riskDescription"),
       riskMeterLabel: document.getElementById("riskMeterLabel"),
       riskMeterTrack: document.getElementById("riskMeterTrack"),
-      riskMeterFill: document.getElementById("riskMeterFill"),
       riskMeterLimit: document.getElementById("riskMeterLimit"),
       drawdownStats: document.getElementById("drawdownStats"),
       positionsCount: document.getElementById("positionsCount"),
@@ -457,24 +454,11 @@
       el.chartEmpty.hidden = false;
     }
 
-    var throttledChartResize = ops.rafThrottle(function () {
-      if (equityChart) equityChart.resize();
-    });
-
     function attachChartResizeObserver() {
-      if (!el.equityChart) return;
-      if (typeof window.ResizeObserver !== "undefined" && !chartResizeObs) {
-        chartResizeObs = new ResizeObserver(function (entries) {
-          if (!equityChart) return;
-          for (var rIdx = 0; rIdx < entries.length; rIdx += 1) {
-            if (entries[rIdx].contentRect && entries[rIdx].contentRect.width > 0) {
-              throttledChartResize();
-              break;
-            }
-          }
-        });
-        chartResizeObs.observe(el.equityChart);
-      }
+      if (!el.equityChart || chartResizeObs) return;
+      chartResizeObs = ops.createChartResizeObserver(el.equityChart, function () {
+        return equityChart;
+      });
     }
 
     function renderEquityChart(curve, forceRebuild) {
@@ -700,7 +684,6 @@
           currentReturn = ((winLast - winFirst) / winFirst) * 100;
           currentDrawdown = winPeak > 0 ? ((winLast - winPeak) / winPeak) * 100 : 0;
         }
-        riskSnapshot = null;
       } else {
         var calculated = ops.computeCycleRiskMetrics(
           sourceCurve,
@@ -709,7 +692,6 @@
           { stopHour: portfolioStopHour, stopMinute: portfolioStopMinute, stopPct: portfolioStopPct },
           data && data.balance_curve_cycle_baseline
         );
-        riskSnapshot = calculated || null;
         metrics = calculated || {};
         var backendReturn = stop ? ops.toNum(stop.current_return_pct) : null;
         currentReturn = backendReturn !== null ? backendReturn : ops.toNum(metrics.currentReturnPct);
@@ -970,7 +952,6 @@
         el.logTail.textContent = logLines.join("\n") || "暂无日志";
         logsLoadedOnce = true;
       }
-      fullLoadedOnce = true;
     }
 
     function setDetailsErrorRows(message) {
@@ -1273,11 +1254,11 @@
           if (isMobile) {
             var fullEvery = 3;
             refreshCore();
-            if (fullLoadedOnce && (refreshTick % fullEvery) === 0) refreshDetails();
+            if (detailsLoaded && (refreshTick % fullEvery) === 0) refreshDetails();
             return;
           }
           refreshCore();
-          if (fullLoadedOnce && (refreshTick % 2) === 0) refreshDetails();
+          if (detailsLoaded && (refreshTick % 2) === 0) refreshDetails();
         }, Math.max(2000, REFRESH_SEC * 1000));
       }
       if (!curveTimer) {
@@ -1325,7 +1306,7 @@
       if (!document.hidden) {
         refreshCurveFast();
         refreshCore();
-        if (fullLoadedOnce) refreshDetails();
+        if (detailsLoaded) refreshDetails();
       }
     });
 
@@ -1344,7 +1325,7 @@
         else if (latestData) renderEquityChart(activeCurve(latestData), true);
         refreshCurveFast();
         refreshCore();
-        if (fullLoadedOnce || detailsLoaded) refreshDetails();
+        if (detailsLoaded) refreshDetails();
       }
     });
   });

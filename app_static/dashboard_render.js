@@ -167,12 +167,7 @@
     if (lower.indexOf("no eligible symbols") >= 0) {
       return "无符合条件的入场交易对";
     }
-    var values = {};
-    raw.split(",").forEach(function (part) {
-      var text = String(part || "").trim();
-      var eq = text.indexOf("=");
-      if (eq > 0) values[text.slice(0, eq)] = text.slice(eq + 1);
-    });
+    var values = ops.parseSummaryPairs(raw);
     var items = [];
     if (values.opened !== undefined) items.push("开仓 " + values.opened);
     if (values.failed !== undefined) items.push("失败 " + values.failed);

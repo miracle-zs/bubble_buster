@@ -75,12 +75,6 @@
       return ops.escapeHtml(text);
     }
 
-    function nonNegNum(primary, fallback) {
-      var v = ops.toNum(primary);
-      if (v === null && fallback !== undefined) v = ops.toNum(fallback);
-      return v === null ? 0 : Math.max(0, v);
-    }
-
     var fmt = R.fmt;
     var taskStatusText = R.taskStatusText;
     var taskStatusCls = R.taskStatusCls;
@@ -323,16 +317,9 @@
       }
       var rows = summaryRows || [];
       var accountRows = [];
-      var todayRows = [];
-      var latest = "";
       for (var i = 0; i < rows.length; i += 1) {
         var row = rows[i] || {};
-        if (String(row.mode || "full").toLowerCase() !== "full") continue;
-        accountRows.push(row);
-        var progress = row.entry_progress || null;
-        if (progress && progress.is_today !== false) todayRows.push(progress);
-        var updated = String((progress && progress.updated_at_local) || "");
-        if (updated && (!latest || updated > latest)) latest = updated;
+        if (String(row.mode || "full").toLowerCase() === "full") accountRows.push(row);
       }
       if (!accountRows.length) {
         nextEntryCheckRaw = "";
@@ -343,161 +330,27 @@
         return;
       }
 
-      var completedAccounts = 0;
-      var targetTotal = 0;
-      var entryActionTotal = 0;
-      var initialActionTotal = 0;
-      var scaleInActionTotal = 0;
-      var positionTotal = 0;
-      var waitingTotal = 0;
-      var failedTotal = 0;
-      var pendingActionTotal = 0;
-      var skippedTotal = 0;
-      var nextCheckRaw = "";
-      for (var j = 0; j < todayRows.length; j += 1) {
-        var summary = todayRows[j];
-        if (String(summary.status || "").toUpperCase() === "COMPLETED") completedAccounts += 1;
-        var completedActions = nonNegNum(summary.entry_action_completed_count, summary.opened_count);
-        var targetActions = nonNegNum(summary.entry_action_target_count, summary.target_count);
-        entryActionTotal += completedActions;
-        targetTotal += targetActions;
-        initialActionTotal += nonNegNum(summary.entry_action_initial_count);
-        scaleInActionTotal += nonNegNum(summary.entry_action_scale_in_count);
-        positionTotal += nonNegNum(summary.position_count, summary.opened_count);
-        waitingTotal += nonNegNum(summary.waiting_count);
-        failedTotal += nonNegNum(summary.entry_action_failed_count, summary.failed_count);
-        pendingActionTotal += nonNegNum(summary.entry_action_pending_count);
-        skippedTotal += nonNegNum(summary.entry_action_skipped_count, summary.skipped_count);
-        var summaryNextCheck = String(summary.next_check_local || "");
-        if (summaryNextCheck && (!nextCheckRaw || summaryNextCheck < nextCheckRaw)) nextCheckRaw = summaryNextCheck;
-      }
-      nextEntryCheckRaw = waitingTotal > 0 ? nextCheckRaw : "";
+      var view = R.buildEntryProgressHtml(accountRows, {
+        entryDetailsUserOverride: entryDetailsUserOverride
+      });
+      nextEntryCheckRaw = view.nextCheckRaw;
       syncCountdownTimer();
 
-      var timeline = buildCommonEntryTimeline(todayRows);
-      var hasIssues = failedTotal > 0;
-      var showDetails = entryDetailsUserOverride === null ? hasIssues : entryDetailsUserOverride;
       if (entryProgressToggle) {
         entryProgressToggle.hidden = false;
-        entryProgressToggle.textContent = showDetails ? "收起账号明细" : "查看账号明细";
-        entryProgressToggle.setAttribute("aria-expanded", showDetails ? "true" : "false");
+        entryProgressToggle.textContent = view.showDetails ? "收起账号明细" : "查看账号明细";
+        entryProgressToggle.setAttribute("aria-expanded", view.showDetails ? "true" : "false");
       }
 
-      var nextCheckLabel = nextCheckRaw ? compactLocalTime(nextCheckRaw) : "--";
-      var nextActionLabel = waitingTotal > 0 ? "等待信号检查" : (completedAccounts === accountRows.length ? "今日已完成" : "等待状态同步");
-      var overallPct = targetTotal > 0 ? Math.round(Math.min(100, (entryActionTotal / targetTotal) * 100)) : 0;
-      var anomalyStatClass = failedTotal > 0 ? "bad" : "neutral";
-      var anomalyStatNote = failedTotal > 0 ? "需要处理" : "当前无异常";
-      var timelineCaption = timeline.groups.length
-        ? timeline.groups.length + " 个共同窗口 · " + timeline.commonActionCount + " 个共同入场动作"
-        : "暂无共同完成窗口";
-
-      var initialMeterPct = targetTotal > 0 ? Math.min(100, (initialActionTotal / targetTotal) * 100) : 0;
-      var scaleInMeterPct = targetTotal > 0 ? Math.min(Math.max(0, 100 - initialMeterPct), (scaleInActionTotal / targetTotal) * 100) : 0;
-      var failedMeterPct = targetTotal > 0 ? Math.min(Math.max(0, 100 - initialMeterPct - scaleInMeterPct), (failedTotal / targetTotal) * 100) : 0;
-      var skippedMeterPct = targetTotal > 0 ? Math.min(Math.max(0, 100 - initialMeterPct - scaleInMeterPct - failedMeterPct), (skippedTotal / targetTotal) * 100) : 0;
-      var pendingMeterPct = Math.min(Math.max(0, 100 - initialMeterPct - scaleInMeterPct - failedMeterPct - skippedMeterPct), (pendingActionTotal / Math.max(1, targetTotal)) * 100);
-
-      var html = '<div class="entry-progress-overview">'
-        + '<div class="entry-progress-overview-primary">'
-        + '<div class="entry-progress-hero-row"><div><span class="entry-progress-hero-label">开仓动作</span><strong>' + entryActionTotal + "<small> / " + targetTotal + '</small></strong></div><span class="entry-progress-hero-percent">' + overallPct + "%</span></div>"
-        + '<div class="entry-progress-hero-caption">首笔 ' + initialActionTotal + " · 二次 " + scaleInActionTotal + " · 持仓记录 " + positionTotal + " · " + completedAccounts + " / " + accountRows.length + " 个账号完成</div>"
-        + '<div class="entry-progress-summary-meter" role="progressbar" aria-label="今日总体入场动作进度" aria-valuenow="' + overallPct + '" aria-valuemin="0" aria-valuemax="100">'
-        + '<span class="summary-meter-initial" style="width:' + initialMeterPct.toFixed(2) + '%"></span>'
-        + '<span class="summary-meter-scale-in" style="width:' + scaleInMeterPct.toFixed(2) + '%"></span>'
-        + '<span class="summary-meter-waiting" style="width:' + pendingMeterPct.toFixed(2) + '%"></span>'
-        + '<span class="summary-meter-failed" style="width:' + failedMeterPct.toFixed(2) + '%"></span>'
-        + '<span class="summary-meter-skipped" style="width:' + skippedMeterPct.toFixed(2) + '%"></span>'
-        + "</div>"
-        + '<div class="entry-progress-summary-legend"><span><i class="legend-dot initial" aria-hidden="true"></i>' + initialActionTotal + ' 首笔</span><span><i class="legend-dot scale-in" aria-hidden="true"></i>' + scaleInActionTotal + ' 二次</span><span><i class="legend-dot waiting" aria-hidden="true"></i>' + waitingTotal + ' 待触发信号</span><span><i class="legend-dot failed" aria-hidden="true"></i>' + failedTotal + " 异常</span></div>"
-        + "</div>"
-        + '<div class="entry-progress-stat ' + (waitingTotal > 0 ? "warn" : "neutral") + '"><span class="entry-progress-stat-label">待触发</span><strong>' + waitingTotal + '</strong><span class="entry-progress-stat-note">' + (waitingTotal > 0 ? "等待信号确认" : "暂无待触发信号") + "</span></div>"
-        + '<div class="entry-progress-stat ' + anomalyStatClass + '"><span class="entry-progress-stat-label">异常</span><strong>' + failedTotal + '</strong><span class="entry-progress-stat-note">' + anomalyStatNote + "</span></div>"
-        + '<div class="entry-progress-stat neutral"><span class="entry-progress-stat-label">账号状态</span><strong>' + completedAccounts + " / " + accountRows.length + '</strong><span class="entry-progress-stat-note">今日完成账号</span></div>'
-        + '<div class="entry-progress-next-action"><span class="entry-progress-next-label">下一检查</span><strong>' + escapeHtml(nextCheckLabel) + '</strong><span class="entry-progress-next-state"><i class="entry-progress-next-pulse" aria-hidden="true"></i>' + escapeHtml(nextActionLabel) + ' · <span id="entry-progress-countdown">--</span></span></div>'
-        + "</div>";
-
-      html += '<div class="entry-progress-timeline"><div class="entry-progress-timeline-head"><div class="entry-progress-timeline-title"><strong>共同入场窗口</strong><span>' + escapeHtml(timelineCaption) + '</span></div></div><div class="entry-progress-timeline-track">';
-      if (timeline.groups.length) {
-        for (var k = 0; k < timeline.groups.length; k += 1) {
-          var group = timeline.groups[k];
-          var groupActions = group.actions || [];
-          var scaleOnly = groupActions.length > 0 && groupActions.every(function (item) {
-            return String((item || {}).entry_stage || "INITIAL").toUpperCase() === "SCALE_IN";
-          });
-          html += '<div class="entry-progress-timeline-event is-complete' + (scaleOnly ? " is-scale-in" : "") + '"><div class="entry-progress-timeline-event-top"><span class="entry-progress-timeline-event-state">已完成</span><time>' + escapeHtml(group.time) + '</time></div><span class="entry-progress-timeline-actions">'
-            + groupActions.map(entryTimelineActionHtml).join("") + "</span></div>";
-        }
-      } else {
-        html += '<div class="entry-progress-detail warn">各账号榜单存在差异或尚未开始，见下方账号明细</div>';
-      }
-      if (waitingTotal > 0 && nextCheckRaw) {
-        html += '<div class="entry-progress-timeline-event entry-progress-timeline-next is-next"><div class="entry-progress-timeline-event-top"><span class="entry-progress-timeline-event-state">下一检查</span><time>' + escapeHtml(nextCheckLabel) + "</time></div><span>待检查 " + waitingTotal + " 个信号</span></div>";
-      }
-      html += "</div></div>"
-        + '<div id="entry-progress-details-table" class="entry-progress-details' + (showDetails ? "" : " is-collapsed") + '" role="table" aria-label="各账号今日开单明细">'
-        + '<div class="entry-progress-header" role="row"><span role="columnheader">账号与进度</span><span role="columnheader">当前判断</span><span role="columnheader">等待信号</span><span role="columnheader">下一动作</span></div>';
-
-      for (var n = 0; n < accountRows.length; n += 1) {
-        var account = accountRows[n] || {};
-        var accProgress = account.entry_progress || null;
-        var rawAid = String(account.account_id || "");
-        var aid = escapeHtml(rawAid);
-        if (!accProgress || accProgress.is_today === false) {
-          html += '<div class="entry-progress-row" role="row">'
-            + '<div class="entry-progress-account progress-account-cell" role="cell"><div class="entry-progress-account-head"><strong>' + aid + '</strong><span class="entry-progress-account-status status-warn">未开始</span></div><span class="entry-progress-account-meta">今日尚未执行</span><div class="entry-progress-progress-line"><strong>0</strong><span>/ 0 入场动作</span><em>0%</em></div><div class="entry-progress-meter" role="progressbar" aria-label="' + escapeHtml(rawAid + " 入场动作进度") + '" aria-valuenow="0" aria-valuemin="0" aria-valuemax="100"></div></div>'
-            + '<div class="entry-progress-phase" role="cell"><span class="entry-progress-phase-label neutral">未开始</span><span class="entry-progress-phase-note">等待今日榜单</span></div>'
-            + '<div class="entry-progress-waiting-cell" role="cell"><div class="entry-progress-waiting-list"><div class="entry-progress-waiting-empty">等待今日榜单</div></div></div>'
-            + '<div class="entry-progress-next-cell" role="cell"><strong>--</strong><span>尚未开始</span></div></div>';
-          continue;
-        }
-        var target = nonNegNum(accProgress.entry_action_target_count, accProgress.target_count);
-        var opened = nonNegNum(accProgress.entry_action_completed_count, accProgress.opened_count);
-        var positionCount = nonNegNum(accProgress.position_count, accProgress.opened_count);
-        var waiting = nonNegNum(accProgress.waiting_count);
-        var failed = nonNegNum(accProgress.entry_action_failed_count, accProgress.failed_count);
-        var skipped = nonNegNum(accProgress.entry_action_skipped_count, accProgress.skipped_count);
-        var pendingRaw = ops.toNum(accProgress.entry_action_pending_count);
-        var pendingActions = pendingRaw !== null ? Math.max(0, pendingRaw) : Math.max(0, target - opened - failed - skipped);
-        var hasActionData = progressItems(accProgress.entry_actions).length > 0;
-        var initialActions = nonNegNum(accProgress.entry_action_initial_count);
-        var scaleInActions = nonNegNum(accProgress.entry_action_scale_in_count);
-        if (!hasActionData && initialActions === 0) initialActions = opened;
-        var denom = target > 0 ? target : Math.max(1, opened + waiting + failed);
-        var openedPct = Math.min(100, (opened / denom) * 100);
-        var initialPct = Math.min(100, (initialActions / denom) * 100);
-        var scaleInPct = Math.min(Math.max(0, 100 - initialPct), (scaleInActions / denom) * 100);
-        var failedPct = Math.min(Math.max(0, 100 - initialPct - scaleInPct), (failed / denom) * 100);
-        var skippedPct = Math.min(Math.max(0, 100 - initialPct - scaleInPct - failedPct), (skipped / denom) * 100);
-        var waitingPct = Math.min(Math.max(0, 100 - initialPct - scaleInPct - failedPct - skippedPct), (pendingActions / denom) * 100);
-        var st = entryProgressStatus(accProgress.status);
-        var phase = entryProgressPhase(accProgress);
-        var nextText = accProgress.next_check_local ? compactLocalTime(accProgress.next_check_local) : "--";
-        var detail = entryProgressDetail(accProgress, timeline.commonKeys);
-        var waitingHtml = waiting ? entryProgressWaitingHtml(accProgress) : '<div class="entry-progress-detail ' + detail.cls + '">' + escapeHtml(detail.text) + "</div>";
-        var nextNote = waiting ? "按小时收盘检查" : (failed ? "请查看任务日志" : "无需动作");
-        var progressNoteParts = ["首笔 " + initialActions, "二次 " + scaleInActions, "记录 " + positionCount];
-        if (waiting) progressNoteParts.push("待触发 " + waiting);
-        if (failed) progressNoteParts.push("异常 " + failed);
-        var progressNoteClass = failed ? "bad" : (waiting ? "warn" : "ok");
-        var accountStatusText = waiting ? "等待中" : st.text;
-        var accountMeta = "启动 " + compactLocalTime(accProgress.started_at_local) + " · " + entryProgressWindow(accProgress);
-        html += '<div class="entry-progress-row" role="row">'
-          + '<div class="entry-progress-account progress-account-cell" role="cell"><div class="entry-progress-account-head"><strong>' + aid + '</strong><span class="entry-progress-account-status ' + st.cls + '">' + escapeHtml(accountStatusText) + '</span></div><span class="entry-progress-account-meta">' + escapeHtml(accountMeta) + '</span><div class="entry-progress-progress-line"><strong>' + opened + "</strong><span>/ " + target + " 入场动作</span><em>" + Math.round(openedPct) + '%</em></div><div class="entry-progress-meter" role="progressbar" aria-label="' + escapeHtml(rawAid + " 入场动作进度") + '" aria-valuenow="' + Math.round(openedPct) + '" aria-valuemin="0" aria-valuemax="100"><span class="entry-progress-meter-initial" style="width:' + initialPct.toFixed(2) + '%"></span><span class="entry-progress-meter-scale-in" style="width:' + scaleInPct.toFixed(2) + '%"></span><span class="entry-progress-meter-waiting" style="width:' + waitingPct.toFixed(2) + '%"></span><span class="entry-progress-meter-failed" style="width:' + failedPct.toFixed(2) + '%"></span><span class="entry-progress-meter-skipped" style="width:' + skippedPct.toFixed(2) + '%"></span></div><div class="entry-progress-progress-foot"><span>入场动作</span><span class="' + progressNoteClass + '">' + escapeHtml(progressNoteParts.join(" · ")) + "</span></div></div>"
-          + '<div class="entry-progress-phase" role="cell" aria-label="' + escapeHtml(st.text) + '"><span class="entry-progress-phase-label ' + phase.cls + " phase-" + escapeHtml(phase.variant || "unknown") + '">' + escapeHtml(phase.label) + '</span><span class="entry-progress-phase-note">' + escapeHtml(phase.note) + "</span></div>"
-          + '<div class="entry-progress-waiting-cell" role="cell">' + waitingHtml + "</div>"
-          + '<div class="entry-progress-next-cell' + (waiting ? " is-waiting" : "") + '" role="cell"><span class="entry-progress-next-cell-label">下一检查</span><strong>' + escapeHtml(nextText) + "</strong><span>" + escapeHtml(nextNote) + "</span></div></div>";
-      }
-      html += "</div>";
       var prevTrack = entryProgressBoard.querySelector(".entry-progress-timeline-track");
       var prevScrollLeft = prevTrack ? prevTrack.scrollLeft : 0;
-      ops.patchHtmlIfChanged(entryProgressBoard, html);
+      ops.patchHtmlIfChanged(entryProgressBoard, view.html);
       if (prevScrollLeft > 0) {
         var nextTrack = entryProgressBoard.querySelector(".entry-progress-timeline-track");
         if (nextTrack) nextTrack.scrollLeft = prevScrollLeft;
       }
       updateEntryProgressCountdown();
-      if (entryProgressUpdated) entryProgressUpdated.textContent = "更新 " + (latest || "--");
+      if (entryProgressUpdated) entryProgressUpdated.textContent = "更新 " + (view.latest || "--");
     }
 
     function createObserver() {
@@ -922,7 +775,7 @@
       if (curveObserver) curveObserver.disconnect();
       curveRenderSig = {};
       var allManagedNotes = managedStrategyNotes(rows);
-      var arrowIcon = '<svg class="ops-icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 11L11 5"/><path d="M6.5 5H11v4.5"/></svg>';
+      var arrowIcon = ops.ARROW_ICON;
 
       for (var j = 0; j < rows.length; j += 1) {
         var row = rows[j] || {};
@@ -1029,41 +882,7 @@
         );
         return;
       }
-      var html = "";
-      for (var i = 0; i < rows.length; i += 1) {
-        var r = rows[i] || {};
-        var aid = String(r.account_id || "");
-        var safeAid = escapeHtml(aid);
-        var mode = String(r.mode || "full").toLowerCase();
-        var modeLabel = mode === "full" ? "完整策略" : (mode === "loss_cut_only" ? "止损保护" : "只读监控");
-        var modeBadgeClass = "task-mode-badge" + (mode === "readonly" ? " mode-readonly" : (mode === "loss_cut_only" ? " mode-loss-cut" : ""));
-        var isAnomaly = hasAnomalyTask(r);
-        var headerStatus = mode === "readonly" ? "READONLY" : worstAccountTaskStatus(r);
-        var accountCls = isAnomaly ? "task-account-card task-account-anomaly" : "task-account-card";
-        html += '<article class="' + accountCls + '" aria-labelledby="task-card-title-' + safeAid + '">'
-          + '<div class="task-account-head">'
-          + '<div class="task-account-title">'
-          + '<h3 class="card-title-heading task-account-id" id="task-card-title-' + safeAid + '">' + safeAid + "</h3>"
-          + '<span class="' + modeBadgeClass + '">' + escapeHtml(modeLabel) + "</span>"
-          + (r && r.equity_recovery_take_profit_enabled ? '<span class="task-feature-badge">组合止盈监控</span>' : "")
-          + "</div>"
-          + '<span class="task-last-run ' + taskStatusCls(headerStatus) + '">' + escapeHtml(taskStatusText(headerStatus)) + "</span>"
-          + "</div>"
-          + '<div class="task-table" role="table" aria-label="' + safeAid + ' 任务执行记录">'
-          + '<div class="task-head" role="row">'
-          + '<span class="task-col-h" role="columnheader">任务</span>'
-          + '<span class="task-col-h" role="columnheader">状态</span>'
-          + '<span class="task-col-h" role="columnheader">时间</span>'
-          + '<span class="task-col-h" role="columnheader">结果</span>'
-          + "</div>"
-          + taskRowsForAccount(r)
-          + "</div>"
-          + "</article>";
-      }
-      var finalHtml = html
-        || (taskFilter === "anomaly"
-          ? '<div class="task-empty"><strong>暂无异常</strong><span>所有系统任务正常运行</span></div>'
-          : '<div class="task-empty"><strong>暂无匹配任务</strong><span>切换筛选条件查看其他任务</span></div>');
+      var finalHtml = R.buildTaskBoardHtml(rows, taskFilter);
       var openKeys = {};
       try {
         var openDetails = taskBoard.querySelectorAll("details.task-error-details[open][data-task-detail-key]");
@@ -1300,13 +1119,25 @@
 
     var hoverState = { box: null, rect: null, rafId: 0, clientX: 0 };
 
+    function getSparkRefs(box) {
+      if (!box.__bbSparkRefs || !box.__bbSparkRefs.tip || !box.contains(box.__bbSparkRefs.tip)) {
+        box.__bbSparkRefs = {
+          tip: box.querySelector(".spark-hover-tip"),
+          crosshair: box.querySelector(".spark-crosshair"),
+          activeDot: box.querySelector(".spark-active-dot")
+        };
+      }
+      return box.__bbSparkRefs;
+    }
+
     function showSparkPoint(box, pts, index, announce) {
       if (!box || !pts || !pts.length) return;
       var clampedIdx = Math.max(0, Math.min(pts.length - 1, index));
       var nearest = pts[clampedIdx];
-      var tip = box.querySelector(".spark-hover-tip");
-      var crosshair = box.querySelector(".spark-crosshair");
-      var activeDot = box.querySelector(".spark-active-dot");
+      var refs = getSparkRefs(box);
+      var tip = refs.tip;
+      var crosshair = refs.crosshair;
+      var activeDot = refs.activeDot;
       if (!tip || !nearest) return;
       var timePart = nearest.t ? ops.formatBeijingTime(nearest.t) + " · " : "";
       var eqPart = nearest.equity != null ? ops.fmtUsdt(nearest.equity, 2) + " · " : "";
@@ -1351,12 +1182,10 @@
 
     function clearSparkHover(box) {
       if (!box) return;
-      var tip = box.querySelector(".spark-hover-tip");
-      var crosshair = box.querySelector(".spark-crosshair");
-      var activeDot = box.querySelector(".spark-active-dot");
-      if (tip) tip.hidden = true;
-      if (crosshair) crosshair.hidden = true;
-      if (activeDot) activeDot.hidden = true;
+      var refs = getSparkRefs(box);
+      if (refs.tip) refs.tip.hidden = true;
+      if (refs.crosshair) refs.crosshair.hidden = true;
+      if (refs.activeDot) refs.activeDot.hidden = true;
       box.removeAttribute("data-active-index");
       if (hoverState.box === box) {
         hoverState.box = null;

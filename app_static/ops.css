@@ -478,7 +478,6 @@ summary {
   cursor: progress;
 }
 
-.ops-btn.is-active,
 .ops-btn.active {
   color: var(--text);
   border-color: var(--accent-border);
@@ -767,10 +766,6 @@ summary {
   box-shadow: var(--shadow-overlay);
 }
 
-.ops-hotkey-popover[hidden] {
-  display: none;
-}
-
 .ops-hotkey-title {
   margin: 0 0 10px;
   font-size: var(--text-sm);
@@ -880,10 +875,6 @@ summary {
   color: var(--warn-text);
 }
 
-.ops-alert[hidden] {
-  display: none;
-}
-
 .ops-alert-copy {
   min-width: 0;
   flex: 1 1 240px;
@@ -915,10 +906,6 @@ summary {
 .ops-incident-banner.is-warn {
   border-color: var(--warn-border);
   background: var(--warn-bg);
-}
-
-.ops-incident-banner[hidden] {
-  display: none;
 }
 
 .ops-incident-main {
@@ -1058,13 +1045,11 @@ summary {
   .ops-alert,
   .ops-incident-banner,
   .ops-freshness,
-  .ops-btn.is-active,
   .ops-btn.active,
   .ops-seg-btn.active {
     border-color: CanvasText;
     forced-color-adjust: auto;
   }
-  .ops-btn.is-active,
   .ops-btn.active,
   .ops-seg-btn.active {
     outline: 2px solid Highlight;

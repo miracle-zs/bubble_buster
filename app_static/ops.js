@@ -4,6 +4,7 @@
 
   var SHANGHAI_TZ = "Asia/Shanghai";
   var SHANGHAI_OFFSET_MS = 8 * 60 * 60 * 1000;
+  var ARROW_ICON = '<svg class="ops-icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 11L11 5"/><path d="M6.5 5H11v4.5"/></svg>';
   var chartThemeCache = null;
   var dateFormatterCache = {};
 
@@ -69,10 +70,6 @@
 
   function prefersReducedMotion() {
     return !!(global.matchMedia && global.matchMedia("(prefers-reduced-motion: reduce)").matches);
-  }
-
-  function invalidateChartThemeCache() {
-    chartThemeCache = null;
   }
 
   function getChartTheme(forceRefresh) {
@@ -673,7 +670,7 @@
     var raw = String(summary || "--").trim();
     var pairs = {};
     if (!raw || raw === "--") return pairs;
-    var matcher = /(?:^|\s)([A-Za-z0-9_.-]+)=/g;
+    var matcher = /(?:^|[\s,])([A-Za-z0-9_.-]+)=/g;
     var tokens = [];
     var match;
     while ((match = matcher.exec(raw)) !== null) {
@@ -740,6 +737,25 @@
     node.__bbLastHtml = html;
     node.innerHTML = html;
     return true;
+  }
+
+  function createChartResizeObserver(container, getChart) {
+    if (!container || typeof global.ResizeObserver === "undefined") return null;
+    var throttledResize = rafThrottle(function () {
+      var chart = getChart();
+      if (chart) chart.resize();
+    });
+    var observer = new global.ResizeObserver(function (entries) {
+      if (!getChart()) return;
+      for (var i = 0; i < entries.length; i += 1) {
+        if (entries[i].contentRect && entries[i].contentRect.width > 0) {
+          throttledResize();
+          break;
+        }
+      }
+    });
+    observer.observe(container);
+    return observer;
   }
 
   function readPageConfig(scriptId) {
@@ -1185,6 +1201,7 @@
   }
 
   global.BBOps = {
+    ARROW_ICON: ARROW_ICON,
     escapeHtml: escapeHtml,
     toNum: toNum,
     fmtNum: fmtNum,
@@ -1197,15 +1214,13 @@
     rafThrottle: rafThrottle,
     ensureEcharts: ensureEcharts,
     getChartTheme: getChartTheme,
-    invalidateChartThemeCache: invalidateChartThemeCache,
-    formatStrategyDisplay: formatStrategyDisplay,
+    createChartResizeObserver: createChartResizeObserver,
     splitStrategyParts: splitStrategyParts,
     formatStrategyTags: formatStrategyTags,
     formatStrategyHighlights: formatStrategyHighlights,
     parseTimestampMs: parseTimestampMs,
     formatBeijingTime: formatBeijingTime,
     evaluateDataFreshness: evaluateDataFreshness,
-    freshnessClassForState: freshnessClassForState,
     announceStatus: announceStatus,
     formatWalletSource: formatWalletSource,
     applyFreshnessPill: applyFreshnessPill,

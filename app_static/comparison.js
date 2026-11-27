@@ -79,17 +79,23 @@
       return accountModesById[String(accountId || "")] === "readonly";
     }
 
+    var NAMED_ACCOUNT_SLOTS = { acc01: 0, acc02: 1, acc03: 2, acc04: 3 };
+
+    function accountSlot(accountId, index) {
+      return Object.prototype.hasOwnProperty.call(NAMED_ACCOUNT_SLOTS, accountId)
+        ? NAMED_ACCOUNT_SLOTS[accountId]
+        : index;
+    }
+
     function colorFor(accountId, index) {
       var theme = ops.getChartTheme();
       if (isReadonlyAccount(accountId)) return theme.readonly;
-      var namedIndex = { acc01: 0, acc02: 1, acc03: 2, acc04: 3 };
-      var slot = Object.prototype.hasOwnProperty.call(namedIndex, accountId) ? namedIndex[accountId] : index;
+      var slot = accountSlot(accountId, index);
       return theme.series[slot % theme.series.length];
     }
 
     function patternFor(accountId, index) {
-      var namedIndex = { acc01: 0, acc02: 1, acc03: 2, acc04: 3 };
-      var slot = Object.prototype.hasOwnProperty.call(namedIndex, accountId) ? namedIndex[accountId] : index;
+      var slot = accountSlot(accountId, index);
       return LINE_PATTERNS[slot % LINE_PATTERNS.length];
     }
 
@@ -196,7 +202,7 @@
       var allNotes = rows.map(function (row) {
         return strategyNotesByAccount[row.account_id] || "";
       }).filter(Boolean);
-      var arrowIcon = '<svg class="ops-icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 11L11 5"/><path d="M6.5 5H11v4.5"/></svg>';
+      var arrowIcon = ops.ARROW_ICON;
       var html = rows.map(function (row, index) {
         var color = colorFor(row.account_id, index);
         var isReadonly = isReadonlyAccount(row.account_id);
@@ -381,16 +387,12 @@
       if (btn) btn.hidden = !show;
     }
 
-    var throttledChartResize = ops.rafThrottle(function () {
-      if (chart) chart.resize();
-    });
-
     function attachChartResizeObserver() {
       var chartContainer = el("equity-chart");
-      if (typeof ResizeObserver !== "undefined" && chartContainer && !resizeObserver) {
-        resizeObserver = new ResizeObserver(throttledChartResize);
-        resizeObserver.observe(chartContainer);
-      }
+      if (!chartContainer || resizeObserver) return;
+      resizeObserver = ops.createChartResizeObserver(chartContainer, function () {
+        return chart;
+      });
     }
 
     function renderChart() {

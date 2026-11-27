@@ -150,10 +150,6 @@
   gap: 5px;
 }
 
-.summary-metric[hidden] {
-  display: none;
-}
-
 .summary-metric.primary {
   background: var(--surface-elevated);
 }
@@ -290,10 +286,6 @@
   gap: 8px 10px;
 }
 
-.tab-row[hidden] {
-  display: none;
-}
-
 .chart-stage {
   position: relative;
   padding: 12px 14px 14px;
@@ -310,10 +302,6 @@
   border-bottom: 1px solid var(--border-subtle);
   color: var(--text-secondary);
   font-size: var(--text-xs);
-}
-
-.chart-sparse-hint[hidden] {
-  display: none;
 }
 
 .chart-sparse-actions {
@@ -346,20 +334,11 @@
   color: var(--bad-text);
 }
 
-.chart-empty[hidden] {
-  display: none;
-}
-
 /* Risk panel & Readonly Trade Stats panel */
 .risk-panel,
 .readonly-stats-panel {
   display: flex;
   flex-direction: column;
-}
-
-.risk-panel[hidden],
-.readonly-stats-panel[hidden] {
-  display: none;
 }
 
 .risk-body {
@@ -778,10 +757,6 @@
   cursor: pointer;
 }
 
-.activity-tab[hidden] {
-  display: none;
-}
-
 .activity-tab::after {
   content: "";
   position: absolute;
@@ -810,10 +785,6 @@
   font-family: var(--font-mono);
   font-variant-numeric: tabular-nums;
   font-size: var(--text-xs);
-}
-
-.activity-view[hidden] {
-  display: none;
 }
 
 .detail-table td.message-cell {
