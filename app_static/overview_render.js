@@ -227,7 +227,7 @@
         + "</div>";
     }
     if (formatted.errorDetail) {
-      html += '<details class="task-error-details"><summary>查看完整详情</summary><div class="task-error-full">' + escapeHtml(formatted.errorDetail) + "</div></details>";
+      html += '<details class="task-error-details" data-task-detail-key="' + escapeHtml(String(accountId || "") + ":" + String(taskKey || "")) + '"><summary>查看完整详情</summary><div class="task-error-full">' + escapeHtml(formatted.errorDetail) + "</div></details>";
     }
     html += "</div>";
     return html;

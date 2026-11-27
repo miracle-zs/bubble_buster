@@ -601,7 +601,9 @@ def _shutdown_trade_stats_background_refresh(app: FastAPI) -> None:
 
 
 def create_app(config_path: Optional[str] = None) -> FastAPI:
+    logger = logging.getLogger(__name__)
     static_root = (Path(__file__).resolve().parent / "app_static").resolve()
+    templates_root = (Path(__file__).resolve().parent / "templates").resolve()
     static_root.mkdir(parents=True, exist_ok=True)
 
     @asynccontextmanager
@@ -647,13 +649,20 @@ def create_app(config_path: Optional[str] = None) -> FastAPI:
         "form-action 'none'"
     )
 
+    svg_csp_header = "default-src 'none'; sandbox"
+
     @app.middleware("http")
     async def enforce_read_only_dashboard(request: Request, call_next):
         if request.method.upper() not in {"GET", "HEAD", "OPTIONS"}:
             return JSONResponse(
                 status_code=405,
                 content={"detail": "Dashboard is read-only"},
-                headers={"Allow": "GET, HEAD, OPTIONS"},
+                headers={
+                    "Allow": "GET, HEAD, OPTIONS",
+                    "X-Content-Type-Options": "nosniff",
+                    "X-Frame-Options": "SAMEORIGIN",
+                    "Referrer-Policy": "same-origin",
+                },
             )
         response = await call_next(request)
         response.headers.setdefault("X-Content-Type-Options", "nosniff")
@@ -663,7 +672,9 @@ def create_app(config_path: Optional[str] = None) -> FastAPI:
         if "text/html" in content_type:
             response.headers.setdefault("Content-Security-Policy", csp_header)
             response.headers["Cache-Control"] = "no-cache"
-        elif request.url.path.startswith("/api/") or request.url.path == "/healthz":
+        elif "image/svg+xml" in content_type or request.url.path.endswith(".svg"):
+            response.headers.setdefault("Content-Security-Policy", svg_csp_header)
+        if request.url.path.startswith("/api/") or request.url.path == "/healthz":
             response.headers["Cache-Control"] = "no-store"
         elif request.url.path.startswith("/static/") and response.status_code in {200, 304}:
             if request.query_params.get("v"):
@@ -671,6 +682,11 @@ def create_app(config_path: Optional[str] = None) -> FastAPI:
             else:
                 response.headers["Cache-Control"] = "public, max-age=604800, stale-while-revalidate=86400"
         return response
+
+    def _require_known_account(ctx: DashboardRuntimeContext, account_id: str) -> None:
+        known_accounts = set(ctx.provider.overview_account_ids or [])
+        if known_accounts and account_id not in known_accounts:
+            raise HTTPException(status_code=404, detail="Account not found")
 
     def _build_nav_accounts(ctx: DashboardRuntimeContext) -> list[dict[str, str]]:
         return sorted(
@@ -711,7 +727,7 @@ def create_app(config_path: Optional[str] = None) -> FastAPI:
 
     @app.get("/accounts/comparison/", response_class=HTMLResponse)
     def accounts_comparison_page(request: Request):
-        comparison_page = static_root / "account-comparison.html"
+        comparison_page = templates_root / "account-comparison.html"
         if not comparison_page.exists():
             raise HTTPException(status_code=404, detail="accounts comparison page not found")
         ctx: DashboardRuntimeContext = request.app.state.ctx
@@ -719,6 +735,7 @@ def create_app(config_path: Optional[str] = None) -> FastAPI:
             render_accounts_comparison_html(
                 static_dir=static_root,
                 nav_accounts=_build_nav_accounts(ctx),
+                templates_dir=templates_root,
             )
         )
 
@@ -728,9 +745,7 @@ def create_app(config_path: Optional[str] = None) -> FastAPI:
         account_id: str,
     ):
         ctx: DashboardRuntimeContext = request.app.state.ctx
-        known_accounts = set(ctx.provider.overview_account_ids or [])
-        if known_accounts and account_id not in known_accounts:
-            raise HTTPException(status_code=404, detail=f"Account not found: {account_id}")
+        _require_known_account(ctx, account_id)
         return HTMLResponse(
             render_account_dashboard_html(
                 ctx.refresh_sec,
@@ -771,7 +786,8 @@ def create_app(config_path: Optional[str] = None) -> FastAPI:
             payload["runtime_settings"] = _runtime_entry_catchup_state(request.app)
             return JSONResponse(payload)
         except Exception as exc:  # noqa: BLE001
-            raise HTTPException(status_code=500, detail=f"dashboard snapshot failed: {exc}") from exc
+            logger.exception("dashboard snapshot failed")
+            raise HTTPException(status_code=500, detail="dashboard snapshot failed") from exc
 
     @app.get("/api/accounts/summary/fast")
     def accounts_summary_fast(request: Request):
@@ -779,7 +795,8 @@ def create_app(config_path: Optional[str] = None) -> FastAPI:
         try:
             return JSONResponse(ctx.provider.cached_accounts_summary_fast())
         except Exception as exc:  # noqa: BLE001
-            raise HTTPException(status_code=500, detail=f"fast accounts summary failed: {exc}") from exc
+            logger.exception("fast accounts summary failed")
+            raise HTTPException(status_code=500, detail="fast accounts summary failed") from exc
 
     @app.get("/api/accounts/summary/details")
     def accounts_summary_details(request: Request):
@@ -787,7 +804,8 @@ def create_app(config_path: Optional[str] = None) -> FastAPI:
         try:
             return JSONResponse(ctx.provider.cached_accounts_summary_details())
         except Exception as exc:  # noqa: BLE001
-            raise HTTPException(status_code=500, detail=f"account summary details failed: {exc}") from exc
+            logger.exception("account summary details failed")
+            raise HTTPException(status_code=500, detail="account summary details failed") from exc
 
     @app.get("/api/accounts/summary")
     def accounts_summary(request: Request):
@@ -795,7 +813,8 @@ def create_app(config_path: Optional[str] = None) -> FastAPI:
         try:
             return JSONResponse(ctx.provider.cached_accounts_summary())
         except Exception as exc:  # noqa: BLE001
-            raise HTTPException(status_code=500, detail=f"accounts summary failed: {exc}") from exc
+            logger.exception("accounts summary failed")
+            raise HTTPException(status_code=500, detail="accounts summary failed") from exc
 
     @app.get("/api/accounts/equity-comparison")
     def accounts_equity_comparison(
@@ -811,11 +830,12 @@ def create_app(config_path: Optional[str] = None) -> FastAPI:
                 ctx.provider.accounts_equity_comparison(
                     window_hours=None if all_time else window_hours,
                     curve_points=curve_points,
-                        include_events=include_events,
+                    include_events=include_events,
                 )
             )
         except Exception as exc:  # noqa: BLE001
-            raise HTTPException(status_code=500, detail=f"accounts equity comparison failed: {exc}") from exc
+            logger.exception("accounts equity comparison failed")
+            raise HTTPException(status_code=500, detail="accounts equity comparison failed") from exc
 
     @app.get("/api/account/{account_id}/snapshot")
     def account_snapshot(
@@ -826,6 +846,7 @@ def create_app(config_path: Optional[str] = None) -> FastAPI:
         curve_points: Optional[int] = Query(default=None, ge=100, le=5000),
     ):
         ctx: DashboardRuntimeContext = request.app.state.ctx
+        _require_known_account(ctx, account_id)
         try:
             payload = ctx.provider.cached_snapshot(
                 log_lines=log_lines,
@@ -843,7 +864,8 @@ def create_app(config_path: Optional[str] = None) -> FastAPI:
             }
             return JSONResponse(payload)
         except Exception as exc:  # noqa: BLE001
-            raise HTTPException(status_code=500, detail=f"account snapshot failed: {exc}") from exc
+            logger.exception("account snapshot failed for %s", account_id)
+            raise HTTPException(status_code=500, detail="account snapshot failed") from exc
 
     @app.get("/api/account/{account_id}/core")
     def account_core(
@@ -853,6 +875,7 @@ def create_app(config_path: Optional[str] = None) -> FastAPI:
         curve_points: Optional[int] = Query(default=None, ge=100, le=5000),
     ):
         ctx: DashboardRuntimeContext = request.app.state.ctx
+        _require_known_account(ctx, account_id)
         try:
             payload = ctx.provider.cached_snapshot(
                 log_lines=0,
@@ -876,7 +899,8 @@ def create_app(config_path: Optional[str] = None) -> FastAPI:
             }
             return JSONResponse(payload)
         except Exception as exc:  # noqa: BLE001
-            raise HTTPException(status_code=500, detail=f"account core failed: {exc}") from exc
+            logger.exception("account core failed for %s", account_id)
+            raise HTTPException(status_code=500, detail="account core failed") from exc
 
     def _build_account_curve_payload(
         ctx: DashboardRuntimeContext,
@@ -965,7 +989,8 @@ def create_app(config_path: Optional[str] = None) -> FastAPI:
             }
             return JSONResponse({"curves": curves})
         except Exception as exc:  # noqa: BLE001
-            raise HTTPException(status_code=500, detail=f"accounts curves batch failed: {exc}") from exc
+            logger.exception("accounts curves batch failed")
+            raise HTTPException(status_code=500, detail="accounts curves batch failed") from exc
 
     @app.get("/api/account/{account_id}/curve")
     def account_curve(
@@ -976,6 +1001,7 @@ def create_app(config_path: Optional[str] = None) -> FastAPI:
         curve_type: Optional[Literal["strategy", "balance", "both"]] = Query(default=None),
     ):
         ctx: DashboardRuntimeContext = request.app.state.ctx
+        _require_known_account(ctx, account_id)
         try:
             payload = _build_account_curve_payload(
                 ctx,
@@ -986,7 +1012,8 @@ def create_app(config_path: Optional[str] = None) -> FastAPI:
             )
             return JSONResponse(payload)
         except Exception as exc:  # noqa: BLE001
-            raise HTTPException(status_code=500, detail=f"account curve failed: {exc}") from exc
+            logger.exception("account curve failed for %s", account_id)
+            raise HTTPException(status_code=500, detail="account curve failed") from exc
 
     @app.get("/api/account/{account_id}/details")
     def account_details(
@@ -995,6 +1022,7 @@ def create_app(config_path: Optional[str] = None) -> FastAPI:
         log_lines: int = Query(default=80, ge=0, le=300),
     ):
         ctx: DashboardRuntimeContext = request.app.state.ctx
+        _require_known_account(ctx, account_id)
         try:
             payload = ctx.provider.cached_snapshot(
                 log_lines=log_lines,
@@ -1008,14 +1036,16 @@ def create_app(config_path: Optional[str] = None) -> FastAPI:
             payload["account_id"] = account_id
             return JSONResponse(payload)
         except Exception as exc:  # noqa: BLE001
-            raise HTTPException(status_code=500, detail=f"account details failed: {exc}") from exc
+            logger.exception("account details failed for %s", account_id)
+            raise HTTPException(status_code=500, detail="account details failed") from exc
 
     @app.get("/api/runtime/settings")
     def runtime_settings(request: Request):
         try:
             return _runtime_entry_catchup_state(request.app)
         except Exception as exc:  # noqa: BLE001
-            raise HTTPException(status_code=500, detail=f"runtime settings read failed: {exc}") from exc
+            logger.exception("runtime settings read failed")
+            raise HTTPException(status_code=500, detail="runtime settings read failed") from exc
 
     @app.get("/healthz")
     def healthz(request: Request):

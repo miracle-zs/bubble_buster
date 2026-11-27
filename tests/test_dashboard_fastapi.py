@@ -208,6 +208,23 @@ portfolio_take_profit_enabled = true
 
             missing_account = client.get("/account/nonexistent_acc/")
             self.assertEqual(missing_account.status_code, 404)
+            self.assertNotIn("nonexistent_acc", missing_account.text)
+
+            missing_api = client.get("/api/account/nonexistent_acc/core")
+            self.assertEqual(missing_api.status_code, 404)
+            self.assertNotIn("nonexistent_acc", missing_api.text)
+
+            raw_static_tpl = client.get("/static/account-comparison.html")
+            self.assertEqual(raw_static_tpl.status_code, 404)
+
+            fav_ico = client.get("/favicon.ico")
+            self.assertEqual(fav_ico.headers.get("content-security-policy"), "default-src 'none'; sandbox")
+            fav_svg = client.get("/static/favicon.svg")
+            self.assertEqual(fav_svg.headers.get("content-security-policy"), "default-src 'none'; sandbox")
+
+            method_not_allowed = client.post("/")
+            self.assertEqual(method_not_allowed.status_code, 405)
+            self.assertEqual(method_not_allowed.headers.get("x-content-type-options"), "nosniff")
 
             comparison_js = client.get("/static/comparison.js")
             self.assertEqual(comparison_js.status_code, 200)
@@ -424,6 +441,8 @@ portfolio_take_profit_enabled = true
             self.assertAlmostEqual(comparison_rows["acc01"]["change_pct"], 9.009009, places=4)
             self.assertAlmostEqual(comparison_rows["acc02"]["change_pct"], -9.90991, places=4)
             self.assertEqual(comparison_rows["55"]["change_pct"], 0.0)
+            self.assertEqual(comparison_rows["55"]["mode"], "loss_cut_only")
+            self.assertEqual(comparison_rows["acc01"]["strategy_note"], "TP 9% / 减仓50% / 浮亏砍仓ON")
             self.assertEqual(len(comparison_rows["acc01"]["points"]), 2)
 
             details = client.get("/api/account/acc01/details")

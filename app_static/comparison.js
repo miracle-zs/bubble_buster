@@ -26,6 +26,7 @@
 
     var pageConfig = ops.readPageConfig("page-config");
     var initialNavAccounts = Array.isArray(pageConfig.navAccounts) ? pageConfig.navAccounts : [];
+    var echartsSrc = String(pageConfig.echartsSrc || "");
 
     var chart = null;
     var resizeObserver = null;
@@ -47,6 +48,8 @@
     var activeRequestToken = 0;
     var navAccountsAbortController = null;
     var navAccountsRequestToken = 0;
+    var pollTimer = null;
+    var echartsLoadFailed = false;
     var lastLoadedAt = 0;
     var navAccountsHydrated = initialNavAccounts.length > 0;
     var accountModesById = {};
@@ -377,12 +380,14 @@
       if (btn) btn.hidden = !show;
     }
 
+    var throttledChartResize = ops.rafThrottle(function () {
+      if (chart) chart.resize();
+    });
+
     function attachChartResizeObserver() {
       var chartContainer = el("equity-chart");
       if (typeof ResizeObserver !== "undefined" && chartContainer && !resizeObserver) {
-        resizeObserver = new ResizeObserver(function () {
-          if (chart) chart.resize();
-        });
+        resizeObserver = new ResizeObserver(throttledChartResize);
         resizeObserver.observe(chartContainer);
       }
     }
@@ -399,6 +404,7 @@
       chartElement.style.display = activeRows.length ? "block" : "none";
       emptyElement.style.display = activeRows.length ? "none" : "flex";
       if (!activeRows.length) {
+        if (chart) chart.clear();
         if (emptyText) {
           emptyText.textContent = range === "all"
             ? "当前筛选下没有可用权益快照"
@@ -419,7 +425,7 @@
 
       if (typeof window.echarts === "undefined") {
         chartElement.style.display = "none";
-        if (emptyText) emptyText.textContent = "图表组件加载失败";
+        if (emptyText) emptyText.textContent = echartsLoadFailed ? "图表组件加载失败" : "图表组件加载中...";
         if (emptyAction) emptyAction.hidden = true;
         emptyElement.style.display = "flex";
         return;
@@ -563,7 +569,6 @@
         series: chartSeries
       }, true);
       updateZoomResetVisibility(false);
-      chart.resize();
     }
 
     function latestSnapshotTimestamp(rows) {
@@ -705,10 +710,15 @@
           lastLoadedAt = Date.now();
           setRefreshBusy(false);
           payload = nextPayload || {};
+          seriesRows().forEach(function (row) {
+            if (!row || !row.account_id) return;
+            if (row.mode) accountModesById[row.account_id] = String(row.mode).toLowerCase();
+            if (row.strategy_note) strategyNotesByAccount[row.account_id] = String(row.strategy_note);
+          });
           ensureVisibility(seriesRows());
           if (!navAccountsHydrated) {
             ops.renderNavAccounts(seriesRows().map(function (r) {
-              return { id: r.account_id, mode: accountModesById[r.account_id] || "full" };
+              return { id: r.account_id, mode: accountModesById[r.account_id] || r.mode || "full" };
             }));
           }
           var emptyEl = el("chart-empty");
@@ -783,8 +793,9 @@
 
     var metricsWrap = document.querySelector(".metrics-panel .table-wrap");
     if (metricsWrap) {
-      metricsWrap.addEventListener("scroll", updateMetricsTableOverflow, { passive: true });
-      window.addEventListener("resize", updateMetricsTableOverflow, { passive: true });
+      var throttledMetricsOverflow = ops.rafThrottle(updateMetricsTableOverflow);
+      metricsWrap.addEventListener("scroll", throttledMetricsOverflow, { passive: true });
+      window.addEventListener("resize", throttledMetricsOverflow, { passive: true });
     }
 
     var emptyActionBtn = el("chart-empty-action");
@@ -847,20 +858,47 @@
 
     attachChartResizeObserver();
 
+    function startPolling() {
+      if (!pollTimer) {
+        pollTimer = setInterval(function () {
+          if (!document.hidden) load();
+        }, 60000);
+      }
+    }
+
+    function stopPolling(disposeChart) {
+      if (pollTimer) {
+        clearInterval(pollTimer);
+        pollTimer = null;
+      }
+      if (activeAbortController) {
+        try { activeAbortController.abort(); } catch (e) {}
+        activeAbortController = null;
+      }
+      if (navAccountsAbortController) {
+        try { navAccountsAbortController.abort(); } catch (e) {}
+        navAccountsAbortController = null;
+      }
+      setRefreshBusy(false);
+      if (disposeChart) {
+        if (resizeObserver) {
+          try { resizeObserver.disconnect(); } catch (e) {}
+          resizeObserver = null;
+        }
+        if (chart) {
+          try { chart.dispose(); } catch (e) {}
+          chart = null;
+        }
+      }
+    }
+
     window.addEventListener("pagehide", function (event) {
-      if (event && event.persisted) return;
-      if (resizeObserver) {
-        try { resizeObserver.disconnect(); } catch (e) {}
-        resizeObserver = null;
-      }
-      if (chart) {
-        try { chart.dispose(); } catch (e) {}
-        chart = null;
-      }
+      stopPolling(!(event && event.persisted));
     });
 
     window.addEventListener("pageshow", function (event) {
       if (event && event.persisted) {
+        startPolling();
         attachChartResizeObserver();
         if (chart) chart.resize();
         else if (payload) renderChart();
@@ -868,7 +906,20 @@
       }
     });
 
-    loadNavAccounts();
+    var resolvedEchartsSrc = echartsSrc || (pathPrefix + "/static/vendor/echarts.min.js");
+    ops.ensureEcharts(
+      resolvedEchartsSrc,
+      function () {
+        echartsLoadFailed = false;
+        if (payload) renderChart();
+      },
+      function () {
+        echartsLoadFailed = true;
+        if (payload) renderChart();
+      }
+    );
+    if (!navAccountsHydrated) loadNavAccounts();
     load();
+    startPolling();
   });
 })();

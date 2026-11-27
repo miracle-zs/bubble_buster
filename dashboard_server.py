@@ -3055,6 +3055,8 @@ class DashboardDataProvider:
                         payload["series"].append(
                             {
                                 "account_id": account_id,
+                                "mode": self.account_modes.get(account_id, "full"),
+                                "strategy_note": self.account_strategy_notes.get(account_id, ""),
                                 "status": "NO_DATA",
                                 "points": [],
                                 "baseline_equity": None,
@@ -3084,6 +3086,8 @@ class DashboardDataProvider:
                     payload["series"].append(
                         {
                             "account_id": account_id,
+                            "mode": self.account_modes.get(account_id, "full"),
+                            "strategy_note": self.account_strategy_notes.get(account_id, ""),
                             "status": "OK",
                             "points": points,
                             "baseline_equity": round(baseline, 8),
@@ -3811,18 +3815,23 @@ def render_accounts_overview_html(
 def render_accounts_comparison_html(
     static_dir: Optional[Path] = None,
     nav_accounts: Optional[List[Dict[str, str]]] = None,
+    templates_dir: Optional[Path] = None,
 ) -> str:
-    base_dir = (static_dir or (Path(__file__).resolve().parent / "app_static")).resolve()
-    raw = load_template("account-comparison.html", base_dir=base_dir)
-    page_config = {"navAccounts": nav_accounts or []}
+    resolved_static_dir = (static_dir or (Path(__file__).resolve().parent / "app_static")).resolve()
+    raw = load_template("account-comparison.html", base_dir=templates_dir)
+    page_config = {
+        "navAccounts": nav_accounts or [],
+        "echartsSrc": version_static_path("../../static/vendor/echarts.min.js", static_dir=resolved_static_dir),
+    }
     rendered = raw.replace("__PAGE_CONFIG_JSON__", _inline_script_json(page_config))
     rendered = inject_ops_topbar(
         rendered,
         active_page="comparison",
         home_href="../../",
         comparison_href="./",
+        templates_dir=templates_dir,
     )
-    return version_static_urls(rendered, static_dir=base_dir)
+    return version_static_urls(rendered, static_dir=resolved_static_dir)
 
 
 _CURVE_PAYLOAD_KEYS = {

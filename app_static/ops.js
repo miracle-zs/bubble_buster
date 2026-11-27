@@ -779,12 +779,66 @@
     wrap.classList.toggle("has-overflow-right", hasRight);
   }
 
+  function rafThrottle(fn) {
+    var rafId = 0;
+    var lastArgs = null;
+    var schedule = typeof requestAnimationFrame === "function"
+      ? requestAnimationFrame
+      : function (cb) { return setTimeout(cb, 16); };
+    return function () {
+      lastArgs = arguments;
+      if (rafId) return;
+      rafId = schedule(function () {
+        rafId = 0;
+        fn.apply(null, lastArgs);
+      });
+    };
+  }
+
+  var echartsWaiters = [];
+  function ensureEcharts(src, onReady, onError) {
+    if (typeof global.echarts !== "undefined") {
+      if (typeof onReady === "function") onReady();
+      return;
+    }
+    if (typeof document === "undefined") return;
+    if (global.__bb_echarts_failed) {
+      if (typeof onError === "function") onError();
+      return;
+    }
+    if (typeof onReady === "function" || typeof onError === "function") {
+      echartsWaiters.push({ onReady: onReady, onError: onError });
+    }
+    if (global.__bb_echarts_loading) return;
+    global.__bb_echarts_loading = true;
+    var script = document.createElement("script");
+    script.src = src || "/static/vendor/echarts.min.js";
+    script.async = true;
+    script.onload = function () {
+      global.__bb_echarts_loading = false;
+      var waiters = echartsWaiters.splice(0, echartsWaiters.length);
+      for (var i = 0; i < waiters.length; i += 1) {
+        if (typeof waiters[i].onReady === "function") waiters[i].onReady();
+      }
+    };
+    script.onerror = function () {
+      global.__bb_echarts_loading = false;
+      global.__bb_echarts_failed = true;
+      var waiters = echartsWaiters.splice(0, echartsWaiters.length);
+      for (var i = 0; i < waiters.length; i += 1) {
+        if (typeof waiters[i].onError === "function") waiters[i].onError();
+      }
+    };
+    document.head.appendChild(script);
+  }
+
   function bindNavOverflowListeners() {
     var nav = document.querySelector(".ops-nav");
     if (!nav || nav.__bbOverflowBound) return;
     nav.__bbOverflowBound = true;
-    nav.addEventListener("scroll", updateNavOverflowFade, { passive: true });
-    global.addEventListener("resize", updateNavOverflowFade, { passive: true });
+    var throttledUpdate = rafThrottle(updateNavOverflowFade);
+    nav.addEventListener("scroll", throttledUpdate, { passive: true });
+    global.addEventListener("resize", throttledUpdate, { passive: true });
     updateNavOverflowFade();
   }
 
@@ -1122,6 +1176,8 @@
     fmtPct: fmtPct,
     fmtWithUnit: fmtWithUnit,
     prefersReducedMotion: prefersReducedMotion,
+    rafThrottle: rafThrottle,
+    ensureEcharts: ensureEcharts,
     getChartTheme: getChartTheme,
     invalidateChartThemeCache: invalidateChartThemeCache,
     formatStrategyDisplay: formatStrategyDisplay,

@@ -488,7 +488,13 @@
           + '<div class="entry-progress-next-cell' + (waiting ? " is-waiting" : "") + '" role="cell"><span class="entry-progress-next-cell-label">下一检查</span><strong>' + escapeHtml(nextText) + "</strong><span>" + escapeHtml(nextNote) + "</span></div></div>";
       }
       html += "</div>";
+      var prevTrack = entryProgressBoard.querySelector(".entry-progress-timeline-track");
+      var prevScrollLeft = prevTrack ? prevTrack.scrollLeft : 0;
       ops.patchHtmlIfChanged(entryProgressBoard, html);
+      if (prevScrollLeft > 0) {
+        var nextTrack = entryProgressBoard.querySelector(".entry-progress-timeline-track");
+        if (nextTrack) nextTrack.scrollLeft = prevScrollLeft;
+      }
       updateEntryProgressCountdown();
       if (entryProgressUpdated) entryProgressUpdated.textContent = "更新 " + (latest || "--");
     }
@@ -692,6 +698,7 @@
     var curveAbortControllers = {};
     var batchCurvesAbortController = null;
     var batchCurvesInFlight = false;
+    var forceCurveRefreshPending = false;
 
     function fetchCurvesBatch(accountIds, force) {
       var ids = (accountIds || []).filter(Boolean);
@@ -742,9 +749,12 @@
             }
             return;
           }
+          var batchErrMsg = (err && err.message) || "网络异常";
           for (var k = 0; k < ids.length; k += 1) {
-            if (!curveAbortControllers[ids[k]]) curveInFlight[ids[k]] = false;
-            fetchCurve(ids[k], true);
+            var failAid = ids[k];
+            if (!curveAbortControllers[failAid]) curveInFlight[failAid] = false;
+            curveErrors[failAid] = batchErrMsg;
+            renderCurve(failAid);
           }
         });
     }
@@ -792,6 +802,8 @@
     }
 
     function primeCurveLoad() {
+      var forceAll = forceCurveRefreshPending;
+      forceCurveRefreshPending = false;
       var nodes = document.querySelectorAll(".spark-box");
       var staleIds = [];
       for (var i = 0; i < nodes.length; i += 1) {
@@ -800,12 +812,16 @@
         renderCurve(aid);
         var cached = curveCache[aid];
         var fresh = !!(cached && cached.ts && (Date.now() - cached.ts) < curveTtlMs);
-        if (!aid || fresh || curveInFlight[aid]) continue;
+        if (!aid || (!forceAll && fresh) || (!forceAll && curveInFlight[aid])) continue;
         if (staleIds.indexOf(aid) < 0) staleIds.push(aid);
       }
       if (staleIds.length > 1) {
-        fetchCurvesBatch(staleIds, false);
+        fetchCurvesBatch(staleIds, forceAll);
       } else if (staleIds.length === 1) {
+        if (forceAll) {
+          fetchCurve(staleIds[0], true);
+          return;
+        }
         createObserver();
         if (curveObserver && nodes.length) {
           for (var j = 0; j < nodes.length; j += 1) {
@@ -1047,7 +1063,24 @@
         || (taskFilter === "anomaly"
           ? '<div class="task-empty"><strong>暂无异常</strong><span>所有系统任务正常运行</span></div>'
           : '<div class="task-empty"><strong>暂无匹配任务</strong><span>切换筛选条件查看其他任务</span></div>');
+      var openKeys = {};
+      try {
+        var openDetails = taskBoard.querySelectorAll("details.task-error-details[open][data-task-detail-key]");
+        for (var dIdx = 0; dIdx < openDetails.length; dIdx += 1) {
+          var key = openDetails[dIdx].getAttribute("data-task-detail-key");
+          if (key) openKeys[key] = true;
+        }
+      } catch (e) {}
       ops.patchHtmlIfChanged(taskBoard, finalHtml);
+      if (Object.keys(openKeys).length > 0) {
+        try {
+          var nextDetails = taskBoard.querySelectorAll("details.task-error-details[data-task-detail-key]");
+          for (var nIdx = 0; nIdx < nextDetails.length; nIdx += 1) {
+            var nKey = nextDetails[nIdx].getAttribute("data-task-detail-key");
+            if (nKey && openKeys[nKey]) nextDetails[nIdx].setAttribute("open", "");
+          }
+        } catch (e) {}
+      }
     }
 
     function mergeFastRows(rows) {
@@ -1198,9 +1231,8 @@
     function triggerOverviewRefresh() {
       if (overviewRefreshBtn && overviewRefreshBtn.disabled) return;
       lastDetailsFetchAt = 0;
-      curveCache = {};
+      forceCurveRefreshPending = true;
       curveErrors = {};
-      curveRenderSig = {};
       batchCurvesInFlight = false;
       if (batchCurvesAbortController) {
         try { batchCurvesAbortController.abort(); } catch (e) {}
@@ -1431,11 +1463,11 @@
       });
     }
 
-    window.addEventListener("resize", function () {
+    window.addEventListener("resize", ops.rafThrottle(function () {
       hoverState.rect = null;
       var openPop = cards && cards.querySelector(".strategy-popover-wrap.is-open .strategy-popover");
       if (openPop) clampPopoverToViewport(openPop);
-    }, { passive: true });
+    }), { passive: true });
 
     document.addEventListener("click", function (event) {
       if (hoverState.box && !(event.target && event.target.closest && event.target.closest(".spark-box") === hoverState.box)) {

@@ -30,6 +30,15 @@
         ],
         "createdAt": "2026-11-27T08:00:21.458Z",
         "reason": "false positive: detector cannot resolve runtime ../../static/ops.css; actual h1=22px (--text-lg) vs body=14px (--text-base), ratio 1.57x"
+      },
+      {
+        "rule": "flat-type-hierarchy",
+        "value": "*",
+        "files": [
+          "templates/account-comparison.html"
+        ],
+        "createdAt": "2026-11-27T14:26:21.750Z",
+        "reason": "agent verified: unrendered template uses runtime ../../static/ path so detect falls back to 16px defaults; actual comparison.css/ops.css step 14px/17px/22px/28px (up to 1.29x and 2.0x)"
       }
     ]
   }

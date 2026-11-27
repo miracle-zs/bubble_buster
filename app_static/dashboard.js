@@ -449,6 +449,10 @@
       el.chartEmpty.hidden = false;
     }
 
+    var throttledChartResize = ops.rafThrottle(function () {
+      if (equityChart) equityChart.resize();
+    });
+
     function attachChartResizeObserver() {
       if (!el.equityChart) return;
       if (typeof window.ResizeObserver !== "undefined" && !chartResizeObs) {
@@ -456,7 +460,7 @@
           if (!equityChart) return;
           for (var rIdx = 0; rIdx < entries.length; rIdx += 1) {
             if (entries[rIdx].contentRect && entries[rIdx].contentRect.width > 0) {
-              equityChart.resize();
+              throttledChartResize();
               break;
             }
           }
@@ -596,25 +600,19 @@
     }
 
     function ensureEcharts() {
-      if (typeof window.echarts !== "undefined") return;
-      if (window.__bb_echarts_loading) return;
-      window.__bb_echarts_loading = true;
-      var script = document.createElement("script");
       var resolvedSrc = ECHARTS_SRC || (apiBase + "/static/vendor/echarts.min.js");
       if (resolvedSrc.charAt(0) === "/" && resolvedSrc.indexOf("://") < 0 && apiBase && apiBase !== "/") {
         resolvedSrc = apiBase + resolvedSrc;
       }
-      script.src = resolvedSrc;
-      script.async = true;
-      script.onload = function () {
-        window.__bb_echarts_loading = false;
-        if (latestData) renderEquityChart(activeCurve(latestData), true);
-      };
-      script.onerror = function () {
-        window.__bb_echarts_loading = false;
-        showChartEmpty("图表组件加载失败");
-      };
-      document.head.appendChild(script);
+      ops.ensureEcharts(
+        resolvedSrc,
+        function () {
+          if (latestData) renderEquityChart(activeCurve(latestData), true);
+        },
+        function () {
+          showChartEmpty("图表组件加载失败", true);
+        }
+      );
     }
 
     function setSummaryMetric(node, value, cls) {
@@ -1194,10 +1192,15 @@
         renderPositionsTable();
       });
     }
+    var eventSearchTimer = 0;
     if (el.eventSearchInput) {
       el.eventSearchInput.addEventListener("input", function () {
         eventSearchQuery = el.eventSearchInput.value || "";
-        renderEventsTable();
+        if (eventSearchTimer) clearTimeout(eventSearchTimer);
+        eventSearchTimer = setTimeout(function () {
+          eventSearchTimer = 0;
+          renderEventsTable();
+        }, 150);
       });
     }
     if (el.eventStatusSelect) {
@@ -1315,6 +1318,7 @@
         else if (latestData) renderEquityChart(activeCurve(latestData), true);
         refreshCurveFast();
         refreshCore();
+        if (fullLoadedOnce || detailsLoaded) refreshDetails();
       }
     });
   });
