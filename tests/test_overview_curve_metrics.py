@@ -63,5 +63,39 @@ assert.equal(result.realPointCount, 1);
 assert.equal(ops.formatWalletSource('DB'), '本地快照');
 assert.equal(ops.formatWalletSource('API'), '交易所实时');
 assert.equal(ops.formatWalletSource(''), '--');
+
+// Pure overview_render.js module tests
+require({str((Path(__file__).resolve().parents[1] / "app_static/overview_render.js").resolve())!r});
+const ov = globalThis.BBOverviewRender;
+assert.equal(ov.worstAccountTaskStatus({{ tasks: {{ entry: {{ status: 'SUCCESS' }}, manage: {{ status: 'FAILED' }} }} }}), 'FAILED');
+assert.equal(ov.anomalyTaskCount([{{ tasks: {{ a: {{ status: 'FAILED' }}, b: {{ status: 'PARTIAL' }}, c: {{ status: 'SUCCESS' }} }} }}]), 2);
+const parsedTask = ov.formatTaskResultLines('entry', {{ summary: 'opened=3 failed=1 skipped=2 failed_symbols=BTCUSDT,ETHUSDT' }});
+assert.equal(parsedTask.statLine, '开仓 3 · 失败 1 · 跳过 2');
+assert.equal(parsedTask.symbolLines.length, 1);
+assert.deepEqual(parsedTask.symbolLines[0].symbols, ['BTCUSDT', 'ETHUSDT']);
+const tl = ov.buildCommonEntryTimeline([
+  {{ entry_actions: [{{ entry_stage: 'INITIAL', symbol: 'BTCUSDT', opened_at_local: '2026-09-05 08:00:10' }}] }},
+  {{ entry_actions: [{{ entry_stage: 'INITIAL', symbol: 'BTCUSDT', opened_at_local: '2026-09-05 08:00:55' }}] }}
+]);
+assert.equal(tl.commonActionCount, 1);
+assert.equal(tl.groups[0].time, '08:00');
+assert.equal(ov.computeVenueState(true, {{}}).cls, 'status-bad');
+
+// Pure dashboard_render.js module tests
+require({str((Path(__file__).resolve().parents[1] / "app_static/dashboard_render.js").resolve())!r});
+const dr = globalThis.BBDashboardRender;
+assert.equal(dr.fmtAdaptive(123.456), '123.46');
+assert.equal(dr.fmtAdaptive(0.00123456), '0.00123456');
+assert.equal(dr.summarizeRunMessage('All symbols already have open strategy positions'), '目标交易对均已有策略持仓（已跳过）');
+assert.equal(dr.summarizeRunMessage('opened=10,failed=0,planned=2'), '开仓 10 · 失败 0 · 计划 2');
+assert.equal(dr.liveOrderLabel('ACTIVE'), '挂单中');
+const opt = dr.buildEquityChartOption({{
+  seriesData: [[Date.parse('2026-09-05T08:23:51Z'), 275.4, 0, 0]],
+  markLines: [{{ yAxis: 285.4 }}, {{ yAxis: 275.41 }}],
+  timeZone: 'Asia/Shanghai'
+}});
+assert.equal(opt.yAxis.min, 272);
+assert.equal(opt.yAxis.max, 289);
+assert.equal(opt.dataZoom.length, 0);
 """
         subprocess.run(["node", "-e", script], check=True, capture_output=True, text=True)

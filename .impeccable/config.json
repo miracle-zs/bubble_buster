@@ -1,0 +1,36 @@
+{
+  "buildPath": "code",
+  "detector": {
+    "ignoreRules": [],
+    "ignoreFiles": [],
+    "ignoreValues": [
+      {
+        "rule": "flat-type-hierarchy",
+        "value": "*",
+        "files": [
+          "templates/accounts_overview.html"
+        ],
+        "createdAt": "2026-11-27T08:00:10.668Z",
+        "reason": "false positive: detector cannot resolve runtime static/ops.css; actual h1=22px (--text-lg) vs body=14px (--text-base), ratio 1.57x"
+      },
+      {
+        "rule": "flat-type-hierarchy",
+        "value": "*",
+        "files": [
+          "templates/dashboard.html"
+        ],
+        "createdAt": "2026-11-27T08:00:19.624Z",
+        "reason": "false positive: detector cannot resolve runtime __STATIC_BASE__/ops.css; actual h1=22px (--text-lg) vs body=14px (--text-base), ratio 1.57x"
+      },
+      {
+        "rule": "flat-type-hierarchy",
+        "value": "*",
+        "files": [
+          "app_static/account-comparison.html"
+        ],
+        "createdAt": "2026-11-27T08:00:21.458Z",
+        "reason": "false positive: detector cannot resolve runtime ../../static/ops.css; actual h1=22px (--text-lg) vs body=14px (--text-base), ratio 1.57x"
+      }
+    ]
+  }
+}

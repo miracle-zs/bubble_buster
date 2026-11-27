@@ -1,0 +1,200 @@
+{
+  "schemaVersion": 2,
+  "generatedAt": "2026-11-27T09:23:00Z",
+  "title": "Design System: Bubble Buster — Obsidian Desk Quantitative Terminal",
+  "extensions": {
+    "colorMeta": {
+      "desk-void": {
+        "role": "neutral",
+        "displayName": "Desk Void",
+        "canonical": "#080a0f",
+        "tonalRamp": ["#05060a", "#080a0f", "#0b0e14", "#10141c", "#151b26", "#222a38", "#344054", "#8b99ad"]
+      },
+      "desk-surface": {
+        "role": "neutral",
+        "displayName": "Desk Surface",
+        "canonical": "#10141c",
+        "tonalRamp": ["#080a0f", "#0b0e14", "#10141c", "#131822", "#151b26", "#1a2230", "#222a38", "#344054"]
+      },
+      "telemetry-cyan": {
+        "role": "primary",
+        "displayName": "Telemetry Cyan",
+        "canonical": "#38bdf8",
+        "tonalRamp": ["#082f49", "#0c4a6e", "#0369a1", "#0284c7", "#38bdf8", "#7dd3fc", "#bae6fd", "#e0f2fe"]
+      },
+      "brand-gold": {
+        "role": "primary",
+        "displayName": "Brand Gold",
+        "canonical": "#f5b942",
+        "tonalRamp": ["#451a03", "#78350f", "#b45309", "#d97706", "#f5b942", "#fcd34d", "#fde68a", "#fef3c7"]
+      },
+      "signal-emerald": {
+        "role": "secondary",
+        "displayName": "Signal Emerald",
+        "canonical": "#10b981",
+        "tonalRamp": ["#022c22", "#064e3b", "#047857", "#059669", "#10b981", "#34d399", "#6ee7b7", "#d1fae5"]
+      },
+      "signal-amber": {
+        "role": "secondary",
+        "displayName": "Signal Amber",
+        "canonical": "#f59e0b",
+        "tonalRamp": ["#451a03", "#78350f", "#b45309", "#d97706", "#f59e0b", "#fbbf24", "#fde68a", "#fef3c7"]
+      },
+      "signal-crimson": {
+        "role": "secondary",
+        "displayName": "Signal Crimson",
+        "canonical": "#f43f5e",
+        "tonalRamp": ["#4c0519", "#881337", "#be123c", "#e11d48", "#f43f5e", "#fb7185", "#fda4af", "#ffe4e6"]
+      },
+      "readonly-violet": {
+        "role": "tertiary",
+        "displayName": "Readonly Violet",
+        "canonical": "#a78bfa",
+        "tonalRamp": ["#2e1065", "#4c1d95", "#6d28d9", "#7c3aed", "#8b5cf6", "#a78bfa", "#c4b5fd", "#ede9fe"]
+      }
+    },
+    "typographyMeta": {
+      "display": { "displayName": "Display KPI", "purpose": "Hero equity and return figures with tabular numerals." },
+      "headline": { "displayName": "Page Headline", "purpose": "Primary page titles and secondary KPI values." },
+      "title": { "displayName": "Section Title", "purpose": "Panel headings and account identifiers." },
+      "body": { "displayName": "Body Copy", "purpose": "Risk descriptions, alerts, and disclosure notes." },
+      "data-cell": { "displayName": "Data Cell", "purpose": "Dense table figures, command values, and logs." },
+      "label": { "displayName": "Metadata Label", "purpose": "12px floor for labels, badges, and axis ticks." }
+    },
+    "shadows": [
+      {
+        "name": "overlay",
+        "value": "0 14px 36px rgba(2, 4, 10, 0.72), 0 2px 8px rgba(2, 4, 10, 0.5)",
+        "purpose": "Floating popovers, tooltip portals, and skip link only; resting surfaces stay flat."
+      }
+    ],
+    "motion": [
+      {
+        "name": "control-hover",
+        "value": "120ms ease",
+        "purpose": "Crisp color, background, and border transitions on buttons and nav links."
+      },
+      {
+        "name": "meter-fill",
+        "value": "180ms ease",
+        "purpose": "Determinate <progress> inline-size transitions gated by prefers-reduced-motion: no-preference."
+      }
+    ],
+    "breakpoints": [
+      { "name": "desktop-4col", "value": "1360px" },
+      { "name": "tablet-split", "value": "1180px" },
+      { "name": "compact-grid", "value": "900px" },
+      { "name": "mobile", "value": "760px" },
+      { "name": "narrow-mobile", "value": "540px" }
+    ]
+  },
+  "components": [
+    {
+      "name": "Ops Button",
+      "kind": "button",
+      "refersTo": "button-default",
+      "description": "Primary interactive control button used for manual refresh, zoom reset, and panel toggles.",
+      "html": "<button class=\"ds-ops-btn\" type=\"button\"><svg width=\"14\" height=\"14\" viewBox=\"0 0 16 16\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"1.6\" stroke-linecap=\"round\" stroke-linejoin=\"round\" aria-hidden=\"true\"><path d=\"M13.5 8a5.5 5.5 0 1 1-1.4-3.7\"/><path d=\"M13.5 2.5v3h-3\"/></svg><span>刷新</span></button>",
+      "css": ".ds-ops-btn { display: inline-flex; align-items: center; justify-content: center; gap: 6px; min-height: var(--target-size, 32px); min-width: 44px; padding: 5px 11px; border: 1px solid var(--border, #222a38); border-radius: var(--radius, 6px); background: var(--surface-elevated, #151b26); color: var(--text-secondary, #c2ccd9); font-size: 0.75rem; font-weight: 600; cursor: pointer; transition: color 120ms ease, background-color 120ms ease, border-color 120ms ease; } .ds-ops-btn:hover { color: var(--text, #f3f6fb); border-color: var(--border-strong, #344054); background: var(--surface-hover, #1a2230); } .ds-ops-btn:focus-visible { outline: 2px solid var(--accent, #38bdf8); outline-offset: 2px; }"
+    },
+    {
+      "name": "Segmented Control",
+      "kind": "button",
+      "refersTo": "button-active",
+      "description": "Recessed segmented switch for curve scope, time windows, and task filters.",
+      "html": "<div class=\"ds-seg\" role=\"group\" aria-label=\"时间范围\"><button class=\"ds-seg-btn\" type=\"button\" aria-pressed=\"false\">1H</button><button class=\"ds-seg-btn is-active\" type=\"button\" aria-pressed=\"true\">1D</button><button class=\"ds-seg-btn\" type=\"button\" aria-pressed=\"false\">1W</button></div>",
+      "css": ".ds-seg { display: inline-flex; align-items: center; gap: 2px; padding: 2px; border: 1px solid var(--border, #222a38); border-radius: var(--radius, 6px); background: var(--surface-inset, #0b0e14); } .ds-seg-btn { min-height: 28px; min-width: 42px; padding: 4px 10px; border: 1px solid transparent; border-radius: var(--radius-sm, 4px); background: transparent; color: var(--text-secondary, #c2ccd9); font-size: 0.75rem; font-weight: 600; cursor: pointer; transition: color 120ms ease, background-color 120ms ease, border-color 120ms ease; } .ds-seg-btn:hover { color: var(--text, #f3f6fb); background: var(--surface-hover, #1a2230); } .ds-seg-btn.is-active { color: var(--text, #f3f6fb); border-color: var(--accent-border, rgba(56, 189, 248, 0.38)); background: var(--accent-bg, rgba(56, 189, 248, 0.12)); } .ds-seg-btn:focus-visible { outline: 2px solid var(--accent, #38bdf8); outline-offset: 2px; }"
+    },
+    {
+      "name": "Strategy Chip",
+      "kind": "chip",
+      "refersTo": "strategy-chip",
+      "description": "Differential strategy tags highlighting primary take-profit rules and disabled protections.",
+      "html": "<div class=\"ds-chip-row\"><span class=\"ds-chip is-primary\">组合止盈 2.5% · 回撤 15%</span><span class=\"ds-chip is-off\">组合止盈 OFF</span><span class=\"ds-chip\">延时入场</span></div>",
+      "css": ".ds-chip-row { display: inline-flex; flex-wrap: wrap; gap: 6px; } .ds-chip { display: inline-flex; align-items: center; min-height: 26px; padding: 4px 8px; border: 1px solid var(--border, #222a38); border-radius: var(--radius-sm, 4px); background: var(--surface-subtle, #131822); color: var(--text-secondary, #c2ccd9); font-size: 0.75rem; font-weight: 600; line-height: 1.35; } .ds-chip.is-primary { border-color: var(--accent-border, rgba(56, 189, 248, 0.38)); background: var(--accent-bg, rgba(56, 189, 248, 0.12)); color: var(--text, #f3f6fb); } .ds-chip.is-off { border-color: var(--bad-border, rgba(244, 63, 94, 0.42)); background: var(--bad-bg, rgba(244, 63, 94, 0.14)); color: var(--bad-text, #fb7185); }"
+    },
+    {
+      "name": "Status & Freshness Pill",
+      "kind": "chip",
+      "refersTo": "status-badge",
+      "description": "Semantic status pills for task results, snapshot freshness, and readonly mode.",
+      "html": "<div class=\"ds-pill-row\"><span class=\"ds-pill is-ok\">实时 · 12秒前</span><span class=\"ds-pill is-warn\">延迟 · 5分钟前</span><span class=\"ds-pill is-bad\">历史快照 · 滞后</span><span class=\"ds-pill is-ro\">只读监控</span></div>",
+      "css": ".ds-pill-row { display: inline-flex; flex-wrap: wrap; gap: 6px; } .ds-pill { display: inline-flex; align-items: center; min-height: 22px; padding: 2px 8px; border: 1px solid var(--border, #222a38); border-radius: 999px; font-size: 0.75rem; font-weight: 700; line-height: 1.3; } .ds-pill.is-ok { border-color: var(--ok-border, rgba(16, 185, 129, 0.38)); background: var(--ok-bg, rgba(16, 185, 129, 0.13)); color: var(--ok-text, #34d399); } .ds-pill.is-warn { border-color: var(--warn-border, rgba(245, 158, 11, 0.42)); background: var(--warn-bg, rgba(245, 158, 11, 0.14)); color: var(--warn-text, #fbbf24); } .ds-pill.is-bad { border-color: var(--bad-border, rgba(244, 63, 94, 0.42)); background: var(--bad-bg, rgba(244, 63, 94, 0.14)); color: var(--bad-text, #fb7185); } .ds-pill.is-ro { border-color: var(--readonly-border, rgba(167, 139, 250, 0.38)); background: var(--readonly-bg, rgba(167, 139, 250, 0.12)); color: var(--readonly-text, #c4b5fd); }"
+    },
+    {
+      "name": "Surface Card with Hairline Metrics",
+      "kind": "card",
+      "refersTo": "surface-card",
+      "description": "Flat Obsidian Desk container using elevated header bar and hairline-divided secondary metrics.",
+      "html": "<article class=\"ds-card\"><header class=\"ds-card-head\"><span class=\"ds-card-id\">acc01</span><span class=\"ds-card-link\">详情</span></header><div class=\"ds-card-body\"><div class=\"ds-card-val\">275.40</div><div class=\"ds-card-grid\"><div><span>当前持仓</span><strong>0</strong></div><div><span>高点回撤</span><strong class=\"is-bad\">-3.50%</strong></div></div></div></article>",
+      "css": ".ds-card { border: 1px solid var(--border, #222a38); border-radius: var(--radius, 6px); background: var(--surface, #10141c); overflow: hidden; } .ds-card-head { display: flex; align-items: center; justify-content: space-between; padding: 10px 12px; border-bottom: 1px solid var(--border-subtle, #181f2b); background: var(--surface-elevated, #151b26); } .ds-card-id { font-family: var(--font-mono, monospace); font-weight: 700; color: var(--text, #f3f6fb); } .ds-card-link { font-size: 0.75rem; font-weight: 600; color: var(--accent-text, #7dd3fc); } .ds-card-body { padding: 12px; } .ds-card-val { font-family: var(--font-mono, monospace); font-variant-numeric: tabular-nums; font-size: 1.375rem; font-weight: 700; color: var(--text, #f3f6fb); margin-bottom: 10px; } .ds-card-grid { display: grid; grid-template-columns: 1fr 1fr; border-top: 1px solid var(--border-subtle, #181f2b); padding-top: 8px; } .ds-card-grid > div + div { border-left: 1px solid var(--border-subtle, #181f2b); padding-left: 10px; } .ds-card-grid span { display: block; font-size: 0.75rem; color: var(--muted, #8b99ad); } .ds-card-grid strong { font-family: var(--font-mono, monospace); font-variant-numeric: tabular-nums; font-size: 0.875rem; color: var(--text, #f3f6fb); } .ds-card-grid strong.is-bad { color: var(--bad-text, #fb7185); }"
+    },
+    {
+      "name": "Native Risk Budget Progress",
+      "kind": "custom",
+      "refersTo": "status-badge",
+      "description": "Semantic native <progress> element indicating portfolio stop-loss consumption.",
+      "html": "<div class=\"ds-meter\"><span class=\"ds-meter-lbl\">已消耗止损空间</span><progress class=\"ds-progress\" max=\"100\" value=\"62\" aria-label=\"已消耗组合止损空间\"></progress></div>",
+      "css": ".ds-meter { display: flex; flex-direction: column; gap: 6px; min-width: 220px; } .ds-meter-lbl { font-size: 0.75rem; color: var(--muted, #8b99ad); } .ds-progress { appearance: none; display: block; width: 100%; height: 7px; border: 1px solid var(--border, #222a38); border-radius: 999px; background: var(--surface-inset, #0b0e14); overflow: clip; } .ds-progress::-webkit-progress-bar { background: transparent; } .ds-progress::-webkit-progress-value { background: var(--warn, #f59e0b); border-radius: 999px; } .ds-progress::-moz-progress-bar { background: var(--warn, #f59e0b); border-radius: 999px; }"
+    },
+    {
+      "name": "Topbar Navigation Link",
+      "kind": "nav",
+      "refersTo": "topbar-nav",
+      "description": "Sticky topbar navigation links with cyan active underline and readonly violet indicator.",
+      "html": "<nav class=\"ds-nav\"><a class=\"ds-nav-link\" aria-current=\"page\" href=\"#\">总览</a><a class=\"ds-nav-link\" href=\"#\">权益对比</a><a class=\"ds-nav-link is-ro\" href=\"#\">readonly01</a></nav>",
+      "css": ".ds-nav { display: inline-flex; align-items: center; gap: 6px; padding: 6px 10px; background: var(--surface, #10141c); border-bottom: 1px solid var(--border, #222a38); } .ds-nav-link { position: relative; display: inline-flex; align-items: center; min-height: 36px; padding: 6px 10px; border: 1px solid transparent; border-radius: var(--radius, 6px); color: var(--text-secondary, #c2ccd9); font-size: 0.8125rem; font-weight: 600; text-decoration: none; transition: color 120ms ease, background-color 120ms ease; } .ds-nav-link:hover { color: var(--text, #f3f6fb); background: var(--surface-hover, #1a2230); } .ds-nav-link[aria-current=\"page\"] { color: var(--text, #f3f6fb); background: var(--accent-bg, rgba(56, 189, 248, 0.12)); border-color: var(--accent-border, rgba(56, 189, 248, 0.38)); } .ds-nav-link[aria-current=\"page\"]::after { content: \"\"; position: absolute; left: 8px; right: 8px; bottom: 0; border-bottom: 2px solid var(--accent, #38bdf8); } .ds-nav-link.is-ro { color: var(--readonly-text, #c4b5fd); font-family: var(--font-mono, monospace); font-size: 0.75rem; } .ds-nav-link:focus-visible { outline: 2px solid var(--accent, #38bdf8); outline-offset: 2px; }"
+    }
+  ],
+  "narrative": {
+    "northStar": "Obsidian Desk Quantitative Terminal",
+    "overview": "Bubble Buster is designed as a calm, precision-instrument monitoring desk for live cryptocurrency futures operations. Surfaces stay dark, flat, and disciplined so real risk signals — portfolio stop proximity, execution failures, and equity drawdowns — cut through immediately without decorative noise.\n\nHierarchy relies on tonal graphite stepping, crisp 1px hairlines, and tabular monospace figures rather than drop shadows or marketing flourishes. Every pixel on screen earns its place by answering an operational question: is the fleet healthy, how fresh is the snapshot, how close is each account to its stop threshold, and what failed?",
+    "keyCharacteristics": [
+      "Deep obsidian-slate surfaces stepped in tight neutral intervals with 1px hairline borders.",
+      "Strictly decoupled semantic hues: cyan for navigation/telemetry focus, emerald for healthy/positive PnL, amber for caution/waiting, crimson for losses/stop/failure, and violet reserved exclusively for read-only accounts.",
+      "Tabular monospace numerals (tabular-nums) for all prices, equity figures, percentages, timestamps, and counts.",
+      "Flat-by-default containers with hairline internal dividers instead of nested cards."
+    ],
+    "rules": [
+      {
+        "name": "The Readonly Violet Quarantine Rule",
+        "body": "Violet is never used for strategy phases, alerts, or decorative highlights; seeing violet anywhere instantly signals a read-only non-trading account.",
+        "section": "colors"
+      },
+      {
+        "name": "The Calm-Until-Broken Rule",
+        "body": "Neutral counts (0 anomalies, 0 pending signals) remain neutral ink on neutral surfaces. Amber and crimson borders or backgrounds appear only when an actual threshold, warning, or failure is active.",
+        "section": "colors"
+      },
+      {
+        "name": "The 12px Floor Rule",
+        "body": "No legible UI text, badge, or chart axis label drops below 0.75rem (12px).",
+        "section": "typography"
+      },
+      {
+        "name": "The Tabular Lock Rule",
+        "body": "Every numeric column, KPI figure, countdown, and timestamp uses monospace font-variant-numeric: tabular-nums and right-aligns inside tables.",
+        "section": "typography"
+      },
+      {
+        "name": "The Flat-By-Default Rule",
+        "body": "Cards, strips, and tables never carry drop shadows at rest. Depth is expressed through tonal stepping and 1px borders; shadows appear only on floating overlays.",
+        "section": "elevation"
+      }
+    ],
+    "dos": [
+      "Do keep [hidden] { display: none !important; } global in ops.css so author display rules never expose hidden controls.",
+      "Do use hairline 1px dividers and tonal stepping inside panels instead of nesting bordered cards inside cards.",
+      "Do encode status with text + shape/line-pattern in addition to color (e.g., distinct legend markers, explicit status labels, multi-pattern chart lines).",
+      "Do use native semantic primitives (<progress>, <details>, <search>, role=\"tablist\", aria-sort) before reaching for generic <div> widgets.",
+      "Do keep all static asset references routed through web/template_loader.py for automatic content-hash ?v= versioning."
+    ],
+    "donts": [
+      "Don't put one-sided colored accent bars down the side of rounded cards; highlight specific failing rows or use full subtle borders/badges instead.",
+      "Don't render CSS ::after pseudo-element tooltips inside bordered/grid containers (they inflate scrollWidth, clip under overflow: hidden, and fail screen readers).",
+      "Don't apply warning/danger colors to healthy zero states (待触发 0, 异常 0) or label stale historical snapshots as \"在线快照\".",
+      "Don't reuse readonly violet (#a78bfa) on managed accounts or strategy entry phases.",
+      "Don't add inline executable <script> blocks or inline <style> tags in templates (violates strict CSP script-src 'self')."
+    ]
+  }
+}
