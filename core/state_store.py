@@ -13,7 +13,6 @@ from zoneinfo import ZoneInfo
 from core.storage.models import (
     PositionRecord,
     RunRecord,
-    RunState as RunState,
     OrderEventRecord,
     FillRecord,
 )
@@ -411,20 +410,6 @@ class StateStore:
                 (ver, now_iso, desc),
             )
 
-    def get_applied_migrations(self) -> List[str]:
-        with self._connect_ctx() as conn:
-            conn.execute(
-                """
-                CREATE TABLE IF NOT EXISTS schema_migrations (
-                    version TEXT PRIMARY KEY,
-                    applied_at_utc TEXT NOT NULL,
-                    description TEXT
-                )
-                """
-            )
-            rows = conn.execute("SELECT version FROM schema_migrations ORDER BY applied_at_utc ASC").fetchall()
-            return [str(r["version"]) for r in rows]
-
     @staticmethod
     def _backfill_order_event_account_ids(conn: sqlite3.Connection) -> None:
         columns = conn.execute("PRAGMA table_info(order_events)").fetchall()
@@ -593,13 +578,6 @@ class StateStore:
                 ),
             )
             return int(cursor.lastrowid)
-
-    def update_position_episode_id(self, position_id: int, episode_id: str) -> None:
-        with self._connect_ctx() as conn:
-            conn.execute(
-                "UPDATE positions SET episode_id = ?, updated_at_utc = ? WHERE id = ?",
-                (episode_id, utc_now_iso(), position_id),
-            )
 
     def list_open_positions(self, conn: Optional[sqlite3.Connection] = None) -> List[PositionRecord]:
         with self._connect_ctx(conn) as conn:
@@ -3781,24 +3759,6 @@ class StateStore:
             row = conn.execute(
                 "SELECT * FROM task_occurrences WHERE task_occurrence_id = ? AND account_id = ?",
                 (task_occurrence_id, self.account_id),
-            ).fetchone()
-            if not row:
-                return None
-            res = dict(row)
-            try:
-                res["payload"] = json.loads(res.get("payload") or "{}")
-            except Exception:
-                res["payload"] = {}
-            return res
-
-    def get_task_occurrence_by_cycle(self, task_type: str, cycle_key: str) -> Optional[Dict[str, Any]]:
-        with self._connect_ctx() as conn:
-            row = conn.execute(
-                """
-                SELECT * FROM task_occurrences
-                WHERE task_type = ? AND cycle_key = ? AND account_id = ?
-                """,
-                (task_type, cycle_key, self.account_id),
             ).fetchone()
             if not row:
                 return None

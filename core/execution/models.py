@@ -41,31 +41,11 @@ class AttemptStatus(str, enum.Enum):
     EXPIRED = "EXPIRED"
     UNKNOWN = "UNKNOWN"
 
-    @property
-    def is_terminal(self) -> bool:
-        return self in {
-            AttemptStatus.FILLED,
-            AttemptStatus.REJECTED,
-            AttemptStatus.CANCELED,
-            AttemptStatus.EXPIRED,
-        }
-
-    @property
-    def is_uncertain(self) -> bool:
-        return self == AttemptStatus.UNKNOWN
-
 
 class EpisodeStatus(str, enum.Enum):
     OPEN = "OPEN"
     CLOSING = "CLOSING"
     CLOSED = "CLOSED"
-
-
-class IntentScope(str, enum.Enum):
-    ENTRY = "ENTRY"
-    EXIT = "EXIT"
-    PROTECTION = "PROTECTION"
-    REBALANCE = "REBALANCE"
 
 
 

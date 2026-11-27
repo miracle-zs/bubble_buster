@@ -272,7 +272,7 @@ portfolio_take_profit_enabled = true
             self.assertFalse(h["service_enabled"])
             self.assertFalse(h["service_running"])
 
-            data = client.get("/api/dashboard")
+            data = client.get("/api/account/acc01/snapshot")
             self.assertEqual(data.status_code, 200)
             payload = data.json()
             self.assertIn("service", payload)
@@ -283,8 +283,12 @@ portfolio_take_profit_enabled = true
             self.assertIn("wallet", payload)
             self.assertNotIn("config_path", payload)
             self.assertNotIn("db_path", payload)
-            self.assertNotIn("config_path", payload["runtime_settings"])
-            self.assertFalse(payload["runtime_settings"]["mutable"])
+
+            runtime_res = client.get("/api/runtime/settings")
+            self.assertEqual(runtime_res.status_code, 200)
+            runtime_payload = runtime_res.json()
+            self.assertNotIn("config_path", runtime_payload)
+            self.assertFalse(runtime_payload["mutable"])
 
             original_config = self.config_path.read_text(encoding="utf-8")
             blocked = client.post("/api/runtime/settings/entry-catchup?enabled=false&persist=true")

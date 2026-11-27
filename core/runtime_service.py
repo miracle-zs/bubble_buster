@@ -821,11 +821,7 @@ class StrategyRuntimeService:
             mode = str(ctx.get("mode", "full")).strip().lower()
             if mode not in {"full", "loss_cut_only"}:
                 continue
-            enabled_raw = ctx.get("daily_loss_cut_enabled", self.cfg.daily_loss_cut_enabled)
-            if isinstance(enabled_raw, str):
-                enabled = enabled_raw.strip().lower() in {"1", "true", "yes", "on"}
-            else:
-                enabled = bool(enabled_raw)
+            enabled = self._as_bool(ctx.get("daily_loss_cut_enabled", self.cfg.daily_loss_cut_enabled))
             if not enabled:
                 continue
             account_ids.append(aid)
@@ -944,11 +940,7 @@ class StrategyRuntimeService:
             for aid, ctx in self.account_runtimes.items():
                 if str(ctx.get("mode", "full")).strip().lower() not in {"full", "loss_cut_only"}:
                     continue
-                enabled_raw = ctx.get("noon_protection_enabled", self.cfg.noon_protection_enabled)
-                if isinstance(enabled_raw, str):
-                    enabled = enabled_raw.strip().lower() in {"1", "true", "yes", "on"}
-                else:
-                    enabled = bool(enabled_raw)
+                enabled = self._as_bool(ctx.get("noon_protection_enabled", self.cfg.noon_protection_enabled))
                 if enabled:
                     account_ids.append(aid)
         self._last_noon_protection_local_date = today
@@ -1059,11 +1051,7 @@ class StrategyRuntimeService:
             if mode not in {"full", "loss_cut_only"}:
                 continue
 
-            enabled_raw = ctx.get("morning_protection_enabled", self.cfg.morning_protection_enabled)
-            if isinstance(enabled_raw, str):
-                enabled = enabled_raw.strip().lower() in {"1", "true", "yes", "on"}
-            else:
-                enabled = bool(enabled_raw)
+            enabled = self._as_bool(ctx.get("morning_protection_enabled", self.cfg.morning_protection_enabled))
             if not enabled:
                 continue
 
@@ -1126,14 +1114,12 @@ class StrategyRuntimeService:
             if mode not in {"full", "loss_cut_only"}:
                 continue
 
-            enabled_raw = ctx.get(
-                "hourly_exchange_take_profit_enabled",
-                self.cfg.hourly_exchange_take_profit_enabled,
+            enabled = self._as_bool(
+                ctx.get(
+                    "hourly_exchange_take_profit_enabled",
+                    self.cfg.hourly_exchange_take_profit_enabled,
+                )
             )
-            if isinstance(enabled_raw, str):
-                enabled = enabled_raw.strip().lower() in {"1", "true", "yes", "on"}
-            else:
-                enabled = bool(enabled_raw)
             if not enabled:
                 continue
 
@@ -1698,6 +1684,8 @@ class StrategyRuntimeService:
             self._manage_executor.shutdown(wait=True, cancel_futures=True)
             self._scheduled_executor.shutdown(wait=True, cancel_futures=True)
             self._orphan_cleanup_executor.shutdown(wait=True, cancel_futures=True)
+            self._cashflow_executor.shutdown(wait=True, cancel_futures=True)
+            self._readonly_snapshot_executor.shutdown(wait=True, cancel_futures=True)
             self._cashflow_executor.shutdown(wait=True, cancel_futures=True)
             self._readonly_snapshot_executor.shutdown(wait=True, cancel_futures=True)
             LOGGER.info("runtime service stopped")

@@ -33,6 +33,10 @@ class PositionManagerTest(unittest.TestCase):
         self.assertLessEqual(len(client_id), 36)
         self.assertRegex(client_id, r"^[.A-Z:/a-z0-9_-]{1,36}$")
 
+    def test_invalid_daily_loss_cut_scope_raises_value_error(self) -> None:
+        with self.assertRaises(ValueError):
+            PositionManager._normalize_daily_loss_cut_scope("exchnage")
+
     def test_noon_protection_window_for_carried_position_uses_two_hours_before_noon(self) -> None:
         start = PositionManager._noon_protection_window_start(
             opened_at_utc=datetime(2026, 2, 12, 23, 30, tzinfo=timezone.utc),

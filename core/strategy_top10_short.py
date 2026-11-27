@@ -3,7 +3,6 @@ import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from functools import wraps
-import hashlib
 from decimal import Decimal, InvalidOperation
 from datetime import date, datetime, time as dt_time, timedelta, timezone
 from typing import Any, Callable, Dict, Iterator, List, Optional, Set, Tuple
@@ -16,7 +15,7 @@ from core.entry_structure_protection import (
 )
 from core.market_fill_reconciler import MarketFillReconciler
 from core.account_snapshot import AccountSnapshotProvider
-from core.risk import CentralExitExecutor
+from core.risk import CentralExitExecutor, build_client_order_id
 from core.state_store import StateStore
 from infra.binance_futures_client import (
     BinanceAPIError,
@@ -2330,20 +2329,6 @@ class Top10ShortStrategy:
             return open_price, close_price, close_time
         return None
 
-    def _build_entry_structure_protection(
-        self,
-        ready_entry: ReadyEntry,
-        fill_time_utc: datetime,
-        entry_price: float,
-    ) -> Optional[EntryStructureProtection]:
-        window = self._prepare_entry_structure_window(ready_entry)
-        return self._complete_entry_structure_protection(
-            symbol=ready_entry.entry.symbol,
-            window=window,
-            fill_time_utc=fill_time_utc,
-            entry_price=entry_price,
-        )
-
     def _prepare_entry_structure_window(
         self,
         ready_entry: ReadyEntry,
@@ -3769,12 +3754,7 @@ class Top10ShortStrategy:
         }
         mode = aliases.get(normalized)
         if mode is None:
-            LOGGER.warning(
-                "Invalid entry_scale_in_mode=%s, fallback to %s",
-                normalized,
-                cls.ENTRY_SCALE_IN_MODE_NONE,
-            )
-            return cls.ENTRY_SCALE_IN_MODE_NONE
+            raise ValueError(f"Invalid entry_scale_in_mode: {raw_mode!r}")
         return mode
 
     def _is_bullish_then_bearish_scale_in_mode(self) -> bool:
@@ -3796,11 +3776,11 @@ class Top10ShortStrategy:
     @classmethod
     def _normalize_rebalance_mode(cls, raw_mode: str) -> str:
         normalized = str(raw_mode or "").strip().lower()
+        if not normalized:
+            return cls.REBALANCE_MODE_EQUAL_RISK
         if normalized in {cls.REBALANCE_MODE_EQUAL_RISK, cls.REBALANCE_MODE_AGE_DECAY}:
             return normalized
-        if normalized:
-            LOGGER.warning("Invalid rebalance_mode=%s, fallback to %s", normalized, cls.REBALANCE_MODE_EQUAL_RISK)
-        return cls.REBALANCE_MODE_EQUAL_RISK
+        raise ValueError(f"Invalid rebalance_mode: {raw_mode!r}")
 
     def _build_entry_notification(
         self,
@@ -3954,18 +3934,6 @@ class Top10ShortStrategy:
         if hidden > 0:
             rendered += f" ... (+{hidden})"
         return rendered
-
-    @staticmethod
-    def _select_entry_candidates(
-        ranked: List[RankEntry],
-        open_symbols: set[str],
-        target_count: int,
-    ) -> tuple[List[RankEntry], List[str]]:
-        return MarketRankScanner.select_entry_candidates(ranked, open_symbols, target_count)
-
-    @staticmethod
-    def _build_ranked_entries(top_gainers: List[Dict[str, Any]]) -> List[RankEntry]:
-        return MarketRankScanner.build_ranked_entries(top_gainers)
 
     def _add_scale_in_tranche(
         self,
@@ -4748,21 +4716,8 @@ class Top10ShortStrategy:
             return None
 
     @staticmethod
-    def _sanitize_client_id_part(value: str, fallback: str, max_len: int) -> str:
-        allowed = set("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-")
-        cleaned = "".join(ch for ch in str(value) if ch in allowed)
-        if not cleaned:
-            cleaned = fallback
-        return cleaned[: max(1, int(max_len))]
-
-    @staticmethod
     def _new_client_id(tag: str, symbol: str) -> str:
-        tag_part = Top10ShortStrategy._sanitize_client_id_part(tag, fallback="x", max_len=8).lower()
-        symbol_part = Top10ShortStrategy._sanitize_client_id_part(symbol, fallback="sym", max_len=6).upper()
-        symbol_hash = hashlib.sha1(str(symbol).encode("utf-8")).hexdigest()[:6]
-        nonce = uuid4().hex[:8]
-        # Binance Futures requires newClientOrderId to match ^[.A-Z:/a-z0-9_-]{1,36}$.
-        return f"t10s-{tag_part}-{symbol_part}-{symbol_hash}-{nonce}"
+        return build_client_order_id(tag, symbol)
 
     @staticmethod
     def _utc_now_datetime() -> datetime:

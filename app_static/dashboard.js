@@ -28,9 +28,8 @@
     }, { passive: true });
 
     var apiBase = ops.resolveBasePrefix();
-    var api = accountId
-      ? apiBase + "/api/account/" + encodeURIComponent(accountId)
-      : apiBase + "/api/dashboard";
+    if (!accountId) return;
+    var api = apiBase + "/api/account/" + encodeURIComponent(accountId);
 
     var equityChart = null;
     var chartResizeObs = null;

@@ -17,8 +17,8 @@ from core.risk.evaluators import (
 )
 from core.risk.executor import (
     CentralExitExecutor,
-    OrderExecutor,
     StopLossExecutionResult,
+    build_client_order_id,
     is_immediate_trigger_error,
 )
 from core.risk.models import (
@@ -67,8 +67,8 @@ __all__ = [
     "is_morning_protection_hold_satisfied",
     "resolve_morning_protection_old_sl",
     "CentralExitExecutor",
-    "OrderExecutor",
     "StopLossExecutionResult",
+    "build_client_order_id",
     "is_immediate_trigger_error",
 ]
 

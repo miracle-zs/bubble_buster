@@ -306,7 +306,6 @@ class BinanceWeightOptimizationTest(unittest.TestCase):
         fetcher = TradeStatsFetcher(
             client=client,
             store=self.store,
-            cache_ttl_sec=900,
         )
 
         first = fetcher.refresh_stats(account_id="acc01", lookback_days=30)

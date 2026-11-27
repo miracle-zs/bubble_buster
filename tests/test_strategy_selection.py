@@ -7,7 +7,7 @@ if importlib.util.find_spec("requests") is None:
     raise unittest.SkipTest("requests is not installed")
 
 from core.state_store import StateStore
-from core.strategy_top10_short import RankEntry, Top10ShortStrategy
+from core.strategy import MarketRankScanner, RankEntry
 
 
 class StrategySelectionTest(unittest.TestCase):
@@ -18,7 +18,7 @@ class StrategySelectionTest(unittest.TestCase):
         ]
         open_symbols = {"S2USDT", "S7USDT"}
 
-        candidates, skipped = Top10ShortStrategy._select_entry_candidates(
+        candidates, skipped = MarketRankScanner.select_entry_candidates(
             ranked=ranked,
             open_symbols=open_symbols,
             target_count=10,
@@ -47,7 +47,7 @@ class StrategySelectionTest(unittest.TestCase):
         ]
         open_symbols = {"AUSDT", "BUSDT"}
 
-        candidates, skipped = Top10ShortStrategy._select_entry_candidates(
+        candidates, skipped = MarketRankScanner.select_entry_candidates(
             ranked=ranked,
             open_symbols=open_symbols,
             target_count=10,
@@ -87,7 +87,7 @@ class StrategySelectionTest(unittest.TestCase):
             self.assertNotIn("BTCUSDT", open_symbols)
 
             ranked = [RankEntry(symbol="BTCUSDT", pct_change=10.0, last_price=1.0, quote_volume=1000.0)]
-            candidates, skipped = Top10ShortStrategy._select_entry_candidates(
+            candidates, skipped = MarketRankScanner.select_entry_candidates(
                 ranked=ranked,
                 open_symbols=open_symbols,
                 target_count=1,

@@ -1,18 +1,17 @@
 import logging
-import hashlib
 import json
 import threading
 from collections import deque
 from datetime import date, datetime, timedelta, timezone
 from functools import wraps
 from typing import Any, Dict, List, Optional, Set
-from uuid import uuid4
 
 from core.account_snapshot import AccountSnapshot, AccountSnapshotProvider
 from core.entry_structure_protection import EntryStructureProtectionState
 from core.market_fill_reconciler import MarketFillReconciler
 from core.risk import (
     CentralExitExecutor,
+    build_client_order_id,
     DailyLossCutEvaluationInput,
     DynamicStopEvaluationInput,
     HourlyExchangeTakeProfitEvaluationInput,
@@ -4198,11 +4197,11 @@ class PositionManager:
     @classmethod
     def _normalize_daily_loss_cut_scope(cls, scope: str) -> str:
         normalized = str(scope or "").strip().lower()
+        if not normalized:
+            return cls.DAILY_LOSS_CUT_SCOPE_TRACKED
         if normalized in {cls.DAILY_LOSS_CUT_SCOPE_TRACKED, cls.DAILY_LOSS_CUT_SCOPE_EXCHANGE}:
             return normalized
-        if normalized:
-            LOGGER.warning("Invalid daily_loss_cut_scope=%s, fallback to %s", normalized, cls.DAILY_LOSS_CUT_SCOPE_TRACKED)
-        return cls.DAILY_LOSS_CUT_SCOPE_TRACKED
+        raise ValueError(f"Invalid daily_loss_cut_scope: {scope!r}")
 
     def _is_expired(self, expire_at_utc: str) -> bool:
         expire_time = datetime.fromisoformat(expire_at_utc)
@@ -4245,21 +4244,8 @@ class PositionManager:
             return None
 
     @staticmethod
-    def _sanitize_client_id_part(value: str, fallback: str, max_len: int) -> str:
-        allowed = set("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-")
-        cleaned = "".join(ch for ch in str(value) if ch in allowed)
-        if not cleaned:
-            cleaned = fallback
-        return cleaned[: max(1, int(max_len))]
-
-    @staticmethod
     def _new_client_id(tag: str, symbol: str) -> str:
-        tag_part = PositionManager._sanitize_client_id_part(tag, fallback="x", max_len=8).lower()
-        symbol_part = PositionManager._sanitize_client_id_part(symbol, fallback="sym", max_len=6).upper()
-        symbol_hash = hashlib.sha1(str(symbol).encode("utf-8")).hexdigest()[:6]
-        nonce = uuid4().hex[:8]
-        # Binance Futures requires newClientOrderId to match ^[.A-Z:/a-z0-9_-]{1,36}$.
-        return f"t10s-{tag_part}-{symbol_part}-{symbol_hash}-{nonce}"
+        return build_client_order_id(tag, symbol)
 
     @staticmethod
     def _utc_now_iso() -> str:

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import logging
 import time
 import uuid
@@ -30,6 +31,24 @@ def is_immediate_trigger_error(exc: BinanceAPIError) -> bool:
     return getattr(exc, "code", None) == -2021 or "immediately trigger" in message
 
 
+def _sanitize_client_id_part(value: str, fallback: str, max_len: int) -> str:
+    allowed = set("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-")
+    cleaned = "".join(ch for ch in str(value) if ch in allowed)
+    if not cleaned:
+        cleaned = fallback
+    return cleaned[: max(1, int(max_len))]
+
+
+def build_client_order_id(tag: str, symbol: str) -> str:
+    """Build a Binance-compatible clientOrderId within the 36-char constraint."""
+    tag_part = _sanitize_client_id_part(tag, fallback="x", max_len=8).lower()
+    symbol_part = _sanitize_client_id_part(symbol, fallback="sym", max_len=6).upper()
+    symbol_hash = hashlib.sha1(str(symbol).encode("utf-8")).hexdigest()[:6]
+    nonce = uuid.uuid4().hex[:8]
+    # Binance Futures requires newClientOrderId to match ^[.A-Z:/a-z0-9_-]{1,36}$.
+    return f"t10s-{tag_part}-{symbol_part}-{symbol_hash}-{nonce}"
+
+
 @dataclass
 class StopLossExecutionResult:
     """Outcome of attempting to execute a stop-loss update intent."""
@@ -55,7 +74,7 @@ class CentralExitExecutor:
         self.store = store
         self.reconciler = market_fill_reconciler or MarketFillReconciler(client, store)
         self.trigger_price_type = trigger_price_type
-        self.new_client_id_fn = new_client_id_fn or (lambda tag, sym: f"{tag}-{sym}")
+        self.new_client_id_fn = new_client_id_fn or build_client_order_id
         self.now_iso_fn = now_iso_fn or (lambda: "")
         self._execution_engine: Optional[Any] = None
 
@@ -800,6 +819,3 @@ class CentralExitExecutor:
             sl_order=sl_order,
             error=None,
         )
-
-
-OrderExecutor = CentralExitExecutor

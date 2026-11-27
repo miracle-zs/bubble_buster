@@ -988,7 +988,7 @@ class DashboardServerTest(unittest.TestCase):
                     funding_fee_usdt=-0.1,
                 )
 
-            def fetch_stats(self, **kwargs):
+            def refresh_stats(self, **kwargs):
                 raise AssertionError("homepage must not fetch Binance synchronously")
 
         fetcher = CachedFetcher()
@@ -1561,11 +1561,7 @@ class DashboardServerTest(unittest.TestCase):
             close_order_id=2001,
         )
 
-        calls = {"n": 0}
-
-        def _mock_balance_fetcher() -> float:
-            calls["n"] += 1
-            return 120.0
+        self.store.add_wallet_snapshot("2026-02-13T00:00:00+00:00", 120.0, source="API")
 
         provider = DashboardDataProvider(
             db_path=self.db_path,
@@ -1573,18 +1569,11 @@ class DashboardServerTest(unittest.TestCase):
             timezone_name="UTC",
             entry_hour=7,
             entry_minute=40,
-            balance_fetcher=_mock_balance_fetcher,
-            balance_cache_ttl_sec=60,
         )
 
         first = provider.snapshot(log_lines=0)
-        second = provider.snapshot(log_lines=0)
 
-        self.assertEqual(calls["n"], 1)
         self.assertEqual(first["wallet"]["source"], "DB")
-        self.assertEqual(second["wallet"]["source"], "DB")
-        self.assertEqual(first["wallet"]["live_source"], "API")
-        self.assertEqual(second["wallet"]["live_source"], "CACHE")
 
         strategy_stats = first["drawdown_stats_strategy"]
         balance_stats = first["drawdown_stats_balance"]
@@ -1607,34 +1596,6 @@ class DashboardServerTest(unittest.TestCase):
         self.assertAlmostEqual(curve[0]["cum_pnl"], 0.0)
         self.assertAlmostEqual(curve[0]["equity"], 120.0)
 
-        with sqlite3.connect(self.db_path) as conn:
-            row = conn.execute("SELECT COUNT(*) FROM wallet_snapshots").fetchone()
-        self.assertEqual(int(row[0]), 1)
-
-    def test_wallet_fetch_error_is_throttled(self) -> None:
-        calls = {"n": 0}
-
-        def _always_fail() -> float:
-            calls["n"] += 1
-            raise RuntimeError("network down")
-
-        provider = DashboardDataProvider(
-            db_path=self.db_path,
-            log_file=self.log_file,
-            timezone_name="UTC",
-            entry_hour=7,
-            entry_minute=40,
-            balance_fetcher=_always_fail,
-            balance_cache_ttl_sec=60,
-        )
-
-        first = provider.snapshot(log_lines=0)
-        second = provider.snapshot(log_lines=0)
-
-        self.assertEqual(calls["n"], 1)
-        self.assertEqual(first["wallet"]["source"], "ERROR")
-        self.assertEqual(second["wallet"]["source"], "COOLDOWN")
-
     def test_equity_curve_prefers_wallet_snapshots(self) -> None:
         self.store.add_wallet_snapshot("2026-02-13T00:00:00+00:00", 100.0, source="API")
         self.store.add_wallet_snapshot("2026-02-13T00:01:00+00:00", 95.0, source="API")
@@ -1646,14 +1607,12 @@ class DashboardServerTest(unittest.TestCase):
             timezone_name="UTC",
             entry_hour=7,
             entry_minute=40,
-            balance_fetcher=lambda: 110.0,
-            balance_cache_ttl_sec=60,
         )
         snapshot = provider.snapshot(log_lines=0)
         curve = snapshot["balance_curve"]
         stats = snapshot["drawdown_stats_balance"]
 
-        self.assertEqual(len(curve), 4)  # 3 seeded + 1 live API snapshot persisted
+        self.assertEqual(len(curve), 3)
         self.assertAlmostEqual(curve[0]["equity"], 100.0)
         self.assertAlmostEqual(curve[1]["equity"], 95.0)
         self.assertAlmostEqual(curve[-1]["equity"], 110.0)
@@ -2262,32 +2221,6 @@ class DashboardServerTest(unittest.TestCase):
         self.assertIn("/api/accounts/curves", overview_js)
         self.assertIn("/curve?window_hours=24&curve_points=160&curve_type=balance", overview_js)
         self.assertIn('event.key === "ArrowLeft"', overview_js)
-
-    def test_live_wallet_snapshot_uses_configured_account_id(self) -> None:
-        calls = {"n": 0}
-
-        def _mock_balance_fetcher() -> float:
-            calls["n"] += 1
-            return 321.0
-
-        provider = DashboardDataProvider(
-            db_path=self.db_path,
-            log_file=self.log_file,
-            timezone_name="UTC",
-            entry_hour=7,
-            entry_minute=40,
-            balance_fetcher=_mock_balance_fetcher,
-            live_wallet_account_id="acc01",
-        )
-        snapshot = provider.snapshot(log_lines=0)
-        self.assertEqual(snapshot["wallet"]["source"], "DB")
-        with sqlite3.connect(self.db_path) as conn:
-            row = conn.execute(
-                "SELECT account_id, balance_usdt FROM wallet_snapshots ORDER BY id DESC LIMIT 1"
-            ).fetchone()
-        self.assertIsNotNone(row)
-        self.assertEqual(str(row[0]), "acc01")
-        self.assertAlmostEqual(float(row[1]), 321.0)
 
     def test_task_status_reads_from_task_executions_table(self) -> None:
         self.store.record_task_execution(

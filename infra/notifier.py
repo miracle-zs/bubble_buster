@@ -25,10 +25,6 @@ class ServerChanNotifier:
         if self.enabled and not self.sendkey:
             LOGGER.warning("ServerChan is enabled but sendkey is empty; notifications will be skipped")
 
-    @property
-    def is_ready(self) -> bool:
-        return bool(not self.enabled or self.sendkey)
-
     def send(self, title: str, content: str) -> None:
         if not self.enabled:
             return

@@ -34,7 +34,8 @@ if importlib.util.find_spec("requests") is None:
     sys.modules["requests.adapters"] = adapters_stub
 
 from core.entry_structure_protection import EntryStructureProtection
-from core.state_store import RunState
+from core.storage.models import RunState
+from core.strategy import MarketRankScanner
 from core.strategy_top10_short import EntryStructureWindow, RankEntry, ReadyEntry, Top10ShortStrategy
 from infra.binance_futures_client import BinanceAPIError, BinanceRateLimitError
 
@@ -106,6 +107,12 @@ class StrategyRebalanceTest(unittest.TestCase):
         client_id = Top10ShortStrategy._new_client_id("ent", "币安人生USDT")
         self.assertLessEqual(len(client_id), 36)
         self.assertRegex(client_id, r"^[.A-Z:/a-z0-9_-]{1,36}$")
+
+    def test_invalid_strategy_mode_config_raises_value_error(self) -> None:
+        with self.assertRaises(ValueError):
+            Top10ShortStrategy._normalize_entry_scale_in_mode("after_bullish_bearish_typo")
+        with self.assertRaises(ValueError):
+            Top10ShortStrategy._normalize_rebalance_mode("equal_risk_typo")
 
     def test_rebalance_reduce_only_sells_nothing_and_reduces_old_positions(self) -> None:
         client = MagicMock()
@@ -1470,7 +1477,7 @@ class StrategyRebalanceTest(unittest.TestCase):
             rebalance_enabled=False,
             entry_wait_bearish_hour_enabled=True,
         )
-        candidates = strategy._build_ranked_entries(
+        candidates = MarketRankScanner.build_ranked_entries(
             [{"symbol": "AAAUSDT", "change": "15", "current_price": "10", "volume": "100"}]
         )
         signal_time = datetime.fromisoformat("2026-07-11T00:10:00+00:00")
@@ -1496,7 +1503,7 @@ class StrategyRebalanceTest(unittest.TestCase):
             rebalance_enabled=False,
             entry_wait_bearish_hour_enabled=True,
         )
-        candidates = strategy._build_ranked_entries(
+        candidates = MarketRankScanner.build_ranked_entries(
             [{"symbol": "AAAUSDT", "change": "15", "current_price": "10", "volume": "100"}]
         )
         signal_time = datetime.fromisoformat("2026-07-11T00:10:00+00:00")
@@ -1532,8 +1539,10 @@ class StrategyRebalanceTest(unittest.TestCase):
             bearish_close_time_utc=datetime(2026, 7, 17, 3, 59, 59, 999000, tzinfo=timezone.utc),
         )
 
-        protection = strategy._build_entry_structure_protection(
-            ready_entry=ready_entry,
+        window = strategy._prepare_entry_structure_window(ready_entry)
+        protection = strategy._complete_entry_structure_protection(
+            symbol=ready_entry.entry.symbol,
+            window=window,
             fill_time_utc=datetime(2026, 7, 17, 4, 0, 5, 804000, tzinfo=timezone.utc),
             entry_price=0.02159,
         )
@@ -2022,7 +2031,7 @@ class StrategyRebalanceTest(unittest.TestCase):
             {"symbol": "AAAUSDT", "change": "15", "current_price": "10", "volume": "100"},
             {"symbol": "BBBUSDT", "change": "14", "current_price": "20", "volume": "100"},
         ]
-        ranked_entries = strategy._build_ranked_entries(candidates)
+        ranked_entries = MarketRankScanner.build_ranked_entries(candidates)
 
         def ready_entries():
             yield type("ReadyEntry", (), {"entry": ranked_entries[0], "reference_price": 10.0})()

@@ -107,9 +107,9 @@ class BalanceSamplerTest(unittest.TestCase):
             sync_cashflows=True,
             cashflow_income_types=["TRANSFER", "WELCOME_BONUS"],
         )
-        sampler._resolve_cashflow_start_ms = lambda income_type=None: 0
+        sampler._resolve_cashflow_start_ms = lambda: 0
 
-        inserted = sampler._sync_cashflows()
+        inserted = sampler.sync_cashflows_once()
 
         self.assertEqual(inserted, 1)
         self.assertEqual(len(client.calls), 1)
@@ -155,7 +155,7 @@ class BalanceSamplerTest(unittest.TestCase):
             sync_cashflows=True,
             cashflow_income_types=["TRANSFER"],
         )
-        sampler._resolve_cashflow_start_ms = lambda income_type=None: 1000
+        sampler._resolve_cashflow_start_ms = lambda: 1000
 
         first_inserted = sampler.sync_cashflows_once(
             now_utc=datetime.fromtimestamp(5, tz=timezone.utc)

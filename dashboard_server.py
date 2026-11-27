@@ -11,14 +11,13 @@ import threading
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Set, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
 from zoneinfo import ZoneInfo
 
 from core.state_store import SQLITE_BUSY_TIMEOUT_MS
 from core.wallet_snapshot_rollup import (
     load_four_hour_wallet_snapshot_candidates,
     load_hourly_wallet_snapshot_candidates,
-    upsert_wallet_snapshot_rollups,
 )
 from core.task_status import format_task_status, task_status_template
 from web.template_loader import (
@@ -45,15 +44,12 @@ class DashboardDataProvider:
         timezone_name: str,
         entry_hour: int,
         entry_minute: int,
-        balance_fetcher: Optional[Callable[[], float]] = None,
-        balance_cache_ttl_sec: int = 60,
         default_curve_points: int = 600,
         account_strategy_notes: Optional[Dict[str, str]] = None,
         account_modes: Optional[Dict[str, str]] = None,
         account_equity_recovery_enabled: Optional[Dict[str, bool]] = None,
         overview_account_ids: Optional[List[str]] = None,
         equity_comparison_account_ids: Optional[List[str]] = None,
-        live_wallet_account_id: str = "default",
         trade_stats_fetchers: Optional[Dict[str, Any]] = None,
         live_position_cache_ttl_sec: int = 30,
     ):
@@ -61,8 +57,6 @@ class DashboardDataProvider:
         self.log_file = log_file
         self.entry_hour = entry_hour % 24
         self.entry_minute = entry_minute % 60
-        self.balance_fetcher = balance_fetcher
-        self.balance_cache_ttl_sec = max(5, int(balance_cache_ttl_sec))
         self.default_curve_points = max(100, min(5000, int(default_curve_points)))
         self._task_status_cache_key: Optional[Tuple[Tuple[str, int, int], ...]] = None
         self._task_status_cache_value: Optional[Dict[str, Dict[str, Dict[str, Any]]]] = None
@@ -99,15 +93,10 @@ class DashboardDataProvider:
         self.equity_comparison_account_ids: Optional[Set[str]] = (
             set(comparison_ids) if comparison_ids else None
         )
-        self.live_wallet_account_id = (live_wallet_account_id or "").strip() or "default"
         self.trade_stats_fetchers = trade_stats_fetchers or {}
         self.live_position_cache_ttl_sec = max(5, int(live_position_cache_ttl_sec))
         self._readonly_position_cache: Dict[str, Tuple[datetime, List[Dict[str, Any]]]] = {}
         self._readonly_position_cache_errors: Dict[str, Optional[str]] = {}
-        self._balance_cache_value: Optional[float] = None
-        self._balance_cache_at: Optional[datetime] = None
-        self._balance_last_attempt_at: Optional[datetime] = None
-        self._balance_last_error: Optional[str] = None
         self._snapshot_cache: Dict[tuple, Tuple[float, Dict[str, Any]]] = {}
         self._snapshot_cache_lock = threading.Lock()
         self._snapshot_cache_ttl_sec: float = 3.0
@@ -567,7 +556,6 @@ class DashboardDataProvider:
             for row in risks
             if str(row.get("symbol") or "").strip()
         }
-        account_fetch_error = None
 
         orders_by_symbol: Dict[str, List[Dict[str, Any]]] = {}
         for order in open_orders:
@@ -624,9 +612,7 @@ class DashboardDataProvider:
             else:
                 tp_order_status = str((selected_tp or {}).get("status") or "NOT_FOUND").upper()
                 sl_order_status = str((selected_sl or {}).get("status") or "NOT_FOUND").upper()
-            margin_data_error = None
-            if return_metrics["actual_margin"] is None:
-                margin_data_error = account_fetch_error or "实际保证金暂不可用"
+            margin_data_error = "实际保证金暂不可用" if return_metrics["actual_margin"] is None else None
             rows.append(
                 {
                     "id": f"readonly:{normalized_account_id}:{symbol}:{position_key}",
@@ -1740,95 +1726,6 @@ class DashboardDataProvider:
             "open_positions": tracked_open_positions,
         }
 
-    def _read_wallet_balance(self, now_utc: datetime) -> Dict[str, Any]:
-        if self.balance_fetcher is None:
-            return {"balance_usdt": None, "as_of_utc": None, "source": "DISABLED", "error": None}
-
-        if self._balance_cache_at and self._balance_cache_value is not None:
-            age_sec = (now_utc - self._balance_cache_at).total_seconds()
-            if age_sec < self.balance_cache_ttl_sec:
-                return {
-                    "balance_usdt": round(self._balance_cache_value, 8),
-                    "as_of_utc": self._balance_cache_at.replace(microsecond=0).isoformat(),
-                    "source": "CACHE",
-                    "error": None,
-                }
-
-        if self._balance_last_attempt_at is not None:
-            attempt_age_sec = (now_utc - self._balance_last_attempt_at).total_seconds()
-            if attempt_age_sec < self.balance_cache_ttl_sec:
-                if self._balance_cache_value is not None and self._balance_cache_at is not None:
-                    return {
-                        "balance_usdt": round(self._balance_cache_value, 8),
-                        "as_of_utc": self._balance_cache_at.replace(microsecond=0).isoformat(),
-                        "source": "STALE",
-                        "error": self._balance_last_error,
-                    }
-                return {
-                    "balance_usdt": None,
-                    "as_of_utc": None,
-                    "source": "COOLDOWN",
-                    "error": self._balance_last_error,
-                }
-
-        try:
-            self._balance_last_attempt_at = now_utc
-            balance = float(self.balance_fetcher())
-            self._balance_cache_value = balance
-            self._balance_cache_at = now_utc
-            self._balance_last_error = None
-            return {
-                "balance_usdt": round(balance, 8),
-                "as_of_utc": now_utc.replace(microsecond=0).isoformat(),
-                "source": "API",
-                "error": None,
-            }
-        except Exception as exc:  # noqa: BLE001
-            self._balance_last_attempt_at = now_utc
-            self._balance_last_error = str(exc)
-            LOGGER.warning("Failed to fetch wallet balance for dashboard: %s", exc)
-            if self._balance_cache_value is not None and self._balance_cache_at is not None:
-                return {
-                    "balance_usdt": round(self._balance_cache_value, 8),
-                    "as_of_utc": self._balance_cache_at.replace(microsecond=0).isoformat(),
-                    "source": "STALE",
-                    "error": self._balance_last_error,
-                }
-            return {"balance_usdt": None, "as_of_utc": None, "source": "ERROR", "error": self._balance_last_error}
-
-    def _insert_wallet_snapshot(
-        self,
-        conn: sqlite3.Connection,
-        captured_at_utc: str,
-        balance_usdt: float,
-        account_id: str = "default",
-        source: str = "API",
-        error: Optional[str] = None,
-    ) -> None:
-        error_value = (error or "")[:1000] or None
-        cursor = conn.execute(
-            """
-            INSERT INTO wallet_snapshots (account_id, captured_at_utc, balance_usdt, source, error, created_at_utc)
-            VALUES (?, ?, ?, ?, ?, ?)
-            """,
-            (
-                account_id,
-                captured_at_utc,
-                float(balance_usdt),
-                source[:24],
-                error_value,
-                datetime.now(timezone.utc).replace(microsecond=0).isoformat(),
-            ),
-        )
-        if error_value is None:
-            upsert_wallet_snapshot_rollups(
-                conn=conn,
-                account_id=account_id,
-                snapshot_id=int(cursor.lastrowid),
-                captured_at_utc=captured_at_utc,
-                balance_usdt=float(balance_usdt),
-            )
-
     def _get_latest_wallet_snapshot(
         self,
         conn: sqlite3.Connection,
@@ -2506,11 +2403,7 @@ class DashboardDataProvider:
         now_local = now_utc.astimezone(self.local_tz)
         next_entry = self._next_entry_local(now_local)
         scoped_account = (account_id or "").strip() or None
-        live_wallet = (
-            self._read_wallet_balance(now_utc)
-            if scoped_account is None
-            else {"balance_usdt": None, "as_of_utc": None, "source": "ACCOUNT_SCOPED", "error": None}
-        )
+        empty_wallet = {"balance_usdt": None, "as_of_utc": None, "source": "DISABLED", "error": None}
         points_limit = max(100, min(5000, int(curve_points if curve_points is not None else self.default_curve_points)))
         window_hours_value: Optional[float] = None
         if window_hours is not None:
@@ -2540,10 +2433,10 @@ class DashboardDataProvider:
                 "open_symbols": 0,
                 "recent_errors": 0,
                 "last_run_status": None,
-                "wallet_balance_usdt": live_wallet["balance_usdt"],
+                "wallet_balance_usdt": None,
                 "net_cashflow_usdt": 0.0,
             },
-            "wallet": live_wallet,
+            "wallet": dict(empty_wallet),
             "portfolio_loss_cut": None,
             "latest_run": None,
             "runs": [],
@@ -2583,7 +2476,7 @@ class DashboardDataProvider:
                 "all_time_account_baseline_usdt": 0.0,
             },
             "drawdown_stats_balance": {
-                "wallet_balance_usdt": live_wallet["balance_usdt"],
+                "wallet_balance_usdt": None,
                 "total_realized_pnl": 0.0,
                 "closed_trades_priced": 0,
                 "wins": 0,
@@ -2604,14 +2497,14 @@ class DashboardDataProvider:
                 "current_drawdown": 0.0,
                 "current_drawdown_pct": 0.0,
                 "unpriced_closed_positions": 0,
-                "equity_baseline": live_wallet["balance_usdt"] if live_wallet["balance_usdt"] is not None else 0.0,
+                "equity_baseline": 0.0,
                 "net_cashflow_usdt": 0.0,
                 "all_time_account_pnl": 0.0,
                 "all_time_account_cashflow_usdt": 0.0,
                 "all_time_account_baseline_usdt": 0.0,
             },
             "drawdown_stats": {
-                "wallet_balance_usdt": live_wallet["balance_usdt"],
+                "wallet_balance_usdt": None,
                 "total_realized_pnl": 0.0,
                 "closed_trades_priced": 0,
                 "wins": 0,
@@ -2632,7 +2525,7 @@ class DashboardDataProvider:
                 "current_drawdown": 0.0,
                 "current_drawdown_pct": 0.0,
                 "unpriced_closed_positions": 0,
-                "equity_baseline": live_wallet["balance_usdt"] if live_wallet["balance_usdt"] is not None else 0.0,
+                "equity_baseline": 0.0,
                 "net_cashflow_usdt": 0.0,
                 "all_time_account_pnl": 0.0,
                 "all_time_account_cashflow_usdt": 0.0,
@@ -2664,31 +2557,15 @@ class DashboardDataProvider:
 
         try:
             with self._connect_ctx() as conn:
-                if live_wallet.get("source") == "API" and self._safe_float(live_wallet.get("balance_usdt")) is not None:
-                    try:
-                        self._insert_wallet_snapshot(
-                            conn=conn,
-                            captured_at_utc=str(live_wallet.get("as_of_utc") or now_utc.replace(microsecond=0).isoformat()),
-                            balance_usdt=float(live_wallet["balance_usdt"]),
-                            account_id=self.live_wallet_account_id,
-                            source="API",
-                            error=None,
-                        )
-                    except sqlite3.Error as exc:
-                        LOGGER.warning("Failed to persist wallet snapshot: %s", exc)
-
                 latest_wallet_row = self._get_latest_wallet_snapshot(conn, account_id=scoped_account)
                 if latest_wallet_row is not None:
                     data["wallet"] = {
                         "balance_usdt": round(float(latest_wallet_row["balance_usdt"]), 8),
                         "as_of_utc": latest_wallet_row["captured_at_utc"],
                         "source": "DB",
-                        "error": live_wallet.get("error"),
-                        "live_source": live_wallet.get("source"),
+                        "error": None,
                     }
                     data["summary"]["wallet_balance_usdt"] = data["wallet"]["balance_usdt"]
-                else:
-                    data["wallet"] = live_wallet
 
                 latest_run = conn.execute(
                     (
@@ -2802,9 +2679,7 @@ class DashboardDataProvider:
                     elif not scoped_account:
                         positions_by_account: Dict[str, List[Dict[str, Any]]] = {}
                         for position in data["open_positions"]:
-                            position_account_id = str(
-                                position.get("_live_account_id") or self.live_wallet_account_id or ""
-                            ).strip()
+                            position_account_id = str(position.get("_live_account_id") or "").strip()
                             if position_account_id:
                                 positions_by_account.setdefault(position_account_id, []).append(position)
                         for position_account_id, positions in positions_by_account.items():
@@ -3709,68 +3584,6 @@ def _inline_script_json(value: Any) -> str:
     )
 
 
-def get_dashboard_html() -> str:
-    return load_template("dashboard.html")
-
-
-def get_accounts_overview_html() -> str:
-    return load_template("accounts_overview.html")
-
-
-def _render_dashboard_template(
-    refresh_sec: int,
-    echarts_src: str,
-    *,
-    account_id: str = "",
-    account_mode: str = "full",
-    strategy_note: str = "",
-    portfolio_loss_cut_enabled: bool = False,
-    portfolio_loss_cut_pct: float = 3.5,
-    portfolio_loss_cut_hour: int = 8,
-    portfolio_loss_cut_minute: int = 0,
-    nav_accounts: Optional[List[Dict[str, str]]] = None,
-) -> str:
-    safe_stop_pct = min(100.0, max(0.001, float(portfolio_loss_cut_pct)))
-    safe_stop_hour = int(portfolio_loss_cut_hour) % 24
-    safe_stop_minute = int(portfolio_loss_cut_minute) % 60
-    safe_refresh = max(2, refresh_sec)
-    safe_echarts_src = version_static_path(echarts_src or "/static/vendor/echarts.min.js")
-    static_base = "../../static" if account_id else "static"
-    page_config = {
-        "refreshSec": safe_refresh,
-        "echartsSrc": safe_echarts_src,
-        "accountId": account_id,
-        "accountMode": account_mode,
-        "strategyNote": strategy_note,
-        "navAccounts": nav_accounts or [],
-        "portfolioStopEnabled": bool(portfolio_loss_cut_enabled),
-        "portfolioStopPct": safe_stop_pct,
-        "portfolioStopHour": safe_stop_hour,
-        "portfolioStopMinute": safe_stop_minute,
-    }
-    replacements = {
-        "__REFRESH_SEC__": str(safe_refresh),
-        "__STATIC_BASE__": static_base,
-        "__PAGE_CONFIG_JSON__": _inline_script_json(page_config),
-    }
-    pattern = re.compile("|".join(re.escape(key) for key in replacements))
-    rendered = pattern.sub(lambda m: replacements[m.group(0)], get_dashboard_html())
-    rendered = inject_ops_topbar(
-        rendered,
-        active_page="account",
-        home_href="/",
-        comparison_href="/accounts/comparison/",
-    )
-    return version_static_urls(rendered)
-
-
-def render_dashboard_html(
-    refresh_sec: int,
-    echarts_src: str = "/static/vendor/echarts.min.js",
-) -> str:
-    return _render_dashboard_template(refresh_sec, echarts_src)
-
-
 def render_account_dashboard_html(
     refresh_sec: int,
     account_id: str,
@@ -3785,22 +3598,41 @@ def render_account_dashboard_html(
 ) -> str:
     safe_account_id = (account_id or "").strip()
     if not safe_account_id:
-        return render_dashboard_html(refresh_sec, echarts_src=echarts_src)
+        raise ValueError("account_id is required")
     safe_account_mode = (account_mode or "full").strip().lower()
     if safe_account_mode not in {"full", "readonly", "loss_cut_only"}:
         safe_account_mode = "full"
-    return _render_dashboard_template(
-        refresh_sec,
-        echarts_src,
-        account_id=safe_account_id,
-        account_mode=safe_account_mode,
-        strategy_note=(strategy_note or "").strip(),
-        portfolio_loss_cut_enabled=portfolio_loss_cut_enabled,
-        portfolio_loss_cut_pct=portfolio_loss_cut_pct,
-        portfolio_loss_cut_hour=portfolio_loss_cut_hour,
-        portfolio_loss_cut_minute=portfolio_loss_cut_minute,
-        nav_accounts=nav_accounts,
+    safe_stop_pct = min(100.0, max(0.001, float(portfolio_loss_cut_pct)))
+    safe_stop_hour = int(portfolio_loss_cut_hour) % 24
+    safe_stop_minute = int(portfolio_loss_cut_minute) % 60
+    safe_refresh = max(2, refresh_sec)
+    safe_echarts_src = version_static_path(echarts_src or "/static/vendor/echarts.min.js")
+    page_config = {
+        "refreshSec": safe_refresh,
+        "echartsSrc": safe_echarts_src,
+        "accountId": safe_account_id,
+        "accountMode": safe_account_mode,
+        "strategyNote": (strategy_note or "").strip(),
+        "navAccounts": nav_accounts or [],
+        "portfolioStopEnabled": bool(portfolio_loss_cut_enabled),
+        "portfolioStopPct": safe_stop_pct,
+        "portfolioStopHour": safe_stop_hour,
+        "portfolioStopMinute": safe_stop_minute,
+    }
+    replacements = {
+        "__REFRESH_SEC__": str(safe_refresh),
+        "__STATIC_BASE__": "../../static",
+        "__PAGE_CONFIG_JSON__": _inline_script_json(page_config),
+    }
+    pattern = re.compile("|".join(re.escape(key) for key in replacements))
+    rendered = pattern.sub(lambda m: replacements[m.group(0)], load_template("dashboard.html"))
+    rendered = inject_ops_topbar(
+        rendered,
+        active_page="account",
+        home_href="/",
+        comparison_href="/accounts/comparison/",
     )
+    return version_static_urls(rendered)
 
 
 def render_accounts_overview_html(
@@ -3838,7 +3670,7 @@ def render_accounts_overview_html(
         "__PORTFOLIO_STOP_CLASS__": stop_class,
     }
     pattern = re.compile("|".join(re.escape(key) for key in replacements))
-    rendered = pattern.sub(lambda m: replacements[m.group(0)], get_accounts_overview_html())
+    rendered = pattern.sub(lambda m: replacements[m.group(0)], load_template("accounts_overview.html"))
     rendered = inject_ops_topbar(
         rendered,
         active_page="overview",

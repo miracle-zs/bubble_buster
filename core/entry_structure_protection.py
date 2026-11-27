@@ -1,11 +1,8 @@
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Dict, Optional
+from typing import Optional
 
 from core.state_store import StateStore
-
-
-ENTRY_STRUCTURE_PROTECTION_LOCK_NAME = "entry_structure_protection_v1"
 
 
 @dataclass(frozen=True)
@@ -14,14 +11,6 @@ class EntryStructureProtection:
     bearish_close_time_utc: datetime
     window_start_utc: datetime
     window_end_utc: datetime
-
-    def to_payload(self) -> Dict[str, object]:
-        return {
-            "stop_price": float(self.stop_price),
-            "bearish_close_time_utc": self._iso_utc(self.bearish_close_time_utc),
-            "window_start_utc": self._iso_utc(self.window_start_utc),
-            "window_end_utc": self._iso_utc(self.window_end_utc),
-        }
 
     @classmethod
     def from_payload(cls, payload: object) -> Optional["EntryStructureProtection"]:

@@ -19,6 +19,22 @@ T = TypeVar("T", bound="DualAccessRecord")
 class DualAccessRecord(dict):
     """Dictionary subclass providing transparent attribute and key-based access."""
 
+    POSITIONAL_FIELDS: Tuple[str, ...] = ()
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        if len(args) == 1 and isinstance(args[0], (dict, DualAccessRecord)):
+            data = dict(args[0])
+            data.update(kwargs)
+            super().__init__(data)
+        elif len(args) > 1 or (args and self.POSITIONAL_FIELDS):
+            data = {}
+            for key, val in zip(self.POSITIONAL_FIELDS, args):
+                data[key] = val
+            data.update(kwargs)
+            super().__init__(data)
+        else:
+            super().__init__(**kwargs)
+
     def __getattr__(self, name: str) -> Any:
         try:
             return self[name]
@@ -47,6 +63,17 @@ class DualAccessRecord(dict):
         if row is None:
             return None
         return cls(dict(row))
+
+    def _parse_json_field(self, field_name: str) -> Dict[str, Any]:
+        raw = self.get(field_name)
+        if not raw:
+            return {}
+        if isinstance(raw, dict):
+            return raw
+        try:
+            return json.loads(raw)
+        except Exception:
+            return {}
 
     def __repr__(self) -> str:
         fields = ", ".join(f"{k}={v!r}" for k, v in self.items())
@@ -80,20 +107,6 @@ class PositionRecord(DualAccessRecord):
         "close_reason",
     )
 
-    def __init__(self, *args: Any, **kwargs: Any) -> None:
-        if len(args) == 1 and isinstance(args[0], (dict, DualAccessRecord)):
-            data = dict(args[0])
-            data.update(kwargs)
-            super().__init__(data)
-        elif len(args) > 1:
-            data = {}
-            for key, val in zip(self.POSITIONAL_FIELDS, args):
-                data[key] = val
-            data.update(kwargs)
-            super().__init__(data)
-        else:
-            super().__init__(**kwargs)
-
     @property
     def is_open(self) -> bool:
         return self.get("status") == "OPEN"
@@ -126,19 +139,7 @@ class RunRecord(DualAccessRecord):
     )
 
     def __init__(self, *args: Any, **kwargs: Any) -> None:
-        if len(args) == 1 and isinstance(args[0], (dict, DualAccessRecord)):
-            data = dict(args[0])
-            data.update(kwargs)
-            super().__init__(data)
-        elif len(args) > 1:
-            data = {}
-            for key, val in zip(self.POSITIONAL_FIELDS, args):
-                data[key] = val
-            data.update(kwargs)
-            super().__init__(data)
-        else:
-            super().__init__(**kwargs)
-
+        super().__init__(*args, **kwargs)
         if "reason" not in self and "message" in self:
             self["reason"] = self["message"]
         elif "message" not in self and "reason" in self:
@@ -190,31 +191,9 @@ class OrderEventRecord(DualAccessRecord):
         "raw_json",
     )
 
-    def __init__(self, *args: Any, **kwargs: Any) -> None:
-        if len(args) == 1 and isinstance(args[0], (dict, DualAccessRecord)):
-            data = dict(args[0])
-            data.update(kwargs)
-            super().__init__(data)
-        elif len(args) > 1:
-            data = {}
-            for key, val in zip(self.POSITIONAL_FIELDS, args):
-                data[key] = val
-            data.update(kwargs)
-            super().__init__(data)
-        else:
-            super().__init__(**kwargs)
-
     def parsed_payload(self) -> Dict[str, Any]:
         """Safely decode raw_json payload into a dictionary."""
-        raw = self.get("raw_json")
-        if not raw:
-            return {}
-        if isinstance(raw, dict):
-            return raw
-        try:
-            return json.loads(raw)
-        except Exception:
-            return {}
+        return self._parse_json_field("raw_json")
 
 
 class FillRecord(DualAccessRecord):
@@ -241,48 +220,6 @@ class FillRecord(DualAccessRecord):
         "created_at_utc",
     )
 
-    def __init__(self, *args: Any, **kwargs: Any) -> None:
-        if len(args) == 1 and isinstance(args[0], (dict, DualAccessRecord)):
-            data = dict(args[0])
-            data.update(kwargs)
-            super().__init__(data)
-        elif len(args) > 1:
-            data = {}
-            for key, val in zip(self.POSITIONAL_FIELDS, args):
-                data[key] = val
-            data.update(kwargs)
-            super().__init__(data)
-        else:
-            super().__init__(**kwargs)
-
     def parsed_payload(self) -> Dict[str, Any]:
         """Safely decode raw_json payload into a dictionary."""
-        raw = self.get("raw_json")
-        if not raw:
-            return {}
-        if isinstance(raw, dict):
-            return raw
-        try:
-            return json.loads(raw)
-        except Exception:
-            return {}
-
-
-class TaskExecutionRecord(DualAccessRecord):
-    """Domain model representing a structured scheduled task execution audit."""
-
-    def parsed_payload(self) -> Dict[str, Any]:
-        raw = self.get("payload_json")
-        if not raw:
-            return {}
-        if isinstance(raw, dict):
-            return raw
-        try:
-            return json.loads(raw)
-        except Exception:
-            return {}
-
-
-class WalletSnapshotRecord(DualAccessRecord):
-    """Domain model representing an account wallet snapshot."""
-    pass
+        return self._parse_json_field("raw_json")

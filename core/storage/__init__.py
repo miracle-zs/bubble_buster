@@ -8,8 +8,6 @@ from core.storage.models import (
     PositionState,
     RunRecord,
     RunState,
-    TaskExecutionRecord,
-    WalletSnapshotRecord,
 )
 from core.storage.uow import UnitOfWork, get_current_uow
 
@@ -21,8 +19,6 @@ __all__ = [
     "PositionState",
     "RunRecord",
     "RunState",
-    "TaskExecutionRecord",
-    "WalletSnapshotRecord",
     "UnitOfWork",
     "get_current_uow",
 ]

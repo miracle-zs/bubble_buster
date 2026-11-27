@@ -203,10 +203,6 @@ class BinanceRateLimitCoordinator:
         with self._lock:
             return self._blocked_until_monotonic > time.monotonic()
 
-    def cooldown_remaining_sec(self) -> float:
-        with self._lock:
-            return max(0.0, self._blocked_until_monotonic - time.monotonic())
-
     def usage(self) -> Dict[str, int]:
         """Return current rolling usage for diagnostics and acceptance tests."""
         with self._lock:

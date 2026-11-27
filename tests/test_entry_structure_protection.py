@@ -4,7 +4,6 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from core.entry_structure_protection import (
-    ENTRY_STRUCTURE_PROTECTION_LOCK_NAME,
     EntryStructureProtection,
     EntryStructureProtectionState,
 )
@@ -41,7 +40,7 @@ class EntryStructureProtectionStateTest(unittest.TestCase):
         self.assertIsNotNone(direct)
         self.assertEqual(direct["stop_price"], 0.02590)
         # Ensure no legacy lock state is written
-        self.assertIsNone(self.store.get_lock_state(ENTRY_STRUCTURE_PROTECTION_LOCK_NAME))
+        self.assertIsNone(self.store.get_lock_state("entry_structure_protection_v1"))
 
 
 if __name__ == "__main__":

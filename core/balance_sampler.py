@@ -201,11 +201,7 @@ class WalletSnapshotSampler:
         )
         return inserted
 
-    # Backwards-compatible private name used by a few older callers/tests.
-    def _sync_cashflows(self) -> int:
-        return self.sync_cashflows_once()
-
-    def _resolve_cashflow_start_ms(self, income_type: Optional[str] = None) -> int:
+    def _resolve_cashflow_start_ms(self) -> int:
         cursor_state = self.store.get_cursor_state("cashflow_income_cursor_v2") or {}
         try:
             cursor_ms = int(cursor_state.get("cursor_ms") or 0)

@@ -307,35 +307,6 @@ class AccountCoordinator:
             data_quality=DataQuality.CERTAIN.value,
         )
 
-    def run_entry_step(
-        self,
-        trade_day_utc: Optional[str] = None,
-        shared_top_gainers: Optional[List[Dict[str, Any]]] = None,
-        strategy: Optional[Any] = None,
-    ) -> Dict[str, Any]:
-        """Execute an entry step under coordinator supervision."""
-        return self.step(
-            action="entry",
-            trade_day_utc=trade_day_utc,
-            shared_top_gainers=shared_top_gainers,
-            strategy=strategy,
-        )
-
-    def run_manage_step(
-        self,
-        wallet_balance: Optional[float] = None,
-        equity: Optional[float] = None,
-        config: Optional[Dict[str, Any]] = None,
-    ) -> Dict[str, Any]:
-        """Execute position management step under coordinator supervision."""
-        return self.step(
-            action="manage",
-            max_duration_sec=30.0,
-            wallet_balance=wallet_balance,
-            equity=equity,
-            config=config,
-        )
-
     def advance_entry_plans(self) -> List[Dict[str, Any]]:
         """Advance awakened entry plans: check confirmation and update status."""
         plan = self.check_entry_plan_wakeups()

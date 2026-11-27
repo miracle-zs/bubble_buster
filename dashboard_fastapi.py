@@ -348,7 +348,6 @@ def create_dashboard_context(config_path: str) -> DashboardRuntimeContext:
             trade_stats_fetchers[aid] = TradeStatsFetcher(
                 client=readonly_client,
                 store=root_store.scoped(aid),
-                cache_ttl_sec=trade_stats_refresh_sec,
             )
         except Exception as exc:  # noqa: BLE001
             logging.getLogger(__name__).warning(
@@ -369,7 +368,6 @@ def create_dashboard_context(config_path: str) -> DashboardRuntimeContext:
         account_equity_recovery_enabled=account_equity_recovery_enabled,
         overview_account_ids=overview_account_ids,
         equity_comparison_account_ids=equity_comparison_account_ids or None,
-        live_wallet_account_id=default_account_id,
         trade_stats_fetchers=trade_stats_fetchers,
     )
 
@@ -765,34 +763,6 @@ def create_app(config_path: Optional[str] = None) -> FastAPI:
         if payload.get("db_error"):
             return JSONResponse(status_code=503, content=payload)
         return JSONResponse(payload)
-
-    @app.get("/api/dashboard")
-    def dashboard_data(
-        request: Request,
-        log_lines: int = Query(default=80, ge=0, le=300),
-        window_hours: Optional[float] = Query(default=24.0, gt=0.0, le=8784.0),
-        curve_points: Optional[int] = Query(default=None, ge=100, le=5000),
-    ):
-        ctx: DashboardRuntimeContext = request.app.state.ctx
-        try:
-            payload = ctx.provider.snapshot(
-                log_lines=log_lines,
-                window_hours=window_hours,
-                curve_points=curve_points,
-            )
-
-            service_state = getattr(request.app.state, "service_state", {}) or {}
-            thread = service_state.get("thread")
-            payload["service"] = {
-                "enabled": bool(service_state.get("enabled", False)),
-                "running": bool(service_state.get("running", False)) and bool(thread and thread.is_alive()),
-                "error": service_state.get("error"),
-            }
-            payload["runtime_settings"] = _runtime_entry_catchup_state(request.app)
-            return _json_or_db_error(payload)
-        except Exception as exc:  # noqa: BLE001
-            logger.exception("dashboard snapshot failed")
-            raise HTTPException(status_code=500, detail="dashboard snapshot failed") from exc
 
     @app.get("/api/accounts/summary/fast")
     def accounts_summary_fast(request: Request):
