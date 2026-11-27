@@ -12,7 +12,7 @@
   function fmt(v, digits) {
     if (v === null || v === undefined || v === "") return "--";
     var n = Number(v);
-    if (!Number.isFinite(n)) return escapeHtml(String(v));
+    if (!Number.isFinite(n)) return String(v);
     return n.toFixed(digits);
   }
 
@@ -269,8 +269,8 @@
           + '<span class="task-meta" role="cell"><span class="task-badge is-readonly">只读</span></span>'
           + '<span class="task-time" role="cell">' + escapeHtml(ops.formatBeijingTime(stats.last_updated_utc, { withYear: true })) + "</span>"
           + '<div class="task-result-lines" role="cell">'
-          + '<div class="task-stat-line">净盈亏 ' + ops.fmtSignedUsdt(stats.net_realized_pnl != null ? stats.net_realized_pnl : stats.total_realized_pnl, 2) + " USDT · 胜率 " + fmt(stats.win_rate_pct, 1) + "% · 盈亏比 " + profitFactor + "</div>"
-          + '<div class="task-stat-line">胜 ' + fmt(stats.win_count, 0) + " / 负 " + fmt(stats.loss_count, 0) + " · 平均盈利 " + ops.fmtUsdt(stats.avg_win, 2) + " · 平均亏损 " + ops.fmtUsdt(stats.avg_loss, 2) + "</div>"
+          + '<div class="task-stat-line">净盈亏 ' + escapeHtml(ops.fmtSignedUsdt(stats.net_realized_pnl != null ? stats.net_realized_pnl : stats.total_realized_pnl, 2)) + " USDT · 胜率 " + escapeHtml(fmt(stats.win_rate_pct, 1)) + "% · 盈亏比 " + escapeHtml(profitFactor) + "</div>"
+          + '<div class="task-stat-line">胜 ' + escapeHtml(fmt(stats.win_count, 0)) + " / 负 " + escapeHtml(fmt(stats.loss_count, 0)) + " · 平均盈利 " + escapeHtml(ops.fmtUsdt(stats.avg_win, 2)) + " · 平均亏损 " + escapeHtml(ops.fmtUsdt(stats.avg_loss, 2)) + "</div>"
           + "</div></div></div>";
       }
       return '<div class="task-row" role="row">'

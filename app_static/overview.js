@@ -16,9 +16,9 @@
     var curvesBatchApi = pathPrefix + "/api/accounts/curves";
     var healthApi = pathPrefix + "/healthz";
     var portfolioStopEnabled = !!cfg.portfolioStopEnabled;
-    var portfolioStopPct = Number(cfg.portfolioStopPct) || 3.5;
-    var portfolioStopHour = Number(cfg.portfolioStopHour) || 0;
-    var portfolioStopMinute = Number(cfg.portfolioStopMinute) || 0;
+    var portfolioStopPct = ops.toNum(cfg.portfolioStopPct) !== null ? ops.toNum(cfg.portfolioStopPct) : 3.5;
+    var portfolioStopHour = ops.toNum(cfg.portfolioStopHour) !== null ? ops.toNum(cfg.portfolioStopHour) : 8;
+    var portfolioStopMinute = ops.toNum(cfg.portfolioStopMinute) !== null ? ops.toNum(cfg.portfolioStopMinute) : 0;
     var navAccounts = Array.isArray(cfg.navAccounts) ? cfg.navAccounts : [];
 
     ops.initTopNav({ basePrefix: pathPrefix, activePage: "overview", accounts: navAccounts });
@@ -65,6 +65,7 @@
     var curveTtlMs = Math.max(60000, refreshSec * 3000);
     var summaryRequestInFlight = false;
     var summaryDetailsRequestInFlight = false;
+    var summaryHydratedOnce = false;
     var detailsHydratedOnce = false;
     var lastDetailsFetchAt = 0;
     var detailsRetryTimer = null;
@@ -72,6 +73,12 @@
 
     function escapeHtml(text) {
       return ops.escapeHtml(text);
+    }
+
+    function nonNegNum(primary, fallback) {
+      var v = ops.toNum(primary);
+      if (v === null && fallback !== undefined) v = ops.toNum(fallback);
+      return v === null ? 0 : Math.max(0, v);
     }
 
     var fmt = R.fmt;
@@ -177,9 +184,14 @@
       ops.applyFreshnessPill(overviewFreshnessPill, overviewFreshnessText, freshness);
 
       if (overviewAnomalyCount) {
-        var count = anomalyTaskCount(summaryRows);
-        overviewAnomalyCount.textContent = String(count);
-        overviewAnomalyCount.className = "command-value" + (count > 0 ? " status-bad" : "");
+        if (!summaryHydratedOnce) {
+          overviewAnomalyCount.textContent = "--";
+          overviewAnomalyCount.className = "command-value";
+        } else {
+          var count = anomalyTaskCount(summaryRows);
+          overviewAnomalyCount.textContent = String(count);
+          overviewAnomalyCount.className = "command-value" + (count > 0 ? " status-bad" : "");
+        }
       }
 
       var stopCmd = document.getElementById("portfolio-stop-command");
@@ -216,13 +228,18 @@
     var healthAbortController = null;
     function fetchHealth() {
       if (!serviceState || document.hidden) return;
-      if (healthAbortController) healthAbortController.abort();
-      healthAbortController = typeof AbortController !== "undefined" ? new AbortController() : null;
+      if (healthAbortController) {
+        try { healthAbortController.abort(); } catch (e) {}
+      }
+      var controller = typeof AbortController !== "undefined" ? new AbortController() : null;
+      healthAbortController = controller;
       ops.fetchJsonWithTimeout(healthApi + "?_=" + Date.now(), {
-        signal: healthAbortController ? healthAbortController.signal : null,
+        signal: controller ? controller.signal : null,
         timeoutMs: 10000
       })
         .then(function (payload) {
+          if (healthAbortController !== controller) return;
+          healthAbortController = null;
           var running = !!payload.service_running;
           var enabled = !!payload.service_enabled;
           serviceHealthState = { enabled: enabled, running: running, loaded: true };
@@ -232,6 +249,8 @@
           scheduleCommandBarRender();
         })
         .catch(function (err) {
+          if (healthAbortController !== controller) return;
+          healthAbortController = null;
           if (err && err.name === "AbortError") return;
           serviceState.innerHTML = '<span class="status-dot" aria-hidden="true"></span>未知';
           serviceState.className = "command-value status-warn";
@@ -280,6 +299,20 @@
 
     function renderEntryProgress() {
       if (!entryProgressBoard) return;
+      if (!detailsHydratedOnce) {
+        nextEntryCheckRaw = "";
+        syncCountdownTimer();
+        var hasErr = !!(overviewErrors.details || (!summaryHydratedOnce && overviewErrors.summary));
+        ops.patchHtmlIfChanged(
+          entryProgressBoard,
+          hasErr
+            ? '<div class="entry-progress-empty is-error">开单进度加载失败，请点击上方“立即重试”</div>'
+            : '<div class="entry-progress-empty">正在同步今日开单进度...</div>'
+        );
+        if (entryProgressUpdated) entryProgressUpdated.textContent = "更新 --";
+        if (entryProgressToggle) entryProgressToggle.hidden = true;
+        return;
+      }
       var rows = summaryRows || [];
       var accountRows = [];
       var todayRows = [];
@@ -316,17 +349,17 @@
       for (var j = 0; j < todayRows.length; j += 1) {
         var summary = todayRows[j];
         if (String(summary.status || "").toUpperCase() === "COMPLETED") completedAccounts += 1;
-        var completedActions = summary.entry_action_completed_count == null ? Number(summary.opened_count || 0) : Number(summary.entry_action_completed_count || 0);
-        var targetActions = summary.entry_action_target_count == null ? Number(summary.target_count || 0) : Number(summary.entry_action_target_count || 0);
-        entryActionTotal += Math.max(0, completedActions);
-        targetTotal += Math.max(0, targetActions);
-        initialActionTotal += Math.max(0, Number(summary.entry_action_initial_count || 0));
-        scaleInActionTotal += Math.max(0, Number(summary.entry_action_scale_in_count || 0));
-        positionTotal += Math.max(0, Number(summary.position_count == null ? summary.opened_count : summary.position_count));
-        waitingTotal += Math.max(0, Number(summary.waiting_count || 0));
-        failedTotal += Math.max(0, Number(summary.entry_action_failed_count == null ? summary.failed_count : summary.entry_action_failed_count));
-        pendingActionTotal += Math.max(0, Number(summary.entry_action_pending_count || 0));
-        skippedTotal += Math.max(0, Number(summary.entry_action_skipped_count == null ? summary.skipped_count : summary.entry_action_skipped_count));
+        var completedActions = nonNegNum(summary.entry_action_completed_count, summary.opened_count);
+        var targetActions = nonNegNum(summary.entry_action_target_count, summary.target_count);
+        entryActionTotal += completedActions;
+        targetTotal += targetActions;
+        initialActionTotal += nonNegNum(summary.entry_action_initial_count);
+        scaleInActionTotal += nonNegNum(summary.entry_action_scale_in_count);
+        positionTotal += nonNegNum(summary.position_count, summary.opened_count);
+        waitingTotal += nonNegNum(summary.waiting_count);
+        failedTotal += nonNegNum(summary.entry_action_failed_count, summary.failed_count);
+        pendingActionTotal += nonNegNum(summary.entry_action_pending_count);
+        skippedTotal += nonNegNum(summary.entry_action_skipped_count, summary.skipped_count);
         var summaryNextCheck = String(summary.next_check_local || "");
         if (summaryNextCheck && (!nextCheckRaw || summaryNextCheck < nextCheckRaw)) nextCheckRaw = summaryNextCheck;
       }
@@ -417,16 +450,17 @@
             + '<div class="entry-progress-next-cell" role="cell"><strong>--</strong><span>尚未开始</span></div></div>';
           continue;
         }
-        var target = Math.max(0, Number(accProgress.entry_action_target_count == null ? accProgress.target_count : accProgress.entry_action_target_count));
-        var opened = Math.max(0, Number(accProgress.entry_action_completed_count == null ? accProgress.opened_count : accProgress.entry_action_completed_count));
-        var positionCount = Math.max(0, Number(accProgress.position_count == null ? accProgress.opened_count : accProgress.position_count));
-        var waiting = Math.max(0, Number(accProgress.waiting_count || 0));
-        var failed = Math.max(0, Number(accProgress.entry_action_failed_count == null ? accProgress.failed_count : accProgress.entry_action_failed_count));
-        var skipped = Math.max(0, Number(accProgress.entry_action_skipped_count == null ? accProgress.skipped_count : accProgress.entry_action_skipped_count));
-        var pendingActions = Math.max(0, Number(accProgress.entry_action_pending_count == null ? target - opened - failed - skipped : accProgress.entry_action_pending_count));
+        var target = nonNegNum(accProgress.entry_action_target_count, accProgress.target_count);
+        var opened = nonNegNum(accProgress.entry_action_completed_count, accProgress.opened_count);
+        var positionCount = nonNegNum(accProgress.position_count, accProgress.opened_count);
+        var waiting = nonNegNum(accProgress.waiting_count);
+        var failed = nonNegNum(accProgress.entry_action_failed_count, accProgress.failed_count);
+        var skipped = nonNegNum(accProgress.entry_action_skipped_count, accProgress.skipped_count);
+        var pendingRaw = ops.toNum(accProgress.entry_action_pending_count);
+        var pendingActions = pendingRaw !== null ? Math.max(0, pendingRaw) : Math.max(0, target - opened - failed - skipped);
         var hasActionData = progressItems(accProgress.entry_actions).length > 0;
-        var initialActions = Math.max(0, Number(accProgress.entry_action_initial_count || 0));
-        var scaleInActions = Math.max(0, Number(accProgress.entry_action_scale_in_count || 0));
+        var initialActions = nonNegNum(accProgress.entry_action_initial_count);
+        var scaleInActions = nonNegNum(accProgress.entry_action_scale_in_count);
         if (!hasActionData && initialActions === 0) initialActions = opened;
         var denom = target > 0 ? target : Math.max(1, opened + waiting + failed);
         var openedPct = Math.min(100, (opened / denom) * 100);
@@ -672,20 +706,23 @@
       if (batchCurvesAbortController) {
         try { batchCurvesAbortController.abort(); } catch (e) {}
       }
-      batchCurvesAbortController = typeof AbortController !== "undefined" ? new AbortController() : null;
+      var controller = typeof AbortController !== "undefined" ? new AbortController() : null;
+      batchCurvesAbortController = controller;
       var url = curvesBatchApi
         + "?window_hours=24&curve_points=160&accounts=" + encodeURIComponent(ids.join(","))
         + "&_=" + now;
       ops.fetchJsonWithTimeout(url, {
-        signal: batchCurvesAbortController ? batchCurvesAbortController.signal : null,
+        signal: controller ? controller.signal : null,
         timeoutMs: 15000
       })
         .then(function (data) {
+          if (batchCurvesAbortController !== controller) return;
+          batchCurvesAbortController = null;
           batchCurvesInFlight = false;
           var curvesMap = (data && data.curves) || {};
           for (var j = 0; j < ids.length; j += 1) {
             var aid = ids[j];
-            curveInFlight[aid] = false;
+            if (!curveAbortControllers[aid]) curveInFlight[aid] = false;
             if (Object.prototype.hasOwnProperty.call(curvesMap, aid) && curvesMap[aid]) {
               storeCurvePayload(aid, curvesMap[aid]);
               renderCurve(aid);
@@ -696,13 +733,17 @@
           scheduleCommandBarRender();
         })
         .catch(function (err) {
+          if (batchCurvesAbortController !== controller) return;
+          batchCurvesAbortController = null;
           batchCurvesInFlight = false;
           if (err && err.name === "AbortError") {
-            for (var a = 0; a < ids.length; a += 1) curveInFlight[ids[a]] = false;
+            for (var a = 0; a < ids.length; a += 1) {
+              if (!curveAbortControllers[ids[a]]) curveInFlight[ids[a]] = false;
+            }
             return;
           }
           for (var k = 0; k < ids.length; k += 1) {
-            curveInFlight[ids[k]] = false;
+            if (!curveAbortControllers[ids[k]]) curveInFlight[ids[k]] = false;
             fetchCurve(ids[k], true);
           }
         });
@@ -727,18 +768,22 @@
         try { curveAbortControllers[aid].abort(); } catch (e) {}
       }
       var controller = typeof AbortController !== "undefined" ? new AbortController() : null;
-      if (controller) curveAbortControllers[aid] = controller;
+      curveAbortControllers[aid] = controller;
       ops.fetchJsonWithTimeout(url, {
         signal: controller ? controller.signal : null,
         timeoutMs: 15000
       })
         .then(function (payload) {
+          if (curveAbortControllers[aid] !== controller) return;
+          delete curveAbortControllers[aid];
           curveInFlight[aid] = false;
           storeCurvePayload(aid, payload);
           renderCurve(aid);
           scheduleCommandBarRender();
         })
         .catch(function (err) {
+          if (curveAbortControllers[aid] !== controller) return;
+          delete curveAbortControllers[aid];
           curveInFlight[aid] = false;
           if (err && err.name === "AbortError") return;
           curveErrors[aid] = (err && err.message) || "网络异常";
@@ -794,7 +839,7 @@
         if (balanceEl) balanceEl.textContent = ops.fmtUsdt(r.wallet_balance_usdt, 2);
         if (mode === "readonly") {
           var stats = r.trade_stats || {};
-          var netPnl = stats.net_realized_pnl;
+          var netPnl = stats.net_realized_pnl != null ? stats.net_realized_pnl : stats.total_realized_pnl;
           var pnlNumber = ops.toNum(netPnl);
           var pnlCls = pnlNumber !== null ? (pnlNumber >= 0 ? "status-ok" : "status-bad") : "";
           var pnlEl = card.querySelector("[data-field='readonly-pnl']");
@@ -825,7 +870,9 @@
           }
           var highlightsEl = card.querySelector("[data-field='strategy-highlights']");
           if (highlightsEl && highlightsEl.getAttribute("data-note") !== noteKey) {
-            highlightsEl.innerHTML = ops.formatStrategyHighlights(r.strategy_note, allNotes, 2, "strategy-tag");
+            var nextHighlights = ops.formatStrategyHighlights(r.strategy_note, allNotes, 2, "strategy-tag");
+            highlightsEl.innerHTML = nextHighlights;
+            highlightsEl.hidden = !nextHighlights;
             highlightsEl.setAttribute("data-note", noteKey);
           }
         }
@@ -870,11 +917,11 @@
 
         if (rowMode === "readonly") {
           var stats = row.trade_stats || {};
-          var netPnl = ops.toNum(stats.net_realized_pnl);
+          var netPnl = ops.toNum(stats.net_realized_pnl != null ? stats.net_realized_pnl : stats.total_realized_pnl);
           var pnlText = netPnl !== null ? ops.fmtSignedUsdt(netPnl, 2) : "--";
-          var winRateText = stats.win_rate_pct != null ? fmt(stats.win_rate_pct, 1) + "%" : "--";
-          var tradeCountText = stats.total_trades != null ? fmt(stats.total_trades, 0) : "--";
-          var profitFactorText = stats.profit_factor != null ? fmt(stats.profit_factor, 2) : "--";
+          var winRateText = stats.win_rate_pct != null ? escapeHtml(fmt(stats.win_rate_pct, 1)) + "%" : "--";
+          var tradeCountText = stats.total_trades != null ? escapeHtml(fmt(stats.total_trades, 0)) : "--";
+          var profitFactorText = stats.profit_factor != null ? escapeHtml(fmt(stats.profit_factor, 2)) : "--";
           var pnlCls = netPnl !== null ? (netPnl >= 0 ? "status-ok" : "status-bad") : "";
           readonlyHtml += '<article class="readonly-strip" id="account-card-' + safeAid + '" data-account-id="' + safeAid + '">'
             + '<div class="readonly-identity"><a class="readonly-id-link" href="' + base + '">' + safeAid + '<span class="readonly-badge">只读监控</span></a></div>'
@@ -903,13 +950,13 @@
             + '<div class="strategy-popover-tags" data-note="' + noteAttr + '">' + ops.formatStrategyTags(row.strategy_note, "strategy-tag") + "</div></div></div>"
             + '<a class="detail-link" href="' + base + '" aria-label="查看 ' + safeAid + ' 账户详情">详情 ' + arrowIcon + "</a></div></header>"
             + '<div class="account-card-body">'
-            + (highlightsHtml ? '<div class="card-strategy-highlights" data-field="strategy-highlights" data-note="' + noteAttr + '">' + highlightsHtml + "</div>" : "")
+            + '<div class="card-strategy-highlights" data-field="strategy-highlights" data-note="' + noteAttr + '"' + (highlightsHtml ? "" : " hidden") + '>' + highlightsHtml + "</div>"
             + '<div class="account-primary">'
             + '<div class="metric"><span class="metric-label">策略权益 (USDT)</span><strong class="metric-value" data-field="wallet-balance">' + ops.fmtUsdt(row.wallet_balance_usdt, 2) + "</strong></div>"
             + '<div class="metric"><span class="metric-label">' + String(portfolioStopHour).padStart(2, "0") + ":" + String(portfolioStopMinute).padStart(2, "0") + ' 以来收益</span><strong class="metric-value return-value spark-delta" data-account-id="' + safeAid + '">--</strong></div>'
             + "</div>"
             + '<div class="account-secondary">'
-            + '<div class="metric"><span class="metric-label">当前持仓</span><strong class="metric-value" data-field="open-positions">' + fmt(row.open_positions, 0) + "</strong></div>"
+            + '<div class="metric"><span class="metric-label">当前持仓</span><strong class="metric-value" data-field="open-positions">' + escapeHtml(fmt(row.open_positions, 0)) + "</strong></div>"
             + '<div class="metric"><span class="metric-label"><span class="ops-term" tabindex="0" data-tip="当前权益相对本账户周期最高点的回落幅度">高点回撤</span></span><strong class="metric-value current-drawdown" data-account-id="' + safeAid + '">--</strong></div>'
             + '<div class="metric"><span class="metric-label"><span class="ops-term" tabindex="0" data-tip="当前周期收益距离触发全账户组合止损还剩的百分点">距组合止损</span></span><strong class="metric-value stop-distance" data-account-id="' + safeAid + '">--</strong></div>'
             + "</div>"
@@ -923,7 +970,10 @@
       var html = managedHtml ? '<div class="managed-grid">' + managedHtml + "</div>" : "";
       html += readonlyHtml;
       cards.setAttribute("data-card-sig", nextSig);
-      cards.innerHTML = html || '<div class="task-empty"><strong>暂无账户数据</strong><span>等待账户快照写入</span></div>';
+      var fallbackHtml = (!summaryHydratedOnce && overviewErrors.summary)
+        ? '<div class="task-empty is-error"><strong>账户概览加载失败</strong><span>请点击上方“立即重试”重新同步</span></div>'
+        : '<div class="task-empty"><strong>暂无账户数据</strong><span>等待账户快照写入</span></div>';
+      cards.innerHTML = html || fallbackHtml;
       primeCurveLoad();
     }
 
@@ -952,6 +1002,16 @@
       var rows = visibleTaskAccounts(summaryRows || []);
       if (!taskBoard) return;
       renderTaskBoardHeader(summaryRows || []);
+      if (!detailsHydratedOnce) {
+        var hasErr = !!(overviewErrors.details || (!summaryHydratedOnce && overviewErrors.summary));
+        ops.patchHtmlIfChanged(
+          taskBoard,
+          hasErr
+            ? '<div class="task-empty is-error"><strong>任务执行记录加载失败</strong><span>请点击上方“立即重试”或稍后刷新</span></div>'
+            : '<div class="task-empty"><strong>正在同步任务执行记录...</strong><span>等待后端返回最新巡检详情</span></div>'
+        );
+        return;
+      }
       var html = "";
       for (var i = 0; i < rows.length; i += 1) {
         var r = rows[i] || {};
@@ -1052,21 +1112,30 @@
       }
       summaryDetailsRequestInFlight = true;
       lastDetailsFetchAt = Date.now();
-      summaryDetailsAbortController = typeof AbortController !== "undefined" ? new AbortController() : null;
+      var controller = typeof AbortController !== "undefined" ? new AbortController() : null;
+      summaryDetailsAbortController = controller;
       ops.fetchJsonWithTimeout(summaryDetailsApi + "?_=" + Date.now(), {
-        signal: summaryDetailsAbortController ? summaryDetailsAbortController.signal : null,
+        signal: controller ? controller.signal : null,
         timeoutMs: 15000
       })
         .then(function (payload) {
+          if (summaryDetailsAbortController !== controller) return;
+          summaryDetailsAbortController = null;
           summaryDetailsRequestInFlight = false;
-          detailsHydratedOnce = true;
+          if (payload && payload.ready === true) detailsHydratedOnce = true;
           setOverviewError("details", "");
           mergeSummaryDetails(payload);
         })
         .catch(function (err) {
+          if (summaryDetailsAbortController !== controller) return;
+          summaryDetailsAbortController = null;
           summaryDetailsRequestInFlight = false;
           if (err && err.name === "AbortError") return;
           setOverviewError("details", "任务与开单进度读取失败：" + (err && err.message ? err.message : "网络异常"));
+          if (!detailsHydratedOnce) {
+            renderEntryProgress();
+            renderTaskBoard();
+          }
         });
     }
 
@@ -1088,14 +1157,18 @@
       }
       summaryRequestInFlight = true;
       if (force) setOverviewRefreshBusy(true);
-      summaryAbortController = typeof AbortController !== "undefined" ? new AbortController() : null;
+      var controller = typeof AbortController !== "undefined" ? new AbortController() : null;
+      summaryAbortController = controller;
       ops.fetchJsonWithTimeout(summaryFastApi + "?_=" + Date.now(), {
-        signal: summaryAbortController ? summaryAbortController.signal : null,
+        signal: controller ? controller.signal : null,
         timeoutMs: 15000
       })
         .then(function (payload) {
+          if (summaryAbortController !== controller) return;
+          summaryAbortController = null;
           summaryRequestInFlight = false;
-          if (force) setOverviewRefreshBusy(false);
+          setOverviewRefreshBusy(false);
+          summaryHydratedOnce = true;
           setOverviewError("summary", "");
           summaryRows = mergeFastRows(payload.accounts || []);
           ops.renderNavAccounts(summaryRows);
@@ -1108,10 +1181,17 @@
           }
         })
         .catch(function (err) {
+          if (summaryAbortController !== controller) return;
+          summaryAbortController = null;
           summaryRequestInFlight = false;
-          if (force) setOverviewRefreshBusy(false);
+          setOverviewRefreshBusy(false);
           if (err && err.name === "AbortError") return;
           setOverviewError("summary", "账户总览刷新失败：" + (err && err.message ? err.message : "网络异常") + "，页面可能不是最新数据");
+          if (!summaryHydratedOnce) {
+            renderCards();
+            renderEntryProgress();
+            renderTaskBoard();
+          }
         });
     }
 
@@ -1124,6 +1204,7 @@
       batchCurvesInFlight = false;
       if (batchCurvesAbortController) {
         try { batchCurvesAbortController.abort(); } catch (e) {}
+        batchCurvesAbortController = null;
       }
       Object.keys(curveAbortControllers).forEach(function (aid) {
         try { curveAbortControllers[aid].abort(); } catch (e) {}
@@ -1412,6 +1493,31 @@
       if (healthTimer) { clearInterval(healthTimer); healthTimer = null; }
       if (countdownTimer) { clearInterval(countdownTimer); countdownTimer = null; }
       if (detailsRetryTimer) { clearTimeout(detailsRetryTimer); detailsRetryTimer = null; }
+      if (summaryAbortController) {
+        try { summaryAbortController.abort(); } catch (e) {}
+        summaryAbortController = null;
+      }
+      if (summaryDetailsAbortController) {
+        try { summaryDetailsAbortController.abort(); } catch (e) {}
+        summaryDetailsAbortController = null;
+      }
+      if (healthAbortController) {
+        try { healthAbortController.abort(); } catch (e) {}
+        healthAbortController = null;
+      }
+      if (batchCurvesAbortController) {
+        try { batchCurvesAbortController.abort(); } catch (e) {}
+        batchCurvesAbortController = null;
+      }
+      Object.keys(curveAbortControllers).forEach(function (aid) {
+        try { if (curveAbortControllers[aid]) curveAbortControllers[aid].abort(); } catch (e) {}
+        delete curveAbortControllers[aid];
+      });
+      summaryRequestInFlight = false;
+      summaryDetailsRequestInFlight = false;
+      batchCurvesInFlight = false;
+      curveInFlight = {};
+      setOverviewRefreshBusy(false);
       if (curveObserver) {
         try { curveObserver.disconnect(); } catch (e) {}
         curveObserver = null;

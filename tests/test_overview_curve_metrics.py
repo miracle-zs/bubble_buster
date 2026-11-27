@@ -73,9 +73,16 @@ assert.equal(ops.classifyDrawdownTone(-0.2, 3.5), 'ok');
 assert.equal(ops.classifyDrawdownTone(-1.4, 3.5), 'warn');
 assert.equal(ops.classifyDrawdownTone(-2.6, 3.5), 'bad');
 
+// Base prefix resolution (including /account/legacy/)
+assert.equal(ops.resolveBasePrefix('/account/legacy/'), '');
+assert.equal(ops.resolveBasePrefix('/proxy/account/legacy/'), '/proxy');
+assert.equal(ops.resolveBasePrefix('/proxy/legacy/'), '/proxy');
+assert.equal(ops.resolveBasePrefix('/proxy/accounts/comparison/'), '/proxy');
+
 // Pure overview_render.js module tests
 require({str((Path(__file__).resolve().parents[1] / "app_static/overview_render.js").resolve())!r});
 const ov = globalThis.BBOverviewRender;
+assert.equal(ov.fmt('N/A<tag>', 2), 'N/A<tag>');
 assert.equal(ov.taskStatusCls('READONLY'), 'is-readonly');
 assert.equal(ov.worstAccountTaskStatus({{ tasks: {{ entry: {{ status: 'SUCCESS' }}, manage: {{ status: 'FAILED' }} }} }}), 'FAILED');
 assert.equal(ov.anomalyTaskCount([{{ tasks: {{ a: {{ status: 'FAILED' }}, b: {{ status: 'PARTIAL' }}, c: {{ status: 'SUCCESS' }} }} }}]), 2);

@@ -757,7 +757,7 @@
     if (!raw) return "";
     var compIdx = raw.indexOf("/accounts/comparison");
     if (compIdx >= 0) return raw.slice(0, compIdx).replace(/\/+$/, "");
-    return raw.replace(/\/legacy$/, "").replace(/\/account\/[^/]+$/, "");
+    return raw.replace(/\/account\/[^/]+(?:\/legacy)?$/, "").replace(/\/legacy$/, "");
   }
 
   var navState = {

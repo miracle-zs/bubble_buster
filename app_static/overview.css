@@ -1291,6 +1291,7 @@
 .entry-progress-next-cell span:last-child { color: var(--muted); font-size: var(--text-xs); line-height: 1.35; }
 .entry-progress-next-cell.is-waiting strong { color: var(--warn-text); }
 .entry-progress-empty { padding: 20px 16px; color: var(--muted); font-size: var(--text-sm); }
+.entry-progress-empty.is-error { color: var(--bad-text); }
 
 /* Task panel */
 .task-panel { margin-top: 18px; }
@@ -1397,6 +1398,7 @@
 }
 
 .task-empty strong { color: var(--text); font-size: var(--text-base); }
+.task-empty.is-error strong { color: var(--bad-text); }
 .task-empty span { font-size: var(--text-xs); }
 
 @media (max-width: 1360px) {

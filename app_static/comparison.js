@@ -45,6 +45,8 @@
     var sortState = { key: "change_pct", dir: "desc" };
     var activeAbortController = null;
     var activeRequestToken = 0;
+    var navAccountsAbortController = null;
+    var navAccountsRequestToken = 0;
     var lastLoadedAt = 0;
     var navAccountsHydrated = initialNavAccounts.length > 0;
     var accountModesById = {};
@@ -141,8 +143,18 @@
     }
 
     function loadNavAccounts() {
-      ops.fetchJsonWithTimeout(pathPrefix + "/api/accounts/summary/fast?_=" + Date.now(), { timeoutMs: 12000 })
+      navAccountsRequestToken += 1;
+      var token = navAccountsRequestToken;
+      if (navAccountsAbortController) {
+        try { navAccountsAbortController.abort(); } catch (e) {}
+      }
+      navAccountsAbortController = typeof AbortController !== "undefined" ? new AbortController() : null;
+      ops.fetchJsonWithTimeout(pathPrefix + "/api/accounts/summary/fast?_=" + Date.now(), {
+        signal: navAccountsAbortController ? navAccountsAbortController.signal : null,
+        timeoutMs: 12000
+      })
         .then(function (data) {
+          if (token !== navAccountsRequestToken) return;
           if (!data || !Array.isArray(data.accounts) || !data.accounts.length) return;
           navAccountsHydrated = true;
           var notesChanged = false;
@@ -162,7 +174,15 @@
             renderMetricsTable(false);
           }
         })
-        .catch(function () {});
+        .catch(function (err) {
+          if (token !== navAccountsRequestToken) return;
+          if (err && err.name === "AbortError") return;
+          if (!navAccountsHydrated && payload) {
+            ops.renderNavAccounts(seriesRows().map(function (r) {
+              return { id: r.account_id, mode: accountModesById[r.account_id] || "full" };
+            }));
+          }
+        });
     }
 
     function renderSummary() {
@@ -297,9 +317,11 @@
         return (va - vb) * dirMult;
       });
 
-      var contentSig = rows.map(function (r) {
-        return String(r.account_id || "") + ":" + String(r.change_pct) + ":" + String(r.latest_equity)
+      var contentSig = enriched.map(function (item) {
+        var r = item.row;
+        return item.account_id + ":" + String(r.change_pct) + ":" + String(r.latest_equity)
           + ":" + String(r.min_change_pct) + ":" + String(r.max_change_pct)
+          + ":" + String(item.max_drawdown_pct) + ":" + String((r.points || []).length)
           + ":" + String(strategyNotesByAccount[r.account_id] || "");
       }).join("|");
 
@@ -544,10 +566,26 @@
       chart.resize();
     }
 
+    function latestSnapshotTimestamp(rows) {
+      var best = "";
+      var bestMs = -Infinity;
+      for (var i = 0; i < (rows || []).length; i += 1) {
+        var val = rows[i] && rows[i].latest_at_utc;
+        if (!val) continue;
+        var ms = ops.parseTimestampMs(val);
+        if (Number.isFinite(ms)) {
+          if (ms > bestMs) { bestMs = ms; best = val; }
+        } else if (!best || String(val) > String(best)) {
+          best = val;
+        }
+      }
+      return best;
+    }
+
     function renderMeta() {
       var rows = seriesRows().filter(function (row) { return row.status === "OK" && row.points && row.points.length; });
       var count = rows.reduce(function (total, row) { return total + row.points.length; }, 0);
-      var latest = rows.map(function (row) { return row.latest_at_utc; }).filter(Boolean).sort().slice(-1)[0];
+      var latest = latestSnapshotTimestamp(rows);
       var comparisonStart = payload && payload.comparison_start_at_utc
         ? formatLocalTime(payload.comparison_start_at_utc, true)
         : "--";
@@ -583,9 +621,21 @@
     }
 
     function ensureVisibility(rows) {
+      var validIds = {};
       rows.forEach(function (row) {
+        if (!row || !row.account_id) return;
+        validIds[row.account_id] = true;
         if (visible[row.account_id] === undefined) visible[row.account_id] = true;
       });
+      if (!rows.length) return;
+      var pruned = false;
+      Object.keys(visible).forEach(function (aid) {
+        if (!validIds[aid]) {
+          delete visible[aid];
+          pruned = true;
+        }
+      });
+      if (pruned) syncComparisonUrl();
     }
 
     function updateFreshnessStatus() {
@@ -594,7 +644,7 @@
         setFreshnessPill("当前窗口无快照", "is-warn");
         return;
       }
-      var latest = rows.map(function (row) { return row.latest_at_utc; }).filter(Boolean).sort().slice(-1)[0];
+      var latest = latestSnapshotTimestamp(rows);
       var freshness = ops.evaluateDataFreshness(latest, { warnSec: 180, staleSec: 900 });
       ops.applyFreshnessPill(el("freshness-pill"), el("status-text"), freshness);
     }
@@ -629,6 +679,19 @@
       setRefreshBusy(true);
       setFreshnessPill("正在读取快照", "is-warn");
       setNotice("");
+      if (!payload) {
+        var chartElement = el("equity-chart");
+        var emptyElement = el("chart-empty");
+        var emptyText = el("chart-empty-text");
+        var emptyAction = el("chart-empty-action");
+        if (chartElement) chartElement.style.display = "none";
+        if (emptyElement) {
+          emptyElement.classList.remove("is-error");
+          emptyElement.style.display = "flex";
+        }
+        if (emptyText) emptyText.textContent = "正在加载对比曲线...";
+        if (emptyAction) emptyAction.hidden = true;
+      }
       var query = range === "all" ? "all_time=true" : "window_hours=" + encodeURIComponent(range);
       ops.fetchJsonWithTimeout(
         pathPrefix + "/api/accounts/equity-comparison?" + query + "&curve_points=600&include_events=false&_=" + Date.now(),
@@ -644,8 +707,12 @@
           payload = nextPayload || {};
           ensureVisibility(seriesRows());
           if (!navAccountsHydrated) {
-            ops.renderNavAccounts(seriesRows());
+            ops.renderNavAccounts(seriesRows().map(function (r) {
+              return { id: r.account_id, mode: accountModesById[r.account_id] || "full" };
+            }));
           }
+          var emptyEl = el("chart-empty");
+          if (emptyEl) emptyEl.classList.remove("is-error");
           render();
           updateFreshnessStatus();
         })
@@ -654,7 +721,27 @@
           if (error && error.name === "AbortError") return;
           setRefreshBusy(false);
           setFreshnessPill("读取失败", "is-stale");
-          setNotice("账户对比数据读取失败：" + (error && error.message ? error.message : "网络异常"));
+          var errMsg = error && error.message ? error.message : "网络异常";
+          setNotice("账户对比数据读取失败：" + errMsg);
+          if (!payload) {
+            var chartNode = el("equity-chart");
+            var emptyNode = el("chart-empty");
+            var emptyTextNode = el("chart-empty-text");
+            var emptyActionNode = el("chart-empty-action");
+            if (chartNode) chartNode.style.display = "none";
+            if (emptyNode) {
+              emptyNode.classList.add("is-error");
+              emptyNode.style.display = "flex";
+            }
+            if (emptyTextNode) emptyTextNode.textContent = "对比曲线加载失败，请点击“立即重试”";
+            if (emptyActionNode) emptyActionNode.hidden = true;
+            var metricsTable = el("comparison-metrics-table");
+            var metricsBody = el("comparison-metrics-body");
+            if (metricsTable) metricsTable.classList.add("is-empty");
+            if (metricsBody) {
+              ops.patchHtmlIfChanged(metricsBody, '<tr><td colspan="6" class="table-empty-cell bad">指标数据加载失败，请点击“立即重试”</td></tr>');
+            }
+          }
         });
     }
 

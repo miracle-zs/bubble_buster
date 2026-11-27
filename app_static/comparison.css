@@ -275,6 +275,10 @@
   text-align: center;
 }
 
+.chart-empty.is-error {
+  color: var(--bad-text);
+}
+
 .legend {
   display: flex;
   flex-wrap: wrap;
@@ -538,6 +542,10 @@
   padding: 24px 12px;
   text-align: center;
   color: var(--muted);
+}
+
+.table-empty-cell.bad {
+  color: var(--bad-text);
 }
 
 .footnote {

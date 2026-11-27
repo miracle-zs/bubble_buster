@@ -677,6 +677,7 @@ def create_app(config_path: Optional[str] = None) -> FastAPI:
             (
                 {"id": aid, "mode": ctx.provider.account_modes.get(aid, "full")}
                 for aid in ctx.provider.overview_account_ids
+                if str(ctx.provider.account_modes.get(aid, "full")).lower() != "loss_cut_only"
             ),
             key=lambda item: (1 if str(item["mode"]).lower() == "readonly" else 0, item["id"]),
         )

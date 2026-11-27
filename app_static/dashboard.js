@@ -15,9 +15,9 @@
     var accountStrategyNote = String(cfg.strategyNote || "");
     var navAccounts = Array.isArray(cfg.navAccounts) ? cfg.navAccounts : [];
     var portfolioStopEnabled = !!cfg.portfolioStopEnabled;
-    var portfolioStopPct = Number(cfg.portfolioStopPct) || 3.5;
-    var portfolioStopHour = Number(cfg.portfolioStopHour) || 0;
-    var portfolioStopMinute = Number(cfg.portfolioStopMinute) || 0;
+    var portfolioStopPct = ops.toNum(cfg.portfolioStopPct) !== null ? ops.toNum(cfg.portfolioStopPct) : 3.5;
+    var portfolioStopHour = ops.toNum(cfg.portfolioStopHour) !== null ? ops.toNum(cfg.portfolioStopHour) : 8;
+    var portfolioStopMinute = ops.toNum(cfg.portfolioStopMinute) !== null ? ops.toNum(cfg.portfolioStopMinute) : 0;
 
     function detectMobile() {
       return !!(window.matchMedia && window.matchMedia("(max-width: 900px)").matches);
@@ -56,6 +56,7 @@
     var detailsLoaded = false;
     var detailsInFlight = false;
     var detailsRefreshPending = false;
+    var detailsRequestToken = 0;
     var logsLoadedOnce = false;
     var manualRefreshPendingCount = 0;
     var cachedPositions = [];
@@ -156,9 +157,9 @@
     function setDetailError(slot, message) {
       detailErrors[slot] = message || "";
       if (!el.detailAlert || !el.detailAlertText) return;
-      var active = detailErrors.core || detailErrors.curve || detailErrors.details;
-      if (active) {
-        el.detailAlertText.textContent = active;
+      var activeList = [detailErrors.core, detailErrors.curve, detailErrors.details].filter(Boolean);
+      if (activeList.length) {
+        el.detailAlertText.textContent = activeList.join("；");
         el.detailAlert.hidden = false;
       } else {
         el.detailAlertText.textContent = "";
@@ -329,6 +330,10 @@
       })
         .then(function (data) {
           if (fetchControllers[reqKey] === reqState) delete fetchControllers[reqKey];
+          if (reqState.superseded) {
+            callback(null, null, true);
+            return;
+          }
           callback(null, data);
         })
         .catch(function (err) {
@@ -435,11 +440,12 @@
       }
     }
 
-    function showChartEmpty(message) {
+    function showChartEmpty(message, isError) {
       if (el.chartSparseHint) el.chartSparseHint.hidden = true;
       if (el.chartResetZoomBtn) el.chartResetZoomBtn.hidden = true;
       if (!el.chartEmpty) return;
       el.chartEmpty.textContent = message || "暂无曲线";
+      el.chartEmpty.classList.toggle("is-error", !!isError);
       el.chartEmpty.hidden = false;
     }
 
@@ -468,11 +474,15 @@
 
       var raw = curve || [];
       var stop = latestData && latestData.portfolio_loss_cut;
-      var stopSig = stop ? (String(stop.status || "") + ":" + String(stop.baseline_equity || "") + ":" + String(stop.current_return_pct || "")) : "";
+      var stopSig = stop
+        ? (String(stop.status || "") + ":" + (stop.baseline_equity != null ? String(stop.baseline_equity) : "") + ":" + (stop.loss_pct != null ? String(stop.loss_pct) : "") + ":" + (stop.current_return_pct != null ? String(stop.current_return_pct) : ""))
+        : "";
       var firstT = raw.length ? String((raw[0] && raw[0].t) || "") : "";
       var lastT = raw.length ? String((raw[raw.length - 1] && raw[raw.length - 1].t) || "") : "";
-      var lastEq = raw.length ? String((raw[raw.length - 1] && raw[raw.length - 1].equity) || "") : "";
-      var nextSig = currentCurveTab + "|" + currentWindowHours + "|" + raw.length + "|" + firstT + "|" + lastT + "|" + lastEq + "|" + stopSig;
+      var lastEq = raw.length && raw[raw.length - 1] && raw[raw.length - 1].equity != null
+        ? String(raw[raw.length - 1].equity)
+        : "";
+      var nextSig = currentCurveTab + "|" + currentWindowHours + "|" + displayTimeZone + "|" + (portfolioStopEnabled ? "1" : "0") + "|" + raw.length + "|" + firstT + "|" + lastT + "|" + lastEq + "|" + stopSig;
       if (!forceRebuild && nextSig === lastChartSignature && equityChart) {
         return;
       }
@@ -502,7 +512,7 @@
         var equity = ops.toNum(item.equity);
         var tMs = ops.parseTimestampMs(item.t);
         if (equity === null || !Number.isFinite(tMs)) continue;
-        seriesData.push([tMs, equity, ops.toNum(item.cum_pnl) || 0, ops.toNum(item.drawdown_pct) || 0]);
+        seriesData.push([tMs, equity, ops.toNum(item.cum_pnl), ops.toNum(item.drawdown_pct)]);
       }
 
       if (!seriesData.length) {
@@ -519,12 +529,13 @@
       var theme = ops.getChartTheme();
       var firstEq = seriesData[0][1];
       var lastEqVal = seriesData[seriesData.length - 1][1];
-      var stopStatus = stop ? String(stop.status || "").toUpperCase() : "";
-      var backendReturn = stop ? ops.toNum(stop.current_return_pct) : null;
+      var isStrategyCurve = accountMode !== "readonly" && currentCurveTab === "strategy";
+      var stopStatus = isStrategyCurve && stop ? String(stop.status || "").toUpperCase() : "";
+      var backendReturn = isStrategyCurve && stop ? ops.toNum(stop.current_return_pct) : null;
       var effectiveReturn = seriesData.length <= 1 && backendReturn !== null
         ? backendReturn
         : (firstEq > 0 ? ((lastEqVal - firstEq) / firstEq) * 100 : 0);
-      var tone = ops.classifyReturnTone(effectiveReturn, accountMode === "readonly" ? null : portfolioStopPct, stopStatus);
+      var tone = ops.classifyReturnTone(effectiveReturn, isStrategyCurve ? portfolioStopPct : null, stopStatus);
       var isNegative = tone === "bad";
       var lineColor = isNegative ? theme.bad : theme.ok;
       var areaTop = isNegative ? theme.areaBad : theme.areaOk;
@@ -658,23 +669,44 @@
         ? ((data && data.strategy_equity_curve) || (data && data.balance_curve) || [])
         : activeCurve(data || {});
 
-      var calculated = ops.computeCycleRiskMetrics(
-        sourceCurve,
-        accountMode,
-        stop,
-        { stopHour: portfolioStopHour, stopMinute: portfolioStopMinute, stopPct: portfolioStopPct },
-        data && data.balance_curve_cycle_baseline
-      );
-      if (calculated) riskSnapshot = calculated;
-      else riskSnapshot = null;
+      var metrics = {};
+      var currentReturn = null;
+      var currentDrawdown = null;
+      var stopStatus = "";
+      if (!useCycle) {
+        var validPts = [];
+        for (var pIdx = 0; pIdx < sourceCurve.length; pIdx += 1) {
+          var eqNum = ops.toNum(sourceCurve[pIdx] && sourceCurve[pIdx].equity);
+          if (eqNum !== null && eqNum > 0) validPts.push(eqNum);
+        }
+        if (validPts.length >= 2) {
+          var winFirst = validPts[0];
+          var winLast = validPts[validPts.length - 1];
+          var winPeak = validPts[0];
+          for (var wIdx = 1; wIdx < validPts.length; wIdx += 1) {
+            if (validPts[wIdx] > winPeak) winPeak = validPts[wIdx];
+          }
+          currentReturn = ((winLast - winFirst) / winFirst) * 100;
+          currentDrawdown = winPeak > 0 ? ((winLast - winPeak) / winPeak) * 100 : 0;
+        }
+        riskSnapshot = null;
+      } else {
+        var calculated = ops.computeCycleRiskMetrics(
+          sourceCurve,
+          accountMode,
+          stop,
+          { stopHour: portfolioStopHour, stopMinute: portfolioStopMinute, stopPct: portfolioStopPct },
+          data && data.balance_curve_cycle_baseline
+        );
+        riskSnapshot = calculated || null;
+        metrics = calculated || {};
+        var backendReturn = stop ? ops.toNum(stop.current_return_pct) : null;
+        currentReturn = backendReturn !== null ? backendReturn : ops.toNum(metrics.currentReturnPct);
+        currentDrawdown = ops.toNum(metrics.currentDrawdownPct);
+        stopStatus = stop ? String(stop.status || "").toUpperCase() : "";
+      }
 
-      var metrics = calculated || {};
-      var backendReturn = stop ? ops.toNum(stop.current_return_pct) : null;
-      var currentReturn = backendReturn !== null ? backendReturn : ops.toNum(metrics.currentReturnPct);
-      var currentDrawdown = ops.toNum(metrics.currentDrawdownPct);
-      var stopStatus = stop ? String(stop.status || "").toUpperCase() : "";
-
-      var returnCls = ops.classifyReturnTone(currentReturn, accountMode === "readonly" ? null : portfolioStopPct, stopStatus);
+      var returnCls = ops.classifyReturnTone(currentReturn, useCycle ? portfolioStopPct : null, stopStatus);
       var drawdownCls = ops.classifyDrawdownTone(currentDrawdown, portfolioStopPct);
 
       setSummaryMetric(el.cycleReturn, currentReturn === null ? "--" : ops.fmtSigned(currentReturn, 2) + "%", returnCls);
@@ -771,6 +803,14 @@
           var coreMsg = "账户状态刷新失败：" + (err && err.message ? err.message : String(err));
           setText(el.meta, coreMsg);
           setDetailError("core", coreMsg);
+          if (!latestData) {
+            if (el.freshnessText) el.freshnessText.textContent = "读取失败";
+            if (el.freshnessPill) el.freshnessPill.className = "ops-freshness is-stale";
+            if (el.serviceState) {
+              el.serviceState.textContent = "读取失败";
+              el.serviceState.className = "command-cell-value bad";
+            }
+          }
           return;
         }
         setDetailError("core", "");
@@ -822,6 +862,10 @@
         if (aborted) return;
         if (err) {
           if (el.curveTitle) el.curveTitle.textContent = "权益曲线（加载失败，请稍后重试）";
+          if (!latestData || !activeCurve(latestData).length) {
+            if (equityChart) equityChart.clear();
+            showChartEmpty("权益曲线读取失败，请稍后重试", true);
+          }
           setDetailError("curve", "权益曲线读取失败：" + (err && err.message ? err.message : String(err)));
           return;
         }
@@ -831,14 +875,21 @@
       });
     }
 
+    function compareNullableNumbers(aVal, bVal, desc) {
+      if (aVal === null && bVal === null) return 0;
+      if (aVal === null) return 1;
+      if (bVal === null) return -1;
+      return desc ? (bVal - aVal) : (aVal - bVal);
+    }
+
     function renderPositionsTable() {
       var sorted = cachedPositions.slice();
       if (positionSortKey === "pnl_asc") {
-        sorted.sort(function (a, b) { return (ops.toNum(a.unrealized_pnl) || 0) - (ops.toNum(b.unrealized_pnl) || 0); });
+        sorted.sort(function (a, b) { return compareNullableNumbers(ops.toNum(a.unrealized_pnl), ops.toNum(b.unrealized_pnl), false); });
       } else if (positionSortKey === "pnl_desc") {
-        sorted.sort(function (a, b) { return (ops.toNum(b.unrealized_pnl) || 0) - (ops.toNum(a.unrealized_pnl) || 0); });
+        sorted.sort(function (a, b) { return compareNullableNumbers(ops.toNum(a.unrealized_pnl), ops.toNum(b.unrealized_pnl), true); });
       } else if (positionSortKey === "notional_desc") {
-        sorted.sort(function (a, b) { return (ops.toNum(b.notional) || 0) - (ops.toNum(a.notional) || 0); });
+        sorted.sort(function (a, b) { return compareNullableNumbers(ops.toNum(a.notional), ops.toNum(b.notional), true); });
       }
 
       renderRows(el.positionsTable, el.positionsBody, sorted, function (p) {
@@ -908,6 +959,29 @@
       fullLoadedOnce = true;
     }
 
+    function setDetailsErrorRows(message) {
+      var targets = [
+        [el.positionsTable, el.positionsBody, 7, "持仓明细"],
+        [el.runsTable, el.runsBody, 4, "运行记录"],
+        [el.eventsTable, el.eventsBody, 6, "订单事件"],
+        [el.cashflowTable, el.cashflowBody, 6, "资金流水"],
+        [el.unpricedTable, el.unpricedBody, 6, "待核对记录"]
+      ];
+      for (var i = 0; i < targets.length; i += 1) {
+        var tbl = targets[i][0];
+        var body = targets[i][1];
+        var cols = targets[i][2];
+        var label = targets[i][3];
+        if (tbl) tbl.classList.add("is-empty");
+        if (body) {
+          ops.patchHtmlIfChanged(body, '<tr><td colspan="' + cols + '" class="empty-row bad">' + ops.escapeHtml(label) + "加载失败，请稍后重试</td></tr>");
+        }
+      }
+      if (el.logTail && !logsLoadedOnce) {
+        el.logTail.textContent = message || "策略日志加载失败，请稍后重试";
+      }
+    }
+
     function refreshDetails(options) {
       var opts = options || {};
       var trackManual = !!opts.manual;
@@ -919,17 +993,16 @@
         if (trackManual) finishManualRefreshSlot();
         return;
       }
+      detailsRequestToken += 1;
+      var requestToken = detailsRequestToken;
       detailsInFlight = true;
       detailsRefreshPending = false;
       fetchDashboard(api + "/details", { kind: "details", includeLogs: includeLogs }, function (err, d, aborted) {
-        detailsInFlight = false;
+        if (requestToken === detailsRequestToken) detailsInFlight = false;
         if (trackManual) finishManualRefreshSlot();
-        if (aborted) return;
+        if (aborted || requestToken !== detailsRequestToken) return;
         if (err) {
-          if (el.positionsTable) el.positionsTable.classList.add("is-empty");
-          if (el.positionsBody) {
-            ops.patchHtmlIfChanged(el.positionsBody, '<tr><td colspan="7" class="empty-row bad">详情加载失败，请稍后重试</td></tr>');
-          }
+          if (!detailsLoaded) setDetailsErrorRows("策略日志加载失败，请稍后重试");
           setDetailError("details", "持仓与活动明细读取失败：" + (err && err.message ? err.message : String(err)));
           return;
         }
@@ -947,7 +1020,10 @@
         if (panel) targets.push(panel);
       }
 
-      setTimeout(function () { if (!detailsLoaded) refreshDetails(); }, isMobile ? 350 : 200);
+      var fallbackTimer = setTimeout(function () {
+        fallbackTimer = 0;
+        if (!detailsLoaded && !detailsInFlight) refreshDetails();
+      }, isMobile ? 350 : 200);
       if (!targets.length || !window.IntersectionObserver) return;
 
       var loaded = false;
@@ -956,6 +1032,10 @@
         for (var i = 0; i < entries.length; i += 1) {
           if (entries[i].isIntersecting) {
             loaded = true;
+            if (fallbackTimer) {
+              clearTimeout(fallbackTimer);
+              fallbackTimer = 0;
+            }
             refreshDetails();
             obs.disconnect();
             return;
@@ -1181,6 +1261,18 @@
     function stopPolling(disposeChart) {
       if (coreTimer) { clearInterval(coreTimer); coreTimer = null; }
       if (curveTimer) { clearInterval(curveTimer); curveTimer = null; }
+      Object.keys(fetchControllers).forEach(function (reqKey) {
+        var state = fetchControllers[reqKey];
+        if (state && state.controller) {
+          state.superseded = true;
+          try { state.controller.abort(); } catch (e) {}
+        }
+        delete fetchControllers[reqKey];
+      });
+      detailsInFlight = false;
+      detailsRefreshPending = false;
+      manualRefreshPendingCount = 0;
+      setDetailRefreshBusy(false);
       if (disposeChart) {
         if (chartResizeObs) {
           try { chartResizeObs.disconnect(); } catch (e) {}

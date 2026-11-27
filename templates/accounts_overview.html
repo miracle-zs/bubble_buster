@@ -41,7 +41,7 @@ __OPS_TOPBAR__
       <button id="overview-anomaly-btn" class="command-item command-anomaly command-item-btn" type="button" aria-label="跳转到异常与任务并筛选仅异常">
         <span class="command-label">任务异常</span>
         <span class="command-anomaly-badge">
-          <strong id="overview-anomaly-count" class="command-value">0</strong>
+          <strong id="overview-anomaly-count" class="command-value">--</strong>
           <span class="command-anomaly-cue" aria-hidden="true">查看</span>
         </span>
       </button>
@@ -69,7 +69,7 @@ __OPS_TOPBAR__
       </div>
     </div>
 
-    <section id="cards" class="accounts-area" aria-label="账户概览"></section>
+    <section id="cards" class="accounts-area" aria-label="账户概览"><div class="task-empty"><strong>正在加载账户概览...</strong><span>正在读取最新账户快照</span></div></section>
 
     <section class="entry-progress-panel" aria-labelledby="entry-progress-heading">
       <div class="entry-progress-heading">
@@ -87,7 +87,7 @@ __OPS_TOPBAR__
         </div>
       </div>
       <div class="entry-progress-shell">
-        <div id="entry-progress-board"></div>
+        <div id="entry-progress-board"><div class="entry-progress-empty">正在同步今日开单进度...</div></div>
       </div>
     </section>
 
@@ -105,7 +105,7 @@ __OPS_TOPBAR__
           </div>
         </div>
       </div>
-      <div id="task-board" class="task-board-list"></div>
+      <div id="task-board" class="task-board-list"><div class="task-empty"><strong>正在同步任务执行记录...</strong><span>等待后端返回最新巡检详情</span></div></div>
     </section>
   </main>
 
