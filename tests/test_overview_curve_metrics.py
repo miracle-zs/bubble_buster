@@ -53,5 +53,15 @@ const theme1 = ops.getChartTheme();
 const theme2 = ops.getChartTheme();
 assert.strictEqual(theme1, theme2);
 assert.equal(ops.formatBeijingTime('2026-10-09T00:01:40Z', {{ withYear: true, withSeconds: true }}), '2026-10-09 08:01:40');
+
+// Carried-forward single point yields realPointCount === 0 (prevents synthetic crash ramp)
+const carried = ops.computeCycleRiskMetrics([{{ t: '2026-10-09T00:01:40Z', equity: 276.56, carried_forward: true }}], 'full', stop, cfg);
+assert.equal(carried.realPointCount, 0);
+assert.equal(result.realPointCount, 1);
+
+// Wallet source localization
+assert.equal(ops.formatWalletSource('DB'), '本地快照');
+assert.equal(ops.formatWalletSource('API'), '交易所实时');
+assert.equal(ops.formatWalletSource(''), '--');
 """
         subprocess.run(["node", "-e", script], check=True, capture_output=True, text=True)

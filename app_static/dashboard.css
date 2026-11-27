@@ -123,7 +123,7 @@
   white-space: nowrap;
 }
 
-/* KPI summary rail (1px grid gap eliminates :nth-child border bugs when metrics hide) */
+/* KPI summary rail (overflow: clip keeps clean corners across responsive wraps & hidden cells) */
 .summary-rail {
   display: grid;
   grid-template-columns: 1.3fr repeat(3, minmax(0, 1fr)) 0.78fr 0.95fr;
@@ -132,6 +132,7 @@
   border: 1px solid var(--border);
   border-radius: var(--radius);
   background: var(--border-subtle);
+  overflow: clip;
 }
 
 .summary-rail.is-readonly-rail {
@@ -147,14 +148,6 @@
   flex-direction: column;
   justify-content: center;
   gap: 5px;
-}
-
-.summary-metric:first-child {
-  border-radius: calc(var(--radius) - 1px) 0 0 calc(var(--radius) - 1px);
-}
-
-.summary-metric:last-child {
-  border-radius: 0 calc(var(--radius) - 1px) calc(var(--radius) - 1px) 0;
 }
 
 .summary-metric[hidden] {
@@ -252,29 +245,11 @@
 }
 
 .table-note-hint summary {
-  display: inline-flex;
-  align-items: center;
-  min-height: var(--target-size);
   color: var(--muted);
-  cursor: pointer;
-  list-style: none;
-}
-
-.table-note-hint summary::-webkit-details-marker {
-  display: none;
 }
 
 .table-note-hint summary:hover {
   color: var(--text-secondary);
-}
-
-.table-note-hint summary::before {
-  content: "+ ";
-  color: var(--accent);
-}
-
-.table-note-hint[open] summary::before {
-  content: "− ";
 }
 
 .table-note-hint p {
@@ -331,10 +306,8 @@
   flex-wrap: wrap;
   gap: 8px 12px;
   margin-bottom: 10px;
-  padding: 8px 12px;
-  border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
-  background: var(--surface-subtle);
+  padding: 0 0 10px;
+  border-bottom: 1px solid var(--border-subtle);
   color: var(--text-secondary);
   font-size: var(--text-xs);
 }
@@ -462,32 +435,9 @@
 }
 
 .risk-meter-track {
-  position: relative;
   height: 7px;
   margin-top: 8px;
-  border: 1px solid var(--border);
-  border-radius: var(--radius-pill);
-  background: var(--surface-inset);
-  overflow: hidden;
 }
-
-.risk-meter-fill {
-  display: block;
-  width: 100%;
-  height: 100%;
-  background: var(--ok);
-  transform-origin: left center;
-  transform: scaleX(var(--meter-scale, 0));
-}
-
-@media (prefers-reduced-motion: no-preference) {
-  .risk-meter-fill {
-    transition: transform 180ms ease;
-  }
-}
-
-.risk-meter-fill.warn { background: var(--warn); }
-.risk-meter-fill.bad { background: var(--bad); }
 
 .risk-meter-scale {
   display: flex;
@@ -501,18 +451,16 @@
   display: grid;
   grid-template-columns: 1fr 1fr;
   gap: 1px;
-  margin-top: 18px;
-  border: 1px solid var(--border-subtle);
-  border-radius: var(--radius-sm);
+  margin: 18px -16px -16px;
+  border-top: 1px solid var(--border-subtle);
   background: var(--border-subtle);
-  overflow: hidden;
 }
 
 .risk-fact {
   min-width: 0;
   min-height: 64px;
-  padding: 10px 12px;
-  background: var(--surface-inset);
+  padding: 12px 16px;
+  background: var(--surface);
 }
 
 .risk-fact-label {
@@ -536,6 +484,7 @@
 
 /* Readonly 30d Trade Stats */
 .readonly-hero-pnl {
+  display: block;
   margin-top: 4px;
   font-family: var(--font-mono);
   font-variant-numeric: tabular-nums;
@@ -870,25 +819,8 @@
 }
 
 .row-details summary {
-  display: inline-flex;
-  align-items: center;
-  min-height: var(--target-size);
   color: var(--accent-text);
   font-size: var(--text-xs);
-  cursor: pointer;
-  list-style: none;
-}
-
-.row-details summary::-webkit-details-marker {
-  display: none;
-}
-
-.row-details summary::before {
-  content: "+ ";
-}
-
-.row-details[open] summary::before {
-  content: "− ";
 }
 
 .raw-message {
@@ -932,8 +864,26 @@
   display: none;
 }
 
-.diagnostics-panel > summary .surface-count {
+.diagnostics-panel > summary .diagnostics-badge-group {
   margin-left: auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+  white-space: nowrap;
+}
+
+.diagnostics-badge-label {
+  color: var(--muted);
+  font-size: var(--text-xs);
+  font-weight: 500;
+  white-space: nowrap;
+}
+
+.surface-count.warn {
+  border-color: var(--warn-border);
+  background: var(--warn-bg);
+  color: var(--warn-text);
 }
 
 .diagnostics-panel > summary::after {
@@ -941,6 +891,8 @@
   color: var(--muted);
   font-size: var(--text-xs);
   font-weight: 600;
+  flex-shrink: 0;
+  white-space: nowrap;
 }
 
 .diagnostics-panel[open] > summary::after {
@@ -1028,6 +980,9 @@
   .summary-rail.is-readonly-rail {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
+  .summary-rail.is-readonly-rail .summary-metric.primary {
+    grid-column: 1 / -1;
+  }
   .summary-metric {
     min-height: 82px;
   }
@@ -1104,17 +1059,13 @@
 
 @media (forced-colors: active) {
   .tab-btn.active,
-  .activity-tab.active,
-  .risk-meter-fill {
+  .activity-tab.active {
     border-color: CanvasText;
   }
   .tab-btn.active {
     outline: 2px solid Highlight;
   }
   .activity-tab.active::after {
-    background: Highlight;
-  }
-  .risk-meter-fill {
     background: Highlight;
   }
 }

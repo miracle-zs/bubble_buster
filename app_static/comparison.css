@@ -351,11 +351,30 @@
 
 /* Quantitative Comparison Matrix */
 .metrics-panel {
+  position: relative;
   margin-top: 14px;
   border: 1px solid var(--border);
   border-radius: var(--radius);
   background: var(--surface);
   overflow: hidden;
+}
+
+.metrics-panel::after {
+  content: "";
+  position: absolute;
+  top: 58px;
+  right: 0;
+  bottom: 0;
+  width: 24px;
+  pointer-events: none;
+  background: linear-gradient(to right, rgba(11, 14, 20, 0), var(--surface-inset));
+  opacity: 0;
+  z-index: 3;
+  transition: opacity 150ms ease;
+}
+
+.metrics-panel.has-table-overflow::after {
+  opacity: 1;
 }
 
 .metrics-panel-head {

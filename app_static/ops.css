@@ -101,7 +101,7 @@
   --text-base: 0.875rem;  /* 14px — body copy */
   --text-md: 1.0625rem;   /* 17px — section titles, card headings */
   --text-lg: 1.375rem;    /* 22px — page titles, primary KPIs */
-  --text-xl: 1.625rem;    /* 26px — hero equity figures */
+  --text-xl: 1.75rem;     /* 28px — hero equity figures (1.27x step over lg) */
 
   --container-max: 1680px;
 }
@@ -116,6 +116,10 @@
 *::before,
 *::after {
   box-sizing: border-box;
+}
+
+[hidden] {
+  display: none !important;
 }
 
 html {
@@ -324,17 +328,31 @@ summary {
   display: none;
 }
 
+.ops-nav-wrap::before,
 .ops-nav-wrap::after {
   content: "";
   position: absolute;
   top: 0;
-  right: 0;
   bottom: 0;
   width: 28px;
   pointer-events: none;
-  background: linear-gradient(to right, rgba(16, 20, 28, 0), var(--surface));
   opacity: 0;
+  z-index: 2;
   transition: opacity 150ms ease;
+}
+
+.ops-nav-wrap::before {
+  left: 0;
+  background: linear-gradient(to left, rgba(16, 20, 28, 0), var(--surface));
+}
+
+.ops-nav-wrap::after {
+  right: 0;
+  background: linear-gradient(to right, rgba(16, 20, 28, 0), var(--surface));
+}
+
+.ops-nav-wrap.has-overflow-left::before {
+  opacity: 1;
 }
 
 .ops-nav-wrap.has-overflow-right::after {
@@ -603,28 +621,26 @@ summary {
   color: var(--accent-text);
 }
 
-/* Inline Domain Term Tooltip (accessible hover + keyboard focus, zero JS) */
+/* Inline Domain Term Trigger & Fixed Top-Layer Portal Tooltip (zero overflow/clipping, ARIA-wired) */
 .ops-term {
-  position: relative;
   display: inline-block;
   border-bottom: 1px dotted var(--border-strong);
   cursor: help;
 }
 
 .ops-term:hover,
-.ops-term:focus-visible {
+.ops-term:focus-visible,
+.ops-term.is-tip-open {
   color: var(--text-secondary);
   border-bottom-color: var(--accent);
 }
 
-.ops-term[data-tip]::after {
-  content: attr(data-tip);
-  position: absolute;
+.ops-tooltip-portal {
+  position: fixed;
+  top: 0;
   left: 0;
-  bottom: calc(100% + 6px);
-  z-index: 60;
-  width: max-content;
-  max-width: min(260px, 72vw);
+  z-index: 120;
+  max-width: min(260px, calc(100vw - 24px));
   padding: 6px 9px;
   border: 1px solid var(--border-strong);
   border-radius: var(--radius-sm);
@@ -637,21 +653,152 @@ summary {
   white-space: normal;
   text-align: left;
   box-shadow: var(--shadow-overlay);
-  opacity: 0;
-  visibility: hidden;
   pointer-events: none;
-  transition: opacity 120ms ease;
 }
 
-.ops-term[data-tip]:hover::after,
-.ops-term[data-tip]:focus-visible::after {
-  opacity: 1;
-  visibility: visible;
+/* Native semantic <progress> primitive (separate vendor pseudo-element rules per modern web guidance) */
+.ops-progress {
+  appearance: none;
+  display: block;
+  width: 100%;
+  height: 6px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-pill);
+  background: var(--surface-inset);
+  overflow: clip;
+  --progress-fill: var(--ok);
 }
 
-.ops-term.tip-below[data-tip]::after {
-  bottom: auto;
+.ops-progress.status-ok,
+.ops-progress.ok {
+  --progress-fill: var(--ok);
+}
+
+.ops-progress.status-warn,
+.ops-progress.warn {
+  --progress-fill: var(--warn);
+}
+
+.ops-progress.status-bad,
+.ops-progress.bad {
+  --progress-fill: var(--bad);
+}
+
+.ops-progress::-webkit-progress-bar {
+  background: transparent;
+}
+
+.ops-progress::-webkit-progress-value {
+  background: var(--progress-fill);
+  border-radius: var(--radius-pill);
+}
+
+.ops-progress::-moz-progress-bar {
+  background: var(--progress-fill);
+  border-radius: var(--radius-pill);
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .ops-progress::-webkit-progress-value {
+    transition: inline-size 180ms ease;
+  }
+  .ops-progress::-moz-progress-bar {
+    transition: inline-size 180ms ease;
+  }
+}
+
+/* Shared Disclosure Primitive (details > summary +/- toggle) */
+:is(.ops-disclosure, .table-note-hint, .row-details, .entry-rule-hint, .task-error-details) summary {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  min-height: var(--target-size);
+  cursor: pointer;
+  list-style: none;
+}
+
+:is(.ops-disclosure, .table-note-hint, .row-details, .entry-rule-hint, .task-error-details) summary::-webkit-details-marker {
+  display: none;
+}
+
+:is(.ops-disclosure, .table-note-hint, .row-details, .entry-rule-hint, .task-error-details) summary::before {
+  content: "+ ";
+  color: var(--accent);
+}
+
+:is(.ops-disclosure, .table-note-hint, .row-details, .entry-rule-hint, .task-error-details)[open] summary::before {
+  content: "− ";
+}
+
+/* Topbar Hotkey Help Button & Popover */
+.ops-hotkey-wrap {
+  flex: 0 0 auto;
+  position: relative;
+}
+
+.ops-hotkey-btn {
+  min-width: var(--target-size);
+  min-height: var(--target-size);
+  padding: 0 9px;
+  font-family: var(--font-mono);
+  font-weight: 700;
+}
+
+.ops-hotkey-popover {
+  position: absolute;
   top: calc(100% + 6px);
+  right: 0;
+  z-index: 90;
+  padding: 14px 16px;
+  width: min(300px, calc(100vw - 24px));
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius);
+  background: var(--surface-elevated);
+  color: var(--text);
+  box-shadow: var(--shadow-overlay);
+}
+
+.ops-hotkey-popover[hidden] {
+  display: none;
+}
+
+.ops-hotkey-title {
+  margin: 0 0 10px;
+  font-size: var(--text-sm);
+  font-weight: 700;
+  color: var(--text);
+}
+
+.ops-hotkey-list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: grid;
+  gap: 8px;
+}
+
+.ops-hotkey-list li {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  font-size: var(--text-xs);
+  color: var(--text-secondary);
+}
+
+.ops-hotkey-list kbd {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 24px;
+  padding: 2px 6px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  background: var(--surface-inset);
+  color: var(--text);
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  font-weight: 700;
 }
 
 /* Shared Strategy Tag Primitive */
@@ -660,15 +807,15 @@ summary {
 .summary-strategy-tag {
   display: inline-flex;
   align-items: center;
-  min-height: 24px;
-  padding: 2px 8px;
+  min-height: 26px;
+  padding: 4px 8px;
   border: 1px solid var(--border);
   border-radius: var(--radius-sm);
   background: var(--surface-subtle);
   color: var(--text-secondary);
   font-size: var(--text-xs);
   font-weight: 600;
-  line-height: 1.3;
+  line-height: 1.35;
   white-space: nowrap;
 }
 
@@ -912,5 +1059,9 @@ summary {
   .ops-btn.active,
   .ops-seg-btn.active {
     outline: 2px solid Highlight;
+  }
+  .ops-progress {
+    border-color: CanvasText;
+    --progress-fill: Highlight;
   }
 }

@@ -360,11 +360,37 @@
     return node;
   }
 
+  var announceTimer = 0;
   function announceStatus(message) {
     var node = ensureLiveAnnouncer();
     if (!node || !message) return;
+    var text = String(message);
     node.textContent = "";
-    node.textContent = String(message);
+    if (announceTimer) {
+      if (typeof cancelAnimationFrame === "function") cancelAnimationFrame(announceTimer);
+      else clearTimeout(announceTimer);
+      announceTimer = 0;
+    }
+    var schedule = typeof requestAnimationFrame === "function"
+      ? requestAnimationFrame
+      : function (fn) { return setTimeout(fn, 16); };
+    announceTimer = schedule(function () {
+      announceTimer = 0;
+      node.textContent = text;
+    });
+  }
+
+  function formatWalletSource(source) {
+    var raw = String(source || "").trim().toUpperCase();
+    var map = {
+      DB: "本地快照",
+      API: "交易所实时",
+      CACHE: "内存缓存",
+      STALE: "缓存快照",
+      COOLDOWN: "冷却回退",
+      ERROR: "读取异常"
+    };
+    return map[raw] || (source ? String(source) : "--");
   }
 
   function applyFreshnessPill(pillEl, textEl, freshness) {
@@ -439,9 +465,16 @@
     }
 
     var scoped = points.slice(startIndex).map(function (pt) {
-      return { t: pt.t || "", ms: parseTimestampMs(pt.t), equity: Number(pt.equity) };
+      return {
+        t: pt.t || "",
+        ms: parseTimestampMs(pt.t),
+        equity: Number(pt.equity),
+        carriedForward: !!(pt.carried_forward || pt.carriedForward)
+      };
     });
     if (!scoped.length) return null;
+
+    var realPointCount = scoped.filter(function (pt) { return !pt.carriedForward; }).length;
 
     if (exactCycleBaseline) {
       scoped = scoped.filter(function (pt) { return pt.ms > exactCycleBaseline.ms; });
@@ -494,6 +527,7 @@
     return {
       values: values,
       points: scoped,
+      realPointCount: realPointCount,
       baselineEquity: baseline,
       stopEquity: baseline * (1 - configuredLossPct / 100),
       configuredLossPct: configuredLossPct,
@@ -727,7 +761,9 @@
       ? nav.parentElement
       : null;
     if (!nav || !wrap) return;
+    var hasLeft = nav.scrollLeft > 4;
     var hasRight = (nav.scrollWidth - nav.clientWidth - nav.scrollLeft) > 4;
+    wrap.classList.toggle("has-overflow-left", hasLeft);
     wrap.classList.toggle("has-overflow-right", hasRight);
   }
 
@@ -810,9 +846,177 @@
       else comparisonLink.removeAttribute("aria-current");
     }
     bindNavOverflowListeners();
+    initTermTooltips();
+    initHotkeyHelp();
     if (Array.isArray(opts.accounts) && opts.accounts.length) {
       renderNavAccounts(opts.accounts);
     }
+  }
+
+  var termTooltipsBound = false;
+  var activeTooltipTerm = null;
+
+  function ensureTooltipPortal() {
+    if (typeof document === "undefined" || !document.body) return null;
+    var portal = document.getElementById("ops-tooltip-portal");
+    if (!portal) {
+      portal = document.createElement("div");
+      portal.id = "ops-tooltip-portal";
+      portal.className = "ops-tooltip-portal";
+      portal.setAttribute("role", "tooltip");
+      portal.hidden = true;
+      document.body.appendChild(portal);
+    }
+    return portal;
+  }
+
+  function positionTooltipPortal(term, portal) {
+    if (!term || !portal || !term.getBoundingClientRect || typeof window === "undefined") return;
+    var rect = term.getBoundingClientRect();
+    var vw = window.innerWidth || document.documentElement.clientWidth || 1024;
+    var vh = window.innerHeight || document.documentElement.clientHeight || 768;
+    var margin = 12;
+    var gap = 6;
+    var popRect = portal.getBoundingClientRect();
+    var preferBelow = term.classList.contains("tip-below");
+
+    var top = preferBelow ? (rect.bottom + gap) : (rect.top - popRect.height - gap);
+    if (!preferBelow && top < margin) {
+      top = rect.bottom + gap;
+    } else if (preferBelow && (top + popRect.height > vh - margin)) {
+      var above = rect.top - popRect.height - gap;
+      if (above >= margin) top = above;
+    }
+
+    var left = rect.left;
+    if (left + popRect.width > vw - margin) {
+      left = vw - margin - popRect.width;
+    }
+    if (left < margin) left = margin;
+
+    portal.style.left = Math.round(left) + "px";
+    portal.style.top = Math.round(Math.max(margin, top)) + "px";
+  }
+
+  function showTermTooltip(term) {
+    if (!term) return;
+    var tip = term.getAttribute("data-tip");
+    if (!tip) return;
+    var portal = ensureTooltipPortal();
+    if (!portal) return;
+    if (activeTooltipTerm && activeTooltipTerm !== term) {
+      activeTooltipTerm.classList.remove("is-tip-open");
+      activeTooltipTerm.removeAttribute("aria-describedby");
+    }
+    activeTooltipTerm = term;
+    portal.textContent = tip;
+    portal.hidden = false;
+    term.classList.add("is-tip-open");
+    term.setAttribute("aria-describedby", portal.id);
+    positionTooltipPortal(term, portal);
+  }
+
+  function hideTermTooltip(targetTerm) {
+    if (targetTerm && activeTooltipTerm && targetTerm !== activeTooltipTerm) return;
+    var portal = document.getElementById("ops-tooltip-portal");
+    if (portal) portal.hidden = true;
+    if (activeTooltipTerm) {
+      activeTooltipTerm.classList.remove("is-tip-open");
+      activeTooltipTerm.removeAttribute("aria-describedby");
+      activeTooltipTerm = null;
+    }
+  }
+
+  function initTermTooltips() {
+    if (termTooltipsBound || typeof document === "undefined") return;
+    termTooltipsBound = true;
+
+    document.addEventListener("pointerenter", function (evt) {
+      if (evt.pointerType === "touch") return;
+      var term = evt.target && evt.target.closest ? evt.target.closest(".ops-term[data-tip]") : null;
+      if (!term) return;
+      showTermTooltip(term);
+    }, true);
+
+    document.addEventListener("focusin", function (evt) {
+      var term = evt.target && evt.target.closest ? evt.target.closest(".ops-term[data-tip]") : null;
+      if (!term) return;
+      showTermTooltip(term);
+    });
+
+    document.addEventListener("pointerleave", function (evt) {
+      if (evt.pointerType === "touch") return;
+      var term = evt.target && evt.target.closest ? evt.target.closest(".ops-term[data-tip]") : null;
+      if (!term) return;
+      if (document.activeElement === term) return;
+      hideTermTooltip(term);
+    }, true);
+
+    document.addEventListener("focusout", function (evt) {
+      var term = evt.target && evt.target.closest ? evt.target.closest(".ops-term[data-tip]") : null;
+      if (!term) return;
+      hideTermTooltip(term);
+    });
+
+    document.addEventListener("click", function (evt) {
+      var term = evt.target && evt.target.closest ? evt.target.closest(".ops-term[data-tip]") : null;
+      if (!term) {
+        hideTermTooltip();
+        return;
+      }
+      if (activeTooltipTerm === term) {
+        hideTermTooltip(term);
+      } else {
+        showTermTooltip(term);
+      }
+    });
+
+    document.addEventListener("keydown", function (evt) {
+      if (evt.key === "Escape" && activeTooltipTerm) {
+        hideTermTooltip();
+      }
+    });
+
+    global.addEventListener("scroll", function () {
+      if (activeTooltipTerm) hideTermTooltip();
+    }, { passive: true, capture: true });
+
+    global.addEventListener("resize", function () {
+      if (activeTooltipTerm) hideTermTooltip();
+    }, { passive: true });
+  }
+
+  var hotkeyHelpBound = false;
+  function initHotkeyHelp() {
+    if (hotkeyHelpBound || typeof document === "undefined") return;
+    var btn = document.getElementById("ops-hotkey-btn");
+    var pop = document.getElementById("ops-hotkey-popover");
+    if (!btn || !pop) return;
+    hotkeyHelpBound = true;
+
+    function setOpen(nextOpen, restoreFocus) {
+      pop.hidden = !nextOpen;
+      btn.setAttribute("aria-expanded", nextOpen ? "true" : "false");
+      if (!nextOpen && restoreFocus && btn.focus) btn.focus();
+    }
+
+    btn.addEventListener("click", function (evt) {
+      evt.stopPropagation();
+      setOpen(pop.hidden, false);
+    });
+
+    document.addEventListener("click", function (evt) {
+      if (pop.hidden) return;
+      if (pop.contains(evt.target) || btn.contains(evt.target)) return;
+      setOpen(false, false);
+    });
+
+    document.addEventListener("keydown", function (evt) {
+      if (evt.key === "Escape" && !pop.hidden) {
+        evt.preventDefault();
+        setOpen(false, true);
+      }
+    });
   }
 
   function isEditableTarget(target) {
@@ -836,7 +1040,14 @@
     document.addEventListener("keydown", function (evt) {
       if (evt.metaKey || evt.ctrlKey || evt.altKey) return;
       if (isEditableTarget(evt.target)) return;
-      if (evt.key === "r" && typeof cfg.onRefresh === "function") {
+      var lowerKey = evt.key ? String(evt.key).toLowerCase() : "";
+      if (evt.key === "?") {
+        var hotkeyBtn = document.getElementById("ops-hotkey-btn");
+        if (hotkeyBtn) {
+          evt.preventDefault();
+          hotkeyBtn.click();
+        }
+      } else if (lowerKey === "r" && typeof cfg.onRefresh === "function") {
         evt.preventDefault();
         cfg.onRefresh();
       } else if (evt.key === "/" && typeof cfg.onSearch === "function") {
@@ -845,7 +1056,7 @@
       } else if (evt.key === "0") {
         var overviewLink = document.getElementById("ops-nav-overview");
         if (navigateToElementHref(overviewLink)) evt.preventDefault();
-      } else if (evt.key === "c") {
+      } else if (lowerKey === "c") {
         var comparisonLink = document.getElementById("ops-nav-comparison");
         if (navigateToElementHref(comparisonLink)) evt.preventDefault();
       } else if (/^[1-9]$/.test(evt.key)) {
@@ -910,6 +1121,7 @@
     evaluateDataFreshness: evaluateDataFreshness,
     freshnessClassForState: freshnessClassForState,
     announceStatus: announceStatus,
+    formatWalletSource: formatWalletSource,
     applyFreshnessPill: applyFreshnessPill,
     cycleStartMs: cycleStartMs,
     computeCycleRiskMetrics: computeCycleRiskMetrics,

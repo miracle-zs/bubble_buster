@@ -164,7 +164,14 @@
         var color = colorFor(row.account_id, index);
         var change = row.change_pct;
         var changeClass = change == null ? "" : (Number(change) >= 0 ? "is-positive" : "is-negative");
-        var status = row.status === "OK" ? "在线快照" : "暂无数据";
+        var status = "暂无数据";
+        if (row.status === "OK") {
+          var rowFreshness = ops.evaluateDataFreshness(row.latest_at_utc, { warnSec: 1800, staleSec: 7200 });
+          if (rowFreshness.state === "live") status = "实时快照";
+          else if (rowFreshness.state === "warn") status = "延迟快照";
+          else if (rowFreshness.state === "offline") status = "离线";
+          else status = "历史快照";
+        }
         var detailHref = pathPrefix + "/account/" + encodeURIComponent(row.account_id) + "/";
         var note = strategyNotesByAccount[row.account_id] || "";
         var strategyHtml = note ? ops.formatStrategyHighlights(note, allNotes, 2, "summary-strategy-tag") : "";
@@ -422,10 +429,10 @@
             symbol: ["none", "none"],
             lineStyle: { color: theme.borderStrong, type: "dashed", width: 1 },
             label: {
-              position: "insideStartTop",
+              position: "insideEndTop",
               distance: [6, 6],
               color: theme.textSecondary,
-              backgroundColor: theme.surface,
+              backgroundColor: "rgba(16, 20, 28, 0.84)",
               borderColor: theme.border,
               borderWidth: 1,
               borderRadius: 4,
@@ -528,12 +535,21 @@
       el("data-as-of").textContent = "组合止盈上线：" + comparisonStart + " · 数据截至 " + (latest ? formatLocalTime(latest, true) : "--") + "（北京时间 UTC+8）";
     }
 
+    function updateMetricsTableOverflow() {
+      var wrap = document.querySelector(".metrics-panel .table-wrap");
+      var panel = wrap && wrap.closest ? wrap.closest(".metrics-panel") : null;
+      if (!wrap || !panel) return;
+      var hasRight = (wrap.scrollWidth - wrap.clientWidth - wrap.scrollLeft) > 4;
+      panel.classList.toggle("has-table-overflow", hasRight);
+    }
+
     function render() {
       renderSummary();
       renderLegend();
       renderChart();
       renderMetricsTable(false);
       renderMeta();
+      updateMetricsTableOverflow();
     }
 
     function setActiveControl(groupId, key, value) {
@@ -625,7 +641,14 @@
     setActiveControl("range-controls", "range", range);
     setActiveControl("mode-controls", "mode", mode);
 
-    ops.bindKeyboardShortcuts({ onRefresh: load });
+    function triggerManualLoad() {
+      var btn = el("refresh-button");
+      if (btn && btn.disabled) return;
+      if (!Object.keys(strategyNotesByAccount).length) loadNavAccounts();
+      load();
+    }
+
+    ops.bindKeyboardShortcuts({ onRefresh: triggerManualLoad });
 
     Array.prototype.forEach.call(document.querySelectorAll("[data-range]"), function (button) {
       button.addEventListener("click", function () {
@@ -646,10 +669,16 @@
     });
 
     var refreshBtn = el("refresh-button");
-    if (refreshBtn) refreshBtn.addEventListener("click", load);
+    if (refreshBtn) refreshBtn.addEventListener("click", triggerManualLoad);
 
     var retryBtn = el("notice-retry-btn");
-    if (retryBtn) retryBtn.addEventListener("click", load);
+    if (retryBtn) retryBtn.addEventListener("click", triggerManualLoad);
+
+    var metricsWrap = document.querySelector(".metrics-panel .table-wrap");
+    if (metricsWrap) {
+      metricsWrap.addEventListener("scroll", updateMetricsTableOverflow, { passive: true });
+      window.addEventListener("resize", updateMetricsTableOverflow, { passive: true });
+    }
 
     var emptyActionBtn = el("chart-empty-action");
     if (emptyActionBtn) {

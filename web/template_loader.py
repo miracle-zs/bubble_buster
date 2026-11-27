@@ -1,9 +1,10 @@
 """HTML template loader and content-hash static asset versioning for web dashboard."""
 
 import hashlib
+from html import escape as html_escape
 import re
 from pathlib import Path
-from typing import Dict, Optional, Tuple
+from typing import Dict, Literal, Optional, Tuple
 
 _PROJECT_ROOT = Path(__file__).resolve().parents[1]
 _DEFAULT_TEMPLATES_DIR = (_PROJECT_ROOT / "templates").resolve()
@@ -15,6 +16,32 @@ _ASSET_VERSION_CACHE: Dict[str, Tuple[int, int, str]] = {}
 _STATIC_URL_PATTERN = re.compile(
     r"""(?P<attr>(?:href|src)=["'])(?P<prefix>(?:\.\./)*static/|/static/)(?P<asset>[^"'?#]+)(?:\?[^"']*)?(?P<quote>["'])"""
 )
+
+TopbarPage = Literal["overview", "account", "comparison"]
+
+_PAGE_HOTKEYS: Dict[TopbarPage, Tuple[Tuple[str, str], ...]] = {
+    "overview": (
+        ("手动刷新", "R"),
+        ("返回账户总览", "0"),
+        ("打开权益对比", "C"),
+        ("切换账户详情", "1-9"),
+        ("打开/关闭本面板", "?"),
+    ),
+    "account": (
+        ("手动刷新", "R"),
+        ("聚焦订单筛选", "/"),
+        ("返回账户总览", "0"),
+        ("打开权益对比", "C"),
+        ("切换账户详情", "1-9"),
+        ("打开/关闭本面板", "?"),
+    ),
+    "comparison": (
+        ("手动刷新", "R"),
+        ("返回账户总览", "0"),
+        ("切换账户详情", "1-9"),
+        ("打开/关闭本面板", "?"),
+    ),
+}
 
 
 def load_template(name: str, base_dir: Optional[Path] = None) -> str:
@@ -82,6 +109,54 @@ def version_static_urls(html: str, static_dir: Optional[Path] = None) -> str:
         return f"{match.group('attr')}{match.group('prefix')}{asset}?v={version}{match.group('quote')}"
 
     return _STATIC_URL_PATTERN.sub(_replace, html)
+
+
+def render_ops_topbar(
+    *,
+    active_page: TopbarPage,
+    home_href: str,
+    comparison_href: str,
+    templates_dir: Optional[Path] = None,
+) -> str:
+    """Render the shared skip-link and topbar partial for a dashboard page."""
+    hotkeys = _PAGE_HOTKEYS[active_page]
+    hotkey_lines = "\n".join(
+        f"            <li><span>{html_escape(label)}</span><kbd>{html_escape(key)}</kbd></li>"
+        for label, key in hotkeys
+    )
+    safe_home = html_escape(home_href, quote=True)
+    safe_comp = html_escape(comparison_href, quote=True)
+    replacements = {
+        "__BRAND_HREF__": safe_home,
+        "__OVERVIEW_HREF__": safe_home,
+        "__OVERVIEW_CURRENT__": ' aria-current="page"' if active_page == "overview" else "",
+        "__COMPARISON_HREF__": safe_comp,
+        "__COMPARISON_CURRENT__": ' aria-current="page"' if active_page == "comparison" else "",
+        "__HOTKEY_ITEMS_HTML__": hotkey_lines,
+    }
+    pattern = re.compile("|".join(re.escape(key) for key in replacements))
+    partial = load_template("_ops_topbar.html", base_dir=templates_dir)
+    return pattern.sub(lambda match: replacements[match.group(0)], partial).rstrip("\n")
+
+
+def inject_ops_topbar(
+    html: str,
+    *,
+    active_page: TopbarPage,
+    home_href: str,
+    comparison_href: str,
+    templates_dir: Optional[Path] = None,
+) -> str:
+    """Replace the __OPS_TOPBAR__ placeholder with the rendered shared topbar."""
+    if "__OPS_TOPBAR__" not in html:
+        raise ValueError("Template is missing __OPS_TOPBAR__ placeholder")
+    topbar = render_ops_topbar(
+        active_page=active_page,
+        home_href=home_href,
+        comparison_href=comparison_href,
+        templates_dir=templates_dir,
+    )
+    return html.replace("__OPS_TOPBAR__", topbar, 1)
 
 
 def clear_template_cache() -> None:

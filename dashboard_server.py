@@ -21,7 +21,12 @@ from core.wallet_snapshot_rollup import (
     upsert_wallet_snapshot_rollups,
 )
 from core.task_status import format_task_status, task_status_template
-from web.template_loader import load_template, version_static_path, version_static_urls
+from web.template_loader import (
+    inject_ops_topbar,
+    load_template,
+    version_static_path,
+    version_static_urls,
+)
 
 LOGGER = logging.getLogger(__name__)
 
@@ -2051,6 +2056,7 @@ class DashboardDataProvider:
         max_points: int,
         account_id: Optional[str] = None,
         wallet_rows: Optional[List[Dict[str, Any]]] = None,
+        wallet_as_of_utc: Optional[str] = None,
     ) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
         if wallet_rows is None:
             wallet_rows = self._query_wallet_rows(
@@ -2077,10 +2083,11 @@ class DashboardDataProvider:
         elif wallet_balance_usdt is not None:
             curve = [
                 {
-                    "t": now_utc.replace(microsecond=0).isoformat(),
+                    "t": wallet_as_of_utc or now_utc.replace(microsecond=0).isoformat(),
                     "equity": round(wallet_balance_usdt, 8),
                     "pnl": 0.0,
                     "cum_pnl": 0.0,
+                    "carried_forward": True,
                 }
             ]
 
@@ -2281,6 +2288,7 @@ class DashboardDataProvider:
         account_id: Optional[str] = None,
         include_trade_stats: bool = True,
         wallet_rows: Optional[List[Dict[str, Any]]] = None,
+        wallet_as_of_utc: Optional[str] = None,
     ) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
         if wallet_rows is None:
             wallet_rows = self._query_wallet_rows(
@@ -2355,11 +2363,12 @@ class DashboardDataProvider:
         if not curve and wallet_balance_usdt is not None:
             curve = [
                 {
-                    "t": now_utc.replace(microsecond=0).isoformat(),
+                    "t": wallet_as_of_utc or now_utc.replace(microsecond=0).isoformat(),
                     "equity": round(wallet_balance_usdt, 8),
                     "pnl": 0.0,
                     "cum_pnl": 0.0,
                     "cum_cashflow": 0.0,
+                    "carried_forward": True,
                 }
             ]
             baseline_equity = wallet_balance_usdt
@@ -2820,6 +2829,7 @@ class DashboardDataProvider:
                             account_id=scoped_account,
                             include_trade_stats=include_trade_stats,
                             wallet_rows=wallet_rows,
+                            wallet_as_of_utc=data["wallet"].get("as_of_utc"),
                         )
                         data["strategy_equity_curve"] = strategy_curve[-points_limit:]
                         data["drawdown_stats_strategy"] = strategy_stats
@@ -2833,6 +2843,7 @@ class DashboardDataProvider:
                             max_points=points_limit,
                             account_id=scoped_account,
                             wallet_rows=wallet_rows,
+                            wallet_as_of_utc=data["wallet"].get("as_of_utc"),
                         )
                         data["balance_curve"] = balance_curve[-points_limit:]
                         data["drawdown_stats_balance"] = balance_stats
@@ -3704,6 +3715,12 @@ def _render_dashboard_template(
     }
     pattern = re.compile("|".join(re.escape(key) for key in replacements))
     rendered = pattern.sub(lambda m: replacements[m.group(0)], get_dashboard_html())
+    rendered = inject_ops_topbar(
+        rendered,
+        active_page="account",
+        home_href="/",
+        comparison_href="/accounts/comparison/",
+    )
     return version_static_urls(rendered)
 
 
@@ -3782,6 +3799,12 @@ def render_accounts_overview_html(
     }
     pattern = re.compile("|".join(re.escape(key) for key in replacements))
     rendered = pattern.sub(lambda m: replacements[m.group(0)], get_accounts_overview_html())
+    rendered = inject_ops_topbar(
+        rendered,
+        active_page="overview",
+        home_href="./",
+        comparison_href="accounts/comparison/",
+    )
     return version_static_urls(rendered)
 
 
@@ -3793,6 +3816,12 @@ def render_accounts_comparison_html(
     raw = load_template("account-comparison.html", base_dir=base_dir)
     page_config = {"navAccounts": nav_accounts or []}
     rendered = raw.replace("__PAGE_CONFIG_JSON__", _inline_script_json(page_config))
+    rendered = inject_ops_topbar(
+        rendered,
+        active_page="comparison",
+        home_href="../../",
+        comparison_href="./",
+    )
     return version_static_urls(rendered, static_dir=base_dir)
 
 

@@ -704,6 +704,38 @@
         });
       }
 
+      var yMin = Infinity;
+      var yMax = -Infinity;
+      for (var k = 0; k < seriesData.length; k += 1) {
+        if (seriesData[k][1] < yMin) yMin = seriesData[k][1];
+        if (seriesData[k][1] > yMax) yMax = seriesData[k][1];
+      }
+      for (var m = 0; m < markLines.length; m += 1) {
+        var mlVal = Number(markLines[m].yAxis);
+        if (Number.isFinite(mlVal)) {
+          if (mlVal < yMin) yMin = mlVal;
+          if (mlVal > yMax) yMax = mlVal;
+        }
+      }
+      var yAxisCfg = {
+        type: "value",
+        scale: true,
+        axisLabel: { color: theme.muted, fontSize: 12, formatter: function (value) { return fmtAdaptive(value); } },
+        axisLine: { show: false },
+        splitLine: { lineStyle: { color: theme.splitLine, type: "dashed" } }
+      };
+      if (Number.isFinite(yMin) && Number.isFinite(yMax) && (seriesData.length <= 2 || markLines.length > 0)) {
+        var rawRange = Math.max(yMax - yMin, Math.abs(yMax || yMin) * 0.02, 1);
+        var pad = rawRange * 0.28;
+        if (rawRange >= 2) {
+          yAxisCfg.min = Math.max(0, Math.floor(yMin - pad));
+          yAxisCfg.max = Math.ceil(yMax + pad);
+        } else {
+          yAxisCfg.min = Math.max(0, Number((yMin - pad).toFixed(2)));
+          yAxisCfg.max = Number((yMax + pad).toFixed(2));
+        }
+      }
+
       var showSlider = seriesData.length > 24;
       el.equityChart.setAttribute(
         "aria-label",
@@ -758,13 +790,7 @@
           axisLine: { lineStyle: { color: theme.border } },
           axisTick: { show: false }
         },
-        yAxis: {
-          type: "value",
-          scale: true,
-          axisLabel: { color: theme.muted, fontSize: 12, formatter: function (value) { return fmtAdaptive(value); } },
-          axisLine: { show: false },
-          splitLine: { lineStyle: { color: theme.splitLine, type: "dashed" } }
-        },
+        yAxis: yAxisCfg,
         series: [
           {
             name: "权益",
@@ -886,9 +912,9 @@
         data && data.balance_curve_cycle_baseline
       );
       if (calculated) riskSnapshot = calculated;
-      else if (sourceCurve.length) riskSnapshot = null;
+      else riskSnapshot = null;
 
-      var metrics = calculated || riskSnapshot || {};
+      var metrics = calculated || {};
       var backendReturn = stop ? ops.toNum(stop.current_return_pct) : null;
       var currentReturn = backendReturn !== null ? backendReturn : ops.toNum(metrics.currentReturnPct);
       var currentDrawdown = ops.toNum(metrics.currentDrawdownPct);
@@ -914,12 +940,9 @@
       setText(el.riskState, state.stateText);
       setText(el.riskDescription, state.description);
       setText(el.riskMeterLabel, state.meterText);
-      if (el.riskMeterFill) {
-        el.riskMeterFill.style.setProperty("--meter-scale", (state.consumedPct / 100).toFixed(4));
-        el.riskMeterFill.className = "risk-meter-fill " + state.tone;
-      }
       if (el.riskMeterTrack) {
-        el.riskMeterTrack.setAttribute("aria-valuenow", String(Math.round(state.consumedPct)));
+        el.riskMeterTrack.value = Math.round(state.consumedPct);
+        el.riskMeterTrack.className = "ops-progress risk-meter-track " + state.tone;
         el.riskMeterTrack.setAttribute("aria-valuetext", state.stateText + "，" + state.meterText);
       }
     }
@@ -1020,7 +1043,7 @@
           svcStatus = svc.running ? "RUNNING" : (svc.error ? "ERROR (" + svc.error + ")" : "STOPPED");
         }
 
-        setText(el.meta, "UTC+8 · 余额来源 " + txt(wallet.source));
+        setText(el.meta, "UTC+8 · 数据来源 " + ops.formatWalletSource(wallet.source));
         if (accountMode !== "readonly") {
           setText(el.nextEntry, fmtAxisTime(d.next_entry_local));
         }
@@ -1067,6 +1090,13 @@
     function summarizeRunMessage(message) {
       var raw = String(message || "").trim();
       if (!raw) return "无执行摘要";
+      var lower = raw.toLowerCase();
+      if (lower.indexOf("all symbols already have open strategy positions") >= 0) {
+        return "目标交易对均已有策略持仓（已跳过）";
+      }
+      if (lower.indexOf("no eligible symbols") >= 0) {
+        return "无符合条件的入场交易对";
+      }
       var values = {};
       raw.split(",").forEach(function (part) {
         var text = String(part || "").trim();
@@ -1152,6 +1182,7 @@
         return true;
       });
       if (el.eventFilterCount) {
+        el.eventFilterCount.hidden = false;
         el.eventFilterCount.textContent = filtered.length === cachedEvents.length
           ? "共 " + cachedEvents.length + " 条"
           : "匹配 " + filtered.length + " / " + cachedEvents.length + " 条";
@@ -1182,6 +1213,9 @@
       setText(el.eventsCount, String(cachedEvents.length));
       setText(el.cashflowCount, String(cashflows.length));
       setText(el.unpricedCount, String(unpriced.length));
+      if (el.unpricedCount) {
+        el.unpricedCount.classList.toggle("warn", unpriced.length > 0);
+      }
 
       if (accountMode === "readonly" && el.runsTab) {
         el.runsTab.hidden = runs.length === 0;
@@ -1278,7 +1312,7 @@
         if (panel) targets.push(panel);
       }
 
-      setTimeout(function () { if (!detailsLoaded) refreshDetails(); }, isMobile ? 1600 : 900);
+      setTimeout(function () { if (!detailsLoaded) refreshDetails(); }, isMobile ? 350 : 200);
       if (!targets.length || !window.IntersectionObserver) return;
 
       var loaded = false;
@@ -1379,6 +1413,7 @@
     }
 
     function triggerManualRefresh() {
+      if (manualRefreshPendingCount > 0) return;
       manualRefreshPendingCount = 3;
       setDetailRefreshBusy(true);
       refreshCore({ manual: true });

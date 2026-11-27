@@ -11,23 +11,7 @@
   <link rel="stylesheet" href="__STATIC_BASE__/dashboard.css" />
 </head>
 <body>
-  <a class="ops-skip-link" href="#main-content">跳到主内容</a>
-  <header class="ops-topbar">
-    <div class="ops-topbar-inner">
-      <a id="ops-nav-brand" class="ops-brand" href="/"><span class="ops-brand-mark" aria-hidden="true"></span>Bubble Buster</a>
-      <span class="ops-venue-chip">Binance USDT-M</span>
-      <div class="ops-nav-wrap">
-        <nav class="ops-nav" aria-label="主导航">
-          <ul class="ops-nav-list">
-            <li><a id="ops-nav-overview" class="ops-nav-link" href="/">总览</a></li>
-            <li><a id="ops-nav-comparison" class="ops-nav-link" href="/accounts/comparison/">权益对比</a></li>
-          </ul>
-          <span id="ops-nav-divider" class="ops-nav-divider" aria-hidden="true" hidden></span>
-          <ul id="ops-nav-accounts" class="ops-nav-list" aria-label="账户快速切换"></ul>
-        </nav>
-      </div>
-    </div>
-  </header>
+__OPS_TOPBAR__
 
   <main id="main-content" class="ops-shell detail-shell">
     <header class="account-command-bar">
@@ -62,7 +46,7 @@
       <span class="strategy-strip-label">策略配置</span>
       <div class="strategy-tags" id="strategyTags"><span class="strategy-chip">未配置策略说明</span></div>
       <div class="strategy-strip-meta">
-        <span class="refresh-note">自动刷新 <span id="refresh">__REFRESH_SEC__</span>s · 只读 · R 刷新 · / 筛选 · 0/C/1-9 导航</span>
+        <span class="refresh-note">自动刷新 <span id="refresh">__REFRESH_SEC__</span>s · 只读</span>
         <button id="detailRefreshBtn" class="ops-btn" type="button" aria-label="手动刷新账户详情">
           <svg class="ops-icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M13.5 8a5.5 5.5 0 1 1-1.4-3.7"/><path d="M13.5 2.5v3h-3"/></svg>
           <span class="btn-label">刷新</span>
@@ -164,7 +148,7 @@
           <p class="risk-description" id="riskDescription">正在根据账户周期权益曲线计算风险距离。</p>
           <div class="risk-meter">
             <div class="risk-meter-head"><span>已消耗止损空间</span><strong id="riskMeterLabel">--</strong></div>
-            <div class="risk-meter-track" id="riskMeterTrack" role="progressbar" aria-label="已消耗组合止损空间" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"><span class="risk-meter-fill" id="riskMeterFill"></span></div>
+            <progress class="ops-progress risk-meter-track" id="riskMeterTrack" max="100" value="0" aria-label="已消耗组合止损空间"></progress>
             <div class="risk-meter-scale"><span>周期起点</span><span id="riskMeterLimit">止损 -3.5%</span></div>
           </div>
           <div class="risk-facts" id="drawdownStats"></div>
@@ -209,7 +193,7 @@
         </div>
       </header>
       <div class="table-wrap" tabindex="0" role="region" aria-labelledby="positionsHeading">
-        <table id="positionsTable" class="detail-table positions-table" aria-labelledby="positionsHeading">
+        <table id="positionsTable" class="detail-table positions-table is-empty" aria-labelledby="positionsHeading">
           <caption class="sr-only">当前持仓与风险监控明细列表</caption>
           <thead>
             <tr>
@@ -241,10 +225,10 @@
       </div>
       <div class="activity-view" id="activity-runs" role="tabpanel" aria-labelledby="tab-runs">
         <div class="table-wrap" tabindex="0" role="region" aria-labelledby="tab-runs">
-          <table id="runsTable" class="detail-table" aria-labelledby="tab-runs">
+          <table id="runsTable" class="detail-table is-empty" aria-labelledby="tab-runs">
             <caption class="sr-only">策略运行历史记录</caption>
             <thead><tr><th scope="col">交易日 (UTC)</th><th scope="col">状态</th><th scope="col" class="numeric">开始时间</th><th scope="col">执行摘要</th></tr></thead>
-            <tbody id="runsBody"></tbody>
+            <tbody id="runsBody"><tr><td colspan="4" class="empty-row">运行记录加载中...</td></tr></tbody>
           </table>
         </div>
       </div>
@@ -261,37 +245,37 @@
             <option value="EXPIRED">已过期</option>
             <option value="REJECTED">已拒绝</option>
           </select>
-          <span id="eventFilterCount" class="table-filter-count">--</span>
+          <span id="eventFilterCount" class="table-filter-count" hidden></span>
         </search>
         <div class="table-wrap" tabindex="0" role="region" aria-labelledby="tab-events">
-          <table id="eventsTable" class="detail-table" aria-labelledby="tab-events">
+          <table id="eventsTable" class="detail-table is-empty" aria-labelledby="tab-events">
             <caption class="sr-only">订单事件记录</caption>
             <thead><tr><th scope="col">时间</th><th scope="col">交易对</th><th scope="col">订单类型</th><th scope="col">方向</th><th scope="col">状态</th><th scope="col" class="numeric">事件 ID</th></tr></thead>
-            <tbody id="eventsBody"></tbody>
+            <tbody id="eventsBody"><tr><td colspan="6" class="empty-row">订单事件加载中...</td></tr></tbody>
           </table>
         </div>
       </div>
       <div class="activity-view" id="activity-cashflow" role="tabpanel" aria-labelledby="tab-cashflow" hidden>
         <div class="table-wrap" tabindex="0" role="region" aria-labelledby="tab-cashflow">
-          <table id="cashflowTable" class="detail-table" aria-labelledby="tab-cashflow">
+          <table id="cashflowTable" class="detail-table is-empty" aria-labelledby="tab-cashflow">
             <caption class="sr-only">资金流水记录</caption>
             <thead><tr><th scope="col">时间</th><th scope="col">类型</th><th scope="col" class="numeric">金额</th><th scope="col">资产</th><th scope="col">交易对</th><th scope="col" class="numeric">事件 ID</th></tr></thead>
-            <tbody id="cashflowBody"></tbody>
+            <tbody id="cashflowBody"><tr><td colspan="6" class="empty-row">资金流水加载中...</td></tr></tbody>
           </table>
         </div>
       </div>
     </section>
 
     <details id="diagnosticsPanel" class="diagnostics-panel">
-      <summary><span>诊断信息 <span class="diagnostics-intro">展开后按需加载策略日志</span></span><span class="surface-count" id="unpricedCount">0</span></summary>
+      <summary><span>诊断信息 <span class="diagnostics-intro">展开后按需加载策略日志</span></span><span class="diagnostics-badge-group"><span class="diagnostics-badge-label">待核对平仓</span><span class="surface-count" id="unpricedCount">0</span></span></summary>
       <div class="diagnostics-grid">
         <section class="diagnostic-block">
           <h2 class="diagnostic-title" id="unpricedHeading"><span class="ops-term tip-below" tabindex="0" data-tip="已平仓但尚未匹配到交易所成交均价的记录，用于异常对账">待核对平仓</span></h2>
           <div class="table-wrap" tabindex="0" role="region" aria-labelledby="unpricedHeading">
-            <table id="unpricedTable" class="detail-table">
+            <table id="unpricedTable" class="detail-table is-empty">
               <caption class="sr-only">待核对平仓记录</caption>
               <thead><tr><th scope="col">交易对 / ID</th><th scope="col">状态</th><th scope="col">平仓原因</th><th scope="col">检测结果</th><th scope="col" class="numeric">订单 ID</th><th scope="col" class="numeric">平仓时间</th></tr></thead>
-              <tbody id="unpricedBody"></tbody>
+              <tbody id="unpricedBody"><tr><td colspan="6" class="empty-row">加载中...</td></tr></tbody>
             </table>
           </div>
         </section>

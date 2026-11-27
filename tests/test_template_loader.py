@@ -1,10 +1,14 @@
 import time
 from pathlib import Path
+from typing import cast
 import pytest
 
 from web.template_loader import (
+    TopbarPage,
     clear_template_cache,
+    inject_ops_topbar,
     load_template,
+    render_ops_topbar,
     static_asset_version,
     version_static_path,
     version_static_urls,
@@ -94,3 +98,57 @@ class TestTemplateLoader:
             static_asset_version("does_not_exist.js", static_dir=tmp_path)
         with pytest.raises(ValueError):
             static_asset_version("../outside.js", static_dir=tmp_path)
+
+    def test_render_and_inject_shared_ops_topbar(self) -> None:
+        overview_bar = render_ops_topbar(
+            active_page="overview",
+            home_href="./",
+            comparison_href="accounts/comparison/",
+        )
+        assert 'id="ops-nav-overview" class="ops-nav-link" href="./" aria-current="page"' in overview_bar
+        assert 'id="ops-nav-comparison" class="ops-nav-link" href="accounts/comparison/">' in overview_bar
+        assert "<kbd>C</kbd>" in overview_bar
+        assert "<kbd>/</kbd>" not in overview_bar
+
+        account_bar = render_ops_topbar(
+            active_page="account",
+            home_href="/",
+            comparison_href="/accounts/comparison/",
+        )
+        assert 'aria-current="page"' not in account_bar
+        assert "<kbd>/</kbd>" in account_bar
+        assert "<kbd>C</kbd>" in account_bar
+
+        comparison_bar = render_ops_topbar(
+            active_page="comparison",
+            home_href="../../",
+            comparison_href="./",
+        )
+        assert 'id="ops-nav-brand" class="ops-brand" href="../../"' in comparison_bar
+        assert 'id="ops-nav-comparison" class="ops-nav-link" href="./" aria-current="page"' in comparison_bar
+        assert "<kbd>C</kbd>" not in comparison_bar
+
+        injected = inject_ops_topbar(
+            "<body>\n__OPS_TOPBAR__\n</body>",
+            active_page="overview",
+            home_href="./",
+            comparison_href="accounts/comparison/",
+        )
+        assert "__OPS_TOPBAR__" not in injected
+        assert 'class="ops-topbar"' in injected
+
+    def test_ops_topbar_crashes_early_on_invalid_page_or_missing_placeholder(self) -> None:
+        invalid_page = cast(TopbarPage, "unknown")
+        with pytest.raises(KeyError):
+            render_ops_topbar(
+                active_page=invalid_page,
+                home_href="./",
+                comparison_href="./",
+            )
+        with pytest.raises(ValueError):
+            inject_ops_topbar(
+                "<body>no placeholder</body>",
+                active_page="overview",
+                home_href="./",
+                comparison_href="accounts/comparison/",
+            )

@@ -161,18 +161,15 @@
         var cached = curveCache[aid];
         if (cached && cached.walletAsOfUtc) {
           candidates.push(ops.parseTimestampMs(cached.walletAsOfUtc));
-        } else if (cached && cached.points && cached.points.length > 1) {
+        } else if (cached && cached.points && cached.points.length) {
           var lastPt = cached.points[cached.points.length - 1];
-          if (lastPt && lastPt.t) candidates.push(ops.parseTimestampMs(lastPt.t));
+          if (lastPt && lastPt.t && !lastPt.carried_forward) {
+            candidates.push(ops.parseTimestampMs(lastPt.t));
+          }
         }
         if (r.portfolio_loss_cut && r.portfolio_loss_cut.updated_at_utc) {
           candidates.push(ops.parseTimestampMs(r.portfolio_loss_cut.updated_at_utc));
         }
-        if (r.entry_progress && r.entry_progress.updated_at_local) {
-          candidates.push(ops.parseTimestampMs(r.entry_progress.updated_at_local));
-        }
-        var taskTs = latestTaskTimeForAccount(r);
-        if (taskTs) candidates.push(ops.parseTimestampMs(taskTs));
       }
       var valid = candidates.filter(Number.isFinite);
       if (valid.length) return Math.max.apply(null, valid);
@@ -460,11 +457,13 @@
     function taskRowHtml(accountId, taskKey, name, task) {
       var t = task || {};
       var status = String(t.status || "UNKNOWN");
+      var upperStatus = status.toUpperCase();
+      var isAnomalyRow = upperStatus === "FAILED" || upperStatus === "PARTIAL";
       var statusText = taskStatusText(status);
       var cls = taskStatusCls(status);
       var timeText = String(t.time_local || "") || "--";
       var metaText = taskMetaLabel(taskKey);
-      return '<div class="task-row" role="row">'
+      return '<div class="task-row' + (isAnomalyRow ? " is-anomaly-row" : "") + '" role="row">'
         + '<div class="task-row-main">'
         + '<div class="task-name-wrap" role="cell"><span class="task-name">' + escapeHtml(name) + "</span>"
         + (metaText ? '<span class="task-task-tag">' + escapeHtml(metaText) + "</span>" : "")
@@ -775,11 +774,14 @@
       syncCountdownTimer();
 
       var timeline = buildCommonEntryTimeline(todayRows);
-      var hasIssues = todayRows.length !== accountRows.length
+      var allNotStarted = todayRows.length === 0 && waitingTotal === 0 && failedTotal === 0;
+      var hasIssues = !allNotStarted && (
+        todayRows.length !== accountRows.length
         || completedAccounts !== accountRows.length
         || waitingTotal > 0
         || failedTotal > 0
-        || !timeline.groups.length;
+        || !timeline.groups.length
+      );
       var showDetails = entryDetailsUserOverride === null ? hasIssues : entryDetailsUserOverride;
       if (entryProgressToggle) {
         entryProgressToggle.hidden = false;
@@ -815,7 +817,7 @@
         + "</div>"
         + '<div class="entry-progress-summary-legend"><span><i class="legend-dot initial" aria-hidden="true"></i>' + initialActionTotal + ' 首笔</span><span><i class="legend-dot scale-in" aria-hidden="true"></i>' + scaleInActionTotal + ' 二次</span><span><i class="legend-dot waiting" aria-hidden="true"></i>' + waitingTotal + ' 待触发信号</span><span><i class="legend-dot failed" aria-hidden="true"></i>' + failedTotal + " 异常</span></div>"
         + "</div>"
-        + '<div class="entry-progress-stat warn"><span class="entry-progress-stat-label">待触发</span><strong>' + waitingTotal + '</strong><span class="entry-progress-stat-note">等待信号确认</span></div>'
+        + '<div class="entry-progress-stat ' + (waitingTotal > 0 ? "warn" : "neutral") + '"><span class="entry-progress-stat-label">待触发</span><strong>' + waitingTotal + '</strong><span class="entry-progress-stat-note">' + (waitingTotal > 0 ? "等待信号确认" : "暂无待触发信号") + "</span></div>"
         + '<div class="entry-progress-stat ' + anomalyStatClass + '"><span class="entry-progress-stat-label">异常</span><strong>' + failedTotal + '</strong><span class="entry-progress-stat-note">' + anomalyStatNote + "</span></div>"
         + '<div class="entry-progress-stat neutral"><span class="entry-progress-stat-label">账号状态</span><strong>' + completedAccounts + " / " + accountRows.length + '</strong><span class="entry-progress-stat-note">今日完成账号</span></div>'
         + '<div class="entry-progress-next-action"><span class="entry-progress-next-label">下一检查</span><strong>' + escapeHtml(nextCheckLabel) + '</strong><span class="entry-progress-next-state"><i class="entry-progress-next-pulse" aria-hidden="true"></i>' + escapeHtml(nextActionLabel) + ' · <span id="entry-progress-countdown">--</span></span></div>'
@@ -999,7 +1001,6 @@
 
     function renderPortfolioStopState(aid, stop, metrics) {
       var meterLabel = accountElement("stop-meter-label", aid);
-      var meter = accountElement("stop-meter-fill", aid);
       var meterTrack = accountElement("stop-meter-track", aid);
       var state = ops.evaluatePortfolioStopState(stop, metrics, {
         enabled: portfolioStopEnabled,
@@ -1020,12 +1021,9 @@
         meterLabel.textContent = state.meterText;
         meterLabel.className = "stop-meter-label " + riskCls;
       }
-      if (meter) {
-        meter.style.setProperty("--meter-scale", (state.consumedPct / 100).toFixed(4));
-        meter.className = "stop-meter-fill " + riskCls;
-      }
       if (meterTrack) {
-        meterTrack.setAttribute("aria-valuenow", String(Math.round(state.consumedPct)));
+        meterTrack.value = Math.round(state.consumedPct);
+        meterTrack.className = "ops-progress stop-meter-track " + riskCls;
         meterTrack.setAttribute("aria-valuetext", state.stateText + "，" + state.meterText);
       }
     }
@@ -1084,13 +1082,30 @@
       var changePct = mode !== "readonly" && backendReturn !== null ? backendReturn : metrics.currentReturnPct;
       var tone2 = ops.classifyReturnTone(changePct, portfolioStopPct, stop && stop.status);
       var deltaCls = tone2 === "ok" ? "spark-up" : (tone2 === "bad" ? "spark-down" : "spark-flat");
+      var signedReturn = (changePct >= 0 ? "+" : "") + fmt(changePct, 2) + "%";
+
+      if (metrics.realPointCount < 2) {
+        var sparseSig = "sparse:" + deltaCls + "|" + signedReturn;
+        if (curveRenderSig[aid] !== sparseSig) {
+          curveRenderSig[aid] = sparseSig;
+          delete curveRenderData[aid];
+          box.className = "spark-box " + deltaCls;
+          box.removeAttribute("tabindex");
+          box.removeAttribute("role");
+          box.removeAttribute("aria-label");
+          box.innerHTML = '<div class="spark-empty">当前窗口暂无日内曲线轨迹</div>';
+        }
+        setAccountMetric("spark-delta", aid, signedReturn, deltaCls);
+        if (mode !== "readonly") renderPortfolioStopState(aid, stop, metrics);
+        return;
+      }
+
       var width = mode === "readonly" ? 300 : 320;
       var height = mode === "readonly" ? 50 : 98;
       var includeStop = mode !== "readonly" && portfolioStopEnabled;
       var geometry = chartGeometry(metrics, width, height, includeStop, metrics.configuredLossPct);
       curveRenderData[aid] = geometry.renderedPoints;
 
-      var signedReturn = (changePct >= 0 ? "+" : "") + fmt(changePct, 2) + "%";
       var nextSig = deltaCls + "|" + signedReturn + "|" + geometry.points + "|" + (includeStop ? geometry.stopY.toFixed(1) : "0");
       if (curveRenderSig[aid] !== nextSig) {
         curveRenderSig[aid] = nextSig;
@@ -1125,15 +1140,12 @@
 
     function storeCurvePayload(aid, payload) {
       if (!aid || !payload || typeof payload !== "object") return;
-      var mode = String(accountModes[aid] || "full").toLowerCase();
-      var curve = mode === "readonly"
-        ? (payload.balance_curve || payload.equity_curve || [])
-        : (payload.balance_curve || payload.equity_curve || []);
+      var curve = payload.balance_curve || payload.equity_curve || [];
       var points = [];
       for (var i = 0; i < curve.length; i += 1) {
         var p = curve[i] || {};
         var n = Number(p.equity);
-        if (Number.isFinite(n)) points.push({ t: p.t || "", equity: n });
+        if (Number.isFinite(n)) points.push({ t: p.t || "", equity: n, carried_forward: !!p.carried_forward });
       }
       if (payload.portfolio_loss_cut) portfolioStopStates[aid] = payload.portfolio_loss_cut;
       curveCache[aid] = {
@@ -1384,7 +1396,7 @@
           var pnlCls = netPnl !== null ? (netPnl >= 0 ? "status-ok" : "status-bad") : "";
           readonlyHtml += '<article class="readonly-strip" id="account-card-' + safeAid + '" data-account-id="' + safeAid + '">'
             + '<div class="readonly-identity"><a class="readonly-id-link" href="' + base + '">' + safeAid + '<span class="readonly-badge">只读监控</span></a></div>'
-            + '<div class="readonly-metric"><span class="metric-label">余额 (USDT)</span><strong class="metric-value" data-field="wallet-balance">' + ops.fmtUsdt(row.wallet_balance_usdt, 2) + "</strong></div>"
+            + '<div class="readonly-metric readonly-balance"><span class="metric-label">余额 (USDT)</span><strong class="metric-value" data-field="wallet-balance">' + ops.fmtUsdt(row.wallet_balance_usdt, 2) + "</strong></div>"
             + '<div class="readonly-metric"><span class="metric-label">近30日净盈亏</span><strong class="metric-value pnl-value ' + pnlCls + '" data-field="readonly-pnl">' + pnlText + "</strong></div>"
             + '<div class="readonly-metric"><span class="metric-label">胜率</span><strong class="metric-value" data-field="readonly-win-rate">' + winRateText + "</strong></div>"
             + '<div class="readonly-metric readonly-secondary"><span class="metric-label">平仓订单数</span><strong class="metric-value" data-field="readonly-trades">' + tradeCountText + "</strong></div>"
@@ -1421,7 +1433,7 @@
             + "</div>"
             + '<div class="spark-block">'
             + '<div class="spark-box" data-account-id="' + safeAid + '"><div class="spark-empty">加载中...</div></div>'
-            + '<div class="stop-meter"><strong class="risk-state" data-account-id="' + safeAid + '">计算中</strong><span class="stop-meter-track" role="progressbar" aria-label="' + safeAid + ' 组合止损预算消耗" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"><span class="stop-meter-fill" data-account-id="' + safeAid + '"></span></span><span class="stop-meter-label" data-account-id="' + safeAid + '">--</span></div>'
+            + '<div class="stop-meter"><strong class="risk-state" data-account-id="' + safeAid + '">计算中</strong><progress class="ops-progress stop-meter-track" data-account-id="' + safeAid + '" max="100" value="0" aria-label="' + safeAid + ' 组合止损预算消耗"></progress><span class="stop-meter-label" data-account-id="' + safeAid + '">--</span></div>'
             + "</div></div>"
             + "</article>";
         }
@@ -1622,6 +1634,7 @@
     }
 
     function triggerOverviewRefresh() {
+      if (overviewRefreshBtn && overviewRefreshBtn.disabled) return;
       lastDetailsFetchAt = 0;
       curveCache = {};
       curveErrors = {};
@@ -1630,6 +1643,11 @@
       if (batchCurvesAbortController) {
         try { batchCurvesAbortController.abort(); } catch (e) {}
       }
+      Object.keys(curveAbortControllers).forEach(function (aid) {
+        try { curveAbortControllers[aid].abort(); } catch (e) {}
+        delete curveAbortControllers[aid];
+        curveInFlight[aid] = false;
+      });
       fetchSummary({ force: true });
       fetchHealth();
     }
@@ -1782,8 +1800,17 @@
         trigger.setAttribute("aria-expanded", shouldOpen ? "true" : "false");
       });
 
+      cards.addEventListener("pointerdown", function (event) {
+        var box = event.target && event.target.closest ? event.target.closest(".spark-box") : null;
+        if (!box) return;
+        if (hoverState.box && hoverState.box !== box) clearSparkHover(hoverState.box);
+        hoverState.box = box;
+        hoverState.rect = box.getBoundingClientRect();
+        hoverState.clientX = event.clientX;
+        renderSparkHover();
+      });
+
       cards.addEventListener("pointermove", function (event) {
-        if (event.pointerType === "touch") return;
         var box = event.target && event.target.closest ? event.target.closest(".spark-box") : null;
         if (!box) return;
         if (hoverState.box !== box) {
@@ -1798,10 +1825,16 @@
       });
 
       cards.addEventListener("pointerout", function (event) {
+        if (event.pointerType === "touch") return;
         var box = event.target && event.target.closest ? event.target.closest(".spark-box") : null;
         if (!box) return;
         if (event.relatedTarget && box.contains(event.relatedTarget)) return;
         clearSparkHover(box);
+      });
+
+      cards.addEventListener("pointercancel", function (event) {
+        var box = event.target && event.target.closest ? event.target.closest(".spark-box") : null;
+        if (box) clearSparkHover(box);
       });
 
       cards.addEventListener("keydown", function (event) {
@@ -1842,6 +1875,9 @@
     }, { passive: true });
 
     document.addEventListener("click", function (event) {
+      if (hoverState.box && !(event.target && event.target.closest && event.target.closest(".spark-box") === hoverState.box)) {
+        clearSparkHover(hoverState.box);
+      }
       if (event.target && event.target.closest && event.target.closest(".strategy-popover-wrap")) return;
       closeStrategyPopovers(null, false);
     });
