@@ -761,6 +761,11 @@ def create_app(config_path: Optional[str] = None) -> FastAPI:
             )
         )
 
+    def _json_or_db_error(payload: dict) -> JSONResponse:
+        if payload.get("db_error"):
+            return JSONResponse(status_code=503, content=payload)
+        return JSONResponse(payload)
+
     @app.get("/api/dashboard")
     def dashboard_data(
         request: Request,
@@ -784,7 +789,7 @@ def create_app(config_path: Optional[str] = None) -> FastAPI:
                 "error": service_state.get("error"),
             }
             payload["runtime_settings"] = _runtime_entry_catchup_state(request.app)
-            return JSONResponse(payload)
+            return _json_or_db_error(payload)
         except Exception as exc:  # noqa: BLE001
             logger.exception("dashboard snapshot failed")
             raise HTTPException(status_code=500, detail="dashboard snapshot failed") from exc
@@ -793,7 +798,7 @@ def create_app(config_path: Optional[str] = None) -> FastAPI:
     def accounts_summary_fast(request: Request):
         ctx: DashboardRuntimeContext = request.app.state.ctx
         try:
-            return JSONResponse(ctx.provider.cached_accounts_summary_fast())
+            return _json_or_db_error(ctx.provider.cached_accounts_summary_fast())
         except Exception as exc:  # noqa: BLE001
             logger.exception("fast accounts summary failed")
             raise HTTPException(status_code=500, detail="fast accounts summary failed") from exc
@@ -802,7 +807,7 @@ def create_app(config_path: Optional[str] = None) -> FastAPI:
     def accounts_summary_details(request: Request):
         ctx: DashboardRuntimeContext = request.app.state.ctx
         try:
-            return JSONResponse(ctx.provider.cached_accounts_summary_details())
+            return _json_or_db_error(ctx.provider.cached_accounts_summary_details())
         except Exception as exc:  # noqa: BLE001
             logger.exception("account summary details failed")
             raise HTTPException(status_code=500, detail="account summary details failed") from exc
@@ -811,7 +816,7 @@ def create_app(config_path: Optional[str] = None) -> FastAPI:
     def accounts_summary(request: Request):
         ctx: DashboardRuntimeContext = request.app.state.ctx
         try:
-            return JSONResponse(ctx.provider.cached_accounts_summary())
+            return _json_or_db_error(ctx.provider.cached_accounts_summary())
         except Exception as exc:  # noqa: BLE001
             logger.exception("accounts summary failed")
             raise HTTPException(status_code=500, detail="accounts summary failed") from exc
@@ -826,7 +831,7 @@ def create_app(config_path: Optional[str] = None) -> FastAPI:
     ):
         ctx: DashboardRuntimeContext = request.app.state.ctx
         try:
-            return JSONResponse(
+            return _json_or_db_error(
                 ctx.provider.accounts_equity_comparison(
                     window_hours=None if all_time else window_hours,
                     curve_points=curve_points,
@@ -862,7 +867,7 @@ def create_app(config_path: Optional[str] = None) -> FastAPI:
                 "running": bool(service_state.get("running", False)) and bool(thread and thread.is_alive()),
                 "error": service_state.get("error"),
             }
-            return JSONResponse(payload)
+            return _json_or_db_error(payload)
         except Exception as exc:  # noqa: BLE001
             logger.exception("account snapshot failed for %s", account_id)
             raise HTTPException(status_code=500, detail="account snapshot failed") from exc
@@ -897,7 +902,7 @@ def create_app(config_path: Optional[str] = None) -> FastAPI:
                 "running": bool(service_state.get("running", False)) and bool(thread and thread.is_alive()),
                 "error": service_state.get("error"),
             }
-            return JSONResponse(payload)
+            return _json_or_db_error(payload)
         except Exception as exc:  # noqa: BLE001
             logger.exception("account core failed for %s", account_id)
             raise HTTPException(status_code=500, detail="account core failed") from exc
@@ -987,6 +992,11 @@ def create_app(config_path: Optional[str] = None) -> FastAPI:
                 )
                 for aid in target_ids
             }
+            if any(isinstance(item, dict) and item.get("db_error") for item in curves.values()):
+                return JSONResponse(
+                    status_code=503,
+                    content={"curves": curves, "db_error": "database error"},
+                )
             return JSONResponse({"curves": curves})
         except Exception as exc:  # noqa: BLE001
             logger.exception("accounts curves batch failed")
@@ -1010,7 +1020,7 @@ def create_app(config_path: Optional[str] = None) -> FastAPI:
                 curve_points=curve_points,
                 curve_type=curve_type,
             )
-            return JSONResponse(payload)
+            return _json_or_db_error(payload)
         except Exception as exc:  # noqa: BLE001
             logger.exception("account curve failed for %s", account_id)
             raise HTTPException(status_code=500, detail="account curve failed") from exc
@@ -1034,7 +1044,7 @@ def create_app(config_path: Optional[str] = None) -> FastAPI:
                 include_curves=False,
             )
             payload["account_id"] = account_id
-            return JSONResponse(payload)
+            return _json_or_db_error(payload)
         except Exception as exc:  # noqa: BLE001
             logger.exception("account details failed for %s", account_id)
             raise HTTPException(status_code=500, detail="account details failed") from exc

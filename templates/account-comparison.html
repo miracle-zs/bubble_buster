@@ -19,7 +19,7 @@ __OPS_TOPBAR__
       <div>
         <div class="hero-title-row">
           <h1>多账户权益走势同轴对比</h1>
-          <div id="freshness-pill" class="ops-freshness is-warn">
+          <div id="freshness-pill" class="ops-freshness">
             <span class="ops-freshness-dot" aria-hidden="true"></span>
             <span id="status-text">正在读取快照</span>
           </div>
@@ -51,7 +51,12 @@ __OPS_TOPBAR__
       </div>
     </div>
 
-    <section id="summary-grid" class="summary-grid" aria-label="账户摘要"></section>
+    <section id="summary-grid" class="summary-grid" aria-label="账户摘要">
+      <div class="summary-card is-skeleton" aria-hidden="true"></div>
+      <div class="summary-card is-skeleton" aria-hidden="true"></div>
+      <div class="summary-card is-skeleton" aria-hidden="true"></div>
+      <div class="summary-card is-skeleton" aria-hidden="true"></div>
+    </section>
 
     <section class="chart-panel" aria-labelledby="chart-title">
       <div class="chart-head">
@@ -79,8 +84,9 @@ __OPS_TOPBAR__
         </div>
       </div>
       <div id="metrics-sort-status" class="sr-only" role="status" aria-live="polite"></div>
-      <div class="table-wrap" tabindex="0" role="region" aria-labelledby="metrics-table-title">
-        <table id="comparison-metrics-table" class="comparison-table">
+      <div class="metrics-table-shell">
+        <div class="table-wrap" tabindex="0" role="region" aria-labelledby="metrics-table-title">
+          <table id="comparison-metrics-table" class="comparison-table is-empty">
           <caption class="sr-only">各账户区间收益、当前权益、最大回撤与策略差异对比表</caption>
           <thead>
             <tr>
@@ -96,6 +102,7 @@ __OPS_TOPBAR__
             <tr><td colspan="6" class="table-empty-cell">加载中...</td></tr>
           </tbody>
         </table>
+        </div>
       </div>
     </section>
 
@@ -107,6 +114,7 @@ __OPS_TOPBAR__
 
   <script id="page-config" type="application/json">__PAGE_CONFIG_JSON__</script>
   <script defer src="../../static/ops.js"></script>
+  <script defer src="../../static/comparison_render.js"></script>
   <script defer src="../../static/comparison.js"></script>
 </body>
 </html>

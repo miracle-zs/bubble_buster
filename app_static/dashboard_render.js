@@ -16,7 +16,8 @@
   function trimFixed(value, digits) {
     var n = ops.toNum(value);
     if (n === null) return "--";
-    return n.toFixed(digits).replace(/(\.\d*?[1-9])0+$/, "$1").replace(/\.0+$/, "");
+    var out = n.toFixed(digits).replace(/(\.\d*?[1-9])0+$/, "$1").replace(/\.0+$/, "");
+    return out === "-0" ? "0" : out;
   }
 
   function fmtAdaptive(value) {
@@ -59,8 +60,8 @@
 
   function clsForStatus(status) {
     var s = (status || "").toUpperCase();
-    if (s.indexOf("SUCCESS") >= 0 || s.indexOf("CLOSED_TP") >= 0) return "ok";
-    if (s.indexOf("RUNNING") >= 0 || s.indexOf("SKIPPED") >= 0) return "warn";
+    if (s.indexOf("SUCCESS") >= 0 || s.indexOf("CLOSED_TP") >= 0 || s.indexOf("RUNNING") >= 0) return "ok";
+    if (s.indexOf("SKIPPED") >= 0) return "warn";
     if (s.indexOf("FAILED") >= 0 || s.indexOf("ERROR") >= 0 || s.indexOf("CLOSED_SL") >= 0) return "bad";
     return "";
   }
@@ -136,7 +137,7 @@
 
   function liveOrderClass(value) {
     var s = String(value || "").toUpperCase();
-    if (s === "NEW" || s === "ACTIVE" || s === "PARTIALLY_FILLED") return "ok";
+    if (s === "NEW" || s === "ACTIVE" || s === "PARTIALLY_FILLED" || s === "FILLED") return "ok";
     if (s === "READ_ERROR" || s === "MISSING" || s === "CANCELED" || s === "CANCELLED" || s === "EXPIRED" || s === "REJECTED") return "bad";
     return "warn";
   }
@@ -210,7 +211,7 @@
     } else if (liveAvailable) {
       stateHtml += '<small class="live-sync">' + (readonlyLive ? "交易所实时" : "实时已同步") + "</small>";
     }
-    var sourceLabel = readonlyLive ? "交易所实时" : "#" + p.id;
+    var sourceLabel = readonlyLive ? "交易所实时" : "#" + txt(p.id);
     var protectionHtml = '<div class="exit-stack"><div class="exit-line"><span class="exit-key tp">TP</span><span class="exit-price">' + escapeHtml(fmtAdaptive(p.tp_price)) + "</span>" + liveOrderBadge(p.tp_order_status) + '</div><div class="exit-line"><span class="exit-key sl">SL</span><span class="exit-price">' + escapeHtml(fmtAdaptive(p.sl_price)) + "</span>" + liveOrderBadge(p.sl_order_status) + "</div></div>";
     if (readonlyLive) {
       protectionHtml += '<small class="readonly-protection-note">交易所订单读取</small>';
@@ -284,13 +285,20 @@
   }
 
   function readonlyStatsFactsHtml(stats) {
+    var winRate = ops.toNum(stats.win_rate_pct);
+    var profitFactor = ops.toNum(stats.profit_factor);
+    var totalTrades = ops.toNum(stats.total_trades);
+    var winCount = ops.toNum(stats.win_count);
+    var lossCount = ops.toNum(stats.loss_count);
+    var avgWin = ops.toNum(stats.avg_win);
+    var avgLoss = ops.toNum(stats.avg_loss);
     var rows = [
-      ["胜率", stats.win_rate_pct != null ? ops.fmtNum(stats.win_rate_pct, 1) + "%" : "--", ""],
-      ["盈亏比", stats.profit_factor != null ? ops.fmtNum(stats.profit_factor, 2) : "--", ""],
-      ["平仓订单数", stats.total_trades != null ? ops.fmtNum(stats.total_trades, 0) + " 笔" : "--", ""],
-      ["胜 / 负场次", (stats.win_count != null ? ops.fmtNum(stats.win_count, 0) : "--") + " / " + (stats.loss_count != null ? ops.fmtNum(stats.loss_count, 0) : "--"), ""],
-      ["平均盈利", stats.avg_win != null ? "+" + ops.fmtUsdt(Math.abs(stats.avg_win), 2) + " USDT" : "--", "ok"],
-      ["平均亏损", stats.avg_loss != null ? "-" + ops.fmtUsdt(Math.abs(stats.avg_loss), 2) + " USDT" : "--", "bad"]
+      ["胜率", winRate !== null ? ops.fmtNum(winRate, 1) + "%" : "--", ""],
+      ["盈亏比", profitFactor !== null ? ops.fmtNum(profitFactor, 2) : "--", ""],
+      ["平仓订单数", totalTrades !== null ? ops.fmtNum(totalTrades, 0) + " 笔" : "--", ""],
+      ["胜 / 负场次", (winCount !== null ? ops.fmtNum(winCount, 0) : "--") + " / " + (lossCount !== null ? ops.fmtNum(lossCount, 0) : "--"), ""],
+      ["平均盈利", avgWin !== null ? "+" + ops.fmtUsdt(Math.abs(avgWin), 2) + " USDT" : "--", "ok"],
+      ["平均亏损", avgLoss !== null ? "-" + ops.fmtUsdt(Math.abs(avgLoss), 2) + " USDT" : "--", "bad"]
     ];
     return rows.map(function (r) {
       return '<div class="risk-fact"><span class="risk-fact-label">' + ops.escapeHtml(r[0]) + '</span><strong class="risk-fact-value ' + r[2] + '">' + ops.escapeHtml(r[1]) + "</strong></div>";
@@ -344,10 +352,10 @@
       var rawRange = Math.max(yMax - yMin, Math.abs(yMax || yMin) * 0.02, 1);
       var pad = rawRange * 0.28;
       if (rawRange >= 2) {
-        yAxisCfg.min = Math.max(0, Math.floor(yMin - pad));
+        yAxisCfg.min = yMin >= 0 ? Math.max(0, Math.floor(yMin - pad)) : Math.floor(yMin - pad);
         yAxisCfg.max = Math.ceil(yMax + pad);
       } else {
-        yAxisCfg.min = Math.max(0, Number((yMin - pad).toFixed(2)));
+        yAxisCfg.min = yMin >= 0 ? Math.max(0, Number((yMin - pad).toFixed(2))) : Number((yMin - pad).toFixed(2));
         yAxisCfg.max = Number((yMax + pad).toFixed(2));
       }
     }
@@ -379,7 +387,7 @@
           return [
             '<div style="margin-bottom:4px;color:' + theme.muted + '">' + escapeHtml(fmtAxisTime(v[0], timeZone)) + "</div>",
             "<div>权益：<strong>" + escapeHtml(ops.fmtUsdt(v[1], 2)) + " USDT</strong></div>",
-            "<div>窗口变化：" + escapeHtml(ops.fmtSigned(v[2], 2)) + " USDT</div>",
+            "<div>窗口变化：" + escapeHtml(ops.fmtSignedUsdt(v[2], 2)) + " USDT</div>",
             "<div>回撤：" + escapeHtml(ops.fmtNum(v[3], 2)) + "%</div>"
           ].join("");
         }

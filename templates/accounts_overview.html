@@ -32,18 +32,19 @@ __OPS_TOPBAR__
       </div>
       <div class="command-item">
         <span class="command-label">调度服务</span>
-        <strong id="service-state" class="command-value status-warn"><span class="status-dot" aria-hidden="true"></span>检测中</strong>
+        <strong id="service-state" class="command-value"><span class="status-dot" aria-hidden="true"></span>检测中</strong>
       </div>
       <div class="command-item">
         <span class="command-label">最新快照</span>
         <strong id="overview-updated-at" class="command-value">--</strong>
       </div>
-      <button id="overview-anomaly-btn" class="command-item command-anomaly command-item-btn" type="button" aria-label="任务异常，跳转到异常与任务并筛选仅异常">
+      <button id="overview-anomaly-btn" class="command-item command-anomaly command-item-btn" type="button" aria-describedby="overview-anomaly-desc">
         <span class="command-label">任务异常</span>
         <span class="command-anomaly-badge">
           <strong id="overview-anomaly-count" class="command-value">--</strong>
           <span id="overview-anomaly-cue" class="command-anomaly-cue" aria-hidden="true" hidden>查看</span>
         </span>
+        <span id="overview-anomaly-desc" class="sr-only">跳转到异常与任务并筛选仅异常</span>
       </button>
       <div class="command-item command-secondary">
         <span class="command-label">开单任务</span>
@@ -69,13 +70,16 @@ __OPS_TOPBAR__
       </div>
     </div>
 
-    <section id="cards" class="accounts-area" aria-label="账户概览"><div class="task-empty"><strong>正在加载账户概览...</strong><span>正在读取最新账户快照</span></div></section>
+    <section class="accounts-section" aria-labelledby="accounts-overview-heading">
+      <h2 id="accounts-overview-heading" class="sr-only">账户概览</h2>
+      <div id="cards" class="accounts-area"><div class="task-empty"><strong>正在加载账户概览...</strong><span>正在读取最新账户快照</span></div></div>
+    </section>
 
     <section class="entry-progress-panel" aria-labelledby="entry-progress-heading">
       <div class="entry-progress-heading">
         <div class="entry-progress-heading-copy">
           <h2 id="entry-progress-heading" class="section-title">今日开单进度</h2>
-          <span class="entry-progress-strategy-badge ops-term tip-below" tabindex="0" data-tip="首笔等待 1h 阴线确认；第二笔先出阳线后再等下一根阴线独立开仓（启用收盘前入场时可在收盘前触发）">先阳后阴 · 信号独立开仓</span>
+          <button type="button" class="entry-progress-strategy-badge ops-term tip-below" data-tip="首笔等待 1h 阴线确认；第二笔先出阳线后再等下一根阴线独立开仓（启用收盘前入场时可在收盘前触发）">先阳后阴 · 信号独立开仓</button>
         </div>
         <div class="section-heading-actions">
           <div id="entry-progress-updated" class="entry-progress-updated">更新 --</div>

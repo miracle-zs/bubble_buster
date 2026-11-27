@@ -159,5 +159,72 @@ const zoomedOpt = dr.buildEquityChartOption({{ seriesData: pts30, zoomStart: 25,
 assert.equal(zoomedOpt.dataZoom[0].start, 25);
 assert.equal(zoomedOpt.dataZoom[0].end, 75);
 assert.ok(!dr.cashflowRowHtml({{ amount: 0, income_type: 'FUNDING_FEE', asset: 'USDT', symbol: 'BTCUSDT', id: 1, event_time_utc: '2026-10-09T00:00:00Z' }}, 'Asia/Shanghai').includes('numeric warn'));
+
+// Fixes verification
+assert.equal(ops.formatBeijingTime('2026-10-08T16:00:00Z', {{ withYear: true, withSeconds: true }}), '2026-10-09 00:00:00');
+assert.equal(ops.parseTimestampMs('2026-10-09T08:00:00'), Date.parse('2026-10-09T08:00:00+08:00'));
+const synthStop = {{ baseline_equity: 100, baseline_captured_at_utc: '2026-10-09T00:00:00Z', current_equity: 105, updated_at_utc: '2026-10-09T00:05:00Z', loss_pct: 3.5 }};
+const synthRes = ops.computeCycleRiskMetrics([{{ t: '2026-10-09T00:01:00Z', equity: 101 }}], 'full', synthStop, cfg);
+assert.equal(synthRes.points[synthRes.points.length - 1].t, '2026-10-09T00:05:00Z');
+assert.equal(dr.trimFixed(-1e-9, 2), '0');
+assert.ok(!dr.readonlyStatsFactsHtml({{ win_rate_pct: 'bad', profit_factor: NaN, total_trades: null }}).includes('NaN'));
+const negOpt = dr.buildEquityChartOption({{ seriesData: [[Date.parse('2026-09-05T08:00:00Z'), -50, -50, -10]], timeZone: 'Asia/Shanghai' }});
+assert.ok(negOpt.yAxis.min < -50);
+assert.equal(dr.clsForStatus('RUNNING'), 'ok');
+assert.equal(dr.liveOrderClass('FILLED'), 'ok');
+const readonlyRow = ov.taskRowsForAccount({{ account_id: 'readonly01', mode: 'readonly', trade_stats: null }});
+assert.ok(readonlyRow.includes('class="task-result" role="cell"'));
+
+// Pure comparison_render.js module tests
+require({str((Path(__file__).resolve().parents[1] / "app_static/comparison_render.js").resolve())!r});
+const cr = globalThis.BBComparisonRender;
+assert.ok(Math.abs(cr.computeRowMaxDrawdownPct({{ points: [{{ equity: 100 }}, {{ equity: 120 }}, {{ equity: 90 }}, {{ equity: 110 }}] }}) - (-25)) < 1e-8);
+assert.equal(cr.computeRowMaxDrawdownPct({{ points: [{{ equity: 0 }}, {{ equity: null }}] }}), null);
+const cardHtml = cr.buildSummaryCardHtml(
+  {{ account_id: 'acc<1>', status: 'OK', change_pct: 2.5, latest_equity: 1234.5, min_change_pct: -1.1, max_change_pct: 3.2 }},
+  0,
+  {{ isReadonly: true, pathPrefix: '/proxy', note: 'TP 9%', allNotes: ['TP 9%'] }}
+);
+assert.ok(cardHtml.includes('summary-card is-readonly'));
+assert.ok(cardHtml.includes('acc&lt;1&gt;'));
+assert.ok(cardHtml.includes('href="/proxy/account/acc%3C1%3E/"'));
+const legendHtml = cr.buildLegendHtml(
+  [
+    {{ account_id: 'acc01', status: 'OK', points: [{{ t: '2026-10-09T00:00:00Z', equity: 100 }}], change_pct: 1.5 }},
+    {{ account_id: 'acc02', status: 'NO_DATA', points: [], change_pct: null }}
+  ],
+  {{ visible: {{ acc01: true }}, isReadonlyFn: (id) => id === 'acc02' }}
+);
+assert.ok(legendHtml.includes('data-account="acc01" aria-pressed="true"'));
+assert.ok(legendHtml.includes('legend-button is-muted is-no-data is-readonly'));
+assert.ok(legendHtml.includes('disabled'));
+const sorted = cr.sortAndEnrichComparisonRows(
+  [
+    {{ account_id: 'acc02', change_pct: null, latest_equity: 100, points: [] }},
+    {{ account_id: 'acc01', change_pct: 1.2, latest_equity: 200, points: [{{ equity: 100 }}, {{ equity: 98 }}] }},
+    {{ account_id: 'acc03', change_pct: 3.4, latest_equity: 300, points: [{{ equity: 100 }}, {{ equity: 97 }}] }}
+  ],
+  {{ key: 'change_pct', dir: 'desc' }}
+);
+assert.deepEqual(sorted.map((item) => item.account_id), ['acc03', 'acc01', 'acc02']);
+const metricsRow = cr.buildMetricsRowHtml(sorted[2], {{ isReadonly: true, pathPrefix: '' }});
+assert.ok(metricsRow.includes('class="is-readonly"'));
+assert.ok(metricsRow.includes('未配置'));
+const cmpOpt = cr.buildComparisonChartOption({{
+  activeRows: [{{
+    account_id: 'acc01',
+    status: 'OK',
+    points: [
+      {{ t: '2026-10-09T00:00:00Z', relative_pct: 0, equity: 100 }},
+      {{ t: '2026-10-09T00:05:00Z', relative_pct: null, equity: 100 }}
+    ]
+  }}],
+  mode: 'relative',
+  range: 'all',
+  animate: false,
+  isReadonlyFn: () => false
+}});
+assert.equal(cmpOpt.series[0].data[1][1], null);
+assert.equal(cmpOpt.dataZoom.length, 0);
 """
         subprocess.run(["node", "-e", script], check=True, capture_output=True, text=True)

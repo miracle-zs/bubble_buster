@@ -153,6 +153,7 @@ portfolio_take_profit_enabled = true
             dashboard_css_v = static_asset_version("dashboard.css")
             dashboard_js_v = static_asset_version("dashboard.js")
             comparison_css_v = static_asset_version("comparison.css")
+            comparison_render_js_v = static_asset_version("comparison_render.js")
             comparison_js_v = static_asset_version("comparison.js")
             favicon_v = static_asset_version("favicon.svg")
             echarts_v = static_asset_version("vendor/echarts.min.js")
@@ -193,6 +194,7 @@ portfolio_take_profit_enabled = true
             self.assertIn(f"../../static/ops.css?v={ops_css_v}", comparison_page.text)
             self.assertIn(f"../../static/comparison.css?v={comparison_css_v}", comparison_page.text)
             self.assertIn(f"../../static/ops.js?v={ops_js_v}", comparison_page.text)
+            self.assertIn(f"../../static/comparison_render.js?v={comparison_render_js_v}", comparison_page.text)
             self.assertIn(f"../../static/comparison.js?v={comparison_js_v}", comparison_page.text)
             self.assertIn(f"../../static/favicon.svg?v={favicon_v}", comparison_page.text)
             self.assertNotIn("<style>", comparison_page.text)
@@ -239,6 +241,7 @@ portfolio_take_profit_enabled = true
             self.assertIn(f"../../static/ops.js?v={ops_js_v}", compact.text)
             self.assertIn(f"../../static/dashboard.js?v={dashboard_js_v}", compact.text)
             self.assertIn(f"../../static/favicon.svg?v={favicon_v}", compact.text)
+            self.assertIn(f'rel="preload" as="script" href="../../static/vendor/echarts.min.js?v={echarts_v}"', compact.text)
             self.assertIn(f'"echartsSrc": "/static/vendor/echarts.min.js?v={echarts_v}"', compact.text)
             self.assertNotIn("<style>", compact.text)
             self.assertIn('id="page-config" type="application/json"', compact.text)
@@ -453,6 +456,18 @@ portfolio_take_profit_enabled = true
             self.assertIn("open_positions", detail_payload)
             self.assertIn("log_tail", detail_payload)
             self.assertEqual(detail_payload.get("strategy_equity_curve"), [])
+
+    def test_db_error_returns_503(self) -> None:
+        app = create_app(config_path=str(self.config_path))
+        with TestClient(app) as client:
+            app.state.ctx.provider.cached_accounts_summary_fast = lambda: {
+                "generated_at_utc": "2026-08-15T00:00:00+00:00",
+                "accounts": [],
+                "db_error": "database is locked",
+            }
+            resp = client.get("/api/accounts/summary/fast")
+            self.assertEqual(resp.status_code, 503)
+            self.assertEqual(resp.json()["db_error"], "database is locked")
 
 
 if __name__ == "__main__":

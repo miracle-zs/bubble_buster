@@ -12,7 +12,7 @@
   function fmt(v, digits) {
     if (v === null || v === undefined || v === "") return "--";
     var n = Number(v);
-    if (!Number.isFinite(n)) return String(v);
+    if (!Number.isFinite(n)) return typeof v === "number" ? "--" : String(v);
     return n.toFixed(digits);
   }
 
@@ -268,10 +268,10 @@
           + '<span class="task-task-tag">只读监控</span></div>'
           + '<div class="task-meta" role="cell"><span class="task-badge is-readonly">只读</span></div>'
           + '<div class="task-time" role="cell">' + escapeHtml(ops.formatBeijingTime(stats.last_updated_utc, { withYear: true })) + "</div>"
-          + '<div class="task-result-lines" role="cell">'
+          + '<div class="task-result" role="cell"><div class="task-result-lines">'
           + '<div class="task-stat-line">净盈亏 ' + escapeHtml(ops.fmtSignedUsdt(stats.net_realized_pnl != null ? stats.net_realized_pnl : stats.total_realized_pnl, 2)) + " USDT · 胜率 " + escapeHtml(fmt(stats.win_rate_pct, 1)) + "% · 盈亏比 " + escapeHtml(profitFactor) + "</div>"
           + '<div class="task-stat-line">胜 ' + escapeHtml(fmt(stats.win_count, 0)) + " / 负 " + escapeHtml(fmt(stats.loss_count, 0)) + " · 平均盈利 " + escapeHtml(ops.fmtUsdt(stats.avg_win, 2)) + " · 平均亏损 " + escapeHtml(ops.fmtUsdt(stats.avg_loss, 2)) + "</div>"
-          + "</div></div></div>";
+          + "</div></div></div></div>";
       }
       return '<div class="task-row" role="none">'
         + '<div class="task-row-main" role="row">'
@@ -279,7 +279,7 @@
         + '<span class="task-task-tag">只读监控</span></div>'
         + '<div class="task-meta" role="cell"><span class="task-badge is-readonly">只读</span></div>'
         + '<div class="task-time" role="cell">--</div>'
-        + '<div class="task-result-lines" role="cell"><div class="task-stat-line">暂无近 30 日交易统计数据</div></div>'
+        + '<div class="task-result" role="cell"><div class="task-result-lines"><div class="task-stat-line">暂无近 30 日交易统计数据</div></div></div>'
         + "</div></div>";
     }
     if (mode === "full") rows.push({ key: "entry", name: "每日开仓", task: tasks.entry });
@@ -367,8 +367,7 @@
       var item = waitingRows[i] || {};
       var meta = entryPhaseMeta(item);
       var next = compactLocalTime(item.next_check_local || (progress && progress.next_check_local));
-      var title = meta.label + (next ? "，下次检查 " + next : "");
-      html += '<span class="entry-progress-waiting-chip is-' + escapeHtml(meta.variant || "unknown") + '" aria-label="' + escapeHtml(title) + '">'
+      html += '<span class="entry-progress-waiting-chip is-' + escapeHtml(meta.variant || "unknown") + '">'
         + '<span class="entry-progress-waiting-chip-head"><i aria-hidden="true"></i><strong>' + escapeHtml(String(item.symbol || "--")) + "</strong></span>"
         + "<small>" + escapeHtml(meta.chipLabel + (next ? " · " + next : "")) + "</small>"
         + "</span>";
@@ -664,7 +663,7 @@
       + '<div class="entry-progress-next-action"><span class="entry-progress-next-label">下一检查</span><strong>' + escapeHtml(nextCheckLabel) + '</strong><span class="entry-progress-next-state"><i class="entry-progress-next-pulse" aria-hidden="true"></i>' + escapeHtml(nextActionLabel) + ' · <span id="entry-progress-countdown">--</span></span></div>'
       + "</div>";
 
-    html += '<div class="entry-progress-timeline"><div class="entry-progress-timeline-head"><div class="entry-progress-timeline-title"><strong>共同入场窗口</strong><span>' + escapeHtml(timelineCaption) + '</span></div></div><div class="entry-progress-timeline-track">';
+    html += '<div class="entry-progress-timeline"><div class="entry-progress-timeline-head"><div class="entry-progress-timeline-title"><strong>共同入场窗口</strong><span>' + escapeHtml(timelineCaption) + '</span></div></div><div class="entry-progress-timeline-wrap"><div class="entry-progress-timeline-track">';
     if (timeline.groups.length) {
       for (var k = 0; k < timeline.groups.length; k += 1) {
         var group = timeline.groups[k];
@@ -681,7 +680,7 @@
     if (waitingTotal > 0 && nextCheckRaw) {
       html += '<div class="entry-progress-timeline-event entry-progress-timeline-next is-next"><div class="entry-progress-timeline-event-top"><span class="entry-progress-timeline-event-state">下一检查</span><time>' + escapeHtml(nextCheckLabel) + "</time></div><span>待检查 " + waitingTotal + " 个信号</span></div>";
     }
-    html += "</div></div>"
+    html += "</div></div></div>"
       + '<div id="entry-progress-details-table" class="entry-progress-details' + (showDetails ? "" : " is-collapsed") + '" role="table" aria-label="各账号今日开单明细">'
       + '<div class="entry-progress-header" role="row"><span role="columnheader">账号与进度</span><span role="columnheader">当前判断</span><span role="columnheader">等待信号</span><span role="columnheader">下一动作</span></div>';
 
@@ -735,7 +734,7 @@
         + '<div class="entry-progress-account progress-account-cell" role="cell"><div class="entry-progress-account-head"><strong>' + aid + '</strong><span class="entry-progress-account-status ' + st.cls + '">' + escapeHtml(accountStatusText) + '</span></div><span class="entry-progress-account-meta">' + escapeHtml(accountMeta) + '</span><div class="entry-progress-progress-line"><strong>' + opened + "</strong><span>/ " + target + " 入场动作</span><em>" + openedPct + "%</em></div>"
         + entryMeterHtml("entry-progress-meter", rawAid + " 入场动作进度", openedPct, rowPcts)
         + '<div class="entry-progress-progress-foot"><span>入场动作</span><span class="' + progressNoteClass + '">' + escapeHtml(progressNoteParts.join(" · ")) + "</span></div></div>"
-        + '<div class="entry-progress-phase" role="cell" aria-label="' + escapeHtml(st.text) + '"><span class="entry-progress-phase-label ' + phase.cls + " phase-" + escapeHtml(phase.variant || "unknown") + '">' + escapeHtml(phase.label) + '</span><span class="entry-progress-phase-note">' + escapeHtml(phase.note) + "</span></div>"
+        + '<div class="entry-progress-phase" role="cell"><span class="entry-progress-phase-label ' + phase.cls + " phase-" + escapeHtml(phase.variant || "unknown") + '">' + escapeHtml(phase.label) + '</span><span class="entry-progress-phase-note">' + escapeHtml(phase.note) + "</span></div>"
         + '<div class="entry-progress-waiting-cell" role="cell">' + waitingHtml + "</div>"
         + '<div class="entry-progress-next-cell' + (waiting ? " is-waiting" : "") + '" role="cell"><span class="entry-progress-next-cell-label">下一检查</span><strong>' + escapeHtml(nextText) + "</strong><span>" + escapeHtml(nextNote) + "</span></div></div>";
     }

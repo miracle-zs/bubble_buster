@@ -7,6 +7,7 @@
   <meta name="theme-color" content="#080a0f" />
   <title>Bubble Buster Console</title>
   <link rel="icon" type="image/svg+xml" href="__STATIC_BASE__/favicon.svg" />
+  <link rel="preload" as="script" href="__STATIC_BASE__/vendor/echarts.min.js" />
   <link rel="stylesheet" href="__STATIC_BASE__/ops.css" />
   <link rel="stylesheet" href="__STATIC_BASE__/dashboard.css" />
 </head>
@@ -63,7 +64,7 @@ __OPS_TOPBAR__
 
     <section id="summaryRail" class="summary-rail" aria-label="账户核心指标">
       <article class="summary-metric primary">
-        <span class="summary-label"><span id="walletLabel" class="ops-term tip-below" tabindex="0" data-tip="扣除出入金影响后的纯策略净值，反映真实策略表现">策略权益 (USDT)</span></span>
+        <span class="summary-label"><button id="walletLabel" type="button" class="ops-term tip-below" data-tip="扣除出入金影响后的纯策略净值，反映真实策略表现">策略权益 (USDT)</button></span>
         <strong class="summary-value" id="walletBalance">--</strong>
         <span class="summary-help" id="walletHelp" hidden></span>
       </article>
@@ -73,11 +74,11 @@ __OPS_TOPBAR__
         <span class="summary-help" id="cycleReturnHelp">UTC+8 周期</span>
       </article>
       <article class="summary-metric">
-        <span class="summary-label"><span class="ops-term tip-below" tabindex="0" data-tip="当前权益相对本账户周期最高点的回落幅度">距周期高点回撤</span></span>
+        <span class="summary-label"><button type="button" class="ops-term tip-below" data-tip="当前权益相对本账户周期最高点的回落幅度">距周期高点回撤</button></span>
         <strong class="summary-value" id="currentDrawdown">--</strong>
       </article>
       <article class="summary-metric" id="stopDistanceMetric">
-        <span class="summary-label"><span class="ops-term tip-below" tabindex="0" data-tip="当前周期收益距离触发全账户组合止损还剩的百分点">距组合止损</span></span>
+        <span class="summary-label"><button type="button" class="ops-term tip-below" data-tip="当前周期收益距离触发全账户组合止损还剩的百分点">距组合止损</button></span>
         <strong class="summary-value" id="stopDistance">--</strong>
         <span class="summary-help" id="stopDistanceHelp">阈值计算中</span>
       </article>
@@ -124,7 +125,7 @@ __OPS_TOPBAR__
               <button class="ops-btn" type="button" data-sparse-window="8760">切换 1Y</button>
             </div>
           </div>
-          <div class="chart-canvas" id="equityChart" role="img" aria-label="账户权益曲线"></div>
+          <div class="chart-canvas" id="equityChart" role="region" aria-roledescription="交互式权益曲线图表" aria-label="账户权益曲线"></div>
           <div class="chart-empty" id="chartEmpty">曲线加载中...</div>
         </div>
       </section>
@@ -223,10 +224,10 @@ __OPS_TOPBAR__
         <button id="tab-cashflow" class="activity-tab" type="button" role="tab" aria-selected="false" aria-controls="activity-cashflow" tabindex="-1" data-activity-target="activity-cashflow">资金流水 <span class="tab-count" id="cashflowCount">0</span></button>
       </div>
       <div class="activity-view" id="activity-runs" role="tabpanel" aria-labelledby="tab-runs">
-        <div class="table-wrap" tabindex="0">
+        <div class="table-wrap" tabindex="0" role="region" aria-label="策略运行历史记录">
           <table id="runsTable" class="detail-table is-empty">
             <caption class="sr-only">策略运行历史记录</caption>
-            <thead><tr><th scope="col">交易日 (UTC)</th><th scope="col">状态</th><th scope="col" class="numeric">开始时间</th><th scope="col">执行摘要</th></tr></thead>
+            <thead><tr><th scope="col" class="numeric">交易日 (UTC)</th><th scope="col">状态</th><th scope="col" class="numeric">开始时间</th><th scope="col">执行摘要</th></tr></thead>
             <tbody id="runsBody"><tr><td colspan="4" class="empty-row">运行记录加载中...</td></tr></tbody>
           </table>
         </div>
@@ -246,19 +247,19 @@ __OPS_TOPBAR__
           </select>
           <span id="eventFilterCount" class="table-filter-count" hidden></span>
         </search>
-        <div class="table-wrap" tabindex="0">
+        <div class="table-wrap" tabindex="0" role="region" aria-label="订单事件记录">
           <table id="eventsTable" class="detail-table is-empty">
             <caption class="sr-only">订单事件记录</caption>
-            <thead><tr><th scope="col">时间</th><th scope="col">交易对</th><th scope="col">订单类型</th><th scope="col">方向</th><th scope="col">状态</th><th scope="col" class="numeric">事件 ID</th></tr></thead>
+            <thead><tr><th scope="col" class="numeric">时间</th><th scope="col">交易对</th><th scope="col">订单类型</th><th scope="col">方向</th><th scope="col">状态</th><th scope="col" class="numeric">事件 ID</th></tr></thead>
             <tbody id="eventsBody"><tr><td colspan="6" class="empty-row">订单事件加载中...</td></tr></tbody>
           </table>
         </div>
       </div>
       <div class="activity-view" id="activity-cashflow" role="tabpanel" aria-labelledby="tab-cashflow" hidden>
-        <div class="table-wrap" tabindex="0">
+        <div class="table-wrap" tabindex="0" role="region" aria-label="资金流水记录">
           <table id="cashflowTable" class="detail-table is-empty">
             <caption class="sr-only">资金流水记录</caption>
-            <thead><tr><th scope="col">时间</th><th scope="col">类型</th><th scope="col" class="numeric">金额</th><th scope="col">资产</th><th scope="col">交易对</th><th scope="col" class="numeric">事件 ID</th></tr></thead>
+            <thead><tr><th scope="col" class="numeric">时间</th><th scope="col">类型</th><th scope="col" class="numeric">金额</th><th scope="col">资产</th><th scope="col">交易对</th><th scope="col" class="numeric">事件 ID</th></tr></thead>
             <tbody id="cashflowBody"><tr><td colspan="6" class="empty-row">资金流水加载中...</td></tr></tbody>
           </table>
         </div>
@@ -269,7 +270,7 @@ __OPS_TOPBAR__
       <summary><span>诊断信息</span><span class="diagnostics-badge-group"><span class="diagnostics-badge-label">待核对平仓</span><span class="surface-count" id="unpricedCount">0</span></span></summary>
       <div class="diagnostics-grid">
         <section class="diagnostic-block">
-          <h2 class="diagnostic-title" id="unpricedHeading"><span class="ops-term tip-below" tabindex="0" data-tip="已平仓但尚未匹配到交易所成交均价的记录，用于异常对账">待核对平仓</span></h2>
+          <h2 class="diagnostic-title" id="unpricedHeading"><button type="button" class="ops-term tip-below" data-tip="已平仓但尚未匹配到交易所成交均价的记录，用于异常对账">待核对平仓</button></h2>
           <div class="table-wrap" tabindex="0" role="region" aria-labelledby="unpricedHeading">
             <table id="unpricedTable" class="detail-table is-empty">
               <caption class="sr-only">待核对平仓记录</caption>

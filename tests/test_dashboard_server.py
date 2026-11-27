@@ -2251,7 +2251,7 @@ class DashboardServerTest(unittest.TestCase):
         self.assertIn("组合止盈监控", overview_bundle)
         self.assertIn('var summaryFastApi = summaryApi + "/fast";', overview_js)
         self.assertIn('var summaryDetailsApi = summaryApi + "/details";', overview_js)
-        self.assertIn("portfolioStopStates[aid] = r.portfolio_loss_cut || null", overview_js)
+        self.assertIn("mergePortfolioStopState(aid, r.portfolio_loss_cut || null)", overview_js)
         self.assertIn("ops.evaluatePortfolioStopState(", overview_js)
 
     def test_render_overview_throttles_refresh_and_uses_lightweight_curve_points(self) -> None:
@@ -2260,7 +2260,7 @@ class DashboardServerTest(unittest.TestCase):
         self.assertIn('"refreshSec": 15', html)
         self.assertIn("setInterval(function () { fetchSummary(); }, refreshSec * 1000)", overview_js)
         self.assertIn("/api/accounts/curves", overview_js)
-        self.assertIn("/curve?window_hours=24&curve_points=160&_=", overview_js)
+        self.assertIn("/curve?window_hours=24&curve_points=160&curve_type=balance", overview_js)
         self.assertIn('event.key === "ArrowLeft"', overview_js)
 
     def test_live_wallet_snapshot_uses_configured_account_id(self) -> None:
@@ -2342,6 +2342,97 @@ class DashboardServerTest(unittest.TestCase):
         self.assertEqual(acc01_tasks["manage"]["summary"], "total=3 tp=1 sl=0 timeout=0 updated=0 errors=0")
         self.assertEqual(acc01_tasks["equity_recovery_take_profit"]["status"], "SUCCESS")
         self.assertIn("equity=1050.00", acc01_tasks["equity_recovery_take_profit"]["summary"])
+
+    def test_readonly_account_snapshot_populates_trade_stats(self) -> None:
+        class CachedFetcher:
+            def get_cached_stats(self, *, account_id: str, lookback_days: int) -> SimpleNamespace:
+                return SimpleNamespace(
+                    total_realized_pnl=12.5,
+                    total_trades=4,
+                    win_count=3,
+                    loss_count=1,
+                    win_rate_pct=75.0,
+                    gross_profit=15.0,
+                    gross_loss=2.5,
+                    profit_factor=6.0,
+                    avg_win=5.0,
+                    avg_loss=2.5,
+                    last_updated_utc="2026-08-15T00:00:00+00:00",
+                    net_realized_pnl=11.0,
+                    commission_usdt=-1.0,
+                    funding_fee_usdt=-0.5,
+                )
+
+        provider = DashboardDataProvider(
+            db_path=self.db_path,
+            log_file=self.log_file,
+            timezone_name="UTC",
+            entry_hour=7,
+            entry_minute=40,
+            overview_account_ids=["readonly01"],
+            account_modes={"readonly01": "readonly"},
+            trade_stats_fetchers={"readonly01": CachedFetcher()},
+        )
+        snap = provider.snapshot(
+            log_lines=0,
+            account_id="readonly01",
+            include_details=False,
+            include_log=False,
+            include_curves=False,
+            include_trade_stats=True,
+        )
+        self.assertIn("trade_stats", snap)
+        self.assertEqual(snap["trade_stats"]["total_trades"], 4)
+        self.assertAlmostEqual(float(snap["trade_stats"]["net_realized_pnl"]), 11.0)
+
+    def test_balance_curve_includes_net_cashflow_and_strategy_only_does_not_alias_balance_stats(self) -> None:
+        now = datetime.now(timezone.utc).replace(microsecond=0)
+        t1 = (now - timedelta(hours=2)).isoformat()
+        t_cf = (now - timedelta(hours=1)).isoformat()
+        t2 = now.isoformat()
+        self.store.scoped("acc01").add_wallet_snapshot(t1, 1000.0, source="API")
+        self.store.scoped("acc01").add_wallet_snapshot(t2, 1200.0, source="API")
+        with sqlite3.connect(self.db_path) as conn:
+            conn.execute(
+                """
+                INSERT INTO cashflow_events (account_id, unique_key, tran_id, event_time_utc, asset, amount, income_type, created_at_utc)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                ("acc01", "cf-1", "t-1", t_cf, "USDT", 150.0, "TRANSFER", t_cf),
+            )
+            conn.commit()
+
+        provider = DashboardDataProvider(
+            db_path=self.db_path,
+            log_file=self.log_file,
+            timezone_name="UTC",
+            entry_hour=7,
+            entry_minute=40,
+        )
+        bal_snap = provider.snapshot(
+            log_lines=0,
+            window_hours=24,
+            account_id="acc01",
+            include_details=False,
+            include_log=False,
+            include_curves=True,
+            include_strategy_curve=False,
+            include_balance_curve=True,
+        )
+        self.assertAlmostEqual(float(bal_snap["drawdown_stats_balance"]["net_cashflow_usdt"]), 150.0)
+        self.assertIsNone(bal_snap["drawdown_stats_strategy"])
+
+        strat_snap = provider.snapshot(
+            log_lines=0,
+            window_hours=24,
+            account_id="acc01",
+            include_details=False,
+            include_log=False,
+            include_curves=True,
+            include_strategy_curve=True,
+            include_balance_curve=False,
+        )
+        self.assertIsNone(strat_snap["drawdown_stats_balance"])
 
 
 if __name__ == "__main__":

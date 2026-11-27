@@ -487,7 +487,7 @@ class DashboardDataProvider:
             position["unrealized_pnl_pct"] = (
                 round(pnl / isolated_margin * 100.0, 4)
                 if pnl is not None and isolated_margin is not None and isolated_margin > 0
-                else None
+                else return_metrics["unrealized_pnl_margin_pct"]
             )
             position["leverage"] = self._safe_float(risk.get("leverage"))
             raw_notional = self._safe_float(risk.get("notional"))
@@ -499,6 +499,35 @@ class DashboardDataProvider:
     def _is_readonly_account(self, account_id: Optional[str]) -> bool:
         normalized = str(account_id or "").strip()
         return bool(normalized) and self.account_modes.get(normalized, "full") == "readonly"
+
+    def _cached_readonly_trade_stats(self, account_id: str) -> Optional[Dict[str, Any]]:
+        """Return cached 30-day trade stats dict for a readonly account without live fetching."""
+        fetcher = self.trade_stats_fetchers.get(account_id)
+        if fetcher is None:
+            return None
+        try:
+            stats = fetcher.get_cached_stats(account_id=account_id, lookback_days=30)
+        except Exception as exc:  # noqa: BLE001
+            LOGGER.warning("Failed to fetch trade stats for account=%s: %s", account_id, exc)
+            return None
+        if stats is None:
+            return None
+        return {
+            "total_realized_pnl": stats.total_realized_pnl,
+            "net_realized_pnl": stats.net_realized_pnl,
+            "commission_usdt": stats.commission_usdt,
+            "funding_fee_usdt": stats.funding_fee_usdt,
+            "total_trades": stats.total_trades,
+            "win_count": stats.win_count,
+            "loss_count": stats.loss_count,
+            "win_rate_pct": stats.win_rate_pct,
+            "gross_profit": stats.gross_profit,
+            "gross_loss": stats.gross_loss,
+            "profit_factor": stats.profit_factor,
+            "avg_win": stats.avg_win,
+            "avg_loss": stats.avg_loss,
+            "last_updated_utc": stats.last_updated_utc,
+        }
 
     def _readonly_live_positions(self, account_id: str) -> List[Dict[str, Any]]:
         """Return current exchange positions for a readonly account without persisting them."""
@@ -2094,6 +2123,29 @@ class DashboardDataProvider:
         curve = self._resample_curve(curve, max_points)
         dd = self._apply_drawdown(curve)
         total_realized_pnl = float(curve[-1]["cum_pnl"]) if curve else 0.0
+        net_cashflow_usdt = 0.0
+        if len(curve) >= 2 and curve[0].get("t") and curve[-1].get("t"):
+            cashflow_params: List[Any] = [str(curve[0]["t"]), str(curve[-1]["t"])]
+            cashflow_where = "WHERE asset = 'USDT' AND event_time_utc > ? AND event_time_utc <= ?"
+            if account_id:
+                cashflow_where += " AND account_id = ?"
+                cashflow_params.append(account_id)
+            try:
+                cf_row = conn.execute(
+                    f"""
+                    SELECT COALESCE(SUM(amount), 0) AS amount
+                    FROM (
+                        SELECT MAX(amount) AS amount
+                        FROM cashflow_events
+                        {cashflow_where}
+                        GROUP BY account_id, COALESCE(NULLIF(tran_id, ''), unique_key)
+                    )
+                    """,
+                    tuple(cashflow_params),
+                ).fetchone()
+                net_cashflow_usdt = float(cf_row["amount"] if cf_row is not None else 0.0)
+            except sqlite3.Error:
+                net_cashflow_usdt = 0.0
 
         stats = {
             "wallet_balance_usdt": round(wallet_balance_usdt, 8) if wallet_balance_usdt is not None else None,
@@ -2115,6 +2167,7 @@ class DashboardDataProvider:
             "current_drawdown_pct": dd["current_drawdown_pct"],
             "unpriced_closed_positions": 0,
             "equity_baseline": round((self._safe_float(curve[0].get("equity")) if curve else 0.0) or 0.0, 8),
+            "net_cashflow_usdt": round(net_cashflow_usdt, 8),
         }
         stats.update(self._load_all_time_account_pnl(conn, account_id=account_id))
         return curve, stats
@@ -2552,6 +2605,7 @@ class DashboardDataProvider:
                 "current_drawdown_pct": 0.0,
                 "unpriced_closed_positions": 0,
                 "equity_baseline": live_wallet["balance_usdt"] if live_wallet["balance_usdt"] is not None else 0.0,
+                "net_cashflow_usdt": 0.0,
                 "all_time_account_pnl": 0.0,
                 "all_time_account_cashflow_usdt": 0.0,
                 "all_time_account_baseline_usdt": 0.0,
@@ -2579,6 +2633,7 @@ class DashboardDataProvider:
                 "current_drawdown_pct": 0.0,
                 "unpriced_closed_positions": 0,
                 "equity_baseline": live_wallet["balance_usdt"] if live_wallet["balance_usdt"] is not None else 0.0,
+                "net_cashflow_usdt": 0.0,
                 "all_time_account_pnl": 0.0,
                 "all_time_account_cashflow_usdt": 0.0,
                 "all_time_account_baseline_usdt": 0.0,
@@ -2599,6 +2654,10 @@ class DashboardDataProvider:
                 data["summary"]["recent_errors"] = 1
             if include_details:
                 data["open_positions"] = [dict(row) for row in readonly_live_positions]
+            if include_trade_stats and scoped_account:
+                readonly_stats = self._cached_readonly_trade_stats(scoped_account)
+                if readonly_stats is not None:
+                    data["trade_stats"] = readonly_stats
 
         if not os.path.exists(self.db_path):
             return data
@@ -2853,10 +2912,11 @@ class DashboardDataProvider:
                     elif include_strategy_curve and strategy_stats is not None:
                         data["equity_curve"] = data["strategy_equity_curve"]
                         data["drawdown_stats"] = data["drawdown_stats_strategy"]
-                        data["drawdown_stats_balance"] = dict(strategy_stats)
+                        data["drawdown_stats_balance"] = None
                     elif balance_stats is not None:
                         data["equity_curve"] = data["balance_curve"]
                         data["drawdown_stats"] = data["drawdown_stats_balance"]
+                        data["drawdown_stats_strategy"] = None
         except sqlite3.Error as exc:
             data["summary"]["last_run_status"] = "DB_ERROR"
             data["db_error"] = str(exc)
@@ -3470,29 +3530,9 @@ class DashboardDataProvider:
                         row["entry_progress"] = entry_progresses.get(aid)
                     # 为 readonly 账户添加交易统计
                     if self.account_modes.get(aid, "full") == "readonly":
-                        fetcher = self.trade_stats_fetchers.get(aid)
-                        if fetcher is not None:
-                            try:
-                                stats = fetcher.get_cached_stats(account_id=aid, lookback_days=30)
-                                if stats is not None:
-                                    row["trade_stats"] = {
-                                        "total_realized_pnl": stats.total_realized_pnl,
-                                        "net_realized_pnl": stats.net_realized_pnl,
-                                        "commission_usdt": stats.commission_usdt,
-                                        "funding_fee_usdt": stats.funding_fee_usdt,
-                                        "total_trades": stats.total_trades,
-                                        "win_count": stats.win_count,
-                                        "loss_count": stats.loss_count,
-                                        "win_rate_pct": stats.win_rate_pct,
-                                        "gross_profit": stats.gross_profit,
-                                        "gross_loss": stats.gross_loss,
-                                        "profit_factor": stats.profit_factor,
-                                        "avg_win": stats.avg_win,
-                                        "avg_loss": stats.avg_loss,
-                                        "last_updated_utc": stats.last_updated_utc,
-                                    }
-                            except Exception as exc:  # noqa: BLE001
-                                LOGGER.warning("Failed to fetch trade stats for account=%s: %s", aid, exc)
+                        trade_stats = self._cached_readonly_trade_stats(aid)
+                        if trade_stats is not None:
+                            row["trade_stats"] = trade_stats
 
                 payload["accounts"] = [by_account[k] for k in sorted(by_account.keys())]
                 return payload

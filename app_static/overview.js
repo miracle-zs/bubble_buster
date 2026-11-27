@@ -44,16 +44,19 @@
     var incidentJumpBtn = document.getElementById("fleet-incident-jump");
 
     var overviewErrors = { summary: "", details: "" };
+    var setAlertError = ops.createAlertController(overviewAlert, overviewAlertText, ["summary", "details"]);
     var serviceHealthState = { enabled: false, running: false, loaded: false };
     var curveCache = {};
     var curveErrors = {};
     var curveInFlight = {};
     var curveRenderData = {};
     var curveRenderSig = {};
+    var curveInputSig = {};
     var curveObserver = null;
     var accountModes = {};
     var portfolioStopStates = {};
     var summaryRows = [];
+    var summaryGeneratedAtUtc = "";
     var initialQuery = ops.readQueryParams();
     var validTaskFilters = { all: true, anomaly: true, symbols: true };
     var taskFilter = validTaskFilters[initialQuery.task_filter] ? initialQuery.task_filter : "anomaly";
@@ -69,6 +72,7 @@
     var detailsHydratedOnce = false;
     var lastDetailsFetchAt = 0;
     var detailsRetryTimer = null;
+    var detailsRetryAttempts = 0;
     var commandBarRafId = 0;
 
     function escapeHtml(text) {
@@ -83,14 +87,26 @@
 
     function setOverviewError(slot, message) {
       overviewErrors[slot] = message || "";
-      if (!overviewAlert || !overviewAlertText) return;
-      var active = overviewErrors.summary || overviewErrors.details;
-      if (active) {
-        overviewAlertText.textContent = active;
-        overviewAlert.hidden = false;
-      } else {
-        overviewAlertText.textContent = "";
-        overviewAlert.hidden = true;
+      setAlertError(slot, message);
+    }
+
+    function mergePortfolioStopState(aid, nextStop) {
+      if (!aid) return;
+      if (!nextStop) {
+        if (!Object.prototype.hasOwnProperty.call(portfolioStopStates, aid)) {
+          portfolioStopStates[aid] = null;
+        }
+        return;
+      }
+      var current = portfolioStopStates[aid];
+      if (!current || !current.updated_at_utc) {
+        portfolioStopStates[aid] = nextStop;
+        return;
+      }
+      var prevMs = ops.parseTimestampMs(current.updated_at_utc);
+      var nextMs = nextStop.updated_at_utc ? ops.parseTimestampMs(nextStop.updated_at_utc) : NaN;
+      if (!Number.isFinite(prevMs) || (Number.isFinite(nextMs) && nextMs >= prevMs)) {
+        portfolioStopStates[aid] = nextStop;
       }
     }
 
@@ -117,9 +133,19 @@
         if (r.portfolio_loss_cut && r.portfolio_loss_cut.updated_at_utc) {
           candidates.push(ops.parseTimestampMs(r.portfolio_loss_cut.updated_at_utc));
         }
+        if (r.live_position_as_of_utc) {
+          candidates.push(ops.parseTimestampMs(r.live_position_as_of_utc));
+        }
+        if (r.trade_stats && r.trade_stats.last_updated_utc) {
+          candidates.push(ops.parseTimestampMs(r.trade_stats.last_updated_utc));
+        }
       }
       var valid = candidates.filter(Number.isFinite);
       if (valid.length) return Math.max.apply(null, valid);
+      if (summaryGeneratedAtUtc) {
+        var genMs = ops.parseTimestampMs(summaryGeneratedAtUtc);
+        if (Number.isFinite(genMs)) return genMs;
+      }
       return NaN;
     }
 
@@ -235,7 +261,7 @@
       }
       var controller = typeof AbortController !== "undefined" ? new AbortController() : null;
       healthAbortController = controller;
-      ops.fetchJsonWithTimeout(healthApi + "?_=" + Date.now(), {
+      ops.fetchJsonWithTimeout(healthApi, {
         signal: controller ? controller.signal : null,
         timeoutMs: 10000
       })
@@ -260,18 +286,7 @@
     }
 
     var latestTaskTime = R.latestTaskTime;
-    var hasAnomalyTask = R.hasAnomalyTask;
-    var taskRowsForAccount = R.taskRowsForAccount;
-    var entryProgressStatus = R.entryProgressStatus;
-    var compactLocalTime = R.compactLocalTime;
     var formatEntryCountdown = R.formatEntryCountdown;
-    var progressItems = R.progressItems;
-    var entryProgressPhase = R.entryProgressPhase;
-    var entryProgressWaitingHtml = R.entryProgressWaitingHtml;
-    var buildCommonEntryTimeline = R.buildCommonEntryTimeline;
-    var entryProgressWindow = R.entryProgressWindow;
-    var entryProgressDetail = R.entryProgressDetail;
-    var entryTimelineActionHtml = R.entryTimelineActionHtml;
 
     function visibleTaskAccounts(rows) {
       return R.visibleTaskAccounts(rows, taskFilter);
@@ -345,9 +360,10 @@
       var prevTrack = entryProgressBoard.querySelector(".entry-progress-timeline-track");
       var prevScrollLeft = prevTrack ? prevTrack.scrollLeft : 0;
       ops.patchHtmlIfChanged(entryProgressBoard, view.html);
-      if (prevScrollLeft > 0) {
-        var nextTrack = entryProgressBoard.querySelector(".entry-progress-timeline-track");
-        if (nextTrack) nextTrack.scrollLeft = prevScrollLeft;
+      var nextTrack = entryProgressBoard.querySelector(".entry-progress-timeline-track");
+      if (nextTrack) {
+        if (prevScrollLeft > 0) nextTrack.scrollLeft = prevScrollLeft;
+        ops.bindScrollOverflowFade(nextTrack, nextTrack.parentElement);
       }
       updateEntryProgressCountdown();
       if (entryProgressUpdated) entryProgressUpdated.textContent = "更新 " + (view.latest || "--");
@@ -429,12 +445,21 @@
       var hasSummaryStop = Object.prototype.hasOwnProperty.call(portfolioStopStates, aid);
       var stop = hasSummaryStop ? portfolioStopStates[aid] : ((cached && cached.portfolioLossCut) || null);
       var backendReturn = stop ? ops.toNum(stop.current_return_pct) : null;
+      var stopSig = stop
+        ? [stop.status, stop.baseline_equity, stop.loss_pct, stop.current_return_pct, stop.current_equity, stop.distance_pct, stop.updated_at_utc].join(":")
+        : "";
+      var inputSig = [mode, portfolioStopEnabled ? 1 : 0, errMsg || "", cached ? cached.ts : 0, curveInFlight[aid] ? 1 : 0, stopSig].join("|");
+      if (curveInputSig[aid] === inputSig && box.querySelector(".spark-svg, .spark-empty")) {
+        return;
+      }
+      curveInputSig[aid] = inputSig;
 
       if (errMsg && !cached) {
         var errSig = "err:" + errMsg;
         if (curveRenderSig[aid] !== errSig) {
           curveRenderSig[aid] = errSig;
           box.className = "spark-box";
+          box.removeAttribute("data-active-index");
           box.innerHTML = '<div class="spark-empty is-error"><span>曲线加载失败</span><button class="ops-btn" type="button" data-retry-curve="' + escapeHtml(aid) + '">重试</button></div>';
         }
         if (mode !== "readonly") renderPortfolioStopState(aid, stop, null);
@@ -456,10 +481,12 @@
         if (curveRenderSig[aid] !== emptySig) {
           curveRenderSig[aid] = emptySig;
           box.className = "spark-box";
+          box.removeAttribute("data-active-index");
           box.innerHTML = '<div class="spark-empty">' + (curveInFlight[aid] ? "加载中..." : "暂无曲线") + "</div>";
         }
         if (mode !== "readonly" && backendReturn !== null) {
-          var tone = ops.classifyReturnTone(backendReturn, portfolioStopPct, stop && stop.status);
+          var effectiveLossPct = (stop && ops.toNum(stop.loss_pct)) || portfolioStopPct;
+          var tone = ops.classifyReturnTone(backendReturn, effectiveLossPct, stop && stop.status);
           var backendCls = tone === "ok" ? "spark-up" : (tone === "bad" ? "spark-down" : "spark-flat");
           setAccountMetric("spark-delta", aid, (backendReturn >= 0 ? "+" : "") + fmt(backendReturn, 2) + "%", backendCls);
           renderPortfolioStopState(aid, stop, null);
@@ -471,7 +498,7 @@
       }
 
       var changePct = mode !== "readonly" && backendReturn !== null ? backendReturn : metrics.currentReturnPct;
-      var tone2 = ops.classifyReturnTone(changePct, mode === "readonly" ? null : portfolioStopPct, stop && stop.status);
+      var tone2 = ops.classifyReturnTone(changePct, mode === "readonly" ? null : metrics.configuredLossPct, stop && stop.status);
       var deltaCls = tone2 === "ok" ? "spark-up" : (tone2 === "bad" ? "spark-down" : "spark-flat");
       var signedReturn = (changePct >= 0 ? "+" : "") + fmt(changePct, 2) + "%";
 
@@ -484,6 +511,7 @@
           box.removeAttribute("tabindex");
           box.removeAttribute("role");
           box.removeAttribute("aria-label");
+          box.removeAttribute("data-active-index");
           box.innerHTML = '<div class="spark-empty">当前窗口暂无日内曲线轨迹</div>';
         }
         setAccountMetric("spark-delta", aid, signedReturn, deltaCls);
@@ -538,7 +566,8 @@
         var n = Number(p.equity);
         if (Number.isFinite(n)) points.push({ t: p.t || "", equity: n, carried_forward: !!p.carried_forward });
       }
-      if (payload.portfolio_loss_cut) portfolioStopStates[aid] = payload.portfolio_loss_cut;
+      if (payload.portfolio_loss_cut) mergePortfolioStopState(aid, payload.portfolio_loss_cut);
+      delete curveInputSig[aid];
       curveCache[aid] = {
         points: points.slice(-160),
         walletAsOfUtc: (payload.wallet && payload.wallet.as_of_utc) || "",
@@ -560,8 +589,13 @@
       if (batchCurvesInFlight && !force) return;
       var now = Date.now();
       for (var i = 0; i < ids.length; i += 1) {
-        curveInFlight[ids[i]] = true;
-        curveErrors[ids[i]] = "";
+        var bid = ids[i];
+        if (curveAbortControllers[bid]) {
+          try { curveAbortControllers[bid].abort(); } catch (e) {}
+          delete curveAbortControllers[bid];
+        }
+        curveInFlight[bid] = true;
+        curveErrors[bid] = "";
       }
       batchCurvesInFlight = true;
       if (batchCurvesAbortController) {
@@ -570,8 +604,7 @@
       var controller = typeof AbortController !== "undefined" ? new AbortController() : null;
       batchCurvesAbortController = controller;
       var url = curvesBatchApi
-        + "?window_hours=24&curve_points=160&accounts=" + encodeURIComponent(ids.join(","))
-        + "&_=" + now;
+        + "?window_hours=24&curve_points=160&accounts=" + encodeURIComponent(ids.join(","));
       ops.fetchJsonWithTimeout(url, {
         signal: controller ? controller.signal : null,
         timeoutMs: 15000
@@ -584,8 +617,13 @@
           for (var j = 0; j < ids.length; j += 1) {
             var aid = ids[j];
             if (!curveAbortControllers[aid]) curveInFlight[aid] = false;
-            if (Object.prototype.hasOwnProperty.call(curvesMap, aid) && curvesMap[aid]) {
-              storeCurvePayload(aid, curvesMap[aid]);
+            var item = Object.prototype.hasOwnProperty.call(curvesMap, aid) ? curvesMap[aid] : null;
+            if (item && item.db_error) {
+              curveErrors[aid] = "数据库读取失败：" + item.db_error;
+              delete curveInputSig[aid];
+              renderCurve(aid);
+            } else if (item) {
+              storeCurvePayload(aid, item);
               renderCurve(aid);
             } else {
               fetchCurve(aid, true);
@@ -627,7 +665,8 @@
       }
       curveInFlight[aid] = true;
       curveErrors[aid] = "";
-      var url = pathPrefix + "/api/account/" + encodeURIComponent(aid) + "/curve?window_hours=24&curve_points=160&_=" + now;
+      delete curveInputSig[aid];
+      var url = pathPrefix + "/api/account/" + encodeURIComponent(aid) + "/curve?window_hours=24&curve_points=160&curve_type=balance";
       if (curveAbortControllers[aid]) {
         try { curveAbortControllers[aid].abort(); } catch (e) {}
       }
@@ -698,6 +737,7 @@
 
     function patchExistingCards(rows) {
       var allNotes = managedStrategyNotes(rows);
+      var allNotesSig = allNotes.join("\n");
       for (var i = 0; i < rows.length; i += 1) {
         var r = rows[i] || {};
         var mode = String(r.mode || "full").toLowerCase();
@@ -739,15 +779,72 @@
             tagsEl.setAttribute("data-note", noteKey);
           }
           var highlightsEl = card.querySelector("[data-field='strategy-highlights']");
-          if (highlightsEl && highlightsEl.getAttribute("data-note") !== noteKey) {
+          var highlightsKey = noteKey + "|" + allNotesSig;
+          if (highlightsEl && highlightsEl.getAttribute("data-note") !== highlightsKey) {
             var nextHighlights = ops.formatStrategyHighlights(r.strategy_note, allNotes, 2, "strategy-tag");
             highlightsEl.innerHTML = nextHighlights;
             highlightsEl.hidden = !nextHighlights;
-            highlightsEl.setAttribute("data-note", noteKey);
+            highlightsEl.setAttribute("data-note", highlightsKey);
           }
         }
       }
       return true;
+    }
+
+    function buildReadonlyStripHtml(row, safeAid, safeBase) {
+      var stats = row.trade_stats || {};
+      var netPnl = ops.toNum(stats.net_realized_pnl != null ? stats.net_realized_pnl : stats.total_realized_pnl);
+      var pnlText = netPnl !== null ? ops.fmtSignedUsdt(netPnl, 2) : "--";
+      var winRateText = stats.win_rate_pct != null ? escapeHtml(fmt(stats.win_rate_pct, 1)) + "%" : "--";
+      var tradeCountText = stats.total_trades != null ? escapeHtml(fmt(stats.total_trades, 0)) : "--";
+      var profitFactorText = stats.profit_factor != null ? escapeHtml(fmt(stats.profit_factor, 2)) : "--";
+      var pnlCls = netPnl !== null ? (netPnl >= 0 ? "status-ok" : "status-bad") : "";
+      return '<article class="readonly-strip" id="account-card-' + safeAid + '" data-account-id="' + safeAid + '" aria-labelledby="card-title-' + safeAid + '">'
+        + '<div class="readonly-identity"><h3 class="card-title-heading" id="card-title-' + safeAid + '"><a class="readonly-id-link" href="' + safeBase + '">' + safeAid + '<span class="readonly-badge">只读监控</span></a></h3></div>'
+        + '<div class="readonly-metric readonly-balance"><span class="metric-label">余额 (USDT)</span><strong class="metric-value" data-field="wallet-balance">' + ops.fmtUsdt(row.wallet_balance_usdt, 2) + "</strong></div>"
+        + '<div class="readonly-metric"><span class="metric-label">近30日净盈亏</span><strong class="metric-value pnl-value ' + pnlCls + '" data-field="readonly-pnl">' + pnlText + "</strong></div>"
+        + '<div class="readonly-metric"><span class="metric-label">胜率</span><strong class="metric-value" data-field="readonly-win-rate">' + winRateText + "</strong></div>"
+        + '<div class="readonly-metric readonly-secondary"><span class="metric-label">平仓订单数</span><strong class="metric-value" data-field="readonly-trades">' + tradeCountText + "</strong></div>"
+        + '<div class="readonly-metric readonly-secondary"><span class="metric-label"><button type="button" class="ops-term" data-tip="平均单笔盈利金额 / 平均单笔亏损金额">盈亏比</button></span><strong class="metric-value" data-field="readonly-pf">' + profitFactorText + "</strong></div>"
+        + '<div class="readonly-chart"><div>'
+        + '<div class="spark-box" data-account-id="' + safeAid + '"><div class="spark-empty">加载中...</div></div>'
+        + '</div><div class="readonly-chart-meta"><span class="metric-label" title="按账户周期首条权益快照计算，含浮盈亏">本周期变化</span><strong class="metric-value spark-delta" data-account-id="' + safeAid + '">--</strong></div></div>'
+        + '<div class="readonly-action"><a class="detail-link" href="' + safeBase + '" aria-label="查看 ' + safeAid + ' 余额曲线与交易统计">详情 ' + ops.ARROW_ICON + "</a></div>"
+        + "</article>";
+    }
+
+    function buildManagedCardHtml(row, rowAid, safeAid, safeBase, idx, allManagedNotes, allNotesSig) {
+      var venueInfo = computeVenueState(rowAid, row);
+      var popoverId = "strategy-popover-" + idx;
+      var noteRaw = String(row.strategy_note || "");
+      var noteAttr = escapeHtml(noteRaw);
+      var highlightsAttr = escapeHtml(noteRaw + "|" + allNotesSig);
+      var highlightsHtml = ops.formatStrategyHighlights(row.strategy_note, allManagedNotes, 2, "strategy-tag");
+      return '<article class="account-card" id="account-card-' + safeAid + '" data-account-id="' + safeAid + '" aria-labelledby="card-title-' + safeAid + '">'
+        + '<header class="account-card-head">'
+        + '<h3 class="card-title-heading" id="card-title-' + safeAid + '"><a class="aid-link ' + venueInfo.cls + '" href="' + safeBase + '" title="' + safeAid + ' · ' + escapeHtml(venueInfo.label) + '"><span class="venue-dot" aria-hidden="true"></span>' + safeAid + '</a></h3>'
+        + '<div class="account-head-actions">'
+        + '<div class="strategy-popover-wrap"><button class="strategy-trigger" type="button" aria-expanded="false" aria-controls="' + popoverId + '" aria-label="' + safeAid + ' 策略配置">策略</button>'
+        + '<div id="' + popoverId + '" class="strategy-popover" hidden role="region" aria-label="' + safeAid + ' 策略配置">'
+        + '<div class="strategy-popover-head"><div class="strategy-popover-meta"><strong class="strategy-popover-title">策略配置</strong><span class="strategy-popover-subtitle">' + safeAid + '</span></div><button class="strategy-popover-close" type="button" aria-label="关闭策略说明">×</button></div>'
+        + '<div class="strategy-popover-tags" data-note="' + noteAttr + '">' + ops.formatStrategyTags(row.strategy_note, "strategy-tag") + "</div></div></div>"
+        + '<a class="detail-link" href="' + safeBase + '" aria-label="查看 ' + safeAid + ' 账户详情">详情 ' + ops.ARROW_ICON + "</a></div></header>"
+        + '<div class="account-card-body">'
+        + '<div class="card-strategy-highlights" data-field="strategy-highlights" data-note="' + highlightsAttr + '"' + (highlightsHtml ? "" : " hidden") + '>' + highlightsHtml + "</div>"
+        + '<div class="account-primary">'
+        + '<div class="metric"><span class="metric-label">策略权益 (USDT)</span><strong class="metric-value" data-field="wallet-balance">' + ops.fmtUsdt(row.wallet_balance_usdt, 2) + "</strong></div>"
+        + '<div class="metric"><span class="metric-label">' + String(portfolioStopHour).padStart(2, "0") + ":" + String(portfolioStopMinute).padStart(2, "0") + ' 以来收益</span><strong class="metric-value return-value spark-delta" data-account-id="' + safeAid + '">--</strong></div>'
+        + "</div>"
+        + '<div class="account-secondary">'
+        + '<div class="metric"><span class="metric-label">当前持仓</span><strong class="metric-value" data-field="open-positions">' + escapeHtml(fmt(row.open_positions, 0)) + "</strong></div>"
+        + '<div class="metric"><span class="metric-label"><button type="button" class="ops-term" data-tip="当前权益相对本账户周期最高点的回落幅度">高点回撤</button></span><strong class="metric-value current-drawdown" data-account-id="' + safeAid + '">--</strong></div>'
+        + '<div class="metric"><span class="metric-label"><button type="button" class="ops-term" data-tip="当前周期收益距离触发全账户组合止损还剩的百分点">距组合止损</button></span><strong class="metric-value stop-distance" data-account-id="' + safeAid + '">--</strong></div>'
+        + "</div>"
+        + '<div class="spark-block">'
+        + '<div class="spark-box" data-account-id="' + safeAid + '"><div class="spark-empty">加载中...</div></div>'
+        + '<div class="stop-meter"><strong class="risk-state" data-account-id="' + safeAid + '">计算中</strong><progress class="ops-progress stop-meter-track" data-account-id="' + safeAid + '" max="100" value="0" aria-label="' + safeAid + ' 组合止损预算消耗"></progress><span class="stop-meter-label" data-account-id="' + safeAid + '">--</span></div>'
+        + "</div></div>"
+        + "</article>";
     }
 
     function renderCards() {
@@ -756,14 +853,13 @@
       var readonlyHtml = "";
       var sigParts = [];
       accountModes = {};
-      portfolioStopStates = {};
       for (var i = 0; i < rows.length; i += 1) {
         var r = rows[i] || {};
         var mode = String(r.mode || "full").toLowerCase();
         if (mode === "loss_cut_only") continue;
         var aid = String(r.account_id || "");
         accountModes[aid] = mode;
-        portfolioStopStates[aid] = r.portfolio_loss_cut || null;
+        mergePortfolioStopState(aid, r.portfolio_loss_cut || null);
         sigParts.push(aid + ":" + mode);
       }
       var nextSig = sigParts.join("|");
@@ -772,10 +868,17 @@
         return;
       }
 
+      if (hoverState.rafId && window.cancelAnimationFrame) {
+        window.cancelAnimationFrame(hoverState.rafId);
+      }
+      hoverState.rafId = 0;
+      hoverState.box = null;
+      hoverState.rect = null;
       if (curveObserver) curveObserver.disconnect();
       curveRenderSig = {};
+      curveInputSig = {};
       var allManagedNotes = managedStrategyNotes(rows);
-      var arrowIcon = ops.ARROW_ICON;
+      var allNotesSig = allManagedNotes.join("\n");
 
       for (var j = 0; j < rows.length; j += 1) {
         var row = rows[j] || {};
@@ -783,58 +886,11 @@
         if (rowMode === "loss_cut_only") continue;
         var rowAid = String(row.account_id || "");
         var safeAid = escapeHtml(rowAid);
-        var base = pathPrefix + "/account/" + encodeURIComponent(rowAid) + "/";
-
+        var safeBase = escapeHtml(pathPrefix + "/account/" + encodeURIComponent(rowAid) + "/");
         if (rowMode === "readonly") {
-          var stats = row.trade_stats || {};
-          var netPnl = ops.toNum(stats.net_realized_pnl != null ? stats.net_realized_pnl : stats.total_realized_pnl);
-          var pnlText = netPnl !== null ? ops.fmtSignedUsdt(netPnl, 2) : "--";
-          var winRateText = stats.win_rate_pct != null ? escapeHtml(fmt(stats.win_rate_pct, 1)) + "%" : "--";
-          var tradeCountText = stats.total_trades != null ? escapeHtml(fmt(stats.total_trades, 0)) : "--";
-          var profitFactorText = stats.profit_factor != null ? escapeHtml(fmt(stats.profit_factor, 2)) : "--";
-          var pnlCls = netPnl !== null ? (netPnl >= 0 ? "status-ok" : "status-bad") : "";
-          readonlyHtml += '<article class="readonly-strip" id="account-card-' + safeAid + '" data-account-id="' + safeAid + '" aria-labelledby="card-title-' + safeAid + '">'
-            + '<div class="readonly-identity"><h3 class="card-title-heading" id="card-title-' + safeAid + '"><a class="readonly-id-link" href="' + base + '">' + safeAid + '<span class="readonly-badge">只读监控</span></a></h3></div>'
-            + '<div class="readonly-metric readonly-balance"><span class="metric-label">余额 (USDT)</span><strong class="metric-value" data-field="wallet-balance">' + ops.fmtUsdt(row.wallet_balance_usdt, 2) + "</strong></div>"
-            + '<div class="readonly-metric"><span class="metric-label">近30日净盈亏</span><strong class="metric-value pnl-value ' + pnlCls + '" data-field="readonly-pnl">' + pnlText + "</strong></div>"
-            + '<div class="readonly-metric"><span class="metric-label">胜率</span><strong class="metric-value" data-field="readonly-win-rate">' + winRateText + "</strong></div>"
-            + '<div class="readonly-metric readonly-secondary"><span class="metric-label">平仓订单数</span><strong class="metric-value" data-field="readonly-trades">' + tradeCountText + "</strong></div>"
-            + '<div class="readonly-metric readonly-secondary"><span class="metric-label"><span class="ops-term" tabindex="0" data-tip="平均单笔盈利金额 / 平均单笔亏损金额">盈亏比</span></span><strong class="metric-value" data-field="readonly-pf">' + profitFactorText + "</strong></div>"
-            + '<div class="readonly-chart"><div>'
-            + '<div class="spark-box" data-account-id="' + safeAid + '"><div class="spark-empty">加载中...</div></div>'
-            + '</div><div class="readonly-chart-meta"><span class="metric-label" title="按账户周期首条权益快照计算，含浮盈亏">本周期变化</span><strong class="metric-value spark-delta" data-account-id="' + safeAid + '">--</strong></div></div>'
-            + '<div class="readonly-action"><a class="detail-link" href="' + base + '" aria-label="查看 ' + safeAid + ' 余额曲线与交易统计">详情 ' + arrowIcon + "</a></div>"
-            + "</article>";
+          readonlyHtml += buildReadonlyStripHtml(row, safeAid, safeBase);
         } else {
-          var venueInfo = computeVenueState(rowAid, row);
-          var popoverId = "strategy-popover-" + j;
-          var noteAttr = escapeHtml(String(row.strategy_note || ""));
-          var highlightsHtml = ops.formatStrategyHighlights(row.strategy_note, allManagedNotes, 2, "strategy-tag");
-          managedHtml += '<article class="account-card" id="account-card-' + safeAid + '" data-account-id="' + safeAid + '" aria-labelledby="card-title-' + safeAid + '">'
-            + '<header class="account-card-head">'
-            + '<h3 class="card-title-heading" id="card-title-' + safeAid + '"><a class="aid-link ' + venueInfo.cls + '" href="' + base + '" title="' + safeAid + ' · ' + escapeHtml(venueInfo.label) + '"><span class="venue-dot" aria-hidden="true"></span>' + safeAid + '</a></h3>'
-            + '<div class="account-head-actions">'
-            + '<div class="strategy-popover-wrap"><button class="strategy-trigger" type="button" aria-expanded="false" aria-controls="' + popoverId + '" aria-label="' + safeAid + ' 策略配置">策略</button>'
-            + '<div id="' + popoverId + '" class="strategy-popover" hidden role="region" aria-label="' + safeAid + ' 策略配置">'
-            + '<div class="strategy-popover-head"><div class="strategy-popover-meta"><strong class="strategy-popover-title">策略配置</strong><span class="strategy-popover-subtitle">' + safeAid + '</span></div><button class="strategy-popover-close" type="button" aria-label="关闭策略说明">×</button></div>'
-            + '<div class="strategy-popover-tags" data-note="' + noteAttr + '">' + ops.formatStrategyTags(row.strategy_note, "strategy-tag") + "</div></div></div>"
-            + '<a class="detail-link" href="' + base + '" aria-label="查看 ' + safeAid + ' 账户详情">详情 ' + arrowIcon + "</a></div></header>"
-            + '<div class="account-card-body">'
-            + '<div class="card-strategy-highlights" data-field="strategy-highlights" data-note="' + noteAttr + '"' + (highlightsHtml ? "" : " hidden") + '>' + highlightsHtml + "</div>"
-            + '<div class="account-primary">'
-            + '<div class="metric"><span class="metric-label">策略权益 (USDT)</span><strong class="metric-value" data-field="wallet-balance">' + ops.fmtUsdt(row.wallet_balance_usdt, 2) + "</strong></div>"
-            + '<div class="metric"><span class="metric-label">' + String(portfolioStopHour).padStart(2, "0") + ":" + String(portfolioStopMinute).padStart(2, "0") + ' 以来收益</span><strong class="metric-value return-value spark-delta" data-account-id="' + safeAid + '">--</strong></div>'
-            + "</div>"
-            + '<div class="account-secondary">'
-            + '<div class="metric"><span class="metric-label">当前持仓</span><strong class="metric-value" data-field="open-positions">' + escapeHtml(fmt(row.open_positions, 0)) + "</strong></div>"
-            + '<div class="metric"><span class="metric-label"><span class="ops-term" tabindex="0" data-tip="当前权益相对本账户周期最高点的回落幅度">高点回撤</span></span><strong class="metric-value current-drawdown" data-account-id="' + safeAid + '">--</strong></div>'
-            + '<div class="metric"><span class="metric-label"><span class="ops-term" tabindex="0" data-tip="当前周期收益距离触发全账户组合止损还剩的百分点">距组合止损</span></span><strong class="metric-value stop-distance" data-account-id="' + safeAid + '">--</strong></div>'
-            + "</div>"
-            + '<div class="spark-block">'
-            + '<div class="spark-box" data-account-id="' + safeAid + '"><div class="spark-empty">加载中...</div></div>'
-            + '<div class="stop-meter"><strong class="risk-state" data-account-id="' + safeAid + '">计算中</strong><progress class="ops-progress stop-meter-track" data-account-id="' + safeAid + '" max="100" value="0" aria-label="' + safeAid + ' 组合止损预算消耗"></progress><span class="stop-meter-label" data-account-id="' + safeAid + '">--</span></div>'
-            + "</div></div>"
-            + "</article>";
+          managedHtml += buildManagedCardHtml(row, rowAid, safeAid, safeBase, j, allManagedNotes, allNotesSig);
         }
       }
       var html = managedHtml ? '<div class="managed-grid">' + managedHtml + "</div>" : "";
@@ -923,14 +979,21 @@
 
     function mergeSummaryDetails(payload) {
       if (!payload || payload.ready !== true) {
+        if (detailsRetryAttempts >= 6) {
+          setOverviewError("details", "任务与开单进度正在后台预热，请稍后手动刷新");
+          return;
+        }
+        var delayMs = Math.min(16000, 1000 * Math.pow(2, detailsRetryAttempts));
+        detailsRetryAttempts += 1;
         if (!detailsRetryTimer) {
           detailsRetryTimer = window.setTimeout(function () {
             detailsRetryTimer = null;
             fetchSummaryDetails();
-          }, 1000);
+          }, delayMs);
         }
         return;
       }
+      detailsRetryAttempts = 0;
       if (detailsRetryTimer) {
         window.clearTimeout(detailsRetryTimer);
         detailsRetryTimer = null;
@@ -967,7 +1030,7 @@
       lastDetailsFetchAt = Date.now();
       var controller = typeof AbortController !== "undefined" ? new AbortController() : null;
       summaryDetailsAbortController = controller;
-      ops.fetchJsonWithTimeout(summaryDetailsApi + "?_=" + Date.now(), {
+      ops.fetchJsonWithTimeout(summaryDetailsApi, {
         signal: controller ? controller.signal : null,
         timeoutMs: 15000
       })
@@ -993,11 +1056,7 @@
     }
 
     function setOverviewRefreshBusy(busy) {
-      if (!overviewRefreshBtn) return;
-      overviewRefreshBtn.disabled = !!busy;
-      var label = overviewRefreshBtn.querySelector(".btn-label");
-      if (label) label.textContent = busy ? "刷新中..." : "刷新";
-      else overviewRefreshBtn.textContent = busy ? "刷新中..." : "刷新";
+      ops.setButtonBusy(overviewRefreshBtn, busy, "刷新", "刷新中...");
     }
 
     var summaryAbortController = null;
@@ -1012,7 +1071,7 @@
       if (force) setOverviewRefreshBusy(true);
       var controller = typeof AbortController !== "undefined" ? new AbortController() : null;
       summaryAbortController = controller;
-      ops.fetchJsonWithTimeout(summaryFastApi + "?_=" + Date.now(), {
+      ops.fetchJsonWithTimeout(summaryFastApi, {
         signal: controller ? controller.signal : null,
         timeoutMs: 15000
       })
@@ -1022,6 +1081,7 @@
           summaryRequestInFlight = false;
           setOverviewRefreshBusy(false);
           summaryHydratedOnce = true;
+          summaryGeneratedAtUtc = (payload && payload.generated_at_utc) || "";
           setOverviewError("summary", "");
           summaryRows = mergeFastRows(payload.accounts || []);
           ops.renderNavAccounts(summaryRows);
@@ -1044,6 +1104,8 @@
             renderCards();
             renderEntryProgress();
             renderTaskBoard();
+          } else if (forceCurveRefreshPending) {
+            primeCurveLoad();
           }
         });
     }
@@ -1051,6 +1113,7 @@
     function triggerOverviewRefresh() {
       if (overviewRefreshBtn && overviewRefreshBtn.disabled) return;
       lastDetailsFetchAt = 0;
+      detailsRetryAttempts = 0;
       forceCurveRefreshPending = true;
       curveErrors = {};
       batchCurvesInFlight = false;
@@ -1145,6 +1208,20 @@
       tip.textContent = text;
       tip.classList.toggle("is-right", nearest.xPct < 48);
       tip.hidden = false;
+      if (box.closest && box.closest(".readonly-chart")) {
+        var boxRect = box.getBoundingClientRect();
+        var tipRect = tip.getBoundingClientRect();
+        var margin = 8;
+        var vw = window.innerWidth || document.documentElement.clientWidth || 1024;
+        var anchorX = boxRect.left + (boxRect.width * nearest.xPct) / 100;
+        var left = Math.max(margin, Math.min(vw - margin - tipRect.width, anchorX - tipRect.width / 2));
+        var top = Math.max(margin, boxRect.top - tipRect.height - 6);
+        tip.style.left = Math.round(left) + "px";
+        tip.style.top = Math.round(top) + "px";
+      } else {
+        tip.style.left = "";
+        tip.style.top = "";
+      }
       if (crosshair) {
         crosshair.style.left = nearest.xPct.toFixed(2) + "%";
         crosshair.hidden = false;
@@ -1188,6 +1265,10 @@
       if (refs.activeDot) refs.activeDot.hidden = true;
       box.removeAttribute("data-active-index");
       if (hoverState.box === box) {
+        if (hoverState.rafId && window.cancelAnimationFrame) {
+          window.cancelAnimationFrame(hoverState.rafId);
+        }
+        hoverState.rafId = 0;
         hoverState.box = null;
         hoverState.rect = null;
       }
@@ -1344,8 +1425,16 @@
     if (entryProgressToggle) {
       entryProgressToggle.addEventListener("click", function () {
         var currentlyExpanded = entryProgressToggle.getAttribute("aria-expanded") === "true";
-        entryDetailsUserOverride = !currentlyExpanded;
-        renderEntryProgress();
+        var nextExpanded = !currentlyExpanded;
+        entryDetailsUserOverride = nextExpanded;
+        var tableEl = document.getElementById("entry-progress-details-table");
+        if (tableEl) {
+          tableEl.classList.toggle("is-collapsed", !nextExpanded);
+          entryProgressToggle.setAttribute("aria-expanded", nextExpanded ? "true" : "false");
+          entryProgressToggle.textContent = nextExpanded ? "收起账号明细" : "查看账号明细";
+        } else {
+          renderEntryProgress();
+        }
       });
     }
 
@@ -1400,7 +1489,12 @@
     startPolling();
 
     document.addEventListener("visibilitychange", function () {
-      if (!document.hidden) {
+      if (document.hidden) {
+        if (summaryTimer) { clearInterval(summaryTimer); summaryTimer = null; }
+        if (healthTimer) { clearInterval(healthTimer); healthTimer = null; }
+        if (countdownTimer) { clearInterval(countdownTimer); countdownTimer = null; }
+      } else {
+        startPolling();
         fetchSummary();
         fetchHealth();
         updateEntryProgressCountdown();

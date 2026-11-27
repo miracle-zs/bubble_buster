@@ -12,6 +12,14 @@
   overflow: clip;
 }
 
+.account-command-bar.is-readonly {
+  border-color: var(--readonly-border);
+}
+
+.account-command-bar.is-readonly .account-title {
+  color: var(--readonly-text);
+}
+
 .account-command-main,
 .command-cell {
   background: var(--surface);
@@ -119,6 +127,7 @@
 .refresh-note {
   color: var(--muted);
   font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
   font-size: var(--text-xs);
   white-space: nowrap;
 }
@@ -219,15 +228,6 @@
   min-width: 0;
 }
 
-.surface-title {
-  margin: 0;
-  color: var(--text);
-  font-size: var(--text-md);
-  font-weight: 700;
-  line-height: 1.25;
-  letter-spacing: -0.015em;
-}
-
 .surface-subtitle {
   margin-top: 3px;
   color: var(--muted);
@@ -320,18 +320,7 @@
 .chart-empty {
   position: absolute;
   inset: 12px 14px 14px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  border-radius: var(--radius-sm);
-  color: var(--muted);
-  background: var(--surface-inset);
-  font-size: var(--text-sm);
   pointer-events: none;
-}
-
-.chart-empty.is-error {
-  color: var(--bad-text);
 }
 
 /* Risk panel & Readonly Trade Stats panel */
@@ -339,6 +328,10 @@
 .readonly-stats-panel {
   display: flex;
   flex-direction: column;
+}
+
+.readonly-stats-panel {
+  border-color: var(--readonly-border);
 }
 
 .risk-body {
@@ -517,6 +510,7 @@
   margin-left: auto;
   color: var(--muted);
   font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
   font-size: var(--text-xs);
 }
 
@@ -526,25 +520,12 @@
 }
 
 .table-wrap {
-  width: 100%;
   max-height: 430px;
-  overflow: auto;
-  background: var(--surface-inset);
-  container-type: inline-size;
 }
 
 .detail-table {
-  width: 100%;
   min-width: 820px;
-  border-collapse: separate;
-  border-spacing: 0;
   table-layout: auto;
-  color: var(--text-secondary);
-  font-size: var(--text-sm);
-}
-
-.detail-table.is-empty {
-  min-width: 100%;
 }
 
 .detail-table th,
@@ -559,13 +540,6 @@
 .positions-table th,
 .positions-table td {
   vertical-align: middle;
-}
-
-.detail-table th.numeric,
-.detail-table td.numeric {
-  text-align: right;
-  font-family: var(--font-mono);
-  font-variant-numeric: tabular-nums;
 }
 
 .detail-table thead th {
@@ -585,17 +559,13 @@
   text-align: left;
 }
 
-.detail-table tbody tr:nth-child(odd) {
-  background: var(--table-stripe);
-}
-
-.detail-table tbody tr:hover {
-  background: var(--surface-hover);
-}
-
 @container (inline-size < 780px) {
-  .detail-table.is-empty thead {
-    display: none;
+  .detail-table:not(.is-empty) thead th:first-child {
+    position: sticky;
+    inset-inline-start: 0;
+    z-index: 4;
+    background: var(--surface-subtle);
+    border-right: 1px solid var(--border-subtle);
   }
   .detail-table:not(.is-empty) tbody th[scope="row"] {
     position: sticky;
@@ -610,6 +580,13 @@
   .detail-table:not(.is-empty) tbody tr:hover th[scope="row"] {
     background: var(--surface-hover);
   }
+}
+
+#unpricedTable td:nth-child(3),
+#unpricedTable td:nth-child(4) {
+  max-width: 280px;
+  white-space: normal;
+  word-break: break-word;
 }
 
 .detail-table td.ok { color: var(--ok-text); }
@@ -627,6 +604,7 @@
   margin-top: 3px;
   color: var(--muted);
   font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
   font-size: var(--text-xs);
 }
 
@@ -815,6 +793,7 @@
   color: var(--muted);
   background: var(--surface);
   font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
   font-size: var(--text-xs);
   line-height: 1.5;
   word-break: break-word;
@@ -926,6 +905,9 @@
   .summary-rail,
   .summary-rail.is-readonly-rail {
     grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+  .summary-rail.is-readonly-rail .summary-metric.primary {
+    grid-column: span 2;
   }
   .analytics-grid {
     grid-template-columns: 1fr;

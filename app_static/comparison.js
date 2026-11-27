@@ -4,25 +4,8 @@
 
   document.addEventListener("DOMContentLoaded", function () {
     var ops = window.BBOps;
-    if (!ops) return;
-
-    var LINE_PATTERNS = [
-      { type: "solid", swatchClass: "" },
-      { type: "dashed", swatchClass: "is-dashed" },
-      { type: "dotted", swatchClass: "is-dotted" },
-      { type: [8, 3, 2, 3], swatchClass: "is-dashdot" }
-    ];
-
-    var SORT_LABELS = {
-      account_id: "账户",
-      change_pct: "区间收益率",
-      latest_equity: "当前权益",
-      max_drawdown_pct: "区间最大回撤"
-    };
-
-    var collator = typeof Intl !== "undefined" && Intl.Collator
-      ? new Intl.Collator(undefined, { numeric: true, sensitivity: "base" })
-      : null;
+    var renderLib = window.BBComparisonRender;
+    if (!ops || !renderLib) return;
 
     var pageConfig = ops.readPageConfig("page-config");
     var initialNavAccounts = Array.isArray(pageConfig.navAccounts) ? pageConfig.navAccounts : [];
@@ -61,6 +44,7 @@
     });
     var strategyNotesByAccount = {};
     var lastMetricsContentSig = "";
+    var lastChartSignature = "";
     var pathPrefix = ops.resolveBasePrefix();
 
     ops.initTopNav({
@@ -71,45 +55,12 @@
 
     function el(id) { return document.getElementById(id); }
 
-    function compareText(a, b) {
-      return collator ? collator.compare(a, b) : String(a).localeCompare(String(b));
-    }
-
     function isReadonlyAccount(accountId) {
       return accountModesById[String(accountId || "")] === "readonly";
     }
 
-    var NAMED_ACCOUNT_SLOTS = { acc01: 0, acc02: 1, acc03: 2, acc04: 3 };
-
-    function accountSlot(accountId, index) {
-      return Object.prototype.hasOwnProperty.call(NAMED_ACCOUNT_SLOTS, accountId)
-        ? NAMED_ACCOUNT_SLOTS[accountId]
-        : index;
-    }
-
-    function colorFor(accountId, index) {
-      var theme = ops.getChartTheme();
-      if (isReadonlyAccount(accountId)) return theme.readonly;
-      var slot = accountSlot(accountId, index);
-      return theme.series[slot % theme.series.length];
-    }
-
-    function patternFor(accountId, index) {
-      var slot = accountSlot(accountId, index);
-      return LINE_PATTERNS[slot % LINE_PATTERNS.length];
-    }
-
-    function formatLocalTime(value, withSeconds) {
-      return ops.formatBeijingTime(value, { withYear: true, withSeconds: !!withSeconds });
-    }
-
     function rangeLabel() {
-      if (range === "all") return "上线以来";
-      var hours = Number(range);
-      if (hours < 48) return "最近 24 小时";
-      if (hours < 168) return "最近 3 天";
-      if (hours < 720) return "最近 7 天";
-      return "最近 30 天";
+      return renderLib.rangeLabel(range);
     }
 
     function setFreshnessPill(text, stateClass) {
@@ -119,37 +70,13 @@
       if (pill) pill.className = "ops-freshness" + (stateClass ? " " + stateClass : "");
     }
 
+    var setNoticeAlert = ops.createAlertController(el("notice"), el("notice-text"), ["load"]);
     function setNotice(message) {
-      var box = el("notice");
-      var copy = el("notice-text");
-      if (!box || !copy) return;
-      if (message) {
-        copy.textContent = message;
-        box.hidden = false;
-      } else {
-        copy.textContent = "";
-        box.hidden = true;
-      }
+      setNoticeAlert("load", message);
     }
 
     function seriesRows() {
       return (payload && payload.series) || [];
-    }
-
-    function computeRowMaxDrawdownPct(row) {
-      var pts = (row && row.points) || [];
-      var peak = -Infinity;
-      var maxDd = 0;
-      for (var i = 0; i < pts.length; i += 1) {
-        var eq = Number(pts[i] && pts[i].equity);
-        if (!Number.isFinite(eq) || eq <= 0) continue;
-        if (eq > peak) peak = eq;
-        if (peak > 0) {
-          var dd = ((eq - peak) / peak) * 100;
-          if (dd < maxDd) maxDd = dd;
-        }
-      }
-      return peak > 0 ? maxDd : null;
     }
 
     function loadNavAccounts() {
@@ -159,7 +86,7 @@
         try { navAccountsAbortController.abort(); } catch (e) {}
       }
       navAccountsAbortController = typeof AbortController !== "undefined" ? new AbortController() : null;
-      ops.fetchJsonWithTimeout(pathPrefix + "/api/accounts/summary/fast?_=" + Date.now(), {
+      ops.fetchJsonWithTimeout(pathPrefix + "/api/accounts/summary/fast", {
         signal: navAccountsAbortController ? navAccountsAbortController.signal : null,
         timeoutMs: 12000
       })
@@ -202,30 +129,13 @@
       var allNotes = rows.map(function (row) {
         return strategyNotesByAccount[row.account_id] || "";
       }).filter(Boolean);
-      var arrowIcon = ops.ARROW_ICON;
       var html = rows.map(function (row, index) {
-        var color = colorFor(row.account_id, index);
-        var isReadonly = isReadonlyAccount(row.account_id);
-        var change = row.change_pct;
-        var changeClass = change == null ? "" : (Number(change) >= 0 ? "is-positive" : "is-negative");
-        var status = "暂无数据";
-        if (row.status === "OK") {
-          var rowFreshness = ops.evaluateDataFreshness(row.latest_at_utc, { warnSec: 180, staleSec: 900 });
-          if (rowFreshness.state === "live") status = "实时快照";
-          else if (rowFreshness.state === "warn") status = "延迟快照";
-          else if (rowFreshness.state === "offline") status = "离线";
-          else status = "历史快照";
-        }
-        var detailHref = pathPrefix + "/account/" + encodeURIComponent(row.account_id) + "/";
-        var note = strategyNotesByAccount[row.account_id] || "";
-        var strategyHtml = note ? ops.formatStrategyHighlights(note, allNotes, 2, "summary-strategy-tag") : "";
-        return '<article class="summary-card' + (isReadonly ? " is-readonly" : "") + '" style="--account-color:' + color + '">'
-          + '<div class="summary-head"><a class="account-label" href="' + detailHref + '" aria-label="查看 ' + ops.escapeHtml(row.account_id) + ' 账户详情"><i class="account-dot" aria-hidden="true"></i><span>' + ops.escapeHtml(row.account_id) + '</span><span class="account-jump" aria-hidden="true">' + arrowIcon + '</span></a><span class="summary-status">' + status + '</span></div>'
-          + '<div class="summary-change ' + changeClass + '">' + ops.fmtPct(change) + '</div>'
-          + '<div class="summary-equity">当前权益 ' + (row.latest_equity == null ? "--" : ops.fmtUsdt(row.latest_equity, 2) + " USDT") + '</div>'
-          + (strategyHtml ? '<div class="summary-strategy">' + strategyHtml + '</div>' : "")
-          + '<div class="summary-range"><span>区间低点 <strong>' + ops.fmtPct(row.min_change_pct) + '</strong></span><span>高点 <strong>' + ops.fmtPct(row.max_change_pct) + '</strong></span></div>'
-          + "</article>";
+        return renderLib.buildSummaryCardHtml(row, index, {
+          isReadonly: isReadonlyAccount(row.account_id),
+          pathPrefix: pathPrefix,
+          note: strategyNotesByAccount[row.account_id] || "",
+          allNotes: allNotes
+        });
       }).join("");
       ops.patchHtmlIfChanged(target, html);
     }
@@ -233,15 +143,23 @@
     function renderLegend() {
       var legendEl = el("legend");
       if (!legendEl) return;
-      var html = seriesRows().map(function (row, index) {
-        var muted = visible[row.account_id] === false;
-        var isReadonly = isReadonlyAccount(row.account_id);
-        var color = colorFor(row.account_id, index);
-        var pat = patternFor(row.account_id, index);
-        return '<button class="legend-button' + (muted ? " is-muted" : "") + (isReadonly ? " is-readonly" : "") + '" data-account="' + ops.escapeHtml(row.account_id) + '" aria-pressed="' + (!muted) + '" style="--account-color:' + color + '" type="button">'
-          + '<i class="legend-swatch ' + pat.swatchClass + '" aria-hidden="true"></i><span>' + ops.escapeHtml(row.account_id) + '</span><span class="legend-value">' + ops.fmtPct(row.change_pct) + "</span></button>";
-      }).join("");
+      var html = renderLib.buildLegendHtml(seriesRows(), {
+        visible: visible,
+        isReadonlyFn: isReadonlyAccount
+      });
       ops.patchHtmlIfChanged(legendEl, html);
+    }
+
+    function syncLegendItemStates() {
+      var legendEl = el("legend");
+      if (!legendEl) return;
+      Array.prototype.forEach.call(legendEl.querySelectorAll("[data-account]"), function (button) {
+        if (button.disabled) return;
+        var aid = button.getAttribute("data-account");
+        var isShown = visible[aid] !== false;
+        button.classList.toggle("is-muted", !isShown);
+        button.setAttribute("aria-pressed", isShown ? "true" : "false");
+      });
     }
 
     function syncSortHeaderAria() {
@@ -301,35 +219,14 @@
       }
       if (table) table.classList.remove("is-empty");
 
-      var enriched = rows.map(function (row, idx) {
-        return {
-          row: row,
-          index: idx,
-          account_id: String(row.account_id || ""),
-          change_pct: ops.toNum(row.change_pct),
-          latest_equity: ops.toNum(row.latest_equity),
-          min_change_pct: ops.toNum(row.min_change_pct),
-          max_change_pct: ops.toNum(row.max_change_pct),
-          max_drawdown_pct: computeRowMaxDrawdownPct(row)
-        };
-      });
+      var enriched = renderLib.sortAndEnrichComparisonRows(rows, sortState);
 
-      var dirMult = sortState.dir === "asc" ? 1 : -1;
-      enriched.sort(function (a, b) {
-        var k = sortState.key;
-        if (k === "account_id") return compareText(a.account_id, b.account_id) * dirMult;
-        var va = a[k];
-        var vb = b[k];
-        if (va === null && vb === null) return compareText(a.account_id, b.account_id);
-        if (va === null) return 1;
-        if (vb === null) return -1;
-        if (va === vb) return compareText(a.account_id, b.account_id);
-        return (va - vb) * dirMult;
-      });
-
-      var contentSig = enriched.map(function (item) {
+      var contentSig = enriched.slice().sort(function (a, b) {
+        return renderLib.compareText(a.account_id, b.account_id);
+      }).map(function (item) {
         var r = item.row;
-        return item.account_id + ":" + String(r.change_pct) + ":" + String(r.latest_equity)
+        return item.account_id + ":" + String(isReadonlyAccount(item.account_id) ? 1 : 0)
+          + ":" + String(r.change_pct) + ":" + String(r.latest_equity)
           + ":" + String(r.min_change_pct) + ":" + String(r.max_change_pct)
           + ":" + String(item.max_drawdown_pct) + ":" + String((r.points || []).length)
           + ":" + String(strategyNotesByAccount[r.account_id] || "");
@@ -340,7 +237,7 @@
         if (announceSort) {
           var statusEl = el("metrics-sort-status");
           if (statusEl) {
-            var label = SORT_LABELS[sortState.key] || sortState.key;
+            var label = renderLib.SORT_LABELS[sortState.key] || sortState.key;
             var dirText = sortState.dir === "asc" ? "升序" : "降序";
             statusEl.textContent = "已按" + label + dirText + "排列，共 " + enriched.length + " 个账户";
           }
@@ -351,23 +248,12 @@
       lastMetricsContentSig = contentSig;
       var html = enriched.map(function (item) {
         var row = item.row;
-        var isReadonly = isReadonlyAccount(row.account_id);
-        var color = colorFor(row.account_id, item.index);
-        var detailHref = pathPrefix + "/account/" + encodeURIComponent(row.account_id) + "/";
-        var changeCls = item.change_pct === null ? "" : (item.change_pct >= 0 ? "ok" : "bad");
-        var ddCls = item.max_drawdown_pct === null ? "" : (item.max_drawdown_pct <= -2.5 ? "bad" : (item.max_drawdown_pct < 0 ? "warn" : "ok"));
-        var note = strategyNotesByAccount[row.account_id] || "";
-        var strategyHtml = note
-          ? ops.formatStrategyHighlights(note, allNotes, 2, "summary-strategy-tag")
-          : '<span class="strategy-tag strategy-tag-empty">未配置</span>';
-        return '<tr data-account-row="' + ops.escapeHtml(item.account_id) + '"' + (isReadonly ? ' class="is-readonly"' : "") + '>'
-          + '<th scope="row"><a class="account-label" style="--account-color:' + color + '" href="' + detailHref + '"><i class="account-dot" aria-hidden="true"></i>' + ops.escapeHtml(row.account_id) + "</a></th>"
-          + '<td class="numeric ' + changeCls + '">' + ops.escapeHtml(ops.fmtPct(item.change_pct)) + "</td>"
-          + '<td class="numeric">' + (item.latest_equity === null ? "--" : ops.escapeHtml(ops.fmtUsdt(item.latest_equity, 2))) + "</td>"
-          + '<td class="numeric ' + ddCls + '">' + (item.max_drawdown_pct === null ? "--" : ops.escapeHtml(ops.fmtSigned(item.max_drawdown_pct, 2) + "%")) + "</td>"
-          + '<td class="numeric">' + ops.escapeHtml(ops.fmtPct(item.min_change_pct) + " / " + ops.fmtPct(item.max_change_pct)) + "</td>"
-          + '<td class="strategy-col"><div class="summary-strategy metrics-strategy-tags">' + strategyHtml + "</div></td>"
-          + "</tr>";
+        return renderLib.buildMetricsRowHtml(item, {
+          isReadonly: isReadonlyAccount(row.account_id),
+          pathPrefix: pathPrefix,
+          note: strategyNotesByAccount[row.account_id] || "",
+          allNotes: allNotes
+        });
       }).join("");
       tbody.__bbLastHtml = html;
       tbody.innerHTML = html;
@@ -375,7 +261,7 @@
       if (announceSort) {
         var statusNode = el("metrics-sort-status");
         if (statusNode) {
-          var sortLabel = SORT_LABELS[sortState.key] || sortState.key;
+          var sortLabel = renderLib.SORT_LABELS[sortState.key] || sortState.key;
           var sortDirText = sortState.dir === "asc" ? "升序" : "降序";
           statusNode.textContent = "已按" + sortLabel + sortDirText + "排列，共 " + enriched.length + " 个账户";
         }
@@ -395,25 +281,42 @@
       });
     }
 
-    function renderChart() {
+    function renderChart(animate) {
       var rows = seriesRows();
       var chartElement = el("equity-chart");
       var emptyElement = el("chart-empty");
       var emptyText = el("chart-empty-text");
       var emptyAction = el("chart-empty-action");
-      var activeRows = rows.filter(function (row) {
-        return row.status === "OK" && visible[row.account_id] !== false && (row.points || []).length;
+      var okRows = rows.filter(function (row) {
+        return row.status === "OK" && (row.points || []).length;
       });
+      var activeRows = okRows.filter(function (row) {
+        return visible[row.account_id] !== false;
+      });
+      var allMuted = okRows.length > 0 && activeRows.length === 0;
       chartElement.style.display = activeRows.length ? "block" : "none";
       emptyElement.style.display = activeRows.length ? "none" : "flex";
       if (!activeRows.length) {
+        lastChartSignature = "";
         if (chart) chart.clear();
         if (emptyText) {
-          emptyText.textContent = range === "all"
-            ? "当前筛选下没有可用权益快照"
-            : "「" + rangeLabel() + "」窗口内暂无权益快照";
+          emptyText.textContent = allMuted
+            ? "已隐藏全部账户曲线"
+            : (range === "all"
+                ? "当前筛选下没有可用权益快照"
+                : "「" + rangeLabel() + "」窗口内暂无权益快照");
         }
-        if (emptyAction) emptyAction.hidden = range === "all";
+        if (emptyAction) {
+          if (allMuted) {
+            emptyAction.textContent = "显示全部账户";
+            emptyAction.setAttribute("data-empty-action", "show-all");
+            emptyAction.hidden = false;
+          } else {
+            emptyAction.textContent = "切换至上线以来";
+            emptyAction.setAttribute("data-empty-action", "all-time");
+            emptyAction.hidden = range === "all";
+          }
+        }
         updateZoomResetVisibility(false);
       }
 
@@ -427,6 +330,7 @@
       if (!activeRows.length) return;
 
       if (typeof window.echarts === "undefined") {
+        lastChartSignature = "";
         chartElement.style.display = "none";
         if (emptyText) emptyText.textContent = echartsLoadFailed ? "图表组件加载失败" : "图表组件加载中...";
         if (emptyAction) emptyAction.hidden = true;
@@ -434,149 +338,44 @@
         return;
       }
 
+      var chartSig = [
+        range,
+        mode,
+        activeRows.map(function (r) {
+          var pts = r.points || [];
+          var lastPt = pts.length ? pts[pts.length - 1] : null;
+          return r.account_id + ":" + (isReadonlyAccount(r.account_id) ? 1 : 0) + ":" + pts.length
+            + ":" + (lastPt ? String(lastPt.t || "") + ":" + String(lastPt.equity) : "");
+        }).join(",")
+      ].join("|");
+      if (chart && chartSig === lastChartSignature) {
+        return;
+      }
+      lastChartSignature = chartSig;
+
       if (!chart) {
         chart = window.echarts.init(chartElement, null, { renderer: "canvas" });
-        chart.on("datazoom", function (evt) {
-          var batch = evt && evt.batch && evt.batch[0] ? evt.batch[0] : evt;
-          var start = batch && Number.isFinite(Number(batch.start)) ? Number(batch.start) : 0;
-          var end = batch && Number.isFinite(Number(batch.end)) ? Number(batch.end) : 100;
-          var zoomed = start > 0.5 || end < 99.5;
-          chartZoomRange = zoomed ? { start: start, end: end } : null;
+        chart.on("datazoom", ops.createEchartsZoomHandler(function (nextZoom, zoomed) {
+          chartZoomRange = nextZoom;
           updateZoomResetVisibility(zoomed);
-        });
+        }));
         attachChartResizeObserver();
       }
 
-      var theme = ops.getChartTheme();
       chartElement.setAttribute("aria-label", activeRows.length + " 个账户权益对比曲线（" + rangeLabel() + "）");
       var totalPoints = activeRows.reduce(function (acc, r) { return acc + (r.points ? r.points.length : 0); }, 0);
       var showSlider = totalPoints > 40;
-
-      var chartSeries = activeRows.map(function (row, index) {
-        var color = colorFor(row.account_id, index);
-        var pat = patternFor(row.account_id, index);
-        var seriesPoints = [];
-        (row.points || []).forEach(function (point) {
-          var tMs = ops.parseTimestampMs(point.t);
-          if (!Number.isFinite(tMs)) return;
-          var yVal = mode === "relative" ? Number(point.relative_pct) : Number(point.equity);
-          var eqVal = Number(point.equity);
-          seriesPoints.push([tMs, Number.isFinite(yVal) ? yVal : null, Number.isFinite(eqVal) ? eqVal : null]);
-        });
-        return {
-          name: row.account_id,
-          type: "line",
-          showSymbol: seriesPoints.length <= 2,
-          smooth: false,
-          connectNulls: true,
-          data: seriesPoints,
-          lineStyle: { color: color, width: 2.2, type: pat.type },
-          itemStyle: { color: color },
-          emphasis: { focus: "series", lineStyle: { width: 3.2 } },
-          markLine: index === 0 ? {
-            silent: true,
-            symbol: ["none", "none"],
-            lineStyle: { color: theme.borderStrong, type: "dashed", width: 1 },
-            label: {
-              position: "insideEndTop",
-              distance: [6, 6],
-              color: theme.textSecondary,
-              backgroundColor: theme.surfaceTooltip,
-              borderColor: theme.border,
-              borderWidth: 1,
-              borderRadius: 4,
-              padding: [3, 7],
-              fontSize: 12,
-              fontFamily: theme.fontMono,
-              formatter: range === "all" ? "0% 基准 · 上线后首快照" : "0% 区间基准"
-            },
-            data: mode === "relative" ? [{ yAxis: 0 }] : []
-          } : undefined
-        };
-      });
-
-      var reduceMotion = ops.prefersReducedMotion();
       var zoomStart = chartZoomRange ? chartZoomRange.start : 0;
       var zoomEnd = chartZoomRange ? chartZoomRange.end : 100;
-      chart.setOption({
-        animation: !reduceMotion,
-        animationDuration: reduceMotion ? 0 : 280,
-        animationEasing: "cubicOut",
-        backgroundColor: "transparent",
-        grid: { top: 32, right: 24, bottom: showSlider ? 78 : 48, left: 16, containLabel: true },
-        dataZoom: showSlider ? [{
-          type: "slider",
-          xAxisIndex: 0,
-          start: zoomStart,
-          end: zoomEnd,
-          height: 22,
-          bottom: 10,
-          borderColor: theme.border,
-          backgroundColor: theme.surfaceInset,
-          fillerColor: theme.zoomFill,
-          handleStyle: { color: theme.accent, borderColor: theme.accent },
-          dataBackground: {
-            lineStyle: { color: theme.borderStrong, width: 1 },
-            areaStyle: { color: theme.zoomArea }
-          },
-          textStyle: { color: theme.muted, fontSize: 12 }
-        }] : [],
-        tooltip: {
-          trigger: "axis",
-          axisPointer: { type: "line", lineStyle: { color: theme.borderStrong } },
-          backgroundColor: theme.surfaceTooltip,
-          borderColor: theme.borderStrong,
-          borderWidth: 1,
-          extraCssText: "box-shadow: " + theme.shadowOverlay + "; font-variant-numeric: tabular-nums;",
-          textStyle: { color: theme.text, fontSize: 12, fontFamily: theme.fontMono },
-          formatter: function (items) {
-            if (!items || !items.length) return "";
-            var html = '<div style="margin-bottom:6px;color:' + theme.muted + '">' + ops.escapeHtml(formatLocalTime(items[0].axisValue, true)) + "</div>";
-            items.forEach(function (item) {
-              var val = Array.isArray(item.value) ? item.value[1] : item.value;
-              var equity = Array.isArray(item.value) ? item.value[2] : null;
-              var suffix = mode === "relative" && equity != null ? " · " + ops.fmtUsdt(equity, 2) + " USDT" : "";
-              html += '<div style="line-height:1.6"><span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:' + ops.escapeHtml(item.color) + ';margin-right:6px"></span>'
-                + ops.escapeHtml(item.seriesName) + " <strong>"
-                + (mode === "relative" ? ops.fmtPct(val) : ops.fmtUsdt(val, 2) + " USDT")
-                + "</strong>" + suffix + "</div>";
-            });
-            return html;
-          }
-        },
-        xAxis: {
-          type: "time",
-          boundaryGap: false,
-          axisLine: { lineStyle: { color: theme.border } },
-          axisTick: { show: false },
-          axisLabel: {
-            color: theme.muted,
-            fontSize: 12,
-            fontFamily: theme.fontMono,
-            hideOverlap: true,
-            alignMinLabel: "left",
-            alignMaxLabel: "right",
-            formatter: function (value) { return formatLocalTime(value, false); }
-          },
-          splitLine: { show: true, lineStyle: { color: theme.splitLineSubtle, type: "dashed" } }
-        },
-        yAxis: {
-          type: "value",
-          scale: mode === "absolute",
-          axisLine: { show: false },
-          axisTick: { show: false },
-          axisLabel: {
-            color: theme.muted,
-            fontSize: 12,
-            fontFamily: theme.fontMono,
-            formatter: function (value) {
-              return mode === "relative" ? (value >= 0 ? "+" : "") + Number(value).toFixed(1) + "%" : ops.fmtUsdt(value, 0);
-            }
-          },
-          splitLine: { lineStyle: { color: theme.splitLine, type: "dashed" } }
-        },
-        series: chartSeries
-      }, true);
+      chart.setOption(renderLib.buildComparisonChartOption({
+        activeRows: activeRows,
+        mode: mode,
+        range: range,
+        animate: animate,
+        zoomStart: zoomStart,
+        zoomEnd: zoomEnd,
+        isReadonlyFn: isReadonlyAccount
+      }), true);
       updateZoomResetVisibility(!!(showSlider && chartZoomRange && (chartZoomRange.start > 0.5 || chartZoomRange.end < 99.5)));
     }
 
@@ -601,10 +400,10 @@
       var count = rows.reduce(function (total, row) { return total + row.points.length; }, 0);
       var latest = latestSnapshotTimestamp(rows);
       var comparisonStart = payload && payload.comparison_start_at_utc
-        ? formatLocalTime(payload.comparison_start_at_utc, true)
+        ? renderLib.formatLocalTime(payload.comparison_start_at_utc, true)
         : "--";
       el("chart-meta").textContent = rangeLabel() + " · " + rows.length + " 个账户 · " + count + " 个点";
-      el("data-as-of").textContent = "组合止盈上线：" + comparisonStart + " · 数据截至 " + (latest ? formatLocalTime(latest, true) : "--") + "（北京时间 UTC+8）";
+      el("data-as-of").textContent = "组合止盈上线：" + comparisonStart + " · 数据截至 " + (latest ? renderLib.formatLocalTime(latest, true) : "--") + "（北京时间 UTC+8）";
     }
 
     function updateMetricsTableOverflow() {
@@ -615,10 +414,10 @@
       panel.classList.toggle("has-table-overflow", hasRight);
     }
 
-    function render() {
+    function render(animateChart) {
       renderSummary();
       renderLegend();
-      renderChart();
+      renderChart(animateChart);
       renderMetricsTable(false);
       renderMeta();
       updateMetricsTableOverflow();
@@ -675,15 +474,12 @@
     }
 
     function setRefreshBusy(busy) {
-      var btn = el("refresh-button");
-      if (!btn) return;
-      btn.disabled = !!busy;
-      var lbl = btn.querySelector(".btn-label");
-      if (lbl) lbl.textContent = busy ? "刷新中..." : "刷新";
-      else btn.textContent = busy ? "刷新中..." : "刷新";
+      ops.setButtonBusy(el("refresh-button"), busy, "刷新", "刷新中...");
     }
 
-    function load() {
+    function load(options) {
+      var opts = options || {};
+      var animateChart = !!opts.animate;
       activeRequestToken += 1;
       var requestToken = activeRequestToken;
       if (activeAbortController) {
@@ -691,7 +487,7 @@
       }
       activeAbortController = typeof AbortController !== "undefined" ? new AbortController() : null;
       setRefreshBusy(true);
-      setFreshnessPill("正在读取快照", "is-warn");
+      setFreshnessPill("正在读取快照", "");
       setNotice("");
       if (!payload) {
         var chartElement = el("equity-chart");
@@ -708,7 +504,7 @@
       }
       var query = range === "all" ? "all_time=true" : "window_hours=" + encodeURIComponent(range);
       ops.fetchJsonWithTimeout(
-        pathPrefix + "/api/accounts/equity-comparison?" + query + "&curve_points=600&include_events=false&_=" + Date.now(),
+        pathPrefix + "/api/accounts/equity-comparison?" + query + "&curve_points=600&include_events=false",
         {
           signal: activeAbortController ? activeAbortController.signal : null,
           timeoutMs: 15000
@@ -732,7 +528,7 @@
           }
           var emptyEl = el("chart-empty");
           if (emptyEl) emptyEl.classList.remove("is-error");
-          render();
+          render(animateChart);
           updateFreshnessStatus();
         })
         .catch(function (error) {
@@ -767,11 +563,29 @@
     setActiveControl("range-controls", "range", range);
     setActiveControl("mode-controls", "mode", mode);
 
+    function retryEchartsIfNeeded() {
+      if (typeof window.echarts === "undefined" && echartsLoadFailed) {
+        echartsLoadFailed = false;
+        ops.ensureEcharts(
+          echartsSrc || (pathPrefix + "/static/vendor/echarts.min.js"),
+          function () {
+            echartsLoadFailed = false;
+            if (payload) renderChart(true);
+          },
+          function () {
+            echartsLoadFailed = true;
+            if (payload) renderChart(false);
+          }
+        );
+      }
+    }
+
     function triggerManualLoad() {
       var btn = el("refresh-button");
       if (btn && btn.disabled) return;
-      if (!Object.keys(strategyNotesByAccount).length) loadNavAccounts();
-      load();
+      retryEchartsIfNeeded();
+      if (!navAccountsHydrated) loadNavAccounts();
+      load({ animate: true });
     }
 
     ops.bindKeyboardShortcuts({ onRefresh: triggerManualLoad });
@@ -783,7 +597,7 @@
         setActiveControl("range-controls", "range", range);
         syncComparisonUrl();
         ops.announceStatus("时间范围已切换为 " + rangeLabel());
-        load();
+        load({ animate: true });
       });
     });
 
@@ -793,7 +607,7 @@
         setActiveControl("mode-controls", "mode", mode);
         syncComparisonUrl();
         ops.announceStatus("图表模式已切换为 " + (mode === "relative" ? "相对变化" : "账户权益"));
-        if (payload) render();
+        if (payload) render(true);
       });
     });
 
@@ -813,11 +627,21 @@
     var emptyActionBtn = el("chart-empty-action");
     if (emptyActionBtn) {
       emptyActionBtn.addEventListener("click", function () {
+        if (emptyActionBtn.getAttribute("data-empty-action") === "show-all") {
+          seriesRows().forEach(function (row) {
+            if (row && row.account_id) visible[row.account_id] = true;
+          });
+          syncComparisonUrl();
+          syncLegendItemStates();
+          renderChart(true);
+          ops.announceStatus("已显示全部账户曲线");
+          return;
+        }
         chartZoomRange = null;
         range = "all";
         setActiveControl("range-controls", "range", range);
         syncComparisonUrl();
-        load();
+        load({ animate: true });
       });
     }
 
@@ -836,13 +660,13 @@
     if (legendEl) {
       legendEl.addEventListener("click", function (event) {
         var button = event.target && event.target.closest ? event.target.closest("[data-account]") : null;
-        if (!button) return;
+        if (!button || button.disabled) return;
         var accountId = button.getAttribute("data-account");
         var nextVisible = visible[accountId] === false;
         visible[accountId] = nextVisible;
         syncComparisonUrl();
-        renderLegend();
-        renderChart();
+        syncLegendItemStates();
+        renderChart(true);
         ops.announceStatus(accountId + (nextVisible ? " 曲线已显示" : " 曲线已隐藏"));
       });
     }
@@ -865,13 +689,25 @@
     }
 
     document.addEventListener("visibilitychange", function () {
-      if (!document.hidden && (Date.now() - lastLoadedAt) >= 30000) {
-        load();
+      if (document.hidden) {
+        if (pollTimer) {
+          clearInterval(pollTimer);
+          pollTimer = null;
+        }
+      } else {
+        startPolling();
+        if ((Date.now() - lastLoadedAt) >= 30000) load({ animate: false });
       }
     });
 
-    window.addEventListener("online", updateFreshnessStatus);
-    window.addEventListener("offline", updateFreshnessStatus);
+    window.addEventListener("online", function () {
+      updateFreshnessStatus();
+      if (payload) renderSummary();
+    });
+    window.addEventListener("offline", function () {
+      updateFreshnessStatus();
+      if (payload) renderSummary();
+    });
 
     attachChartResizeObserver();
 

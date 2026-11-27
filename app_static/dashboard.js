@@ -50,9 +50,13 @@
 
     var displayTimeZone = "Asia/Shanghai";
     var latestData = null;
+    var curveCacheByKey = {};
+    var curveLoadedOnce = false;
+    var echartsLoadFailed = false;
     var lastChartSignature = "";
     var refreshTick = 0;
     var detailsLoaded = false;
+    var detailsAttempted = false;
     var detailsInFlight = false;
     var detailsRefreshPending = false;
     var detailsRequestToken = 0;
@@ -142,7 +146,7 @@
       detailRetryBtn: document.getElementById("detailRetryBtn")
     };
 
-    var detailErrors = { core: "", curve: "", details: "" };
+    var setAlertError = ops.createAlertController(el.detailAlert, el.detailAlertText, ["core", "curve", "details"]);
 
     function setText(node, value) {
       if (node) node.textContent = value;
@@ -153,16 +157,7 @@
     var statusLabel = R.statusLabel;
 
     function setDetailError(slot, message) {
-      detailErrors[slot] = message || "";
-      if (!el.detailAlert || !el.detailAlertText) return;
-      var activeList = [detailErrors.core, detailErrors.curve, detailErrors.details].filter(Boolean);
-      if (activeList.length) {
-        el.detailAlertText.textContent = activeList.join("；");
-        el.detailAlert.hidden = false;
-      } else {
-        el.detailAlertText.textContent = "";
-        el.detailAlert.hidden = true;
-      }
+      setAlertError(slot, message);
     }
 
     function fmtAxisTime(isoText) {
@@ -204,9 +199,15 @@
       });
       document.title = displayId + " · Bubble Buster";
 
+      var commandBar = document.querySelector(".account-command-bar");
+      if (commandBar) commandBar.classList.toggle("is-readonly", accountMode === "readonly");
       var cycleText = String(portfolioStopHour).padStart(2, "0") + ":" + String(portfolioStopMinute).padStart(2, "0");
+      var tzShort = displayTimeZone === "Asia/Shanghai" ? "UTC+8" : displayTimeZone;
       if (accountMode === "readonly") {
         setText(el.walletLabel, "账户余额 (USDT)");
+        if (el.walletLabel) {
+          el.walletLabel.setAttribute("data-tip", "交易所实时账户总余额（含未实现盈亏）");
+        }
         if (el.walletHelp) {
           el.walletHelp.textContent = "含未实现盈亏";
           el.walletHelp.hidden = false;
@@ -231,15 +232,18 @@
         if (el.diagnosticsPanel) el.diagnosticsPanel.hidden = true;
       } else {
         setText(el.walletLabel, "策略权益 (USDT)");
+        if (el.walletLabel) {
+          el.walletLabel.setAttribute("data-tip", "扣除出入金影响后的纯策略净值，反映真实策略表现");
+        }
         if (el.walletHelp) {
           el.walletHelp.textContent = "";
           el.walletHelp.hidden = true;
         }
         setText(el.nextEntryLabel, "下次开单");
         setText(el.cycleReturnLabel, cycleText + " 以来收益");
-        setText(el.cycleReturnHelp, "UTC+8 周期");
+        setText(el.cycleReturnHelp, tzShort + " 周期");
         setText(el.stopDistanceHelp, portfolioStopEnabled ? "距离 -" + portfolioStopPct + "% 止损阈值" : "组合止损未启用");
-        setText(el.riskCycleStart, "每日 " + cycleText + " 切换账户周期 · 北京时间 UTC+8");
+        setText(el.riskCycleStart, "每日 " + cycleText + " 切换账户周期 · " + (displayTimeZone === "Asia/Shanghai" ? "北京时间 UTC+8" : displayTimeZone));
         if (el.riskThreshold) {
           el.riskThreshold.textContent = portfolioStopEnabled ? "-" + portfolioStopPct + "%" : "未启用";
           el.riskThreshold.classList.toggle("is-neutral", !portfolioStopEnabled);
@@ -303,7 +307,7 @@
     function fetchDashboard(apiUrl, options, callback) {
       var opts = options || {};
       var kind = opts.kind || "full";
-      var q = ["_=" + encodeURIComponent(String(Date.now()))];
+      var q = [];
       if (kind === "curve" || kind === "full") {
         var curvePoints = curvePointsForWindow(currentWindowHours);
         if (!opts.lite && currentWindowHours >= 24) {
@@ -319,7 +323,7 @@
       if (opts.curveType === "strategy" || opts.curveType === "balance" || opts.curveType === "both") {
         q.push("curve_type=" + encodeURIComponent(opts.curveType));
       }
-      var targetUrl = apiUrl + (apiUrl.indexOf("?") >= 0 ? "&" : "?") + q.join("&");
+      var targetUrl = q.length ? (apiUrl + (apiUrl.indexOf("?") >= 0 ? "&" : "?") + q.join("&")) : apiUrl;
       var reqKey = apiUrl.split("?")[0];
 
       if (fetchControllers[reqKey]) {
@@ -380,10 +384,15 @@
       applyTradeOutcomeStats();
     }
 
-    function mergeCurveOnly(curvePayload) {
+    function curveCacheKey(tab, winHours) {
+      return String(tab || currentCurveTab) + ":" + String(winHours == null ? currentWindowHours : winHours);
+    }
+
+    function mergeCurveOnly(curvePayload, requestedTab, requestedWindow) {
       if (!curvePayload || typeof curvePayload !== "object") return;
       if (!latestData || typeof latestData !== "object") latestData = {};
-      latestData.curve_window_hours = curvePayload.curve_window_hours;
+      var winHours = curvePayload.curve_window_hours != null ? Number(curvePayload.curve_window_hours) : (requestedWindow || currentWindowHours);
+      latestData.curve_window_hours = winHours;
       latestData.curve_points = curvePayload.curve_points;
       if (curvePayload.balance_curve_cycle_baseline !== undefined) {
         latestData.balance_curve_cycle_baseline = curvePayload.balance_curve_cycle_baseline;
@@ -391,35 +400,57 @@
       if (curvePayload.portfolio_loss_cut) {
         latestData.portfolio_loss_cut = curvePayload.portfolio_loss_cut;
       }
-      if (curvePayload.curve_type === "strategy") {
-        latestData.strategy_equity_curve = curvePayload.strategy_equity_curve || [];
-        latestData.equity_curve = curvePayload.equity_curve || latestData.strategy_equity_curve;
-        if (curvePayload.drawdown_stats_strategy) latestData.drawdown_stats_strategy = curvePayload.drawdown_stats_strategy;
-      } else if (curvePayload.curve_type === "balance") {
-        latestData.balance_curve = curvePayload.balance_curve || [];
-        latestData.equity_curve = curvePayload.equity_curve || latestData.balance_curve;
-        if (curvePayload.drawdown_stats_balance) latestData.drawdown_stats_balance = curvePayload.drawdown_stats_balance;
+      var cType = curvePayload.curve_type || requestedTab;
+      if (cType === "strategy" || cType === "both") {
+        var sCurve = curvePayload.strategy_equity_curve || [];
+        var sStats = curvePayload.drawdown_stats_strategy || curvePayload.drawdown_stats || null;
+        latestData.strategy_equity_curve = sCurve;
+        if (sStats) latestData.drawdown_stats_strategy = sStats;
+        curveCacheByKey[curveCacheKey("strategy", winHours)] = {
+          curve: sCurve,
+          stats: sStats
+        };
+      }
+      if (cType === "balance" || cType === "both") {
+        var bCurve = curvePayload.balance_curve || [];
+        var bStats = curvePayload.drawdown_stats_balance || curvePayload.drawdown_stats || null;
+        latestData.balance_curve = bCurve;
+        if (bStats) latestData.drawdown_stats_balance = bStats;
+        curveCacheByKey[curveCacheKey("balance", winHours)] = {
+          curve: bCurve,
+          stats: bStats
+        };
+      }
+      if (cType === "strategy") {
+        latestData.equity_curve = latestData.strategy_equity_curve;
+      } else if (cType === "balance") {
+        latestData.equity_curve = latestData.balance_curve;
       } else {
-        latestData.strategy_equity_curve = curvePayload.strategy_equity_curve || [];
-        latestData.balance_curve = curvePayload.balance_curve || [];
-        latestData.equity_curve = curvePayload.equity_curve || latestData.strategy_equity_curve || [];
-        if (curvePayload.drawdown_stats_strategy) latestData.drawdown_stats_strategy = curvePayload.drawdown_stats_strategy;
-        if (curvePayload.drawdown_stats_balance) latestData.drawdown_stats_balance = curvePayload.drawdown_stats_balance;
+        latestData.equity_curve = latestData.strategy_equity_curve || [];
       }
       if (curvePayload.drawdown_stats) latestData.drawdown_stats = curvePayload.drawdown_stats;
       applyTradeOutcomeStats();
+      if (latestData.drawdown_stats_strategy && curveCacheByKey[curveCacheKey("strategy", winHours)]) {
+        curveCacheByKey[curveCacheKey("strategy", winHours)].stats = latestData.drawdown_stats_strategy;
+      }
     }
 
     function activeStats(data) {
+      var cached = curveCacheByKey[curveCacheKey(currentCurveTab, currentWindowHours)];
+      if (cached && cached.stats) return cached.stats;
       if (!data) return {};
-      if (currentCurveTab === "balance") return data.drawdown_stats_balance || data.drawdown_stats || {};
-      return data.drawdown_stats_strategy || data.drawdown_stats || {};
+      if (Number(data.curve_window_hours) !== currentWindowHours) return {};
+      if (currentCurveTab === "balance") return data.drawdown_stats_balance || {};
+      return data.drawdown_stats_strategy || {};
     }
 
     function activeCurve(data) {
+      var cached = curveCacheByKey[curveCacheKey(currentCurveTab, currentWindowHours)];
+      if (cached && Array.isArray(cached.curve)) return cached.curve;
       if (!data) return [];
-      if (currentCurveTab === "balance") return data.balance_curve || data.equity_curve || [];
-      return data.strategy_equity_curve || data.equity_curve || [];
+      if (Number(data.curve_window_hours) !== currentWindowHours) return [];
+      if (currentCurveTab === "balance") return data.balance_curve || [];
+      return data.strategy_equity_curve || [];
     }
 
     function latestUnderlyingTimestamp(data) {
@@ -464,7 +495,7 @@
     function renderEquityChart(curve, forceRebuild) {
       if (!el.equityChart) return;
       if (typeof window.echarts === "undefined") {
-        showChartEmpty("图表组件加载中...");
+        showChartEmpty(echartsLoadFailed ? "图表组件加载失败" : "图表组件加载中...", echartsLoadFailed);
         return;
       }
 
@@ -478,7 +509,7 @@
       var lastEq = raw.length && raw[raw.length - 1] && raw[raw.length - 1].equity != null
         ? String(raw[raw.length - 1].equity)
         : "";
-      var nextSig = currentCurveTab + "|" + currentWindowHours + "|" + displayTimeZone + "|" + (portfolioStopEnabled ? "1" : "0") + "|" + raw.length + "|" + firstT + "|" + lastT + "|" + lastEq + "|" + stopSig;
+      var nextSig = currentCurveTab + "|" + currentWindowHours + "|" + displayTimeZone + "|" + (portfolioStopEnabled ? "1" : "0") + "|" + (curveLoadedOnce ? "1" : "0") + "|" + raw.length + "|" + firstT + "|" + lastT + "|" + lastEq + "|" + stopSig;
       if (!forceRebuild && nextSig === lastChartSignature && equityChart) {
         return;
       }
@@ -486,20 +517,17 @@
 
       if (!equityChart) {
         equityChart = window.echarts.init(el.equityChart, null, { renderer: "canvas" });
-        equityChart.on("datazoom", function (evt) {
-          var batch = evt && evt.batch && evt.batch[0] ? evt.batch[0] : evt;
-          var start = batch && Number.isFinite(Number(batch.start)) ? Number(batch.start) : 0;
-          var end = batch && Number.isFinite(Number(batch.end)) ? Number(batch.end) : 100;
-          var zoomed = start > 0.5 || end < 99.5;
-          chartZoomRange = zoomed ? { start: start, end: end } : null;
+        equityChart.on("datazoom", ops.createEchartsZoomHandler(function (nextZoom, zoomed) {
+          chartZoomRange = nextZoom;
           if (el.chartResetZoomBtn) el.chartResetZoomBtn.hidden = !zoomed;
-        });
+        }));
         attachChartResizeObserver();
       }
 
       if (!raw.length) {
         equityChart.clear();
-        showChartEmpty("所选范围暂无权益曲线");
+        var hasCachedForKey = !!curveCacheByKey[curveCacheKey(currentCurveTab, currentWindowHours)];
+        showChartEmpty((curveLoadedOnce && hasCachedForKey) ? "所选范围暂无权益曲线" : "曲线加载中...");
         return;
       }
 
@@ -604,9 +632,11 @@
       ops.ensureEcharts(
         resolvedSrc,
         function () {
+          echartsLoadFailed = false;
           if (latestData) renderEquityChart(activeCurve(latestData), true);
         },
         function () {
+          echartsLoadFailed = true;
           showChartEmpty("图表组件加载失败", true);
         }
       );
@@ -657,6 +687,37 @@
       ops.patchHtmlIfChanged(el.readonlyStatsFacts, R.readonlyStatsFactsHtml(stats));
     }
 
+    function computeFallbackCycleReturnDrawdown(curvePoints) {
+      var valid = (curvePoints || []).filter(function (pt) {
+        return pt && ops.toNum(pt.equity) !== null;
+      });
+      if (!valid.length) return { currentReturn: null, currentDrawdown: null };
+      var latestMs = ops.parseTimestampMs(valid[valid.length - 1].t);
+      var cyclePts = valid;
+      if (Number.isFinite(latestMs)) {
+        var startMs = ops.cycleStartMs(latestMs, portfolioStopHour, portfolioStopMinute);
+        cyclePts = valid.filter(function (pt) {
+          var ms = ops.parseTimestampMs(pt.t);
+          return Number.isFinite(ms) && ms >= startMs;
+        });
+      }
+      if (cyclePts.length < 2) return { currentReturn: null, currentDrawdown: null };
+      var baseEq = ops.toNum(cyclePts[0].equity);
+      if (baseEq === null || baseEq <= 0) return { currentReturn: null, currentDrawdown: null };
+      var peakEq = baseEq;
+      var lastEq = baseEq;
+      for (var i = 0; i < cyclePts.length; i += 1) {
+        var eq = ops.toNum(cyclePts[i].equity);
+        if (eq === null) continue;
+        if (eq > peakEq) peakEq = eq;
+        lastEq = eq;
+      }
+      return {
+        currentReturn: ((lastEq - baseEq) / baseEq) * 100,
+        currentDrawdown: peakEq > 0 ? ((lastEq - peakEq) / peakEq) * 100 : 0
+      };
+    }
+
     function renderRiskMetrics(data) {
       var useCycle = accountMode !== "readonly";
       var stop = data && data.portfolio_loss_cut;
@@ -696,6 +757,11 @@
         var backendReturn = stop ? ops.toNum(stop.current_return_pct) : null;
         currentReturn = backendReturn !== null ? backendReturn : ops.toNum(metrics.currentReturnPct);
         currentDrawdown = ops.toNum(metrics.currentDrawdownPct);
+        if (currentReturn === null || currentDrawdown === null) {
+          var fallbackCycle = computeFallbackCycleReturnDrawdown(sourceCurve);
+          if (currentReturn === null) currentReturn = fallbackCycle.currentReturn;
+          if (currentDrawdown === null) currentDrawdown = fallbackCycle.currentDrawdown;
+        }
         stopStatus = stop ? String(stop.status || "").toUpperCase() : "";
       }
 
@@ -764,8 +830,8 @@
       var wallet = d.wallet || {};
       var stats = activeStats(d);
 
-      var walletDisplay = stats.wallet_balance_usdt;
-      if (walletDisplay === null || walletDisplay === undefined) walletDisplay = wallet.balance_usdt;
+      var walletDisplay = wallet.balance_usdt;
+      if (walletDisplay === null || walletDisplay === undefined) walletDisplay = stats.wallet_balance_usdt;
       setText(el.walletBalance, ops.fmtUsdt(walletDisplay, 2));
       renderCurveTabState();
       if (opts.updateChart) {
@@ -814,13 +880,22 @@
         var summary = d.summary || {};
         var wallet = d.wallet || {};
         var svc = d.service || {};
-        if (d.timezone) displayTimeZone = String(d.timezone);
+        if (d.timezone) {
+          displayTimeZone = String(d.timezone);
+          var tzLabel = displayTimeZone === "Asia/Shanghai" ? "UTC+8" : displayTimeZone;
+          if (accountMode !== "readonly") {
+            setText(el.cycleReturnHelp, tzLabel + " 周期");
+            var cycleLabel = String(portfolioStopHour).padStart(2, "0") + ":" + String(portfolioStopMinute).padStart(2, "0");
+            setText(el.riskCycleStart, "每日 " + cycleLabel + " 切换账户周期 · " + (displayTimeZone === "Asia/Shanghai" ? "北京时间 UTC+8" : displayTimeZone));
+          }
+        }
         var svcStatus = "DISABLED";
         if (svc.enabled) {
           svcStatus = svc.running ? "RUNNING" : (svc.error ? "ERROR (" + svc.error + ")" : "STOPPED");
         }
 
-        setText(el.meta, "UTC+8 · 数据来源 " + ops.formatWalletSource(wallet.source));
+        var metaTz = displayTimeZone === "Asia/Shanghai" ? "UTC+8" : displayTimeZone;
+        setText(el.meta, metaTz + " · 数据来源 " + ops.formatWalletSource(wallet.source));
         if (accountMode !== "readonly") {
           setText(el.nextEntry, fmtAxisTime(d.next_entry_local));
         }
@@ -850,7 +925,9 @@
     function refreshCurveFast(options) {
       var opts = options || {};
       var trackManual = !!opts.manual;
-      fetchDashboard(api + "/curve", { kind: "curve", lite: true, curveType: currentCurveTab }, function (err, d, aborted) {
+      var requestedTab = currentCurveTab;
+      var requestedWindow = currentWindowHours;
+      fetchDashboard(api + "/curve", { kind: "curve", lite: true, curveType: requestedTab }, function (err, d, aborted) {
         if (trackManual) finishManualRefreshSlot();
         if (aborted) return;
         if (err) {
@@ -862,8 +939,9 @@
           setDetailError("curve", "权益曲线读取失败：" + (err && err.message ? err.message : String(err)));
           return;
         }
+        curveLoadedOnce = true;
         setDetailError("curve", "");
-        mergeCurveOnly(d);
+        mergeCurveOnly(d, requestedTab, requestedWindow);
         rerenderFromLatest({ updateChart: true, forceChart: !!opts.forceChart });
       });
     }
@@ -988,6 +1066,7 @@
         if (trackManual) finishManualRefreshSlot();
         return;
       }
+      detailsAttempted = true;
       detailsRequestToken += 1;
       var requestToken = detailsRequestToken;
       detailsInFlight = true;
@@ -1049,11 +1128,7 @@
     }
 
     function setDetailRefreshBusy(busy) {
-      if (!el.detailRefreshBtn) return;
-      el.detailRefreshBtn.disabled = !!busy;
-      var lbl = el.detailRefreshBtn.querySelector(".btn-label");
-      if (lbl) lbl.textContent = busy ? "刷新中..." : "刷新";
-      else el.detailRefreshBtn.textContent = busy ? "刷新中..." : "刷新";
+      ops.setButtonBusy(el.detailRefreshBtn, busy, "刷新", "刷新中...");
     }
 
     var activateActivityTab = null;
@@ -1131,6 +1206,7 @@
       if (manualRefreshPendingCount > 0) return;
       manualRefreshPendingCount = 3;
       setDetailRefreshBusy(true);
+      ensureEcharts();
       refreshCore({ manual: true });
       refreshCurveFast({ manual: true, forceChart: true });
       refreshDetails({ manual: true, force: true });
@@ -1237,11 +1313,11 @@
         var btn = evt.target && evt.target.closest ? evt.target.closest("[data-window-hours]") : null;
         if (!btn) return;
         var parsed = Number(btn.getAttribute("data-window-hours"));
-        if (!Number.isFinite(parsed) || parsed <= 0) return;
+        if (!VALID_WINDOWS[parsed]) return;
         chartZoomRange = null;
         currentWindowHours = parsed;
         syncDetailUrl();
-        renderCurveTabState();
+        rerenderFromLatest({ updateChart: true, forceChart: true });
         refreshCurveFast({ forceChart: true });
       });
     }
@@ -1254,11 +1330,11 @@
           if (isMobile) {
             var fullEvery = 3;
             refreshCore();
-            if (detailsLoaded && (refreshTick % fullEvery) === 0) refreshDetails();
+            if ((detailsLoaded || detailsAttempted) && (refreshTick % fullEvery) === 0) refreshDetails();
             return;
           }
           refreshCore();
-          if (detailsLoaded && (refreshTick % 2) === 0) refreshDetails();
+          if ((detailsLoaded || detailsAttempted) && (refreshTick % 2) === 0) refreshDetails();
         }, Math.max(2000, REFRESH_SEC * 1000));
       }
       if (!curveTimer) {
@@ -1303,10 +1379,14 @@
     startPolling();
 
     document.addEventListener("visibilitychange", function () {
-      if (!document.hidden) {
+      if (document.hidden) {
+        if (coreTimer) { clearInterval(coreTimer); coreTimer = null; }
+        if (curveTimer) { clearInterval(curveTimer); curveTimer = null; }
+      } else {
+        startPolling();
         refreshCurveFast();
         refreshCore();
-        if (detailsLoaded) refreshDetails();
+        if (detailsLoaded || detailsAttempted) refreshDetails();
       }
     });
 
@@ -1325,7 +1405,7 @@
         else if (latestData) renderEquityChart(activeCurve(latestData), true);
         refreshCurveFast();
         refreshCore();
-        if (detailsLoaded) refreshDetails();
+        if (detailsLoaded || detailsAttempted) refreshDetails();
       }
     });
   });

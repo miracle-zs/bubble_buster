@@ -249,7 +249,7 @@
     var raw = String(value || "").trim();
     if (!raw || raw === "--") return NaN;
     var normalized = raw;
-    if (/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}/.test(normalized) && !/[zZ]|[+-]\d{2}:?\d{2}$/.test(normalized)) {
+    if (/^\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}/.test(normalized) && !/[zZ]|[+-]\d{2}:?\d{2}$/.test(normalized)) {
       normalized = normalized.replace(" ", "T") + "+08:00";
     }
     var ms = Date.parse(normalized);
@@ -264,7 +264,7 @@
     try {
       var intlOpts = dateOnly
         ? { timeZone: tz, year: "numeric", month: "2-digit", day: "2-digit" }
-        : { timeZone: tz, month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", hour12: false };
+        : { timeZone: tz, month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", hour12: false, hourCycle: "h23" };
       if (!dateOnly && withYear) intlOpts.year = "numeric";
       if (!dateOnly && withSeconds) intlOpts.second = "2-digit";
       dateFormatterCache[key] = new Intl.DateTimeFormat("zh-CN", intlOpts);
@@ -500,8 +500,13 @@
         var lastReal = scoped[scoped.length - 1];
         var currEq = Number(stop.current_equity);
         if (Math.abs(currEq - lastReal.equity) > 1e-9 || scoped.length < 2) {
-          var currMs = Number.isFinite(lastReal.ms) ? lastReal.ms + 1000 : NaN;
-          scoped.push({ t: lastReal.t, ms: currMs, equity: currEq, synthetic: true });
+          var stopUpdMs = stop.updated_at_utc ? parseTimestampMs(stop.updated_at_utc) : NaN;
+          var useStopTs = Number.isFinite(stopUpdMs) && (!Number.isFinite(lastReal.ms) || stopUpdMs >= lastReal.ms);
+          var currMs = useStopTs
+            ? stopUpdMs
+            : (Number.isFinite(lastReal.ms) ? lastReal.ms + 1000 : NaN);
+          var currT = useStopTs ? String(stop.updated_at_utc) : lastReal.t;
+          scoped.push({ t: currT, ms: currMs, equity: currEq, synthetic: true });
         }
       }
     }
@@ -718,17 +723,61 @@
       cache: "no-store",
       signal: controller ? controller.signal : externalSignal || undefined,
       headers: { Accept: "application/json" }
-    }).then(function (res) {
-      if (timer) clearTimeout(timer);
-      if (!res.ok) throw new Error("HTTP " + res.status);
-      return res.json();
-    }, function (err) {
-      if (timer) clearTimeout(timer);
-      if (timedOut) {
-        throw new Error("请求超时（" + Math.round(timeoutMs / 1000) + "s）");
+    })
+      .then(function (res) {
+        if (!res.ok) throw new Error("HTTP " + res.status);
+        return res.json();
+      })
+      .then(function (data) {
+        if (timer) clearTimeout(timer);
+        if (data && typeof data === "object" && data.db_error) {
+          throw new Error("数据库读取失败：" + data.db_error);
+        }
+        return data;
+      }, function (err) {
+        if (timer) clearTimeout(timer);
+        if (timedOut) {
+          throw new Error("请求超时（" + Math.round(timeoutMs / 1000) + "s）");
+        }
+        throw err;
+      });
+  }
+
+  function setButtonBusy(btn, busy, idleText, busyText) {
+    if (!btn) return;
+    btn.disabled = !!busy;
+    var text = busy ? (busyText || "刷新中...") : (idleText || "刷新");
+    var label = btn.querySelector(".btn-label");
+    if (label) label.textContent = text;
+    else btn.textContent = text;
+  }
+
+  function createAlertController(alertEl, textEl, slotOrder, separator) {
+    var errors = {};
+    var sep = separator == null ? "；" : String(separator);
+    return function setError(slot, message) {
+      errors[slot] = message || "";
+      if (!alertEl || !textEl) return;
+      var keys = Array.isArray(slotOrder) && slotOrder.length ? slotOrder : Object.keys(errors);
+      var active = keys.map(function (k) { return errors[k]; }).filter(Boolean);
+      if (active.length) {
+        textEl.textContent = active.join(sep);
+        alertEl.hidden = false;
+      } else {
+        textEl.textContent = "";
+        alertEl.hidden = true;
       }
-      throw err;
-    });
+    };
+  }
+
+  function createEchartsZoomHandler(onChange) {
+    return function (evt) {
+      var batch = evt && evt.batch && evt.batch[0] ? evt.batch[0] : evt;
+      var start = batch && Number.isFinite(Number(batch.start)) ? Number(batch.start) : 0;
+      var end = batch && Number.isFinite(Number(batch.end)) ? Number(batch.end) : 100;
+      var zoomed = start > 0.5 || end < 99.5;
+      onChange(zoomed ? { start: start, end: end } : null, zoomed);
+    };
   }
 
   function patchHtmlIfChanged(node, html) {
@@ -783,16 +832,33 @@
     lastSig: ""
   };
 
+  function updateScrollOverflowFade(scrollEl, wrapEl) {
+    if (!scrollEl || !wrapEl) return;
+    var hasLeft = scrollEl.scrollLeft > 4;
+    var hasRight = (scrollEl.scrollWidth - scrollEl.clientWidth - scrollEl.scrollLeft) > 4;
+    wrapEl.classList.toggle("has-overflow-left", hasLeft);
+    wrapEl.classList.toggle("has-overflow-right", hasRight);
+  }
+
+  function bindScrollOverflowFade(scrollEl, wrapEl) {
+    if (!scrollEl || !wrapEl) return;
+    if (!scrollEl.__bbOverflowBound) {
+      scrollEl.__bbOverflowBound = true;
+      var throttledUpdate = rafThrottle(function () {
+        updateScrollOverflowFade(scrollEl, wrapEl);
+      });
+      scrollEl.addEventListener("scroll", throttledUpdate, { passive: true });
+      global.addEventListener("resize", throttledUpdate, { passive: true });
+    }
+    updateScrollOverflowFade(scrollEl, wrapEl);
+  }
+
   function updateNavOverflowFade() {
     var nav = document.querySelector(".ops-nav");
     var wrap = nav && nav.parentElement && nav.parentElement.classList.contains("ops-nav-wrap")
       ? nav.parentElement
       : null;
-    if (!nav || !wrap) return;
-    var hasLeft = nav.scrollLeft > 4;
-    var hasRight = (nav.scrollWidth - nav.clientWidth - nav.scrollLeft) > 4;
-    wrap.classList.toggle("has-overflow-left", hasLeft);
-    wrap.classList.toggle("has-overflow-right", hasRight);
+    updateScrollOverflowFade(nav, wrap);
   }
 
   function rafThrottle(fn) {
@@ -812,34 +878,37 @@
   }
 
   var echartsWaiters = [];
+  var echartsLoading = false;
+  var echartsScriptEl = null;
   function ensureEcharts(src, onReady, onError) {
     if (typeof global.echarts !== "undefined") {
       if (typeof onReady === "function") onReady();
       return;
     }
     if (typeof document === "undefined") return;
-    if (global.__bb_echarts_failed) {
-      if (typeof onError === "function") onError();
-      return;
-    }
     if (typeof onReady === "function" || typeof onError === "function") {
       echartsWaiters.push({ onReady: onReady, onError: onError });
     }
-    if (global.__bb_echarts_loading) return;
-    global.__bb_echarts_loading = true;
+    if (echartsLoading) return;
+    echartsLoading = true;
+    if (echartsScriptEl && echartsScriptEl.parentNode) {
+      echartsScriptEl.parentNode.removeChild(echartsScriptEl);
+    }
     var script = document.createElement("script");
     script.src = src || "/static/vendor/echarts.min.js";
     script.async = true;
+    echartsScriptEl = script;
     script.onload = function () {
-      global.__bb_echarts_loading = false;
+      echartsLoading = false;
       var waiters = echartsWaiters.splice(0, echartsWaiters.length);
       for (var i = 0; i < waiters.length; i += 1) {
         if (typeof waiters[i].onReady === "function") waiters[i].onReady();
       }
     };
     script.onerror = function () {
-      global.__bb_echarts_loading = false;
-      global.__bb_echarts_failed = true;
+      echartsLoading = false;
+      if (script.parentNode) script.parentNode.removeChild(script);
+      if (echartsScriptEl === script) echartsScriptEl = null;
       var waiters = echartsWaiters.splice(0, echartsWaiters.length);
       for (var i = 0; i < waiters.length; i += 1) {
         if (typeof waiters[i].onError === "function") waiters[i].onError();
@@ -850,12 +919,10 @@
 
   function bindNavOverflowListeners() {
     var nav = document.querySelector(".ops-nav");
-    if (!nav || nav.__bbOverflowBound) return;
-    nav.__bbOverflowBound = true;
-    var throttledUpdate = rafThrottle(updateNavOverflowFade);
-    nav.addEventListener("scroll", throttledUpdate, { passive: true });
-    global.addEventListener("resize", throttledUpdate, { passive: true });
-    updateNavOverflowFade();
+    var wrap = nav && nav.parentElement && nav.parentElement.classList.contains("ops-nav-wrap")
+      ? nav.parentElement
+      : null;
+    bindScrollOverflowFade(nav, wrap);
   }
 
   function renderNavAccounts(accounts) {
@@ -889,7 +956,7 @@
       var cls = "ops-nav-link ops-nav-account" + (entry.mode === "readonly" ? " is-readonly" : "");
       var isCurrent = navState.activePage === "account" && navState.activeAccountId === entry.id;
       var href = (navState.basePrefix || "") + "/account/" + encodeURIComponent(entry.id) + "/";
-      html += '<li><a class="' + cls + '" href="' + href + '"'
+      html += '<li><a class="' + cls + '" href="' + escapeHtml(href) + '"'
         + (isCurrent ? ' aria-current="page"' : "")
         + '><span class="ops-nav-dot" aria-hidden="true"></span>' + escapeHtml(entry.id) + "</a></li>";
     }
@@ -1096,7 +1163,8 @@
 
     btn.addEventListener("click", function (evt) {
       evt.stopPropagation();
-      setOpen(pop.hidden, false);
+      var focusInside = !pop.hidden && pop.contains(document.activeElement);
+      setOpen(pop.hidden, focusInside);
     });
 
     document.addEventListener("click", function (evt) {
@@ -1134,10 +1202,14 @@
     return true;
   }
 
+  var boundShortcutListener = null;
   function bindKeyboardShortcuts(handlers) {
     if (typeof document === "undefined") return;
+    if (boundShortcutListener) {
+      document.removeEventListener("keydown", boundShortcutListener);
+    }
     var cfg = handlers || {};
-    document.addEventListener("keydown", function (evt) {
+    boundShortcutListener = function (evt) {
       if (evt.metaKey || evt.ctrlKey || evt.altKey) return;
       if (isEditableTarget(evt.target)) return;
       var lowerKey = evt.key ? String(evt.key).toLowerCase() : "";
@@ -1166,7 +1238,8 @@
           evt.preventDefault();
         }
       }
-    });
+    };
+    document.addEventListener("keydown", boundShortcutListener);
   }
 
   function readQueryParams() {
@@ -1231,6 +1304,10 @@
     classifyDrawdownTone: classifyDrawdownTone,
     parseSummaryPairs: parseSummaryPairs,
     fetchJsonWithTimeout: fetchJsonWithTimeout,
+    setButtonBusy: setButtonBusy,
+    createAlertController: createAlertController,
+    createEchartsZoomHandler: createEchartsZoomHandler,
+    bindScrollOverflowFade: bindScrollOverflowFade,
     patchHtmlIfChanged: patchHtmlIfChanged,
     readPageConfig: readPageConfig,
     resolveBasePrefix: resolveBasePrefix,
