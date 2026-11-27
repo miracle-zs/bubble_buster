@@ -191,7 +191,8 @@
         <div class="threshold-note">触底达到阈值的账号日比例（只看是否触及，不代表实际退出后的收益；账号筛选有效，路径筛选不影响此表）。</div>
         <div class="table-scroll">
           <table>
-            <thead><tr><th>止损阈值</th><th>一直跌</th><th>先涨后跌</th><th>先跌后涨</th><th>一直涨</th><th>全部路径</th></tr></thead>
+            <caption class="sr-only">止损阈值触及比例</caption>
+            <thead><tr><th scope="col">止损阈值</th><th scope="col">一直跌</th><th scope="col">先涨后跌</th><th scope="col">先跌后涨</th><th scope="col">一直涨</th><th scope="col">全部路径</th></tr></thead>
             <tbody id="threshold-body"></tbody>
           </table>
         </div>
@@ -214,7 +215,8 @@
       <div class="table-panel">
         <div class="table-scroll">
           <table>
-            <thead><tr><th>账号</th><th>账号日</th><th>一直涨</th><th>一直跌</th><th>先跌后涨</th><th>先涨后跌</th><th>先跌后涨最差</th><th>先跌后涨最差10%</th><th>最终盈利率</th></tr></thead>
+            <caption class="sr-only">路径类型统计表</caption>
+            <thead><tr><th scope="col">账号</th><th scope="col">账号日</th><th scope="col">一直涨</th><th scope="col">一直跌</th><th scope="col">先跌后涨</th><th scope="col">先涨后跌</th><th scope="col">先跌后涨最差</th><th scope="col">先跌后涨最差10%</th><th scope="col">最终盈利率</th></tr></thead>
             <tbody id="stats-body"></tbody>
           </table>
         </div>
@@ -245,8 +247,9 @@
     </section>
   </main>
 
+  <script id="account-equity-paths-data" type="application/json">__ACCOUNT_EQUITY_PATHS_DATA__</script>
   <script>
-    const DATA = __ACCOUNT_EQUITY_PATHS_DATA__;
+    const DATA = JSON.parse(document.getElementById("account-equity-paths-data").textContent);
     const CATEGORY_LABELS = {up: "一直涨", down: "一直跌", down_up: "先跌后涨", up_down: "先涨后跌"};
     const CATEGORY_COLORS = {up: "#27d39a", down: "#ff6b6b", down_up: "#53c7f3", up_down: "#f4b64a"};
     const CATEGORY_ORDER = ["up", "down", "down_up", "up_down"];
@@ -367,7 +370,7 @@
       $("threshold-body").innerHTML = thresholds.map((item) => {
         const rates = item.rates || {};
         const cell = (key) => rates[key] == null ? "--" : `${(rates[key] * 100).toFixed(1)}%`;
-        return `<tr><td class="amber">${item.threshold}%</td><td>${cell("down")}</td><td>${cell("up_down")}</td><td class="accent">${cell("down_up")}</td><td>${cell("up")}</td><td>${cell("all")}</td></tr>`;
+        return `<tr><th scope="row" class="amber">${esc(item.threshold)}%</th><td>${cell("down")}</td><td>${cell("up_down")}</td><td class="accent">${cell("down_up")}</td><td>${cell("up")}</td><td>${cell("all")}</td></tr>`;
       }).join("");
     }
     function allDates() {
@@ -376,7 +379,7 @@
     function renderDateOptions() {
       const dates = allDates();
       if (!dates.includes(state.date)) state.date = dates[0] || "";
-      $("date-filter").innerHTML = dates.map((date) => `<option value="${date}">${date}</option>`).join("");
+      $("date-filter").innerHTML = dates.map((date) => `<option value="${esc(date)}">${esc(date)}</option>`).join("");
       $("date-filter").value = state.date;
     }
     function renderDetail() {
@@ -393,14 +396,14 @@
       const rows = Object.entries(DATA.accounts).map(([account, payload]) => {
         const stats = payload.stats;
         const downUp = stats.downUp || {};
-        return `<tr><td><strong>${esc(account)}</strong></td><td>${count(stats.count)}</td><td>${count(stats.categories.up)}</td><td>${count(stats.categories.down)}</td><td>${count(stats.categories.down_up)}</td><td>${count(stats.categories.up_down)}</td><td class="negative">${pct(downUp.worst)}</td><td class="amber">${pct(downUp.p10)}</td><td class="${stats.positiveEndRate >= .5 ? "positive" : "negative"}">${stats.positiveEndRate == null ? "--" : (stats.positiveEndRate * 100).toFixed(1) + "%"}</td></tr>`;
+        return `<tr><th scope="row"><strong>${esc(account)}</strong></th><td>${count(stats.count)}</td><td>${count(stats.categories.up)}</td><td>${count(stats.categories.down)}</td><td>${count(stats.categories.down_up)}</td><td>${count(stats.categories.up_down)}</td><td class="negative">${pct(downUp.worst)}</td><td class="amber">${pct(downUp.p10)}</td><td class="${stats.positiveEndRate >= .5 ? "positive" : "negative"}">${stats.positiveEndRate == null ? "--" : (stats.positiveEndRate * 100).toFixed(1) + "%"}</td></tr>`;
       });
       const overall = DATA.overall.stats;
-      rows.push(`<tr><td><strong>合计</strong></td><td>${count(overall.count)}</td><td>${count(overall.categories.up)}</td><td>${count(overall.categories.down)}</td><td>${count(overall.categories.down_up)}</td><td>${count(overall.categories.up_down)}</td><td class="negative">${pct(overall.downUp.worst)}</td><td class="amber">${pct(overall.downUp.p10)}</td><td class="${overall.positiveEndRate >= .5 ? "positive" : "negative"}">${(overall.positiveEndRate * 100).toFixed(1)}%</td></tr>`);
+      rows.push(`<tr><th scope="row"><strong>合计</strong></th><td>${count(overall.count)}</td><td>${count(overall.categories.up)}</td><td>${count(overall.categories.down)}</td><td>${count(overall.categories.down_up)}</td><td>${count(overall.categories.up_down)}</td><td class="negative">${pct(overall.downUp.worst)}</td><td class="amber">${pct(overall.downUp.p10)}</td><td class="${overall.positiveEndRate >= .5 ? "positive" : "negative"}">${(overall.positiveEndRate * 100).toFixed(1)}%</td></tr>`);
       $("stats-body").innerHTML = rows.join("");
     }
     function populateControls() {
-      $("account-filter").innerHTML = `<option value="all">全部账号</option>${Object.keys(DATA.accounts).map((account) => `<option value="${account}">${account}</option>`).join("")}`;
+      $("account-filter").innerHTML = `<option value="all">全部账号</option>${Object.keys(DATA.accounts).map((account) => `<option value="${esc(account)}">${esc(account)}</option>`).join("")}`;
       $("category-filter").innerHTML = `<option value="all">全部路径</option>${CATEGORY_ORDER.map((key) => `<option value="${key}">${CATEGORY_LABELS[key]}</option>`).join("")}`;
       $("account-filter").addEventListener("change", (event) => { state.account = event.target.value; render(); });
       $("category-filter").addEventListener("change", (event) => { state.category = event.target.value; render(); });

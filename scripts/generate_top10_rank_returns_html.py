@@ -196,7 +196,6 @@ HTML_TEMPLATE = """<!doctype html>
     }
     .heat-cell {
       border-radius: 12px;
-      color: #fff;
       font-weight: 700;
       padding: 10px 8px;
     }
@@ -364,12 +363,12 @@ HTML_TEMPLATE = """<!doctype html>
       <section class="panel">
         <h2>明细穿透</h2>
         <div class="filters">
-          <div class="field"><label>账号</label><select id="filter-account"></select></div>
-          <div class="field"><label>排名</label><select id="filter-rank"></select></div>
-          <div class="field"><label>收益口径</label><select id="filter-basis"></select></div>
-          <div class="field"><label>开始日期</label><input id="filter-start" type="date"></div>
-          <div class="field"><label>结束日期</label><input id="filter-end" type="date"></div>
-          <div class="field"><label>关键词</label><input id="filter-keyword" type="text" placeholder="symbol / 状态"></div>
+          <div class="field"><label for="filter-account">账号</label><select id="filter-account"></select></div>
+          <div class="field"><label for="filter-rank">排名</label><select id="filter-rank"></select></div>
+          <div class="field"><label for="filter-basis">收益口径</label><select id="filter-basis"></select></div>
+          <div class="field"><label for="filter-start">开始日期</label><input id="filter-start" type="date"></div>
+          <div class="field"><label for="filter-end">结束日期</label><input id="filter-end" type="date"></div>
+          <div class="field"><label for="filter-keyword">关键词</label><input id="filter-keyword" type="text" placeholder="symbol / 状态"></div>
         </div>
         <div class="detail-summary" id="detail-summary"></div>
         <div class="table-shell">
@@ -397,6 +396,7 @@ HTML_TEMPLATE = """<!doctype html>
 
   <script>
     const data = __DATA__;
+    const escapeHtml = (str) => String(str ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
     const pct = (v) => {
       if (v === null || v === undefined || Number.isNaN(v)) return "—";
       return `${v >= 0 ? "+" : ""}${v.toFixed(2)}%`;
@@ -443,14 +443,12 @@ HTML_TEMPLATE = """<!doctype html>
       </div>
     `).join("");
 
-    const heatColor = (value) => {
-      if (value === null || value === undefined) return "rgba(141,131,121,0.58)";
-      if (value >= 0) {
-        const alpha = Math.min(0.88, 0.28 + Math.abs(value) / 20);
-        return `rgba(15,139,109,${alpha})`;
-      }
+    const heatStyle = (value) => {
+      if (value === null || value === undefined) return "background:rgba(141,131,121,0.58);color:#fff;";
       const alpha = Math.min(0.88, 0.28 + Math.abs(value) / 20);
-      return `rgba(191,77,59,${alpha})`;
+      const bg = value >= 0 ? `rgba(15,139,109,${alpha})` : `rgba(191,77,59,${alpha})`;
+      const color = alpha < 0.6 ? "#181512" : "#ffffff";
+      return `background:${bg};color:${color};`;
     };
     document.getElementById("heatmap").innerHTML = `
       <table>
@@ -463,10 +461,10 @@ HTML_TEMPLATE = """<!doctype html>
         <tbody>
           ${data.account_rank_heatmap.map((row) => `
             <tr>
-              <th>${row.account_id}</th>
+              <th>${escapeHtml(row.account_id)}</th>
               ${row.cells.map((cell) => `
                 <td>
-                  <div class="heat-cell" style="background:${heatColor(cell.avg_return_pct)}">
+                  <div class="heat-cell" style="${heatStyle(cell.avg_return_pct)}">
                     ${pct(cell.avg_return_pct)}
                     <span class="heat-note">${cell.sample_count} 条</span>
                   </div>
@@ -504,8 +502,8 @@ HTML_TEMPLATE = """<!doctype html>
     const detailRows = data.detail_rows;
     const fillSelect = (id, values, allLabel) => {
       const node = document.getElementById(id);
-      node.innerHTML = [`<option value="">${allLabel}</option>`]
-        .concat(values.map((value) => `<option value="${value}">${value}</option>`))
+      node.innerHTML = [`<option value="">${escapeHtml(allLabel)}</option>`]
+        .concat(values.map((value) => `<option value="${escapeHtml(value)}">${escapeHtml(value)}</option>`))
         .join("");
     };
     fillSelect("filter-account", data.accounts, "全部账号");
@@ -539,23 +537,28 @@ HTML_TEMPLATE = """<!doctype html>
         `当前筛选命中 ${rows.length} 条；其中可计算真实收益率 ${rows.filter((row) => row.return_pct !== null).length} 条。`;
       document.getElementById("detail-body").innerHTML = rows.map((row) => `
         <tr>
-          <td>${row.ranking_local_date}</td>
-          <td>${row.account_id}</td>
-          <td>#${row.rank}</td>
-          <td>${row.symbol}</td>
+          <td>${escapeHtml(row.ranking_local_date)}</td>
+          <td>${escapeHtml(row.account_id)}</td>
+          <td>#${escapeHtml(row.rank)}</td>
+          <td>${escapeHtml(row.symbol)}</td>
           <td class="${cls(row.rank_pct_change)}">${pct(row.rank_pct_change)}</td>
           <td class="${cls(row.return_pct)}">${pct(row.return_pct)}</td>
-          <td>${row.position_status || "—"}</td>
-          <td>${row.return_basis_label}</td>
-          <td>${num(row.entry_price)}</td>
-          <td>${num(row.exit_fill_avg_price)}</td>
+          <td>${escapeHtml(row.position_status || "—")}</td>
+          <td>${escapeHtml(row.return_basis_label)}</td>
+          <td>${escapeHtml(num(row.entry_price))}</td>
+          <td>${escapeHtml(num(row.exit_fill_avg_price))}</td>
         </tr>
       `).join("");
     };
-    [accountFilter, rankFilter, basisFilter, startFilter, endFilter, keywordFilter].forEach((node) => {
-      node.addEventListener("input", renderDetailTable);
+    let debounceTimer;
+    const debounceRender = () => {
+      clearTimeout(debounceTimer);
+      debounceTimer = setTimeout(renderDetailTable, 150);
+    };
+    [accountFilter, rankFilter, basisFilter, startFilter, endFilter].forEach((node) => {
       node.addEventListener("change", renderDetailTable);
     });
+    keywordFilter.addEventListener("input", debounceRender);
     renderDetailTable();
   </script>
 </body>

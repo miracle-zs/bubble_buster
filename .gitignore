@@ -31,4 +31,6 @@ htmlcov/
 # Local session handoff
 /docs/HANDOFF.md
 
-.worktrees/
+# Local agent / critique artifacts
+.gemini/
+.impeccable/critique/

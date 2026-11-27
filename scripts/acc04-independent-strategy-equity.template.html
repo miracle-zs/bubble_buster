@@ -246,13 +246,25 @@
     min-height: 340px;
   }
 }
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
 </style>
 
-<script src="https://cdn.jsdelivr.net/npm/d3@7.9.0/dist/d3.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/d3@7.9.0/dist/d3.min.js" integrity="sha384-CjloA8y00+1SDAUkjs099PVfnY2KmDC2BZnws9kh8D/lX1s46w6EPhpXdqMfjK6i" crossorigin="anonymous"></script>
+<script id="acc04-independent-data" type="application/json">__DATA_JSON__</script>
 <script>
 (() => {
   const root = document.getElementById("acc04-independent-strategy-replay");
-  const DATA = __DATA_JSON__;
+  const DATA = JSON.parse(document.getElementById("acc04-independent-data").textContent);
   const series = [
     { key: "actual", label: "实际（独立重算）", colorClass: "actual" },
     { key: "second", label: "第二次阴线（独立重算）", colorClass: "second" },
@@ -301,6 +313,15 @@
     daySelect.appendChild(option);
   });
   daySelect.value = DATA.days[0] || "";
+
+  function escapeHtml(value) {
+    return String(value == null ? "" : value)
+      .replace(/&/g, "&amp;")
+      .replace(/</g, "&lt;")
+      .replace(/>/g, "&gt;")
+      .replace(/"/g, "&quot;")
+      .replace(/'/g, "&#39;");
+  }
 
   function sessionDay(timestamp) {
     const value = parseTime(timestamp);
@@ -379,13 +400,13 @@
         : "未触发";
       const tr = document.createElement("tr");
       tr.innerHTML = [
-        item.label,
+        escapeHtml(item.label),
         formatEquity(row.baseline_equity),
         formatCount(row.carried_count),
-        newOpen,
-        portfolioText,
-        formatTimes(events, "HOURLY_EXCHANGE_TAKE_PROFIT"),
-        protection,
+        escapeHtml(newOpen),
+        escapeHtml(portfolioText),
+        escapeHtml(formatTimes(events, "HOURLY_EXCHANGE_TAKE_PROFIT")),
+        escapeHtml(protection),
         formatCount(row.next_day_active_count),
         formatEquity(row.end_equity)
       ].map((value, index) => index === 0
@@ -412,9 +433,9 @@
   function updateTooltip(x, pointerX, pointerY, pinned) {
     const rows = series.filter(item => visible.has(item.key)).map(item => {
       const value = interpolate(pointsBySeries[item.key], x);
-      return "<div class=\"acc04-independent-tooltip-row\" data-series-row=\"" + item.key + "\">"
+      return "<div class=\"acc04-independent-tooltip-row\" data-series-row=\"" + escapeHtml(item.key) + "\">"
         + "<span class=\"acc04-independent-tooltip-key\"><span class=\"acc04-independent-tooltip-dot acc04-independent-tooltip-dot-" + item.colorClass + "\"></span>"
-        + item.label + "</span><span class=\"tabular-nums\">" + formatEquity(value) + " USDT</span></div>";
+        + escapeHtml(item.label) + "</span><span class=\"tabular-nums\">" + formatEquity(value) + " USDT</span></div>";
     }).join("");
     tooltip.innerHTML = "<div class=\"acc04-independent-tooltip-title\">" + formatLocal(x.toISOString()) + "</div>" + rows;
     tooltip.hidden = false;

@@ -17,7 +17,25 @@ def main() -> int:
     data = json.loads(Path(args.input_json).read_text(encoding="utf-8"))
     embedded = json.dumps(data, ensure_ascii=False, separators=(",", ":"))
     embedded = embedded.replace("<", "\\u003c").replace(">", "\\u003e")
-    html = f'''<div id="equity-curve-split-vs-original" class="equity-visual">
+    html = f'''<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta name="color-scheme" content="dark" />
+  <title>一次满仓 vs 两次建仓 · 权益对比</title>
+  <style>
+    body {{
+      margin: 0;
+      padding: 16px;
+      background: #07131d;
+      color-scheme: dark;
+      font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }}
+  </style>
+</head>
+<body>
+<div id="equity-curve-split-vs-original" class="equity-visual">
   <style>
     #equity-curve-split-vs-original {{
       --bg: #07131d;
@@ -127,7 +145,7 @@ def main() -> int:
   <div class="accounts-grid" id="equity-curve-split-vs-original-accounts"></div>
   <div class="footer-note">口径：钱包余额为已实现权益，不含历史未实现浮盈亏；原策略的第二笔入场被移回首笔信号，平仓数量按现行仓位实际关闭比例缩放。因此这是入场分配归因，不代表原策略一定会触发完全相同的止损/止盈。手续费优先采用服务器成交记录，缺失时按双边 0.05% 估算。</div>
 </div>
-<script src="https://cdn.jsdelivr.net/npm/d3@7.9.0/dist/d3.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/d3@7.9.0/dist/d3.min.js" integrity="sha384-CjloA8y00+1SDAUkjs099PVfnY2KmDC2BZnws9kh8D/lX1s46w6EPhpXdqMfjK6i" crossorigin="anonymous"></script>
 <script>
 (() => {{
   const DATA = {embedded};
@@ -143,6 +161,7 @@ def main() -> int:
   const parseTime = value => new Date(value);
   const localTime = value => localFmt.format(parseTime(value)).replace(',', ' ');
   const numberOrNull = value => value == null ? null : +value;
+  const escapeHtml = str => String(str ?? '').replace(/[&<>"']/g, c => ({{ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }}[c]));
 
   const accountRows = Object.entries(DATA.accounts).map(([account, value]) => ({{ account, ...value }}));
   const aggregate = DATA.aggregate.points.map(point => ({{ ...point, date: parseTime(point.t) }}));
@@ -218,7 +237,8 @@ def main() -> int:
     const panel = document.createElement('div'); panel.className = 'account-panel chart-panel';
     const metrics = accountData.metrics;
     const deltaColor = metrics.delta_final_usdt >= 0 ? 'var(--positive)' : 'var(--negative)';
-    panel.innerHTML = `<div class="account-head"><div class="account-title">${{accountData.account}}</div><div class="account-meta">启动 ${{localTime(accountData.meta.rollout_start_utc)}} · 结束 ${{localTime(DATA.meta.end_utc)}}</div></div><div class="chart-wrap"><svg role="img" aria-label="${{accountData.account}} 一次满仓与两次建仓曲线"></svg><div class="tooltip"></div></div><div class="metric-strip"><div class="metric"><div class="metric-label">现行</div><div class="metric-value" style="color:${{colors.actual}}">${{fmtPct(metrics.actual_return_pct)}}</div></div><div class="metric"><div class="metric-label">原策略</div><div class="metric-value" style="color:${{colors.original}}">${{fmtPct(metrics.original_return_pct)}}</div></div><div class="metric"><div class="metric-label">原−现 USDT</div><div class="metric-value" style="color:${{deltaColor}}">${{metrics.delta_final_usdt >= 0 ? '+' : ''}}${{fmt(metrics.delta_final_usdt)}}</div></div><div class="metric"><div class="metric-label">最大回撤</div><div class="metric-value">${{fmt(metrics.actual_max_drawdown_pct)}}% / ${{fmt(metrics.original_max_drawdown_pct)}}%</div></div></div>`;
+    const safeAccount = escapeHtml(accountData.account);
+    panel.innerHTML = `<div class="account-head"><div class="account-title">${{safeAccount}}</div><div class="account-meta">启动 ${{localTime(accountData.meta.rollout_start_utc)}} · 结束 ${{localTime(DATA.meta.end_utc)}}</div></div><div class="chart-wrap"><svg role="img" aria-label="${{safeAccount}} 一次满仓与两次建仓曲线"></svg><div class="tooltip"></div></div><div class="metric-strip"><div class="metric"><div class="metric-label">现行</div><div class="metric-value" style="color:${{colors.actual}}">${{fmtPct(metrics.actual_return_pct)}}</div></div><div class="metric"><div class="metric-label">原策略</div><div class="metric-value" style="color:${{colors.original}}">${{fmtPct(metrics.original_return_pct)}}</div></div><div class="metric"><div class="metric-label">原−现 USDT</div><div class="metric-value" style="color:${{deltaColor}}">${{metrics.delta_final_usdt >= 0 ? '+' : ''}}${{fmt(metrics.delta_final_usdt)}}</div></div><div class="metric"><div class="metric-label">最大回撤</div><div class="metric-value">${{fmt(metrics.actual_max_drawdown_pct)}}% / ${{fmt(metrics.original_max_drawdown_pct)}}%</div></div></div>`;
     document.getElementById('equity-curve-split-vs-original-accounts').appendChild(panel);
     const wrap = panel.querySelector('.chart-wrap'); const svg = d3.select(panel.querySelector('svg'));
     const points = accountData.points.map(point => ({{ ...point, date: +point.hours }}));
@@ -251,6 +271,8 @@ def main() -> int:
   window.addEventListener('resize', (() => {{ let timer; return () => {{ clearTimeout(timer); timer = setTimeout(redraw, 120); }}; }})());
 }})();
 </script>
+</body>
+</html>
 '''
     output = Path(args.output_html)
     output.parent.mkdir(parents=True, exist_ok=True)

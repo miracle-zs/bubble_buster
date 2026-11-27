@@ -26,9 +26,11 @@ HTML_TEMPLATE = """<!doctype html>
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light">
   <title>开单到次日 07:30 下单窗口分析</title>
   <style>
     :root {
+      color-scheme: light;
       --bg: #f4efe5;
       --paper: rgba(255,255,255,0.82);
       --ink: #1f1a17;
@@ -461,6 +463,22 @@ HTML_TEMPLATE = """<!doctype html>
     }
     .pos { color: var(--up); }
     .neg { color: var(--down); }
+    .sr-only {
+      position: absolute;
+      width: 1px;
+      height: 1px;
+      padding: 0;
+      margin: -1px;
+      overflow: hidden;
+      clip: rect(0, 0, 0, 0);
+      white-space: nowrap;
+      border: 0;
+    }
+    .interactive-canvas path:focus-visible,
+    .dot:focus-visible {
+      outline: 2px solid #1f1a17;
+      outline-offset: 2px;
+    }
     .footer {
       margin-top: 16px;
       color: var(--muted);
@@ -559,28 +577,24 @@ HTML_TEMPLATE = """<!doctype html>
 
     <section class="section">
       <h2>样本明细</h2>
-      <div class="table-shell">
-        <table>
-          <thead>
-            <tr>
-              <th>日期</th>
-              <th>账户</th>
-              <th>实际下单</th>
-              <th>起始余额</th>
-              <th>次日 07:30 余额</th>
-              <th>变化</th>
-              <th>收益率</th>
-            </tr>
-          </thead>
-          <tbody id="detail-table"></tbody>
-        </table>
-      </div>
+      <div id="detail-tables-container" class="tables-grid"></div>
     </section>
   </div>
 
+  <script id="order-time-data" type="application/json">__DATA_JSON__</script>
   <script>
-    const data = __DATA__;
+    const data = JSON.parse(document.getElementById("order-time-data").textContent);
     const windowEndLabel = data.window_end_label;
+
+    function escapeHtml(str) {
+      if (str == null) return "";
+      return String(str)
+        .replace(/&/g, "&amp;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;")
+        .replace(/"/g, "&quot;")
+        .replace(/'/g, "&#39;");
+    }
 
     const pct = (v) => `${v >= 0 ? "+" : ""}${v.toFixed(4)}%`;
     const num = (v) => `${v >= 0 ? "+" : ""}${v.toFixed(4)}`;
@@ -595,7 +609,7 @@ HTML_TEMPLATE = """<!doctype html>
       ` 这份报告把开单到 ${windowEndLabel} 的分钟级路径也展开了，用来判断是否真的存在“总会先大回撤再反弹”。`;
 
     document.getElementById("takeaways").innerHTML = data.key_takeaways
-      .map((item) => `<li>${item}</li>`).join("");
+      .map((item) => `<li>${escapeHtml(item)}</li>`).join("");
 
     const metricCards = [
       ["样本数", `${overall.sample_count}`, `真实下单后到 ${windowEndLabel} 的窗口`],
@@ -634,7 +648,7 @@ HTML_TEMPLATE = """<!doctype html>
       const yTicks = [y0, (y0 + y1) / 2, y1];
       const xTickEvery = Math.max(1, Math.floor(points.length / 5));
       const svg = `
-        <svg viewBox="0 0 ${width} ${height}" aria-label="path chart">
+        <svg viewBox="0 0 ${width} ${height}" role="img" aria-label="path chart">
           ${yTicks.map((tick) => `
             <g>
               <line x1="${margin.left}" x2="${width - margin.right}" y1="${yOf(tick)}" y2="${yOf(tick)}" stroke="rgba(31,26,23,0.10)" />
@@ -676,7 +690,7 @@ HTML_TEMPLATE = """<!doctype html>
       const yTicks = [y0, (y0 + y1) / 2, y1];
       const step = Math.max(1, Math.floor(points.length / 4));
       return `
-        <svg viewBox="0 0 ${width} ${height}" aria-label="account path chart">
+        <svg viewBox="0 0 ${width} ${height}" role="img" aria-label="account path chart">
           ${yTicks.map((tick) => `
             <g>
               <line x1="${margin.left}" x2="${width - margin.right}" y1="${yOf(tick)}" y2="${yOf(tick)}" stroke="rgba(31,26,23,0.10)" />
@@ -721,12 +735,12 @@ HTML_TEMPLATE = """<!doctype html>
       panel.innerHTML = `
         <article class="interactive-account">
           <div class="interactive-head">
-            <h3>${accountData.account_id}</h3>
+            <h3>${escapeHtml(accountData.account_id)}</h3>
             <p>${series.length} 条样本线。默认展示全部路径，点击任意一根线高亮并查看该样本。</p>
           </div>
           <div class="interactive-body">
             <div class="interactive-canvas">
-              <svg viewBox="0 0 ${width} ${height}" aria-label="${accountData.account_id} sample paths">
+              <svg viewBox="0 0 ${width} ${height}" role="img" aria-label="${escapeHtml(accountData.account_id)} sample paths">
                 ${yTicks.map((tick) => `
                   <g>
                     <line x1="${margin.left}" x2="${width - margin.right}" y1="${yOf(tick)}" y2="${yOf(tick)}" stroke="rgba(31,26,23,0.10)" />
@@ -741,7 +755,7 @@ HTML_TEMPLATE = """<!doctype html>
                 `).join("")}
                 ${series.map((sample, idx) => {
                   const path = sample.returns.map((ret, minute) => `${minute === 0 ? "M" : "L"}${xOf(minute).toFixed(2)},${yOf(ret).toFixed(2)}`).join(" ");
-                  return `<path d="${path}" data-sample-index="${idx}" fill="none" stroke="rgba(15,139,109,0.18)" stroke-width="1.1" style="cursor:pointer" />`;
+                  return `<path d="${path}" data-sample-index="${idx}" role="button" tabindex="0" aria-label="${escapeHtml(sample.date)} 样本 #${idx + 1}" fill="none" stroke="rgba(15,139,109,0.18)" stroke-width="1.1" style="cursor:pointer" />`;
                 }).join("")}
               </svg>
             </div>
@@ -766,11 +780,11 @@ HTML_TEMPLATE = """<!doctype html>
           }
         });
         info.innerHTML = `
-          <h4>${sample.date}</h4>
+          <h4>${escapeHtml(sample.date)}</h4>
           <div class="sample-kv">
-            <div><span>实际开单</span><strong>${sample.run_time}</strong></div>
-            <div><span>到 ${windowEndLabel} 收益</span><strong class="${cls(sample.final_ret_pct)}">${pct(sample.final_ret_pct)}</strong></div>
-            <div><span>最低点</span><strong>${sample.min_time}</strong></div>
+            <div><span>实际开单</span><strong>${escapeHtml(sample.run_time)}</strong></div>
+            <div><span>到 ${escapeHtml(windowEndLabel)} 收益</span><strong class="${cls(sample.final_ret_pct)}">${pct(sample.final_ret_pct)}</strong></div>
+            <div><span>最低点</span><strong>${escapeHtml(sample.min_time)}</strong></div>
             <div><span>最低回撤</span><strong class="${cls(sample.min_drawdown_pct)}">${pct(sample.min_drawdown_pct)}</strong></div>
             <div><span>样本编号</span><strong>#${idx + 1}</strong></div>
           </div>
@@ -779,7 +793,14 @@ HTML_TEMPLATE = """<!doctype html>
       };
 
       paths.forEach((path) => {
-        path.addEventListener("click", () => setActive(Number(path.dataset.sampleIndex)));
+        const handler = () => setActive(Number(path.dataset.sampleIndex));
+        path.addEventListener("click", handler);
+        path.addEventListener("keydown", (e) => {
+          if (e.key === "Enter" || e.key === " ") {
+            e.preventDefault();
+            handler();
+          }
+        });
       });
       setActive(0);
     };
@@ -802,7 +823,7 @@ HTML_TEMPLATE = """<!doctype html>
 
     document.getElementById("account-path-grid").innerHTML = data.account_path_curves.map((item) => `
       <article class="chart-shell small-chart">
-        <h3>${item.account_id}</h3>
+        <h3>${escapeHtml(item.account_id)}</h3>
         ${renderPathChartInline(item.points)}
       </article>
     `).join("");
@@ -819,7 +840,7 @@ HTML_TEMPLATE = """<!doctype html>
       .slice(0, 12)
       .map((item) => `
         <div class="time-bar-row">
-          <div>${item.time}</div>
+          <div>${escapeHtml(item.time)}</div>
           <div class="time-bar-track"><div class="time-bar-fill" style="width:${item.count / maxMinCount * 100}%"></div></div>
           <div>${item.count}</div>
         </div>
@@ -832,7 +853,7 @@ HTML_TEMPLATE = """<!doctype html>
       const fill = item.avg_ret_pct >= 0 ? `linear-gradient(90deg, #d6a94f, #0f8b6d)` : `linear-gradient(90deg, #d28b6d, #d04f3e)`;
       return `
         <div class="bar-row">
-          <div class="bar-label ${item.time === candidateBest ? "candidate-best" : ""}">${item.time}</div>
+          <div class="bar-label ${item.time === candidateBest ? "candidate-best" : ""}">${escapeHtml(item.time)}</div>
           <div class="bar-track"><div class="bar-fill" style="width:${width}%; background:${fill};"></div></div>
           <div class="bar-stat ${cls(item.avg_ret_pct)}">${pct(item.avg_ret_pct)}</div>
           <div class="bar-stat">${item.down_ratio_pct.toFixed(2)}% down</div>
@@ -844,7 +865,7 @@ HTML_TEMPLATE = """<!doctype html>
       const downRatioAccount = item.down_count / item.sample_count * 100;
       return `
         <article class="account-card">
-          <h3>${item.account_id}</h3>
+          <h3>${escapeHtml(item.account_id)}</h3>
           <div class="account-line"><span>样本</span><strong>${item.sample_count}</strong></div>
           <div class="account-line"><span>上涨 / 下跌</span><strong>${item.up_count} / ${item.down_count}</strong></div>
           <div class="account-line"><span>下跌占比</span><strong>${downRatioAccount.toFixed(2)}%</strong></div>
@@ -856,7 +877,7 @@ HTML_TEMPLATE = """<!doctype html>
 
     document.getElementById("heatmap").innerHTML = data.actual_run_samples.map((item) => {
       const tip = `${item.date} ${item.account_id}\\n实际下单 ${item.run_time}\\n起始 ${item.start_balance}\\n${windowEndLabel} ${item.end_balance_window}\\n变化 ${num(item.delta)}\\n收益率 ${pct(item.ret_pct)}`;
-      return `<div class="dot ${item.direction}" data-tip="${tip}"></div>`;
+      return `<div class="dot ${escapeHtml(item.direction)}" data-tip="${escapeHtml(tip)}" role="img" aria-label="${escapeHtml(tip)}" tabindex="0"></div>`;
     }).join("");
 
     const groupedRows = data.actual_run_samples.reduce((acc, item) => {
@@ -864,51 +885,48 @@ HTML_TEMPLATE = """<!doctype html>
       acc[item.account_id].push(item);
       return acc;
     }, {});
-    document.getElementById("detail-table").parentElement.parentElement.outerHTML = `
-      <div class="tables-grid">
-        ${Object.entries(groupedRows)
-          .sort((a, b) => a[0].localeCompare(b[0]))
-          .map(([accountId, rows]) => {
-            const sortedRows = rows.slice().sort((a, b) => a.run_ts < b.run_ts ? 1 : -1);
-            return `
-              <section class="table-group">
-                <div class="table-group-head">
-                  <h3>${accountId}</h3>
-                  <span>${rows.length} 个样本</span>
-                </div>
-                <div class="table-shell">
-                  <table>
-                    <thead>
-                      <tr>
-                        <th>日期</th>
-                        <th>账户</th>
-                        <th>实际下单</th>
-                        <th>起始余额</th>
-                        <th>${windowEndLabel} 余额</th>
-                        <th>变化</th>
-                        <th>收益率</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      ${sortedRows.map((item) => `
-                        <tr>
-                          <td>${item.date}</td>
-                          <td>${item.account_id}</td>
-                          <td>${item.run_time}</td>
-                          <td>${item.start_balance.toFixed(4)}</td>
-                          <td>${item.end_balance_window.toFixed(4)}</td>
-                          <td class="${cls(item.delta)}">${num(item.delta)}</td>
-                          <td class="${cls(item.ret_pct)}">${pct(item.ret_pct)}<br><span style="color:#6f645d;font-size:12px">最低点 ${item.min_time} / ${pct(item.min_drawdown_pct)}</span></td>
-                        </tr>
-                      `).join("")}
-                    </tbody>
-                  </table>
-                </div>
-              </section>
-            `;
-          }).join("")}
-      </div>
-    `;
+    document.getElementById("detail-tables-container").innerHTML = Object.entries(groupedRows)
+      .sort((a, b) => a[0].localeCompare(b[0]))
+      .map(([accountId, rows]) => {
+        const sortedRows = rows.slice().sort((a, b) => a.run_ts < b.run_ts ? 1 : -1);
+        return `
+          <section class="table-group">
+            <div class="table-group-head">
+              <h3>${escapeHtml(accountId)}</h3>
+              <span>${rows.length} 个样本</span>
+            </div>
+            <div class="table-shell">
+              <table>
+                <caption class="sr-only">${escapeHtml(accountId)} 样本明细</caption>
+                <thead>
+                  <tr>
+                    <th scope="col">日期</th>
+                    <th scope="col">账户</th>
+                    <th scope="col">实际下单</th>
+                    <th scope="col">起始余额</th>
+                    <th scope="col">${escapeHtml(windowEndLabel)} 余额</th>
+                    <th scope="col">变化</th>
+                    <th scope="col">收益率</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  ${sortedRows.map((item) => `
+                    <tr>
+                      <td>${escapeHtml(item.date)}</td>
+                      <td>${escapeHtml(item.account_id)}</td>
+                      <td>${escapeHtml(item.run_time)}</td>
+                      <td>${item.start_balance.toFixed(4)}</td>
+                      <td>${item.end_balance_window.toFixed(4)}</td>
+                      <td class="${cls(item.delta)}">${num(item.delta)}</td>
+                      <td class="${cls(item.ret_pct)}">${pct(item.ret_pct)}<br><span style="color:#6f645d;font-size:12px">最低点 ${escapeHtml(item.min_time)} / ${pct(item.min_drawdown_pct)}</span></td>
+                    </tr>
+                  `).join("")}
+                </tbody>
+              </table>
+            </div>
+          </section>
+        `;
+      }).join("");
   </script>
 </body>
 </html>
@@ -1211,7 +1229,7 @@ def main():
 
     report = build_report(wallet, runs)
     DEFAULT_OUT.parent.mkdir(parents=True, exist_ok=True)
-    html = HTML_TEMPLATE.replace("__DATA__", json.dumps(report, ensure_ascii=False))
+    html = HTML_TEMPLATE.replace("__DATA_JSON__", json.dumps(report, ensure_ascii=False))
     DEFAULT_OUT.write_text(html, encoding="utf-8")
     print(DEFAULT_OUT)
 

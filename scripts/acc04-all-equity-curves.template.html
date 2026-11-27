@@ -198,11 +198,12 @@
 }
 </style>
 
-<script src="https://cdn.jsdelivr.net/npm/d3@7.9.0/dist/d3.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/d3@7.9.0/dist/d3.min.js" integrity="sha384-CjloA8y00+1SDAUkjs099PVfnY2KmDC2BZnws9kh8D/lX1s46w6EPhpXdqMfjK6i" crossorigin="anonymous"></script>
+<script id="acc04-all-data" type="application/json">__DATA_JSON__</script>
 <script>
 (() => {
   const root = document.getElementById("acc04-all-equity-curves");
-  const DATA = __DATA_JSON__;
+  const DATA = JSON.parse(document.getElementById("acc04-all-data").textContent);
   const series = [
     { key: "actual", label: "原版", colorClass: "1" },
     { key: "second", label: "第二次阴线（严格持仓）", colorClass: "2" },
@@ -271,12 +272,21 @@
     return a.y + (b.y - a.y) * ratio;
   }
 
+  function escapeHtml(value) {
+    return String(value == null ? "" : value)
+      .replace(/&/g, "&amp;")
+      .replace(/</g, "&lt;")
+      .replace(/>/g, "&gt;")
+      .replace(/"/g, "&quot;")
+      .replace(/'/g, "&#39;");
+  }
+
   function updateTooltip(xValue, pointerX, pointerY, pinned) {
     const rows = series.filter(item => visible.has(item.key)).map(item => {
       const value = interpolate(pointsBySeries[item.key], xValue);
-      return "<div class=\"acc04-all-tooltip-row\" data-series-row=\"" + item.key + "\">"
+      return "<div class=\"acc04-all-tooltip-row\" data-series-row=\"" + escapeHtml(item.key) + "\">"
         + "<span class=\"acc04-all-tooltip-key\"><span class=\"acc04-all-tooltip-dot acc04-all-tooltip-dot-" + item.colorClass + "\"></span>"
-        + item.label + "</span><span class=\"tabular-nums\">" + formatEquity(value) + " USDT</span></div>";
+        + escapeHtml(item.label) + "</span><span class=\"tabular-nums\">" + formatEquity(value) + " USDT</span></div>";
     }).join("");
     tooltip.innerHTML = "<div class=\"acc04-all-tooltip-title\">" + formatLocal(xValue) + "</div>" + rows;
     tooltip.hidden = false;
