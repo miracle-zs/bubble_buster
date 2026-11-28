@@ -117,31 +117,34 @@
     }
 
     function latestUnderlyingTimestamp(rows) {
-      var candidates = [];
+      var snapshotCandidates = [];
+      var fallbackCandidates = [];
       for (var i = 0; i < (rows || []).length; i += 1) {
         var r = rows[i] || {};
         var aid = String(r.account_id || "");
         var cached = curveCache[aid];
         if (cached && cached.walletAsOfUtc) {
-          candidates.push(ops.parseTimestampMs(cached.walletAsOfUtc));
+          snapshotCandidates.push(ops.parseTimestampMs(cached.walletAsOfUtc));
         } else if (cached && cached.points && cached.points.length) {
           var lastPt = cached.points[cached.points.length - 1];
           if (lastPt && lastPt.t && !lastPt.carried_forward) {
-            candidates.push(ops.parseTimestampMs(lastPt.t));
+            snapshotCandidates.push(ops.parseTimestampMs(lastPt.t));
           }
         }
         if (r.portfolio_loss_cut && r.portfolio_loss_cut.updated_at_utc) {
-          candidates.push(ops.parseTimestampMs(r.portfolio_loss_cut.updated_at_utc));
+          snapshotCandidates.push(ops.parseTimestampMs(r.portfolio_loss_cut.updated_at_utc));
         }
         if (r.live_position_as_of_utc) {
-          candidates.push(ops.parseTimestampMs(r.live_position_as_of_utc));
+          fallbackCandidates.push(ops.parseTimestampMs(r.live_position_as_of_utc));
         }
         if (r.trade_stats && r.trade_stats.last_updated_utc) {
-          candidates.push(ops.parseTimestampMs(r.trade_stats.last_updated_utc));
+          fallbackCandidates.push(ops.parseTimestampMs(r.trade_stats.last_updated_utc));
         }
       }
-      var valid = candidates.filter(Number.isFinite);
-      if (valid.length) return Math.max.apply(null, valid);
+      var validSnapshots = snapshotCandidates.filter(Number.isFinite);
+      if (validSnapshots.length) return Math.max.apply(null, validSnapshots);
+      var validFallback = fallbackCandidates.filter(Number.isFinite);
+      if (validFallback.length) return Math.max.apply(null, validFallback);
       if (summaryGeneratedAtUtc) {
         var genMs = ops.parseTimestampMs(summaryGeneratedAtUtc);
         if (Number.isFinite(genMs)) return genMs;
@@ -165,10 +168,6 @@
 
       var alerts = [];
       var severity = "warn";
-      if (stoppedCount > 0) {
-        severity = "bad";
-        alerts.push("组合止损已触发 " + stoppedCount + "/" + managedRows.length + " 个托管账户");
-      }
       if (anomalies > 0) {
         severity = "bad";
         alerts.push("存在 " + anomalies + " 项任务执行异常");
@@ -179,6 +178,11 @@
       }
       if (isStale) {
         alerts.push(freshness.detailText);
+      }
+      // Only surface portfolio stop in the banner when combined with other fleet conditions or when command bar lacks it
+      if (stoppedCount > 0 && (!portfolioStopEnabled || alerts.length > 0)) {
+        severity = "bad";
+        alerts.unshift("组合止损已触发 " + stoppedCount + "/" + managedRows.length + " 个托管账户");
       }
 
       if (!alerts.length) {
@@ -903,6 +907,7 @@
       var html = managedHtml ? '<div class="managed-grid">' + managedHtml + "</div>" : "";
       html += readonlyHtml;
       cards.setAttribute("data-card-sig", nextSig);
+      cards.removeAttribute("aria-busy");
       var fallbackHtml = (!summaryHydratedOnce && overviewErrors.summary)
         ? '<div class="task-empty is-error"><strong>账户概览加载失败</strong><span>请点击上方“立即重试”重新同步</span></div>'
         : '<div class="task-empty"><strong>暂无账户数据</strong><span>等待账户快照写入</span></div>';

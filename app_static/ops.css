@@ -309,7 +309,7 @@ summary {
 .ops-scroll-fade {
   position: relative;
   --scroll-fade-bg: var(--surface);
-  --scroll-fade-width: 28px;
+  --scroll-fade-width: 32px;
 }
 
 .ops-nav {
@@ -477,6 +477,23 @@ summary {
 .ops-btn:disabled {
   opacity: 0.65;
   cursor: progress;
+}
+
+.ops-btn[aria-busy="true"] {
+  min-width: 78px;
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  @keyframes ops-spin {
+    to { transform: rotate(360deg); }
+  }
+  @keyframes ops-shimmer {
+    0% { background-position: 200% 0; }
+    100% { background-position: -200% 0; }
+  }
+  .ops-btn[aria-busy="true"] .ops-icon {
+    animation: ops-spin 900ms linear infinite;
+  }
 }
 
 .ops-btn.active {
@@ -705,14 +722,14 @@ summary {
     inset-inline-start: 0;
     z-index: 4;
     background: var(--surface-subtle);
-    border-right: 1px solid var(--border-subtle);
+    border-right: 1px solid var(--border-strong);
   }
   :is(.detail-table, .comparison-table):not(.is-empty) tbody th[scope="row"] {
     position: sticky;
     inset-inline-start: 0;
     z-index: 2;
     background: var(--surface-inset);
-    border-right: 1px solid var(--border-subtle);
+    border-right: 1px solid var(--border-strong);
   }
   :is(.detail-table, .comparison-table):not(.is-empty) tbody tr:nth-child(odd) th[scope="row"] {
     background: var(--surface);
@@ -1113,7 +1130,7 @@ summary {
 
 @media (max-width: 760px) {
   :root {
-    --target-size: 40px;
+    --target-size: 44px;
   }
   .ops-shell {
     padding: 10px 10px 24px;
@@ -1129,12 +1146,20 @@ summary {
     font-size: var(--text-sm);
   }
   .ops-nav-link {
-    min-height: max(40px, var(--target-size));
+    min-height: max(44px, var(--target-size));
     padding: 6px 8px;
   }
   .ops-btn,
   .ops-seg-btn {
-    min-height: max(40px, var(--target-size));
+    min-height: max(44px, var(--target-size));
+  }
+  .ops-term {
+    min-height: var(--target-size);
+    padding: 4px 2px;
+  }
+  .ops-term.entry-progress-strategy-badge {
+    min-height: var(--target-size);
+    padding: 6px 12px;
   }
 }
 
@@ -1145,6 +1170,10 @@ summary {
   .ops-term {
     min-height: var(--target-size);
     padding: 4px 2px;
+  }
+  .ops-term.entry-progress-strategy-badge {
+    min-height: var(--target-size);
+    padding: 6px 12px;
   }
 }
 

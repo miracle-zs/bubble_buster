@@ -199,7 +199,7 @@
           symbol: ["none", "none"],
           lineStyle: { color: theme.borderStrong, type: "dashed", width: 1 },
           label: {
-            position: "insideEndTop",
+            position: "insideStartTop",
             distance: [6, 6],
             color: theme.textSecondary,
             backgroundColor: theme.surfaceTooltip,
@@ -209,7 +209,7 @@
             padding: [3, 7],
             fontSize: 12,
             fontFamily: theme.fontMono,
-            formatter: range === "all" ? "0% 基准 · 上线后首快照" : "0% 区间基准"
+            formatter: range === "all" ? "0% 基准" : "0% 区间基准"
           },
           data: mode === "relative" ? [{ yAxis: 0 }] : []
         } : undefined
@@ -246,12 +246,14 @@
       }
     });
 
+    chrome.xAxis.axisLabel.padding = [0, 4, 0, 0];
+
     return {
       animation: shouldAnimate,
       animationDuration: shouldAnimate ? 280 : 0,
       animationEasing: "cubicOut",
       backgroundColor: "transparent",
-      grid: { top: 32, right: 24, bottom: showSlider ? 78 : 48, left: 16, containLabel: true },
+      grid: { top: 28, right: 36, bottom: showSlider ? 74 : 44, left: 16, containLabel: true },
       dataZoom: chrome.dataZoom,
       tooltip: chrome.tooltip,
       xAxis: chrome.xAxis,

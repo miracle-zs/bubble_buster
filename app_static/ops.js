@@ -814,6 +814,7 @@
   function setButtonBusy(btn, busy, idleText, busyText) {
     if (!btn) return;
     btn.disabled = !!busy;
+    btn.setAttribute("aria-busy", busy ? "true" : "false");
     var text = busy ? (busyText || "刷新中...") : (idleText || "刷新");
     var label = btn.querySelector(".btn-label");
     if (label) label.textContent = text;
@@ -902,6 +903,7 @@
     var yAxis = {
       type: "value",
       scale: opts.yScale !== undefined ? !!opts.yScale : true,
+      splitNumber: opts.ySplitNumber != null ? opts.ySplitNumber : 4,
       axisLine: { show: false },
       axisTick: { show: false },
       axisLabel: {
@@ -1339,7 +1341,7 @@
     var activeLink = listEl.querySelector('[aria-current="page"]');
     if (activeLink && activeLink.scrollIntoView) {
       try {
-        activeLink.scrollIntoView({ block: "nearest", inline: "nearest" });
+        activeLink.scrollIntoView({ block: "nearest", inline: "center" });
       } catch (e) {}
     }
     updateNavOverflowFade();

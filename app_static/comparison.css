@@ -60,9 +60,15 @@
 }
 
 .summary-card.is-skeleton {
-  min-height: 162px;
+  min-height: 152px;
   background: linear-gradient(90deg, var(--surface) 25%, var(--surface-elevated) 50%, var(--surface) 75%);
   background-size: 200% 100%;
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .summary-card.is-skeleton {
+    animation: ops-shimmer 1.4s ease-in-out infinite;
+  }
 }
 
 .summary-card:hover {
@@ -204,7 +210,7 @@
 
 .chart-panel {
   position: relative;
-  min-height: 540px;
+  min-height: 484px;
   padding: 14px 16px 14px;
   border: 1px solid var(--border);
   border-radius: var(--radius);
@@ -247,7 +253,7 @@
 
 #equity-chart {
   width: 100%;
-  height: 452px;
+  height: 396px;
   border-radius: var(--radius-sm);
   background: var(--surface-inset);
 }
@@ -256,7 +262,7 @@
   display: none;
   flex-direction: column;
   gap: 10px;
-  height: 452px;
+  height: 396px;
   padding: 16px;
   text-align: center;
 }
@@ -555,11 +561,12 @@
     gap: 8px;
   }
   .summary-card {
-    padding: 10px 11px;
+    padding: 9px 10px;
   }
   .summary-strategy {
     min-height: 0;
-    margin-bottom: 8px;
+    margin-top: 6px;
+    margin-bottom: 6px;
   }
   .summary-strategy-tag {
     white-space: normal;
@@ -568,12 +575,16 @@
   .summary-change {
     font-size: var(--text-lg);
   }
+  .summary-equity {
+    font-size: var(--text-xs);
+  }
   .summary-range {
     flex-direction: column;
     gap: 2px;
+    padding-top: 7px;
   }
   .chart-panel {
-    min-height: 490px;
+    min-height: 440px;
     padding: 12px 10px 10px;
   }
   .chart-head {
@@ -588,7 +599,7 @@
   }
   #equity-chart,
   .chart-empty {
-    height: 380px;
+    height: 340px;
   }
   .footnote {
     display: block;
@@ -598,7 +609,7 @@
   }
 }
 
-@media (max-width: 480px) {
+@media (max-width: 340px) {
   .summary-grid {
     grid-template-columns: 1fr;
   }

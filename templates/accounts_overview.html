@@ -72,7 +72,14 @@ __OPS_TOPBAR__
 
     <section class="accounts-section" aria-labelledby="accounts-overview-heading">
       <h2 id="accounts-overview-heading" class="sr-only">账户概览</h2>
-      <div id="cards" class="accounts-area"><div class="task-empty"><strong>正在加载账户概览...</strong><span>正在读取最新账户快照</span></div></div>
+      <div id="cards" class="accounts-area" aria-busy="true">
+        <div class="managed-grid" aria-label="正在加载账户概览">
+          <div class="account-card is-skeleton" aria-hidden="true"></div>
+          <div class="account-card is-skeleton" aria-hidden="true"></div>
+          <div class="account-card is-skeleton" aria-hidden="true"></div>
+          <div class="account-card is-skeleton" aria-hidden="true"></div>
+        </div>
+      </div>
     </section>
 
     <section class="entry-progress-panel" aria-labelledby="entry-progress-heading">

@@ -543,7 +543,26 @@
 
       if (el.chartEmpty) el.chartEmpty.hidden = true;
       if (el.chartSparseHint) {
-        el.chartSparseHint.hidden = !(seriesData.length <= 1);
+        var isSparse = seriesData.length <= 1;
+        el.chartSparseHint.hidden = !isSparse;
+        if (isSparse) {
+          var sparseButtons = el.chartSparseHint.querySelectorAll("[data-sparse-window]");
+          var availableCount = 0;
+          for (var sbIdx = 0; sbIdx < sparseButtons.length; sbIdx += 1) {
+            var targetWin = Number(sparseButtons[sbIdx].getAttribute("data-sparse-window"));
+            var showBtn = Number.isFinite(targetWin) && targetWin > currentWindowHours;
+            sparseButtons[sbIdx].hidden = !showBtn;
+            if (showBtn) availableCount += 1;
+          }
+          var sparseActions = el.chartSparseHint.querySelector(".chart-sparse-actions");
+          if (sparseActions) sparseActions.hidden = availableCount === 0;
+          var sparseMsg = el.chartSparseHint.querySelector("span");
+          if (sparseMsg) {
+            sparseMsg.textContent = availableCount > 0
+              ? "当前窗口仅 1 个快照点，切换更长周期查看走势"
+              : "当前仅 1 个历史快照点，暂无更早轨迹";
+          }
+        }
       }
 
       var theme = ops.getChartTheme();
@@ -583,7 +602,8 @@
           yAxis: stopEq,
           lineStyle: { color: theme.bad, type: "dashed", width: 1.4 },
           label: {
-            position: "insideStartBottom",
+            position: "insideStartTop",
+            distance: [0, 5],
             color: theme.badText,
             backgroundColor: theme.surface,
             borderColor: theme.bad,
@@ -660,10 +680,12 @@
         }
         setText(el.readonlyStatsSubtitle, "暂无近 30 日成交统计（或未配置只读成交拉取）");
         if (el.readonlyStatsFacts) {
-          ops.patchHtmlIfChanged(el.readonlyStatsFacts, '<div class="risk-fact"><span class="risk-fact-label">胜率</span><strong class="risk-fact-value">--</strong></div><div class="risk-fact"><span class="risk-fact-label">盈亏比</span><strong class="risk-fact-value">--</strong></div>');
+          el.readonlyStatsFacts.hidden = true;
+          ops.patchHtmlIfChanged(el.readonlyStatsFacts, "");
         }
         return;
       }
+      if (el.readonlyStatsFacts) el.readonlyStatsFacts.hidden = false;
       var netPnl = ops.toNum(stats.net_realized_pnl != null ? stats.net_realized_pnl : stats.total_realized_pnl);
       var pnlCls = netPnl === null ? "" : (netPnl >= 0 ? "ok" : "bad");
       if (el.readonlyNetPnl) {
