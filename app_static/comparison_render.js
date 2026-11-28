@@ -21,12 +21,8 @@
 
   var NAMED_ACCOUNT_SLOTS = { acc01: 0, acc02: 1, acc03: 2, acc04: 3 };
 
-  var collator = typeof Intl !== "undefined" && Intl.Collator
-    ? new Intl.Collator(undefined, { numeric: true, sensitivity: "base" })
-    : null;
-
   function compareText(a, b) {
-    return collator ? collator.compare(a, b) : String(a).localeCompare(String(b));
+    return ops.compareText(a, b);
   }
 
   function accountSlot(accountId, index) {
@@ -133,17 +129,12 @@
       };
     });
     var state = sortState || { key: "change_pct", dir: "desc" };
-    var dirMult = state.dir === "asc" ? 1 : -1;
+    var isDesc = state.dir !== "asc";
     enriched.sort(function (a, b) {
       var k = state.key;
-      if (k === "account_id") return compareText(a.account_id, b.account_id) * dirMult;
-      var va = a[k];
-      var vb = b[k];
-      if (va === null && vb === null) return compareText(a.account_id, b.account_id);
-      if (va === null) return 1;
-      if (vb === null) return -1;
-      if (va === vb) return compareText(a.account_id, b.account_id);
-      return (va - vb) * dirMult;
+      if (k === "account_id") return compareText(a.account_id, b.account_id) * (isDesc ? -1 : 1);
+      var cmp = ops.compareNullableNumbers(a[k], b[k], isDesc);
+      return cmp !== 0 ? cmp : compareText(a.account_id, b.account_id);
     });
     return enriched;
   }
@@ -227,8 +218,33 @@
 
     var reduceMotion = ops.prefersReducedMotion();
     var shouldAnimate = !!options.animate && !reduceMotion;
-    var zoomStart = options.zoomStart != null ? options.zoomStart : 0;
-    var zoomEnd = options.zoomEnd != null ? options.zoomEnd : 100;
+    var chrome = ops.buildEchartsChrome(theme, {
+      showSlider: showSlider,
+      zoomStart: options.zoomStart,
+      zoomEnd: options.zoomEnd,
+      sliderBottom: 10,
+      zoomDataBackground: true,
+      xSplitLine: true,
+      yScale: mode === "absolute",
+      formatXAxis: function (value) { return formatLocalTime(value, false); },
+      formatYAxis: function (value) {
+        return mode === "relative" ? (value >= 0 ? "+" : "") + Number(value).toFixed(1) + "%" : ops.fmtUsdt(value, 0);
+      },
+      tooltipFormatter: function (items) {
+        if (!items || !items.length) return "";
+        var html = '<div style="margin-bottom:6px;color:' + theme.muted + '">' + ops.escapeHtml(formatLocalTime(items[0].axisValue, true)) + "</div>";
+        items.forEach(function (item) {
+          var val = Array.isArray(item.value) ? item.value[1] : item.value;
+          var equity = Array.isArray(item.value) ? item.value[2] : null;
+          var suffix = mode === "relative" && equity != null ? " · " + ops.fmtUsdt(equity, 2) + " USDT" : "";
+          html += '<div style="line-height:1.6"><span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:' + ops.escapeHtml(item.color) + ';margin-right:6px"></span>'
+            + ops.escapeHtml(item.seriesName) + " <strong>"
+            + (mode === "relative" ? ops.fmtPct(val) : ops.fmtUsdt(val, 2) + " USDT")
+            + "</strong>" + suffix + "</div>";
+        });
+        return html;
+      }
+    });
 
     return {
       animation: shouldAnimate,
@@ -236,77 +252,10 @@
       animationEasing: "cubicOut",
       backgroundColor: "transparent",
       grid: { top: 32, right: 24, bottom: showSlider ? 78 : 48, left: 16, containLabel: true },
-      dataZoom: showSlider ? [{
-        type: "slider",
-        xAxisIndex: 0,
-        start: zoomStart,
-        end: zoomEnd,
-        height: 22,
-        bottom: 10,
-        borderColor: theme.border,
-        backgroundColor: theme.surfaceInset,
-        fillerColor: theme.zoomFill,
-        handleStyle: { color: theme.accent, borderColor: theme.accent },
-        dataBackground: {
-          lineStyle: { color: theme.borderStrong, width: 1 },
-          areaStyle: { color: theme.zoomArea }
-        },
-        textStyle: { color: theme.muted, fontSize: 12 }
-      }] : [],
-      tooltip: {
-        trigger: "axis",
-        axisPointer: { type: "line", lineStyle: { color: theme.borderStrong } },
-        backgroundColor: theme.surfaceTooltip,
-        borderColor: theme.borderStrong,
-        borderWidth: 1,
-        extraCssText: "box-shadow: " + theme.shadowOverlay + "; font-variant-numeric: tabular-nums;",
-        textStyle: { color: theme.text, fontSize: 12, fontFamily: theme.fontMono },
-        formatter: function (items) {
-          if (!items || !items.length) return "";
-          var html = '<div style="margin-bottom:6px;color:' + theme.muted + '">' + ops.escapeHtml(formatLocalTime(items[0].axisValue, true)) + "</div>";
-          items.forEach(function (item) {
-            var val = Array.isArray(item.value) ? item.value[1] : item.value;
-            var equity = Array.isArray(item.value) ? item.value[2] : null;
-            var suffix = mode === "relative" && equity != null ? " · " + ops.fmtUsdt(equity, 2) + " USDT" : "";
-            html += '<div style="line-height:1.6"><span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:' + ops.escapeHtml(item.color) + ';margin-right:6px"></span>'
-              + ops.escapeHtml(item.seriesName) + " <strong>"
-              + (mode === "relative" ? ops.fmtPct(val) : ops.fmtUsdt(val, 2) + " USDT")
-              + "</strong>" + suffix + "</div>";
-          });
-          return html;
-        }
-      },
-      xAxis: {
-        type: "time",
-        boundaryGap: false,
-        axisLine: { lineStyle: { color: theme.border } },
-        axisTick: { show: false },
-        axisLabel: {
-          color: theme.muted,
-          fontSize: 12,
-          fontFamily: theme.fontMono,
-          hideOverlap: true,
-          alignMinLabel: "left",
-          alignMaxLabel: "right",
-          formatter: function (value) { return formatLocalTime(value, false); }
-        },
-        splitLine: { show: true, lineStyle: { color: theme.splitLineSubtle, type: "dashed" } }
-      },
-      yAxis: {
-        type: "value",
-        scale: mode === "absolute",
-        axisLine: { show: false },
-        axisTick: { show: false },
-        axisLabel: {
-          color: theme.muted,
-          fontSize: 12,
-          fontFamily: theme.fontMono,
-          formatter: function (value) {
-            return mode === "relative" ? (value >= 0 ? "+" : "") + Number(value).toFixed(1) + "%" : ops.fmtUsdt(value, 0);
-          }
-        },
-        splitLine: { lineStyle: { color: theme.splitLine, type: "dashed" } }
-      },
+      dataZoom: chrome.dataZoom,
+      tooltip: chrome.tooltip,
+      xAxis: chrome.xAxis,
+      yAxis: chrome.yAxis,
       series: chartSeries
     };
   }

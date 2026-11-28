@@ -999,35 +999,8 @@
 .entry-progress-timeline-title > span:last-child { color: var(--muted); font-size: var(--text-xs); }
 
 .entry-progress-timeline-wrap {
-  position: relative;
-}
-
-.entry-progress-timeline-wrap::before,
-.entry-progress-timeline-wrap::after {
-  content: "";
-  position: absolute;
-  top: 0;
-  bottom: 0;
-  width: 24px;
-  pointer-events: none;
-  opacity: 0;
-  z-index: 2;
-  transition: opacity 150ms ease;
-}
-
-.entry-progress-timeline-wrap::before {
-  left: 0;
-  background: linear-gradient(to left, color-mix(in srgb, var(--surface) 0%, transparent), var(--surface));
-}
-
-.entry-progress-timeline-wrap::after {
-  right: 0;
-  background: linear-gradient(to right, color-mix(in srgb, var(--surface) 0%, transparent), var(--surface));
-}
-
-.entry-progress-timeline-wrap.has-overflow-left::before,
-.entry-progress-timeline-wrap.has-overflow-right::after {
-  opacity: 1;
+  --scroll-fade-bg: var(--surface);
+  --scroll-fade-width: 24px;
 }
 
 .entry-progress-timeline-track {
@@ -1292,7 +1265,18 @@
   container-type: inline-size;
 }
 
-.task-account-card { padding: 14px 16px; background: var(--surface); }
+.task-account-card {
+  padding: 14px 16px;
+  background: var(--surface);
+  content-visibility: auto;
+  contain-intrinsic-size: auto 240px;
+}
+
+@supports not (content-visibility: auto) {
+  .task-account-card {
+    contain: layout style paint;
+  }
+}
 .task-account-card + .task-account-card { border-top: 1px solid var(--border); }
 .task-account-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-bottom: 10px; }
 .task-account-title { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; }

@@ -17,6 +17,21 @@
       .replace(/'/g, "&#39;");
   }
 
+  var collator = typeof Intl !== "undefined" && Intl.Collator
+    ? new Intl.Collator(undefined, { numeric: true, sensitivity: "base" })
+    : null;
+
+  function compareText(a, b) {
+    return collator ? collator.compare(a, b) : String(a).localeCompare(String(b));
+  }
+
+  function compareNullableNumbers(aVal, bVal, desc) {
+    if (aVal === null && bVal === null) return 0;
+    if (aVal === null) return 1;
+    if (bVal === null) return -1;
+    return desc ? (bVal - aVal) : (aVal - bVal);
+  }
+
   function toNum(value) {
     if (value === null || value === undefined || value === "") return null;
     var n = Number(value);
@@ -242,6 +257,59 @@
       html += '<span class="' + classifyStrategyPart(item, clsBase) + '" title="' + escapeHtml(display) + '">' + escapeHtml(display) + "</span>";
     }
     return html;
+  }
+
+  var STATUS_LABELS = {
+    SUCCESS: "成功",
+    RUNNING: "运行中",
+    FAILED: "失败",
+    PARTIAL: "部分完成",
+    SKIPPED: "已跳过",
+    READONLY: "只读",
+    UNKNOWN: "未知",
+    NEW: "挂单中",
+    FILLED: "已成交",
+    CANCELED: "已撤销",
+    CANCELLED: "已撤销",
+    EXPIRED: "已过期",
+    REJECTED: "已拒绝",
+    CLOSED_TP: "止盈平仓",
+    CLOSED_SL: "止损平仓",
+    CLOSED_TIMEOUT: "到期平仓",
+    CLOSED_EXTERNAL: "外部平仓"
+  };
+
+  function formatStatusLabel(status, fallback) {
+    var s = String(status || "").toUpperCase();
+    if (!s) return fallback !== undefined ? fallback : "未知";
+    return STATUS_LABELS[s] || s;
+  }
+
+  function statusTone(status) {
+    var s = String(status || "").toUpperCase();
+    if (s === "READONLY") return "readonly";
+    if (s.indexOf("SUCCESS") >= 0 || s.indexOf("CLOSED_TP") >= 0 || s.indexOf("RUNNING") >= 0) return "ok";
+    if (s.indexOf("PARTIAL") >= 0 || s.indexOf("SKIPPED") >= 0 || s === "UNKNOWN") return "warn";
+    if (s.indexOf("FAILED") >= 0 || s.indexOf("ERROR") >= 0 || s.indexOf("CLOSED_SL") >= 0) return "bad";
+    return "";
+  }
+
+  function pickLatestTimestamp(values) {
+    var best = "";
+    var bestMs = -Infinity;
+    var list = values || [];
+    for (var i = 0; i < list.length; i += 1) {
+      var val = list[i];
+      if (!val) continue;
+      var text = String(val);
+      var ms = parseTimestampMs(text);
+      if (Number.isFinite(ms)) {
+        if (ms > bestMs) { bestMs = ms; best = text; }
+      } else if (!best || text > best) {
+        best = text;
+      }
+    }
+    return best;
   }
 
   function parseTimestampMs(value) {
@@ -770,6 +838,17 @@
     };
   }
 
+  function syncPressedButtons(nodes, isActiveFn) {
+    if (!nodes) return;
+    for (var i = 0; i < nodes.length; i += 1) {
+      var btn = nodes[i];
+      if (!btn) continue;
+      var active = !!isActiveFn(btn, i);
+      btn.classList.toggle("active", active);
+      btn.setAttribute("aria-pressed", active ? "true" : "false");
+    }
+  }
+
   function createEchartsZoomHandler(onChange) {
     return function (evt) {
       var batch = evt && evt.batch && evt.batch[0] ? evt.batch[0] : evt;
@@ -780,11 +859,306 @@
     };
   }
 
-  function patchHtmlIfChanged(node, html) {
+  function buildEchartsChrome(theme, options) {
+    var t = theme || getChartTheme();
+    var opts = options || {};
+    var timeZone = opts.timeZone || SHANGHAI_TZ;
+    var formatXAxis = opts.formatXAxis || function (value) {
+      return formatBeijingTime(value, { timeZone: timeZone });
+    };
+    var formatYAxis = opts.formatYAxis || function (value) { return String(value); };
+
+    var tooltip = {
+      trigger: "axis",
+      axisPointer: { type: "line", lineStyle: { color: t.borderStrong } },
+      backgroundColor: t.surfaceTooltip,
+      borderColor: t.borderStrong,
+      borderWidth: 1,
+      extraCssText: "box-shadow: " + t.shadowOverlay + "; font-variant-numeric: tabular-nums;",
+      textStyle: { color: t.text, fontSize: 12, fontFamily: t.fontMono },
+      formatter: opts.tooltipFormatter
+    };
+
+    var xAxis = {
+      type: "time",
+      boundaryGap: false,
+      axisLine: { lineStyle: { color: t.border } },
+      axisTick: { show: false },
+      axisLabel: {
+        color: t.muted,
+        fontSize: 12,
+        fontFamily: t.fontMono,
+        hideOverlap: true,
+        alignMinLabel: "left",
+        alignMaxLabel: "right",
+        margin: opts.xLabelMargin != null ? opts.xLabelMargin : 8,
+        formatter: formatXAxis
+      }
+    };
+    if (opts.xSplitLine) {
+      xAxis.splitLine = { show: true, lineStyle: { color: t.splitLineSubtle, type: "dashed" } };
+    }
+
+    var yAxis = {
+      type: "value",
+      scale: opts.yScale !== undefined ? !!opts.yScale : true,
+      axisLine: { show: false },
+      axisTick: { show: false },
+      axisLabel: {
+        color: t.muted,
+        fontSize: 12,
+        fontFamily: t.fontMono,
+        formatter: formatYAxis
+      },
+      splitLine: { lineStyle: { color: t.splitLine, type: "dashed" } }
+    };
+
+    var dataZoom = opts.showSlider ? [{
+      type: "slider",
+      xAxisIndex: 0,
+      start: Number.isFinite(Number(opts.zoomStart)) ? Number(opts.zoomStart) : 0,
+      end: Number.isFinite(Number(opts.zoomEnd)) ? Number(opts.zoomEnd) : 100,
+      height: 22,
+      bottom: opts.sliderBottom != null ? opts.sliderBottom : 8,
+      borderColor: t.border,
+      backgroundColor: t.surfaceInset,
+      fillerColor: t.zoomFill,
+      handleStyle: { color: t.accent, borderColor: t.accent },
+      dataBackground: opts.zoomDataBackground ? {
+        lineStyle: { color: t.borderStrong, width: 1 },
+        areaStyle: { color: t.zoomArea }
+      } : undefined,
+      textStyle: { color: t.muted, fontSize: 12 }
+    }] : [];
+
+    return { tooltip: tooltip, xAxis: xAxis, yAxis: yAxis, dataZoom: dataZoom };
+  }
+
+  function captureOpenDetails(root, detailAttr) {
+    var openKeys = {};
+    if (!root || !detailAttr) return openKeys;
+    try {
+      var openEls = root.querySelectorAll("details[open][" + detailAttr + "]");
+      for (var i = 0; i < openEls.length; i += 1) {
+        var key = openEls[i].getAttribute(detailAttr);
+        if (key) openKeys[key] = true;
+      }
+    } catch (e) {}
+    return openKeys;
+  }
+
+  function restoreOpenDetails(root, detailAttr, openKeys) {
+    if (!root || !detailAttr || !openKeys) return;
+    var keys = Object.keys(openKeys);
+    if (!keys.length) return;
+    try {
+      var nextEls = root.querySelectorAll("details[" + detailAttr + "]");
+      for (var i = 0; i < nextEls.length; i += 1) {
+        var key = nextEls[i].getAttribute(detailAttr);
+        if (key && openKeys[key]) nextEls[i].setAttribute("open", "");
+      }
+    } catch (e) {}
+  }
+
+  function captureFocusToken(container) {
+    if (typeof document === "undefined" || !container || !container.contains) return null;
+    var active = document.activeElement;
+    if (!active || active === container || !container.contains(active)) return null;
+    if (active.id) return { attr: "id", value: active.id };
+    var attrs = ["data-account", "data-account-card", "data-detail-key", "data-task-detail-key", "data-row-key"];
+    for (var i = 0; i < attrs.length; i += 1) {
+      var attr = attrs[i];
+      var val = active.getAttribute ? active.getAttribute(attr) : "";
+      if (val) return { attr: attr, value: val };
+      var parent = active.closest ? active.closest("[" + attr + "]") : null;
+      if (parent && container.contains(parent)) {
+        var pVal = parent.getAttribute(attr);
+        if (pVal) {
+          var sub = active.tagName === "SUMMARY" ? "summary" : (active.classList && active.classList[0] ? "." + active.classList[0] : "");
+          return { attr: attr, value: pVal, sub: sub };
+        }
+      }
+    }
+    return null;
+  }
+
+  function restoreFocusToken(container, token) {
+    if (!container || !token || typeof document === "undefined") return;
+    if (container.contains(document.activeElement)) return;
+    var target = null;
+    if (token.attr === "id") {
+      target = document.getElementById(token.value);
+    } else if (container.querySelector) {
+      var list = container.querySelectorAll("[" + token.attr + "]");
+      for (var i = 0; i < list.length; i += 1) {
+        if (list[i].getAttribute(token.attr) === token.value) {
+          target = token.sub && list[i].querySelector ? (list[i].querySelector(token.sub) || list[i]) : list[i];
+          break;
+        }
+      }
+    }
+    if (target && target.focus) {
+      try { target.focus({ preventScroll: true }); } catch (e) { target.focus(); }
+    }
+  }
+
+  function patchHtmlIfChanged(node, html, options) {
     if (!node) return false;
     if (node.__bbLastHtml === html) return false;
+    var opts = options || {};
+    var detailAttr = opts.detailAttr || "";
+    var openKeys = detailAttr ? captureOpenDetails(node, detailAttr) : null;
+    var focusToken = opts.preserveFocus !== false ? captureFocusToken(node) : null;
     node.__bbLastHtml = html;
     node.innerHTML = html;
+    if (detailAttr && openKeys) restoreOpenDetails(node, detailAttr, openKeys);
+    if (focusToken) restoreFocusToken(node, focusToken);
+    return true;
+  }
+
+  function parseSingleElement(html, parentTag) {
+    if (typeof document === "undefined") return null;
+    var tpl = document.createElement("template");
+    if (tpl && tpl.content) {
+      tpl.innerHTML = html;
+      return tpl.content.firstElementChild;
+    }
+    var wrap = document.createElement(parentTag || "div");
+    wrap.innerHTML = html;
+    return wrap.firstElementChild;
+  }
+
+  function moveChildNode(container, node, refNode) {
+    if (typeof container.moveBefore === "function") {
+      try {
+        container.moveBefore(node, refNode || null);
+        return;
+      } catch (e) {}
+    }
+    container.insertBefore(node, refNode || null);
+  }
+
+  function reorderChildrenByKey(container, keyAttr, orderedKeys) {
+    if (!container || !keyAttr || !orderedKeys) return false;
+    var existing = {};
+    var children = container.children;
+    var keyedCount = 0;
+    for (var i = 0; i < children.length; i += 1) {
+      var k = children[i].getAttribute ? children[i].getAttribute(keyAttr) : "";
+      if (k) {
+        existing[k] = children[i];
+        keyedCount += 1;
+      }
+    }
+    if (keyedCount !== orderedKeys.length) return false;
+    var orderedNodes = [];
+    for (var j = 0; j < orderedKeys.length; j += 1) {
+      var node = existing[orderedKeys[j]];
+      if (!node) return false;
+      orderedNodes.push(node);
+    }
+    for (var m = 0; m < orderedNodes.length; m += 1) {
+      if (container.children[m] !== orderedNodes[m]) {
+        moveChildNode(container, orderedNodes[m], container.children[m] || null);
+      }
+    }
+    return true;
+  }
+
+  function reconcileKeyedHtml(container, items, options) {
+    if (!container) return false;
+    var opts = options || {};
+    var keyAttr = opts.keyAttr || "data-row-key";
+    var detailAttr = opts.detailAttr || "";
+    var list = items || [];
+
+    if (!list.length) {
+      delete container.__bbKeyedReady;
+      return patchHtmlIfChanged(container, opts.emptyHtml || "", opts);
+    }
+
+    var fullSig = "";
+    for (var s = 0; s < list.length; s += 1) {
+      fullSig += list[s].key + "\0" + list[s].html + "\n";
+    }
+    if (container.__bbLastHtml === fullSig && container.__bbKeyedReady) {
+      return false;
+    }
+
+    var existingByKey = {};
+    var existingCount = 0;
+    var children = container.children;
+    for (var i = 0; i < children.length; i += 1) {
+      var child = children[i];
+      var cKey = child.getAttribute ? child.getAttribute(keyAttr) : "";
+      if (cKey) {
+        existingByKey[cKey] = child;
+        existingCount += 1;
+      }
+    }
+
+    if (!container.__bbKeyedReady || existingCount === 0) {
+      var joined = "";
+      for (var j = 0; j < list.length; j += 1) joined += list[j].html;
+      patchHtmlIfChanged(container, joined, opts);
+      container.__bbLastHtml = fullSig;
+      container.__bbKeyedReady = true;
+      var newChildren = container.children;
+      for (var n = 0; n < list.length && n < newChildren.length; n += 1) {
+        newChildren[n].setAttribute(keyAttr, list[n].key);
+        newChildren[n].__bbRowHtml = list[n].html;
+      }
+      return true;
+    }
+
+    var focusToken = captureFocusToken(container);
+    var keepKeys = {};
+    var desiredNodes = [];
+    var parentTag = container.tagName || "div";
+
+    for (var idx = 0; idx < list.length; idx += 1) {
+      var item = list[idx];
+      keepKeys[item.key] = true;
+      var existing = existingByKey[item.key];
+      if (existing && existing.__bbRowHtml === item.html) {
+        desiredNodes.push(existing);
+      } else {
+        var nextNode = parseSingleElement(item.html, parentTag);
+        if (!nextNode) {
+          delete container.__bbKeyedReady;
+          return patchHtmlIfChanged(container, list.map(function (x) { return x.html; }).join(""), opts);
+        }
+        nextNode.setAttribute(keyAttr, item.key);
+        nextNode.__bbRowHtml = item.html;
+        if (existing) {
+          if (detailAttr) {
+            restoreOpenDetails(nextNode, detailAttr, captureOpenDetails(existing, detailAttr));
+          }
+          container.replaceChild(nextNode, existing);
+        }
+        desiredNodes.push(nextNode);
+      }
+    }
+
+    for (var r = container.children.length - 1; r >= 0; r -= 1) {
+      var rem = container.children[r];
+      var rKey = rem.getAttribute ? rem.getAttribute(keyAttr) : "";
+      if (!rKey || !keepKeys[rKey]) {
+        container.removeChild(rem);
+      }
+    }
+
+    for (var p = 0; p < desiredNodes.length; p += 1) {
+      var want = desiredNodes[p];
+      var currentAt = container.children[p] || null;
+      if (currentAt !== want) {
+        moveChildNode(container, want, currentAt);
+      }
+    }
+
+    container.__bbLastHtml = fullSig;
+    container.__bbKeyedReady = true;
+    if (focusToken) restoreFocusToken(container, focusToken);
     return true;
   }
 
@@ -1276,6 +1650,8 @@
   global.BBOps = {
     ARROW_ICON: ARROW_ICON,
     escapeHtml: escapeHtml,
+    compareText: compareText,
+    compareNullableNumbers: compareNullableNumbers,
     toNum: toNum,
     fmtNum: fmtNum,
     fmtSigned: fmtSigned,
@@ -1287,10 +1663,14 @@
     rafThrottle: rafThrottle,
     ensureEcharts: ensureEcharts,
     getChartTheme: getChartTheme,
+    buildEchartsChrome: buildEchartsChrome,
     createChartResizeObserver: createChartResizeObserver,
     splitStrategyParts: splitStrategyParts,
     formatStrategyTags: formatStrategyTags,
     formatStrategyHighlights: formatStrategyHighlights,
+    formatStatusLabel: formatStatusLabel,
+    statusTone: statusTone,
+    pickLatestTimestamp: pickLatestTimestamp,
     parseTimestampMs: parseTimestampMs,
     formatBeijingTime: formatBeijingTime,
     evaluateDataFreshness: evaluateDataFreshness,
@@ -1305,10 +1685,13 @@
     parseSummaryPairs: parseSummaryPairs,
     fetchJsonWithTimeout: fetchJsonWithTimeout,
     setButtonBusy: setButtonBusy,
+    syncPressedButtons: syncPressedButtons,
     createAlertController: createAlertController,
     createEchartsZoomHandler: createEchartsZoomHandler,
     bindScrollOverflowFade: bindScrollOverflowFade,
     patchHtmlIfChanged: patchHtmlIfChanged,
+    reorderChildrenByKey: reorderChildrenByKey,
+    reconcileKeyedHtml: reconcileKeyedHtml,
     readPageConfig: readPageConfig,
     resolveBasePrefix: resolveBasePrefix,
     readQueryParams: readQueryParams,

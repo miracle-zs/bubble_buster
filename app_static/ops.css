@@ -302,9 +302,14 @@ summary {
 }
 
 .ops-nav-wrap {
-  position: relative;
   flex: 1 1 auto;
   min-width: 0;
+}
+
+.ops-scroll-fade {
+  position: relative;
+  --scroll-fade-bg: var(--surface);
+  --scroll-fade-width: 28px;
 }
 
 .ops-nav {
@@ -323,34 +328,34 @@ summary {
   display: none;
 }
 
-.ops-nav-wrap::before,
-.ops-nav-wrap::after {
+.ops-scroll-fade::before,
+.ops-scroll-fade::after {
   content: "";
   position: absolute;
   top: 0;
   bottom: 0;
-  width: 28px;
+  width: var(--scroll-fade-width);
   pointer-events: none;
   opacity: 0;
   z-index: 2;
   transition: opacity 150ms ease;
 }
 
-.ops-nav-wrap::before {
+.ops-scroll-fade::before {
   left: 0;
-  background: linear-gradient(to left, color-mix(in srgb, var(--surface) 0%, transparent), var(--surface));
+  background: linear-gradient(to left, color-mix(in srgb, var(--scroll-fade-bg) 0%, transparent), var(--scroll-fade-bg));
 }
 
-.ops-nav-wrap::after {
+.ops-scroll-fade::after {
   right: 0;
-  background: linear-gradient(to right, color-mix(in srgb, var(--surface) 0%, transparent), var(--surface));
+  background: linear-gradient(to right, color-mix(in srgb, var(--scroll-fade-bg) 0%, transparent), var(--scroll-fade-bg));
 }
 
-.ops-nav-wrap.has-overflow-left::before {
+.ops-scroll-fade.has-overflow-left::before {
   opacity: 1;
 }
 
-.ops-nav-wrap.has-overflow-right::after {
+.ops-scroll-fade.has-overflow-right::after {
   opacity: 1;
 }
 
@@ -529,7 +534,6 @@ summary {
 }
 
 /* Unified Status Badge Primitive (single source of truth across all 3 pages) */
-.ops-badge,
 .status-badge,
 .order-state,
 .task-badge,
@@ -583,33 +587,32 @@ summary {
   font-weight: 600;
 }
 
-:is(.ops-badge, .status-badge, .order-state, .task-badge, .task-last-run, .entry-progress-account-status):is(.is-ok, .ok, .status-ok),
+:is(.status-badge, .order-state, .task-badge, .task-last-run, .entry-progress-account-status):is(.ok, .status-ok),
 .task-feature-badge {
   border-color: var(--ok-border);
   background: var(--ok-bg);
   color: var(--ok-text);
 }
 
-:is(.ops-badge, .status-badge, .order-state, .task-badge, .task-last-run, .entry-progress-account-status, .mode-badge, .task-mode-badge):is(.is-warn, .warn, .status-warn, .mode-loss-cut) {
+:is(.status-badge, .order-state, .task-badge, .task-last-run, .entry-progress-account-status, .mode-badge, .task-mode-badge):is(.is-warn, .warn, .status-warn, .mode-loss-cut) {
   border-color: var(--warn-border);
   background: var(--warn-bg);
   color: var(--warn-text);
 }
 
-:is(.ops-badge, .status-badge, .order-state, .task-badge, .task-last-run, .entry-progress-account-status):is(.is-bad, .bad, .status-bad) {
+:is(.status-badge, .order-state, .task-badge, .task-last-run, .entry-progress-account-status):is(.bad, .status-bad) {
   border-color: var(--bad-border);
   background: var(--bad-bg);
   color: var(--bad-text);
 }
 
-:is(.ops-badge, .status-badge, .task-badge, .task-last-run, .mode-badge, .task-mode-badge):is(.is-readonly, .readonly, .mode-readonly),
+:is(.status-badge, .task-badge, .task-last-run, .mode-badge, .task-mode-badge):is(.is-readonly, .readonly, .mode-readonly),
 .readonly-badge {
   border-color: var(--readonly-border);
   background: var(--readonly-bg);
   color: var(--readonly-text);
 }
 
-.ops-badge.is-accent,
 .entry-progress-strategy-badge {
   border-color: var(--accent-border);
   background: var(--accent-bg);
@@ -661,6 +664,24 @@ summary {
   min-width: 100%;
 }
 
+:is(.detail-table, .comparison-table) :is(th, td) {
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--border-subtle);
+  text-align: left;
+  white-space: nowrap;
+}
+
+:is(.detail-table, .comparison-table) thead th {
+  position: sticky;
+  top: 0;
+  z-index: 3;
+  color: var(--muted);
+  background: var(--surface-subtle);
+  border-bottom: 1px solid var(--border);
+  font-size: var(--text-xs);
+  font-weight: 700;
+}
+
 :is(.detail-table, .comparison-table) :is(th.numeric, td.numeric) {
   text-align: right;
   font-family: var(--font-mono);
@@ -678,6 +699,26 @@ summary {
 @container (inline-size < 780px) {
   :is(.detail-table, .comparison-table).is-empty thead {
     display: none;
+  }
+  :is(.detail-table, .comparison-table):not(.is-empty) thead th:first-child {
+    position: sticky;
+    inset-inline-start: 0;
+    z-index: 4;
+    background: var(--surface-subtle);
+    border-right: 1px solid var(--border-subtle);
+  }
+  :is(.detail-table, .comparison-table):not(.is-empty) tbody th[scope="row"] {
+    position: sticky;
+    inset-inline-start: 0;
+    z-index: 2;
+    background: var(--surface-inset);
+    border-right: 1px solid var(--border-subtle);
+  }
+  :is(.detail-table, .comparison-table):not(.is-empty) tbody tr:nth-child(odd) th[scope="row"] {
+    background: var(--surface);
+  }
+  :is(.detail-table, .comparison-table):not(.is-empty) tbody tr:hover th[scope="row"] {
+    background: var(--surface-hover);
   }
 }
 
@@ -761,7 +802,7 @@ summary {
 }
 
 /* Shared Disclosure Primitive (details > summary +/- toggle) */
-:is(.ops-disclosure, .table-note-hint, .row-details, .task-error-details) summary {
+:is(.table-note-hint, .row-details, .task-error-details) summary {
   display: inline-flex;
   align-items: center;
   gap: 4px;
@@ -770,16 +811,16 @@ summary {
   list-style: none;
 }
 
-:is(.ops-disclosure, .table-note-hint, .row-details, .task-error-details) summary::-webkit-details-marker {
+:is(.table-note-hint, .row-details, .task-error-details) summary::-webkit-details-marker {
   display: none;
 }
 
-:is(.ops-disclosure, .table-note-hint, .row-details, .task-error-details) summary::before {
+:is(.table-note-hint, .row-details, .task-error-details) summary::before {
   content: "+ ";
   color: var(--accent);
 }
 
-:is(.ops-disclosure, .table-note-hint, .row-details, .task-error-details)[open] summary::before {
+:is(.table-note-hint, .row-details, .task-error-details)[open] summary::before {
   content: "− ";
 }
 
@@ -1007,8 +1048,7 @@ summary {
   color: var(--warn-text);
 }
 
-.ops-freshness.is-stale,
-.ops-freshness.is-offline {
+.ops-freshness.is-stale {
   border-color: var(--bad-border);
   background: var(--bad-bg);
   color: var(--bad-text);

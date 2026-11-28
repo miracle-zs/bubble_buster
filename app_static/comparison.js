@@ -45,6 +45,8 @@
     var strategyNotesByAccount = {};
     var lastMetricsContentSig = "";
     var lastChartSignature = "";
+    var lastChartModeRange = "";
+    var lastChartHasSlider = false;
     var pathPrefix = ops.resolveBasePrefix();
 
     ops.initTopNav({
@@ -129,25 +131,34 @@
       var allNotes = rows.map(function (row) {
         return strategyNotesByAccount[row.account_id] || "";
       }).filter(Boolean);
-      var html = rows.map(function (row, index) {
-        return renderLib.buildSummaryCardHtml(row, index, {
-          isReadonly: isReadonlyAccount(row.account_id),
-          pathPrefix: pathPrefix,
-          note: strategyNotesByAccount[row.account_id] || "",
-          allNotes: allNotes
-        });
-      }).join("");
-      ops.patchHtmlIfChanged(target, html);
+      var items = rows.map(function (row, index) {
+        return {
+          key: String(row.account_id || index),
+          html: renderLib.buildSummaryCardHtml(row, index, {
+            isReadonly: isReadonlyAccount(row.account_id),
+            pathPrefix: pathPrefix,
+            note: strategyNotesByAccount[row.account_id] || "",
+            allNotes: allNotes
+          })
+        };
+      });
+      ops.reconcileKeyedHtml(target, items, { keyAttr: "data-account-card" });
     }
 
     function renderLegend() {
       var legendEl = el("legend");
       if (!legendEl) return;
-      var html = renderLib.buildLegendHtml(seriesRows(), {
-        visible: visible,
-        isReadonlyFn: isReadonlyAccount
+      var rows = seriesRows();
+      var items = rows.map(function (row, index) {
+        return {
+          key: String(row.account_id || index),
+          html: renderLib.buildLegendHtml([row], {
+            visible: visible,
+            isReadonlyFn: isReadonlyAccount
+          })
+        };
       });
-      ops.patchHtmlIfChanged(legendEl, html);
+      ops.reconcileKeyedHtml(legendEl, items, { keyAttr: "data-account" });
     }
 
     function syncLegendItemStates() {
@@ -176,30 +187,12 @@
       });
     }
 
-    function reorderExistingRows(tbody, orderedAccountIds) {
-      var rowMap = {};
-      var currentRows = tbody.querySelectorAll("tr[data-account-row]");
-      if (currentRows.length !== orderedAccountIds.length) return false;
-      for (var i = 0; i < currentRows.length; i += 1) {
-        rowMap[currentRows[i].getAttribute("data-account-row")] = currentRows[i];
-      }
-      var orderedNodes = [];
-      for (var j = 0; j < orderedAccountIds.length; j += 1) {
-        var tr = rowMap[orderedAccountIds[j]];
-        if (!tr) return false;
-        orderedNodes.push(tr);
-      }
-      var useMoveBefore = typeof tbody.moveBefore === "function";
-      for (var k = 0; k < orderedNodes.length; k += 1) {
-        if (useMoveBefore) {
-          try {
-            tbody.moveBefore(orderedNodes[k], null);
-            continue;
-          } catch (e) {}
-        }
-        tbody.appendChild(orderedNodes[k]);
-      }
-      return true;
+    function announceMetricsSort(totalCount) {
+      var statusNode = el("metrics-sort-status");
+      if (!statusNode) return;
+      var label = renderLib.SORT_LABELS[sortState.key] || sortState.key;
+      var dirText = sortState.dir === "asc" ? "升序" : "降序";
+      statusNode.textContent = "已按" + label + dirText + "排列，共 " + totalCount + " 个账户";
     }
 
     function renderMetricsTable(announceSort) {
@@ -214,7 +207,10 @@
       if (!rows.length) {
         if (table) table.classList.add("is-empty");
         lastMetricsContentSig = "";
-        ops.patchHtmlIfChanged(tbody, '<tr><td colspan="6" class="table-empty-cell">当前窗口暂无账户对比数据</td></tr>');
+        ops.reconcileKeyedHtml(tbody, [], {
+          keyAttr: "data-account-row",
+          emptyHtml: '<tr><td colspan="6" class="table-empty-cell">当前窗口暂无账户对比数据</td></tr>'
+        });
         return;
       }
       if (table) table.classList.remove("is-empty");
@@ -233,39 +229,27 @@
       }).join("|");
 
       var orderedIds = enriched.map(function (item) { return item.account_id; });
-      if (contentSig === lastMetricsContentSig && reorderExistingRows(tbody, orderedIds)) {
-        if (announceSort) {
-          var statusEl = el("metrics-sort-status");
-          if (statusEl) {
-            var label = renderLib.SORT_LABELS[sortState.key] || sortState.key;
-            var dirText = sortState.dir === "asc" ? "升序" : "降序";
-            statusEl.textContent = "已按" + label + dirText + "排列，共 " + enriched.length + " 个账户";
-          }
-        }
+      if (contentSig === lastMetricsContentSig && ops.reorderChildrenByKey(tbody, "data-account-row", orderedIds)) {
+        if (announceSort) announceMetricsSort(enriched.length);
         return;
       }
 
       lastMetricsContentSig = contentSig;
-      var html = enriched.map(function (item) {
+      var items = enriched.map(function (item) {
         var row = item.row;
-        return renderLib.buildMetricsRowHtml(item, {
-          isReadonly: isReadonlyAccount(row.account_id),
-          pathPrefix: pathPrefix,
-          note: strategyNotesByAccount[row.account_id] || "",
-          allNotes: allNotes
-        });
-      }).join("");
-      tbody.__bbLastHtml = html;
-      tbody.innerHTML = html;
+        return {
+          key: item.account_id,
+          html: renderLib.buildMetricsRowHtml(item, {
+            isReadonly: isReadonlyAccount(row.account_id),
+            pathPrefix: pathPrefix,
+            note: strategyNotesByAccount[row.account_id] || "",
+            allNotes: allNotes
+          })
+        };
+      });
+      ops.reconcileKeyedHtml(tbody, items, { keyAttr: "data-account-row" });
 
-      if (announceSort) {
-        var statusNode = el("metrics-sort-status");
-        if (statusNode) {
-          var sortLabel = renderLib.SORT_LABELS[sortState.key] || sortState.key;
-          var sortDirText = sortState.dir === "asc" ? "升序" : "降序";
-          statusNode.textContent = "已按" + sortLabel + sortDirText + "排列，共 " + enriched.length + " 个账户";
-        }
-      }
+      if (announceSort) announceMetricsSort(enriched.length);
     }
 
     function updateZoomResetVisibility(show) {
@@ -367,6 +351,10 @@
       var showSlider = totalPoints > 40;
       var zoomStart = chartZoomRange ? chartZoomRange.start : 0;
       var zoomEnd = chartZoomRange ? chartZoomRange.end : 100;
+      var chartModeRange = range + "|" + mode;
+      var needsFullMerge = !lastChartModeRange || lastChartModeRange !== chartModeRange || lastChartHasSlider !== showSlider;
+      lastChartModeRange = chartModeRange;
+      lastChartHasSlider = showSlider;
       chart.setOption(renderLib.buildComparisonChartOption({
         activeRows: activeRows,
         mode: mode,
@@ -375,24 +363,14 @@
         zoomStart: zoomStart,
         zoomEnd: zoomEnd,
         isReadonlyFn: isReadonlyAccount
-      }), true);
+      }), needsFullMerge ? true : { replaceMerge: ["series"] });
       updateZoomResetVisibility(!!(showSlider && chartZoomRange && (chartZoomRange.start > 0.5 || chartZoomRange.end < 99.5)));
     }
 
     function latestSnapshotTimestamp(rows) {
-      var best = "";
-      var bestMs = -Infinity;
-      for (var i = 0; i < (rows || []).length; i += 1) {
-        var val = rows[i] && rows[i].latest_at_utc;
-        if (!val) continue;
-        var ms = ops.parseTimestampMs(val);
-        if (Number.isFinite(ms)) {
-          if (ms > bestMs) { bestMs = ms; best = val; }
-        } else if (!best || String(val) > String(best)) {
-          best = val;
-        }
-      }
-      return best;
+      return ops.pickLatestTimestamp((rows || []).map(function (r) {
+        return r && r.latest_at_utc;
+      }));
     }
 
     function renderMeta() {
@@ -426,10 +404,8 @@
     function setActiveControl(groupId, key, value) {
       var group = el(groupId);
       if (!group) return;
-      Array.prototype.forEach.call(group.querySelectorAll(".control"), function (button) {
-        var isActive = button.getAttribute("data-" + key) === value;
-        button.classList.toggle("active", isActive);
-        button.setAttribute("aria-pressed", isActive ? "true" : "false");
+      ops.syncPressedButtons(group.querySelectorAll(".control"), function (button) {
+        return button.getAttribute("data-" + key) === value;
       });
     }
 

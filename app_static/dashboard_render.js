@@ -59,33 +59,13 @@
   }
 
   function clsForStatus(status) {
-    var s = (status || "").toUpperCase();
-    if (s.indexOf("SUCCESS") >= 0 || s.indexOf("CLOSED_TP") >= 0 || s.indexOf("RUNNING") >= 0) return "ok";
-    if (s.indexOf("SKIPPED") >= 0) return "warn";
-    if (s.indexOf("FAILED") >= 0 || s.indexOf("ERROR") >= 0 || s.indexOf("CLOSED_SL") >= 0) return "bad";
-    return "";
+    var s = String(status || "").toUpperCase();
+    if (s === "READONLY" || s.indexOf("PARTIAL") >= 0) return "";
+    return ops.statusTone(s);
   }
 
   function statusLabel(status) {
-    var s = String(status || "").toUpperCase();
-    var labels = {
-      SUCCESS: "成功",
-      RUNNING: "运行中",
-      FAILED: "失败",
-      PARTIAL: "部分完成",
-      SKIPPED: "已跳过",
-      NEW: "挂单中",
-      FILLED: "已成交",
-      CANCELED: "已撤销",
-      CANCELLED: "已撤销",
-      EXPIRED: "已过期",
-      REJECTED: "已拒绝",
-      CLOSED_TP: "止盈平仓",
-      CLOSED_SL: "止损平仓",
-      CLOSED_TIMEOUT: "到期平仓",
-      CLOSED_EXTERNAL: "外部平仓"
-    };
-    return labels[s] || s || "--";
+    return ops.formatStatusLabel(status, "--");
   }
 
   function statusBadge(status) {
@@ -341,28 +321,40 @@
         if (mlVal > yMax) yMax = mlVal;
       }
     }
-    var yAxisCfg = {
-      type: "value",
-      scale: true,
-      axisLabel: { color: theme.muted, fontSize: 12, fontFamily: theme.fontMono, formatter: function (value) { return fmtAdaptive(value); } },
-      axisLine: { show: false },
-      splitLine: { lineStyle: { color: theme.splitLine, type: "dashed" } }
-    };
+    var showSlider = seriesData.length > 24;
+    var chrome = ops.buildEchartsChrome(theme, {
+      timeZone: timeZone,
+      showSlider: showSlider,
+      zoomStart: params.zoomStart,
+      zoomEnd: params.zoomEnd,
+      sliderBottom: 8,
+      xLabelMargin: 10,
+      yScale: true,
+      formatXAxis: function (value) { return fmtAxisTime(value, timeZone); },
+      formatYAxis: function (value) { return fmtAdaptive(value); },
+      tooltipFormatter: function (items) {
+        if (!items || !items.length) return "";
+        var v = items[0].value || [];
+        return [
+          '<div style="margin-bottom:4px;color:' + theme.muted + '">' + escapeHtml(fmtAxisTime(v[0], timeZone)) + "</div>",
+          "<div>权益：<strong>" + escapeHtml(ops.fmtUsdt(v[1], 2)) + " USDT</strong></div>",
+          "<div>窗口变化：" + escapeHtml(ops.fmtSignedUsdt(v[2], 2)) + " USDT</div>",
+          "<div>回撤：" + escapeHtml(ops.fmtNum(v[3], 2)) + "%</div>"
+        ].join("");
+      }
+    });
     if (Number.isFinite(yMin) && Number.isFinite(yMax) && (seriesData.length <= 2 || markLines.length > 0)) {
       var rawRange = Math.max(yMax - yMin, Math.abs(yMax || yMin) * 0.02, 1);
       var pad = rawRange * 0.28;
       if (rawRange >= 2) {
-        yAxisCfg.min = yMin >= 0 ? Math.max(0, Math.floor(yMin - pad)) : Math.floor(yMin - pad);
-        yAxisCfg.max = Math.ceil(yMax + pad);
+        chrome.yAxis.min = yMin >= 0 ? Math.max(0, Math.floor(yMin - pad)) : Math.floor(yMin - pad);
+        chrome.yAxis.max = Math.ceil(yMax + pad);
       } else {
-        yAxisCfg.min = yMin >= 0 ? Math.max(0, Number((yMin - pad).toFixed(2))) : Number((yMin - pad).toFixed(2));
-        yAxisCfg.max = Number((yMax + pad).toFixed(2));
+        chrome.yAxis.min = yMin >= 0 ? Math.max(0, Number((yMin - pad).toFixed(2))) : Number((yMin - pad).toFixed(2));
+        chrome.yAxis.max = Number((yMax + pad).toFixed(2));
       }
     }
 
-    var showSlider = seriesData.length > 24;
-    var zoomStart = Number.isFinite(Number(params.zoomStart)) ? Number(params.zoomStart) : 0;
-    var zoomEnd = Number.isFinite(Number(params.zoomEnd)) ? Number(params.zoomEnd) : 100;
     var areaColor = echartsGraphic && echartsGraphic.LinearGradient
       ? new echartsGraphic.LinearGradient(0, 0, 0, 1, [
           { offset: 0, color: areaTop },
@@ -373,55 +365,10 @@
     return {
       animation: false,
       grid: { left: 16, right: 24, top: 20, bottom: showSlider ? 68 : 36, containLabel: true },
-      tooltip: {
-        trigger: "axis",
-        axisPointer: { type: "line", lineStyle: { color: theme.borderStrong } },
-        backgroundColor: theme.surfaceTooltip,
-        borderColor: theme.borderStrong,
-        borderWidth: 1,
-        extraCssText: "box-shadow: " + theme.shadowOverlay + "; font-variant-numeric: tabular-nums;",
-        textStyle: { color: theme.text, fontSize: 12, fontFamily: theme.fontMono },
-        formatter: function (items) {
-          if (!items || !items.length) return "";
-          var v = items[0].value || [];
-          return [
-            '<div style="margin-bottom:4px;color:' + theme.muted + '">' + escapeHtml(fmtAxisTime(v[0], timeZone)) + "</div>",
-            "<div>权益：<strong>" + escapeHtml(ops.fmtUsdt(v[1], 2)) + " USDT</strong></div>",
-            "<div>窗口变化：" + escapeHtml(ops.fmtSignedUsdt(v[2], 2)) + " USDT</div>",
-            "<div>回撤：" + escapeHtml(ops.fmtNum(v[3], 2)) + "%</div>"
-          ].join("");
-        }
-      },
-      dataZoom: showSlider ? [{
-        type: "slider",
-        xAxisIndex: 0,
-        start: zoomStart,
-        end: zoomEnd,
-        height: 22,
-        bottom: 8,
-        borderColor: theme.border,
-        backgroundColor: theme.surfaceInset,
-        fillerColor: theme.zoomFill,
-        handleStyle: { color: theme.accent, borderColor: theme.accent },
-        textStyle: { color: theme.muted, fontSize: 12 }
-      }] : [],
-      xAxis: {
-        type: "time",
-        boundaryGap: false,
-        axisLabel: {
-          color: theme.muted,
-          hideOverlap: true,
-          alignMinLabel: "left",
-          alignMaxLabel: "right",
-          fontSize: 12,
-          fontFamily: theme.fontMono,
-          margin: 10,
-          formatter: function (value) { return fmtAxisTime(value, timeZone); }
-        },
-        axisLine: { lineStyle: { color: theme.border } },
-        axisTick: { show: false }
-      },
-      yAxis: yAxisCfg,
+      tooltip: chrome.tooltip,
+      dataZoom: chrome.dataZoom,
+      xAxis: chrome.xAxis,
+      yAxis: chrome.yAxis,
       series: [
         {
           name: "权益",
@@ -437,7 +384,7 @@
             silent: true,
             symbol: ["none", "none"],
             data: markLines
-          } : undefined
+          } : { data: [] }
         }
       ]
     };

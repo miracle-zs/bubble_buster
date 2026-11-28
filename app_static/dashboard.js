@@ -23,9 +23,9 @@
       return !!(window.matchMedia && window.matchMedia("(max-width: 900px)").matches);
     }
     var isMobile = detectMobile();
-    window.addEventListener("resize", function () {
+    window.addEventListener("resize", ops.rafThrottle(function () {
       isMobile = detectMobile();
-    }, { passive: true });
+    }), { passive: true });
 
     var apiBase = ops.resolveBasePrefix();
     if (!accountId) return;
@@ -53,6 +53,7 @@
     var curveLoadedOnce = false;
     var echartsLoadFailed = false;
     var lastChartSignature = "";
+    var lastChartModeWindow = "";
     var refreshTick = 0;
     var detailsLoaded = false;
     var detailsAttempted = false;
@@ -253,43 +254,38 @@
       }
     }
 
-    function renderRows(tableNode, tbodyNode, rows, mapper, emptyCols, emptyMessage) {
+    function renderRows(tableNode, tbodyNode, rows, mapper, emptyCols, emptyMessage, keyFn) {
       if (!tbodyNode) return;
+      var emptyHtml = '<tr><td colspan="' + emptyCols + '" class="empty-row">' + ops.escapeHtml(emptyMessage || "暂无数据") + "</td></tr>";
       if (!rows || rows.length === 0) {
         if (tableNode) tableNode.classList.add("is-empty");
-        var emptyHtml = '<tr><td colspan="' + emptyCols + '" class="empty-row">' + ops.escapeHtml(emptyMessage || "暂无数据") + "</td></tr>";
-        ops.patchHtmlIfChanged(tbodyNode, emptyHtml);
+        if (keyFn) {
+          ops.reconcileKeyedHtml(tbodyNode, [], { keyAttr: "data-row-key", emptyHtml: emptyHtml });
+        } else {
+          ops.patchHtmlIfChanged(tbodyNode, emptyHtml);
+        }
         return;
       }
       if (tableNode) tableNode.classList.remove("is-empty");
 
-      var html = "";
-      for (var i = 0; i < rows.length; i += 1) {
-        html += mapper(rows[i]);
-      }
-      if (tbodyNode.__bbLastHtml === html) return;
-
-      var openKeys = {};
-      try {
-        var openEls = tbodyNode.querySelectorAll("details[open][data-detail-key]");
-        for (var k = 0; k < openEls.length; k += 1) {
-          var key = openEls[k].getAttribute("data-detail-key");
-          if (key) openKeys[key] = true;
+      if (keyFn) {
+        var items = [];
+        for (var i = 0; i < rows.length; i += 1) {
+          items.push({ key: String(keyFn(rows[i], i)), html: mapper(rows[i]) });
         }
-      } catch (e) {}
-
-      tbodyNode.__bbLastHtml = html;
-      tbodyNode.innerHTML = html;
-
-      if (Object.keys(openKeys).length > 0) {
-        try {
-          var newDetails = tbodyNode.querySelectorAll("details[data-detail-key]");
-          for (var j = 0; j < newDetails.length; j += 1) {
-            var dKey = newDetails[j].getAttribute("data-detail-key");
-            if (dKey && openKeys[dKey]) newDetails[j].setAttribute("open", "");
-          }
-        } catch (e) {}
+        ops.reconcileKeyedHtml(tbodyNode, items, {
+          keyAttr: "data-row-key",
+          detailAttr: "data-detail-key",
+          emptyHtml: emptyHtml
+        });
+        return;
       }
+
+      var html = "";
+      for (var j = 0; j < rows.length; j += 1) {
+        html += mapper(rows[j]);
+      }
+      ops.patchHtmlIfChanged(tbodyNode, html, { detailAttr: "data-detail-key" });
     }
 
     function curvePointsForWindow(hours) {
@@ -606,6 +602,9 @@
         + "曲线，共 " + seriesData.length + " 个快照点，最新权益 " + ops.fmtUsdt(lastEqVal, 2) + " USDT"
       );
 
+      var nextModeWindow = currentCurveTab + "|" + currentWindowHours;
+      var needsFullMerge = !!forceRebuild || lastChartModeWindow !== nextModeWindow;
+      lastChartModeWindow = nextModeWindow;
       equityChart.setOption(R.buildEquityChartOption({
         seriesData: seriesData,
         markLines: markLines,
@@ -617,7 +616,7 @@
         zoomStart: chartZoomRange ? chartZoomRange.start : undefined,
         zoomEnd: chartZoomRange ? chartZoomRange.end : undefined,
         echartsGraphic: window.echarts && window.echarts.graphic
-      }), true);
+      }), needsFullMerge ? true : { replaceMerge: ["series"] });
       if (el.chartResetZoomBtn) {
         el.chartResetZoomBtn.hidden = !(seriesData.length > 24 && chartZoomRange && (chartZoomRange.start > 0.5 || chartZoomRange.end < 99.5));
       }
@@ -806,13 +805,9 @@
           : "账户权益（含未实现盈亏与出入金）";
       }
       if (el.windowRow) {
-        var buttons = el.windowRow.querySelectorAll("[data-window-hours]");
-        for (var i = 0; i < buttons.length; i += 1) {
-          var b = buttons[i];
-          var h = Number(b.getAttribute("data-window-hours"));
-          b.classList.toggle("active", h === currentWindowHours);
-          b.setAttribute("aria-pressed", h === currentWindowHours ? "true" : "false");
-        }
+        ops.syncPressedButtons(el.windowRow.querySelectorAll("[data-window-hours]"), function (b) {
+          return Number(b.getAttribute("data-window-hours")) === currentWindowHours;
+        });
       }
     }
 
@@ -945,26 +940,21 @@
       });
     }
 
-    function compareNullableNumbers(aVal, bVal, desc) {
-      if (aVal === null && bVal === null) return 0;
-      if (aVal === null) return 1;
-      if (bVal === null) return -1;
-      return desc ? (bVal - aVal) : (aVal - bVal);
-    }
-
     function renderPositionsTable() {
       var sorted = cachedPositions.slice();
       if (positionSortKey === "pnl_asc") {
-        sorted.sort(function (a, b) { return compareNullableNumbers(ops.toNum(a.unrealized_pnl), ops.toNum(b.unrealized_pnl), false); });
+        sorted.sort(function (a, b) { return ops.compareNullableNumbers(ops.toNum(a.unrealized_pnl), ops.toNum(b.unrealized_pnl), false); });
       } else if (positionSortKey === "pnl_desc") {
-        sorted.sort(function (a, b) { return compareNullableNumbers(ops.toNum(a.unrealized_pnl), ops.toNum(b.unrealized_pnl), true); });
+        sorted.sort(function (a, b) { return ops.compareNullableNumbers(ops.toNum(a.unrealized_pnl), ops.toNum(b.unrealized_pnl), true); });
       } else if (positionSortKey === "notional_desc") {
-        sorted.sort(function (a, b) { return compareNullableNumbers(ops.toNum(a.notional), ops.toNum(b.notional), true); });
+        sorted.sort(function (a, b) { return ops.compareNullableNumbers(ops.toNum(a.notional), ops.toNum(b.notional), true); });
       }
 
       renderRows(el.positionsTable, el.positionsBody, sorted, function (p) {
         return R.positionRowHtml(p, displayTimeZone);
-      }, 7, "当前无持仓");
+      }, 7, "当前无持仓", function (p) {
+        return p.readonly_live ? ("ro:" + (p.symbol || "") + ":" + (p.side || "")) : ("pos:" + p.id);
+      });
     }
 
     function renderEventsTable() {
@@ -982,7 +972,9 @@
       }
       renderRows(el.eventsTable, el.eventsBody, filtered, function (e) {
         return R.eventRowHtml(e, displayTimeZone);
-      }, 6, cachedEvents.length ? "无匹配筛选条件的订单事件" : "暂无订单事件");
+      }, 6, cachedEvents.length ? "无匹配筛选条件的订单事件" : "暂无订单事件", function (e) {
+        return "ev:" + e.id;
+      });
     }
 
     function renderDetails(d, includedLogs) {
@@ -1012,17 +1004,23 @@
 
       renderRows(el.runsTable, el.runsBody, runs, function (r) {
         return R.runRowHtml(r, displayTimeZone);
-      }, 4, "暂无策略运行记录");
+      }, 4, "暂无策略运行记录", function (r) {
+        return "run:" + (r.id != null ? r.id : ((r.trade_day_utc || "") + ":" + (r.started_at_utc || "")));
+      });
 
       renderEventsTable();
 
       renderRows(el.cashflowTable, el.cashflowBody, cashflows, function (c) {
         return R.cashflowRowHtml(c, displayTimeZone);
-      }, 6, "暂无资金流水");
+      }, 6, "暂无资金流水", function (c) {
+        return "cf:" + c.id;
+      });
 
       renderRows(el.unpricedTable, el.unpricedBody, unpriced, function (u) {
         return R.unpricedRowHtml(u, displayTimeZone);
-      }, 6, "暂无待核对平仓记录");
+      }, 6, "暂无待核对平仓记录", function (u) {
+        return "unp:" + u.id;
+      });
 
       if (includedLogs && el.logTail) {
         var logLines = Array.isArray(d.log_tail) ? d.log_tail : [];

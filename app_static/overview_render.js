@@ -17,24 +17,14 @@
   }
 
   function taskStatusText(status) {
-    var s = String(status || "UNKNOWN").toUpperCase();
-    var map = {
-      SUCCESS: "成功",
-      FAILED: "失败",
-      PARTIAL: "部分完成",
-      SKIPPED: "已跳过",
-      RUNNING: "运行中",
-      READONLY: "只读",
-      UNKNOWN: "未知"
-    };
-    return map[s] || s;
+    return ops.formatStatusLabel(status, "未知");
   }
 
   function taskStatusCls(status) {
-    var s = String(status || "UNKNOWN").toUpperCase();
-    if (s === "READONLY") return "is-readonly";
-    if (s === "SUCCESS" || s === "RUNNING") return "status-ok";
-    if (s === "PARTIAL" || s === "SKIPPED" || s === "UNKNOWN") return "status-warn";
+    var tone = ops.statusTone(status);
+    if (tone === "readonly") return "is-readonly";
+    if (tone === "ok") return "status-ok";
+    if (tone === "warn") return "status-warn";
     return "status-bad";
   }
 
@@ -78,35 +68,19 @@
   function latestTaskTimeForAccount(row) {
     var tasks = (row && row.tasks) || {};
     var keys = Object.keys(tasks);
-    var best = "";
-    var bestMs = -Infinity;
+    var values = [];
     for (var i = 0; i < keys.length; i += 1) {
-      var val = taskTimeValue(tasks[keys[i]]);
-      if (!val) continue;
-      var ms = ops.parseTimestampMs(val);
-      if (Number.isFinite(ms)) {
-        if (ms > bestMs) { bestMs = ms; best = val; }
-      } else if (!best || val > best) {
-        best = val;
-      }
+      values.push(taskTimeValue(tasks[keys[i]]));
     }
-    return best;
+    return ops.pickLatestTimestamp(values);
   }
 
   function latestTaskTime(rows) {
-    var best = "";
-    var bestMs = -Infinity;
+    var values = [];
     for (var i = 0; i < (rows || []).length; i += 1) {
-      var val = latestTaskTimeForAccount(rows[i]);
-      if (!val) continue;
-      var ms = ops.parseTimestampMs(val);
-      if (Number.isFinite(ms)) {
-        if (ms > bestMs) { bestMs = ms; best = val; }
-      } else if (!best || val > best) {
-        best = val;
-      }
+      values.push(latestTaskTimeForAccount(rows[i]));
     }
-    return best;
+    return ops.pickLatestTimestamp(values);
   }
 
   function hasAnomalyTask(row) {
@@ -663,7 +637,7 @@
       + '<div class="entry-progress-next-action"><span class="entry-progress-next-label">下一检查</span><strong>' + escapeHtml(nextCheckLabel) + '</strong><span class="entry-progress-next-state"><i class="entry-progress-next-pulse" aria-hidden="true"></i>' + escapeHtml(nextActionLabel) + ' · <span id="entry-progress-countdown">--</span></span></div>'
       + "</div>";
 
-    html += '<div class="entry-progress-timeline"><div class="entry-progress-timeline-head"><div class="entry-progress-timeline-title"><strong>共同入场窗口</strong><span>' + escapeHtml(timelineCaption) + '</span></div></div><div class="entry-progress-timeline-wrap"><div class="entry-progress-timeline-track">';
+    html += '<div class="entry-progress-timeline"><div class="entry-progress-timeline-head"><div class="entry-progress-timeline-title"><strong>共同入场窗口</strong><span>' + escapeHtml(timelineCaption) + '</span></div></div><div class="entry-progress-timeline-wrap ops-scroll-fade"><div class="entry-progress-timeline-track">';
     if (timeline.groups.length) {
       for (var k = 0; k < timeline.groups.length; k += 1) {
         var group = timeline.groups[k];
@@ -749,41 +723,48 @@
     };
   }
 
+  function buildTaskAccountCardHtml(row) {
+    var r = row || {};
+    var aid = String(r.account_id || "");
+    var safeAid = escapeHtml(aid);
+    var mode = String(r.mode || "full").toLowerCase();
+    var modeLabel = mode === "full" ? "完整策略" : (mode === "loss_cut_only" ? "止损保护" : "只读监控");
+    var modeBadgeClass = "task-mode-badge" + (mode === "readonly" ? " mode-readonly" : (mode === "loss_cut_only" ? " mode-loss-cut" : ""));
+    var headerStatus = mode === "readonly" ? "READONLY" : worstAccountTaskStatus(r);
+    return '<article class="task-account-card" aria-labelledby="task-card-title-' + safeAid + '">'
+      + '<div class="task-account-head">'
+      + '<div class="task-account-title">'
+      + '<h3 class="card-title-heading task-account-id" id="task-card-title-' + safeAid + '">' + safeAid + "</h3>"
+      + '<span class="' + modeBadgeClass + '">' + escapeHtml(modeLabel) + "</span>"
+      + (r && r.equity_recovery_take_profit_enabled ? '<span class="task-feature-badge">组合止盈监控</span>' : "")
+      + "</div>"
+      + '<span class="task-last-run ' + taskStatusCls(headerStatus) + '">' + escapeHtml(taskStatusText(headerStatus)) + "</span>"
+      + "</div>"
+      + '<div class="task-table" role="table" aria-label="' + safeAid + ' 任务执行记录">'
+      + '<div class="task-head" role="row">'
+      + '<span class="task-col-h" role="columnheader">任务</span>'
+      + '<span class="task-col-h" role="columnheader">状态</span>'
+      + '<span class="task-col-h" role="columnheader">时间</span>'
+      + '<span class="task-col-h" role="columnheader">结果</span>'
+      + "</div>"
+      + taskRowsForAccount(r)
+      + "</div>"
+      + "</article>";
+  }
+
+  function buildTaskEmptyHtml(taskFilter) {
+    return taskFilter === "anomaly"
+      ? '<div class="task-empty"><strong>暂无异常</strong><span>所有系统任务正常运行</span></div>'
+      : '<div class="task-empty"><strong>暂无匹配任务</strong><span>切换筛选条件查看其他任务</span></div>';
+  }
+
   function buildTaskBoardHtml(rows, taskFilter) {
     var list = rows || [];
     var html = "";
     for (var i = 0; i < list.length; i += 1) {
-      var r = list[i] || {};
-      var aid = String(r.account_id || "");
-      var safeAid = escapeHtml(aid);
-      var mode = String(r.mode || "full").toLowerCase();
-      var modeLabel = mode === "full" ? "完整策略" : (mode === "loss_cut_only" ? "止损保护" : "只读监控");
-      var modeBadgeClass = "task-mode-badge" + (mode === "readonly" ? " mode-readonly" : (mode === "loss_cut_only" ? " mode-loss-cut" : ""));
-      var headerStatus = mode === "readonly" ? "READONLY" : worstAccountTaskStatus(r);
-      html += '<article class="task-account-card" aria-labelledby="task-card-title-' + safeAid + '">'
-        + '<div class="task-account-head">'
-        + '<div class="task-account-title">'
-        + '<h3 class="card-title-heading task-account-id" id="task-card-title-' + safeAid + '">' + safeAid + "</h3>"
-        + '<span class="' + modeBadgeClass + '">' + escapeHtml(modeLabel) + "</span>"
-        + (r && r.equity_recovery_take_profit_enabled ? '<span class="task-feature-badge">组合止盈监控</span>' : "")
-        + "</div>"
-        + '<span class="task-last-run ' + taskStatusCls(headerStatus) + '">' + escapeHtml(taskStatusText(headerStatus)) + "</span>"
-        + "</div>"
-        + '<div class="task-table" role="table" aria-label="' + safeAid + ' 任务执行记录">'
-        + '<div class="task-head" role="row">'
-        + '<span class="task-col-h" role="columnheader">任务</span>'
-        + '<span class="task-col-h" role="columnheader">状态</span>'
-        + '<span class="task-col-h" role="columnheader">时间</span>'
-        + '<span class="task-col-h" role="columnheader">结果</span>'
-        + "</div>"
-        + taskRowsForAccount(r)
-        + "</div>"
-        + "</article>";
+      html += buildTaskAccountCardHtml(list[i]);
     }
-    return html
-      || (taskFilter === "anomaly"
-        ? '<div class="task-empty"><strong>暂无异常</strong><span>所有系统任务正常运行</span></div>'
-        : '<div class="task-empty"><strong>暂无匹配任务</strong><span>切换筛选条件查看其他任务</span></div>');
+    return html || buildTaskEmptyHtml(taskFilter);
   }
 
   global.BBOverviewRender = {
@@ -821,6 +802,8 @@
     managedStrategyNotes: managedStrategyNotes,
     computeVenueState: computeVenueState,
     buildEntryProgressHtml: buildEntryProgressHtml,
+    buildTaskAccountCardHtml: buildTaskAccountCardHtml,
+    buildTaskEmptyHtml: buildTaskEmptyHtml,
     buildTaskBoardHtml: buildTaskBoardHtml
   };
 })(typeof window !== "undefined" ? window : globalThis);

@@ -530,11 +530,7 @@
 
 .detail-table th,
 .detail-table td {
-  padding: 10px 12px;
-  border-bottom: 1px solid var(--border-subtle);
-  text-align: left;
   vertical-align: top;
-  white-space: nowrap;
 }
 
 .positions-table th,
@@ -542,44 +538,10 @@
   vertical-align: middle;
 }
 
-.detail-table thead th {
-  position: sticky;
-  top: 0;
-  z-index: 3;
-  color: var(--muted);
-  background: var(--surface-subtle);
-  border-bottom: 1px solid var(--border);
-  font-size: var(--text-xs);
-  font-weight: 700;
-}
-
 .detail-table tbody th {
   font-weight: 400;
   color: inherit;
   text-align: left;
-}
-
-@container (inline-size < 780px) {
-  .detail-table:not(.is-empty) thead th:first-child {
-    position: sticky;
-    inset-inline-start: 0;
-    z-index: 4;
-    background: var(--surface-subtle);
-    border-right: 1px solid var(--border-subtle);
-  }
-  .detail-table:not(.is-empty) tbody th[scope="row"] {
-    position: sticky;
-    inset-inline-start: 0;
-    z-index: 2;
-    background: var(--surface-inset);
-    border-right: 1px solid var(--border-subtle);
-  }
-  .detail-table:not(.is-empty) tbody tr:nth-child(odd) th[scope="row"] {
-    background: var(--surface);
-  }
-  .detail-table:not(.is-empty) tbody tr:hover th[scope="row"] {
-    background: var(--surface-hover);
-  }
 }
 
 #unpricedTable td:nth-child(3),
@@ -799,6 +761,11 @@
   word-break: break-word;
 }
 
+.activity-panel {
+  content-visibility: auto;
+  contain-intrinsic-size: auto 480px;
+}
+
 /* Diagnostics */
 .diagnostics-panel {
   margin-top: 14px;
@@ -806,6 +773,15 @@
   border-radius: var(--radius);
   background: var(--surface);
   overflow: clip;
+  content-visibility: auto;
+  contain-intrinsic-size: auto 56px;
+}
+
+@supports not (content-visibility: auto) {
+  .activity-panel,
+  .diagnostics-panel {
+    contain: layout style paint;
+  }
 }
 
 .diagnostics-panel > summary {
@@ -1024,12 +1000,8 @@
 }
 
 @media (forced-colors: active) {
-  .tab-btn.active,
   .activity-tab.active {
     border-color: CanvasText;
-  }
-  .tab-btn.active {
-    outline: 2px solid Highlight;
   }
   .activity-tab.active::after {
     background: Highlight;

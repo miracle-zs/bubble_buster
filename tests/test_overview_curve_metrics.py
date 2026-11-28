@@ -226,5 +226,205 @@ const cmpOpt = cr.buildComparisonChartOption({{
 }});
 assert.equal(cmpOpt.series[0].data[1][1], null);
 assert.equal(cmpOpt.dataZoom.length, 0);
+
+// Shared ops.js utilities: status labels, sorting, timestamp selection, ECharts chrome
+assert.equal(ops.formatStatusLabel('CLOSED_TP'), '止盈平仓');
+assert.equal(ops.formatStatusLabel('', '--'), '--');
+assert.equal(ops.statusTone('READONLY'), 'readonly');
+assert.equal(ops.statusTone('PARTIAL'), 'warn');
+assert.equal(ops.compareNullableNumbers(null, 5, true), 1);
+assert.equal(ops.compareNullableNumbers(10, 5, true), -5);
+assert.equal(ops.pickLatestTimestamp(['2026-10-09T00:00:00Z', '2026-10-09T02:00:00Z', '2026-10-09T01:00:00Z']), '2026-10-09T02:00:00Z');
+const chrome = ops.buildEchartsChrome(ops.getChartTheme(), {{ showSlider: true, zoomStart: 10, zoomEnd: 90, xSplitLine: true }});
+assert.equal(chrome.dataZoom.length, 1);
+assert.equal(chrome.dataZoom[0].start, 10);
+assert.equal(chrome.xAxis.splitLine.show, true);
+"""
+        subprocess.run(["node", "-e", script], check=True, capture_output=True, text=True)
+
+    @unittest.skipUnless(shutil.which("node"), "Node.js required for browser DOM reconciliation test")
+    def test_keyed_reconciliation_and_reorder_preserve_nodes_and_state(self):
+        ops_path = (Path(__file__).resolve().parents[1] / "app_static/ops.js").resolve()
+        script = f"""
+const assert = require('node:assert/strict');
+
+// Minimal DOM stub for testing ops.syncPressedButtons, reorderChildrenByKey, and reconcileKeyedHtml
+class FakeClassList {{
+  constructor(el) {{ this.el = el; }}
+  toggle(cls, force) {{
+    const set = new Set((this.el.className || '').split(/\\s+/).filter(Boolean));
+    const has = set.has(cls);
+    const next = force === undefined ? !has : !!force;
+    if (next) set.add(cls); else set.delete(cls);
+    this.el.className = Array.from(set).join(' ');
+    return next;
+  }}
+}}
+
+class FakeElement {{
+  constructor(tagName) {{
+    this.tagName = String(tagName || 'DIV').toUpperCase();
+    this.children = [];
+    this.parentNode = null;
+    this.attrs = {{}};
+    this.className = '';
+    this.classList = new FakeClassList(this);
+    this._innerHTML = '';
+    this.moveBeforeCalls = 0;
+  }}
+  setAttribute(k, v) {{ this.attrs[k] = String(v); }}
+  getAttribute(k) {{ return Object.prototype.hasOwnProperty.call(this.attrs, k) ? this.attrs[k] : null; }}
+  removeAttribute(k) {{ delete this.attrs[k]; }}
+  appendChild(child) {{
+    if (child.parentNode) child.parentNode.removeChild(child);
+    child.parentNode = this;
+    this.children.push(child);
+    return child;
+  }}
+  removeChild(child) {{
+    const idx = this.children.indexOf(child);
+    if (idx >= 0) {{
+      this.children.splice(idx, 1);
+      child.parentNode = null;
+    }}
+    return child;
+  }}
+  insertBefore(node, ref) {{
+    if (node.parentNode) node.parentNode.removeChild(node);
+    node.parentNode = this;
+    if (!ref) {{
+      this.children.push(node);
+      return node;
+    }}
+    const idx = this.children.indexOf(ref);
+    if (idx < 0) this.children.push(node);
+    else this.children.splice(idx, 0, node);
+    return node;
+  }}
+  moveBefore(node, ref) {{
+    this.moveBeforeCalls += 1;
+    return this.insertBefore(node, ref);
+  }}
+  replaceChild(next, old) {{
+    const idx = this.children.indexOf(old);
+    if (idx < 0) return null;
+    old.parentNode = null;
+    next.parentNode = this;
+    this.children[idx] = next;
+    return old;
+  }}
+  contains(node) {{
+    let cur = node;
+    while (cur) {{
+      if (cur === this) return true;
+      cur = cur.parentNode;
+    }}
+    return false;
+  }}
+  querySelectorAll(selector) {{
+    const out = [];
+    const wantDetailsOpen = selector.includes('details[open]');
+    const mAttr = selector.match(/\\[([a-zA-Z0-9_-]+)\\]$/);
+    const attrName = mAttr ? mAttr[1] : null;
+    const walk = (el) => {{
+      for (const ch of el.children) {{
+        if (selector.startsWith('details') && ch.tagName === 'DETAILS') {{
+          if ((!wantDetailsOpen || Object.prototype.hasOwnProperty.call(ch.attrs, 'open'))
+              && (!attrName || ch.getAttribute(attrName) != null)) {{
+            out.push(ch);
+          }}
+        }} else if (!selector.startsWith('details') && attrName && ch.getAttribute(attrName) != null) {{
+          out.push(ch);
+        }}
+        walk(ch);
+      }}
+    }};
+    walk(this);
+    return out;
+  }}
+  set innerHTML(html) {{
+    this._innerHTML = html;
+    this.children = [];
+    const trMatches = html.match(/<tr[^>]*>.*?<\\/tr>/g) || [];
+    for (const chunk of trMatches) {{
+      const tr = new FakeElement('tr');
+      tr._raw = chunk;
+      const detMatch = chunk.match(/<details([^>]*)>/);
+      if (detMatch) {{
+        const det = new FakeElement('details');
+        const dk = detMatch[1].match(/data-detail-key="([^"]+)"/);
+        if (dk) det.setAttribute('data-detail-key', dk[1]);
+        if (/\\bopen\\b/.test(detMatch[1])) det.setAttribute('open', '');
+        tr.appendChild(det);
+      }}
+      this.appendChild(tr);
+    }}
+  }}
+  get innerHTML() {{ return this._innerHTML; }}
+}}
+
+globalThis.document = {{
+  activeElement: null,
+  createElement(tag) {{
+    if (tag === 'template') {{
+      const holder = new FakeElement('template');
+      return {{
+        content: {{
+          get firstElementChild() {{ return holder.children[0] || null; }}
+        }},
+        set innerHTML(v) {{ holder.innerHTML = v; }}
+      }};
+    }}
+    return new FakeElement(tag);
+  }}
+}};
+
+require({str(ops_path)!r});
+const ops = globalThis.BBOps;
+
+// 1. syncPressedButtons
+const b1 = new FakeElement('button');
+const b2 = new FakeElement('button');
+ops.syncPressedButtons([b1, b2], (btn) => btn === b2);
+assert.equal(b1.className, '');
+assert.equal(b1.getAttribute('aria-pressed'), 'false');
+assert.equal(b2.className, 'active');
+assert.equal(b2.getAttribute('aria-pressed'), 'true');
+
+// 2. reconcileKeyedHtml: initial render, no-op short-circuit, single-row patch, open-details preservation, moveBefore reorder
+const tbody = new FakeElement('tbody');
+const rowA1 = '<tr><td>A</td><td>10<details data-detail-key="dA"></details></td></tr>';
+const rowB1 = '<tr><td>B</td><td>20<details data-detail-key="dB"></details></td></tr>';
+assert.equal(ops.reconcileKeyedHtml(tbody, [{{ key: 'A', html: rowA1 }}, {{ key: 'B', html: rowB1 }}], {{ keyAttr: 'data-row-key', detailAttr: 'data-detail-key' }}), true);
+const origA = tbody.children[0];
+const origB = tbody.children[1];
+assert.equal(origA.getAttribute('data-row-key'), 'A');
+assert.equal(origB.getAttribute('data-row-key'), 'B');
+
+// Exact same items => no-op
+assert.equal(ops.reconcileKeyedHtml(tbody, [{{ key: 'A', html: rowA1 }}, {{ key: 'B', html: rowB1 }}], {{ keyAttr: 'data-row-key', detailAttr: 'data-detail-key' }}), false);
+assert.strictEqual(tbody.children[0], origA);
+assert.strictEqual(tbody.children[1], origB);
+
+// User opens details in row A; row A updates, row B stays unchanged (same node!)
+origA.children[0].setAttribute('open', '');
+const rowA2 = '<tr><td>A</td><td>15<details data-detail-key="dA"></details></td></tr>';
+assert.equal(ops.reconcileKeyedHtml(tbody, [{{ key: 'A', html: rowA2 }}, {{ key: 'B', html: rowB1 }}], {{ keyAttr: 'data-row-key', detailAttr: 'data-detail-key' }}), true);
+assert.notStrictEqual(tbody.children[0], origA);
+assert.strictEqual(tbody.children[1], origB);
+assert.equal(tbody.children[0].children[0].getAttribute('open'), '');
+
+// Reorder B before A uses moveBefore and keeps both node identities
+const nodeA = tbody.children[0];
+const nodeB = tbody.children[1];
+assert.equal(ops.reorderChildrenByKey(tbody, 'data-row-key', ['B', 'A']), true);
+assert.strictEqual(tbody.children[0], nodeB);
+assert.strictEqual(tbody.children[1], nodeA);
+assert.ok(tbody.moveBeforeCalls >= 1);
+
+// Empty state resets keyed state cleanly
+assert.equal(ops.reconcileKeyedHtml(tbody, [], {{ keyAttr: 'data-row-key', emptyHtml: '<tr><td colspan="2">empty</td></tr>' }}), true);
+assert.equal(tbody.children.length, 1);
+assert.equal(tbody.children[0].getAttribute('data-row-key'), null);
 """
         subprocess.run(["node", "-e", script], check=True, capture_output=True, text=True)

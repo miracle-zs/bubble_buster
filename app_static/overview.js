@@ -271,17 +271,24 @@
           var running = !!payload.service_running;
           var enabled = !!payload.service_enabled;
           serviceHealthState = { enabled: enabled, running: running, loaded: true };
-          serviceState.innerHTML = '<span class="status-dot" aria-hidden="true"></span>'
-            + (running ? "运行中" : (enabled ? "已停止" : "未启用"));
-          serviceState.className = "command-value" + (running ? " status-ok" : (enabled ? " status-bad" : ""));
+          var nextHealthSig = running ? "ok" : (enabled ? "bad" : "off");
+          if (serviceState.getAttribute("data-health-sig") !== nextHealthSig) {
+            serviceState.setAttribute("data-health-sig", nextHealthSig);
+            serviceState.innerHTML = '<span class="status-dot" aria-hidden="true"></span>'
+              + (running ? "运行中" : (enabled ? "已停止" : "未启用"));
+            serviceState.className = "command-value" + (running ? " status-ok" : (enabled ? " status-bad" : ""));
+          }
           scheduleCommandBarRender();
         })
         .catch(function (err) {
           if (healthAbortController !== controller) return;
           healthAbortController = null;
           if (err && err.name === "AbortError") return;
-          serviceState.innerHTML = '<span class="status-dot" aria-hidden="true"></span>未知';
-          serviceState.className = "command-value status-warn";
+          if (serviceState.getAttribute("data-health-sig") !== "unknown") {
+            serviceState.setAttribute("data-health-sig", "unknown");
+            serviceState.innerHTML = '<span class="status-dot" aria-hidden="true"></span>未知';
+            serviceState.className = "command-value status-warn";
+          }
         });
     }
 
@@ -907,12 +914,11 @@
       if (!taskUpdatedAt) return;
       var latest = latestTaskTime(rows || []);
       taskUpdatedAt.textContent = "更新 " + (latest || "--");
-      ["all", "anomaly", "symbols"].forEach(function (key) {
-        var btn = document.getElementById("task-filter-" + key);
-        if (!btn) return;
-        var isActive = key === taskFilter;
-        btn.classList.toggle("active", isActive);
-        btn.setAttribute("aria-pressed", isActive ? "true" : "false");
+      var filterNodes = ["all", "anomaly", "symbols"].map(function (key) {
+        return document.getElementById("task-filter-" + key);
+      });
+      ops.syncPressedButtons(filterNodes, function (btn) {
+        return btn.id === "task-filter-" + taskFilter;
       });
     }
 
@@ -930,33 +936,25 @@
       renderTaskBoardHeader(summaryRows || []);
       if (!detailsHydratedOnce) {
         var hasErr = !!(overviewErrors.details || (!summaryHydratedOnce && overviewErrors.summary));
-        ops.patchHtmlIfChanged(
-          taskBoard,
-          hasErr
+        ops.reconcileKeyedHtml(taskBoard, [], {
+          keyAttr: "data-account-card",
+          emptyHtml: hasErr
             ? '<div class="task-empty is-error"><strong>任务执行记录加载失败</strong><span>请点击上方“立即重试”或稍后刷新</span></div>'
             : '<div class="task-empty"><strong>正在同步任务执行记录...</strong><span>等待后端返回最新巡检详情</span></div>'
-        );
+        });
         return;
       }
-      var finalHtml = R.buildTaskBoardHtml(rows, taskFilter);
-      var openKeys = {};
-      try {
-        var openDetails = taskBoard.querySelectorAll("details.task-error-details[open][data-task-detail-key]");
-        for (var dIdx = 0; dIdx < openDetails.length; dIdx += 1) {
-          var key = openDetails[dIdx].getAttribute("data-task-detail-key");
-          if (key) openKeys[key] = true;
-        }
-      } catch (e) {}
-      ops.patchHtmlIfChanged(taskBoard, finalHtml);
-      if (Object.keys(openKeys).length > 0) {
-        try {
-          var nextDetails = taskBoard.querySelectorAll("details.task-error-details[data-task-detail-key]");
-          for (var nIdx = 0; nIdx < nextDetails.length; nIdx += 1) {
-            var nKey = nextDetails[nIdx].getAttribute("data-task-detail-key");
-            if (nKey && openKeys[nKey]) nextDetails[nIdx].setAttribute("open", "");
-          }
-        } catch (e) {}
-      }
+      var items = rows.map(function (row) {
+        return {
+          key: String((row && row.account_id) || ""),
+          html: R.buildTaskAccountCardHtml(row)
+        };
+      });
+      ops.reconcileKeyedHtml(taskBoard, items, {
+        keyAttr: "data-account-card",
+        detailAttr: "data-task-detail-key",
+        emptyHtml: R.buildTaskEmptyHtml(taskFilter)
+      });
     }
 
     function mergeFastRows(rows) {
@@ -1196,6 +1194,10 @@
     function showSparkPoint(box, pts, index, announce) {
       if (!box || !pts || !pts.length) return;
       var clampedIdx = Math.max(0, Math.min(pts.length - 1, index));
+      var prevIdx = box.getAttribute("data-active-index");
+      if (!announce && prevIdx !== null && prevIdx !== "" && Number(prevIdx) === clampedIdx) {
+        return;
+      }
       var nearest = pts[clampedIdx];
       var refs = getSparkRefs(box);
       var tip = refs.tip;
@@ -1209,7 +1211,7 @@
       tip.classList.toggle("is-right", nearest.xPct < 48);
       tip.hidden = false;
       if (box.closest && box.closest(".readonly-chart")) {
-        var boxRect = box.getBoundingClientRect();
+        var boxRect = (hoverState.box === box && hoverState.rect) ? hoverState.rect : box.getBoundingClientRect();
         var tipRect = tip.getBoundingClientRect();
         var margin = 8;
         var vw = window.innerWidth || document.documentElement.clientWidth || 1024;
